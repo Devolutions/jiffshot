@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: ${{ matrix.rid }}
+    # win-arm64 is cross-built on x64 (Visual Studio's ARM64 tools are on the
+    # image), so it is built but not run.
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            target: x86_64-pc-windows-msvc
+            test: true
+          - rid: win-arm64
+            target: aarch64-pc-windows-msvc
+            test: false
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        shell: pwsh
+        run: |
+          # rust-toolchain.toml selects the channel; rustup installs it here.
+          rustup show
+          rustup target add ${{ matrix.target }}
+          cargo --version
+          rustc --version
+
+      - name: Cache Cargo and the Rustolonia host
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/AppData/Local/rustolonia/host
+            target
+          key: ${{ matrix.rid }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ matrix.rid }}-
+
+      - name: Build
+        run: cargo build --release --locked -p jiffshot --target ${{ matrix.target }}
+
+      - name: Test
+        if: matrix.test
+        run: cargo test --release --locked --workspace --target ${{ matrix.target }}
+
+      - name: Package
+        shell: pwsh
+        run: |
+          # The build script puts the Rustolonia host next to jiffshot.exe.
+          $out = "target/${{ matrix.target }}/release"
+          $dir = "jiffshot-${{ matrix.rid }}"
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          Copy-Item "$out/jiffshot.exe", "$out/*.dll", "app/README-portable.txt" -Destination $dir
+          Get-ChildItem $dir | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jiffshot-${{ matrix.rid }}
+          path: jiffshot-${{ matrix.rid }}
+          if-no-files-found: error
