@@ -1273,6 +1273,7 @@ pub trait TrayViewModel: Send + 'static {
     fn capture_screen(&mut self) -> Result<()>;
     fn repeat_last(&mut self) -> Result<()>;
     fn capture_window(&mut self) -> Result<()>;
+    fn show_capture_window(&mut self) -> Result<()>;
     fn show_editor(&mut self) -> Result<()>;
     fn scrolling(&mut self) -> Result<()>;
     fn scrolling_horizontal(&mut self) -> Result<()>;

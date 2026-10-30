@@ -255,8 +255,8 @@ jobs:
           SIGNING_ENVIRONMENT: ${{ inputs.signing_environment }}
         run: |
           $msi = (Get-ChildItem msi/*.msi).FullName
-          $exe = "$env:ProgramFiles\Devolutions\jiffshot\jiffshot.exe"
-          $hostDll = "$env:ProgramFiles\Devolutions\jiffshot\rustolonia_host.dll"
+          $exe = "$env:ProgramFiles\Devolutions\Jiffshot\jiffshot.exe"
+          $hostDll = "$env:ProgramFiles\Devolutions\Jiffshot\rustolonia_host.dll"
           function Invoke-Msiexec($arguments) {
             $p = Start-Process msiexec.exe -ArgumentList $arguments -Wait -PassThru
             if ($p.ExitCode -ne 0) { Get-Content msiexec.log -Tail 50; throw "msiexec $arguments exited with $($p.ExitCode)" }
@@ -282,7 +282,7 @@ jobs:
           }
           $open = (Get-ItemProperty "HKLM:\Software\Classes\jiffshot.Document\shell\open\command").'(default)'
           if ($open -notlike "*jiffshot.exe*") { throw "the .jsd association is wrong: $open" }
-          Get-ChildItem "$env:ProgramFiles\Devolutions\jiffshot" | Format-Table Name, Length
+          Get-ChildItem "$env:ProgramFiles\Devolutions\Jiffshot" | Format-Table Name, Length
           Invoke-Msiexec "/x `"$msi`" /qn /l*v msiexec.log"
           if (Test-Path $exe) { throw "$exe is still there after uninstalling" }
 

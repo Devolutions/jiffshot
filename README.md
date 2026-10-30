@@ -38,7 +38,7 @@ Prebuilt, Authenticode-signed packages for **Windows 10 and Windows 11** (`x64` 
 
 | Package | Architecture | Description |
 |---|---|---|
-| **`Devolutions.Jiffshot-x64-<version>.msi`** | Windows x64 (Intel / AMD) | Standard Windows Installer. Installs to `C:\Program Files\Devolutions\jiffshot`, adds a Start Menu shortcut, and associates `.jsd` Jiffshot Document files. |
+| **`Devolutions.Jiffshot-x64-<version>.msi`** | Windows x64 (Intel / AMD) | Standard Windows Installer. Installs to `C:\Program Files\Devolutions\Jiffshot`, adds a Start Menu shortcut, and associates `.jsd` Jiffshot Document files. |
 | **`Devolutions.Jiffshot-arm64-<version>.msi`** | Windows ARM64 | Standard Windows Installer for Windows on ARM devices. |
 | **`Devolutions.Jiffshot-x64-<version>-portable.zip`** | Windows x64 (Intel / AMD) | Portable archive—unzip anywhere and run `jiffshot.exe`. Nothing is installed in the system. |
 | **`Devolutions.Jiffshot-arm64-<version>-portable.zip`** | Windows ARM64 | Portable archive for Windows on ARM devices. |
@@ -48,7 +48,7 @@ Prebuilt, Authenticode-signed packages for **Windows 10 and Windows 11** (`x64` 
 ## Quick Start
 
 1. **Launch Jiffshot:** Start **Devolutions Jiffshot** from the Start Menu (or run `jiffshot.exe` from the portable folder). Jiffshot places its icon in the Windows notification area (system tray).
-2. **Take a capture:** Press **Print Screen** (`PrtScn`) at any time, click the tray icon, or open the **Capture Window**.
+2. **Take a capture:** Press **Print Screen** (`PrtScn`) at any time, or left-click the tray icon to open the **Capture Window** and choose a capture mode.
    - **Capture a window or UI element:** Move the pointer over any window and click. Roll the **mouse wheel** up or down while hovering to step between the top-level window and individual child UI controls.
    - **Capture a region:** Click and drag a rectangle. Hold `Shift` for a square, `Ctrl` for `16:9`, or `Ctrl+Shift` for `4:3`.
    - **Capture a full monitor or desktop:** Press `F` for the current screen or `A` for all screens.
@@ -304,7 +304,7 @@ cargo run --release -p jiffshot -- --write-logo 512 jiffshot-512.png
 
 ### Building the MSI Installer
 
-`package/` builds a per-machine MSI with [WixSharp](https://github.com/oleg-shilo/wixsharp) on WiX 3.14. It installs `jiffshot.exe` and the host DLLs into `C:\Program Files\Devolutions\jiffshot`, adds a Start menu shortcut and associates `.jsd` documents; installing a newer MSI upgrades the old one. It needs the .NET SDK (the packager is a small .NET Framework program) and WiX 3.14 (`choco install wixtoolset --version 3.14.0`, or set `WIXSHARP_WIXDIR` to its `bin` folder):
+`package/` builds a per-machine MSI with [WixSharp](https://github.com/oleg-shilo/wixsharp) on WiX 3.14. It installs `jiffshot.exe` and the host DLLs into `C:\Program Files\Devolutions\Jiffshot`, adds a Start menu shortcut and associates `.jsd` documents; installing a newer MSI upgrades the old one. It needs the .NET SDK (the packager is a small .NET Framework program) and WiX 3.14 (`choco install wixtoolset --version 3.14.0`, or set `WIXSHARP_WIXDIR` to its `bin` folder):
 
 ```powershell
 cargo build --release -p jiffshot

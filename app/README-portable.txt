@@ -5,8 +5,9 @@ Screen capture and image editor for Windows 10 and 11.
 
 Getting started
 - Unzip this folder anywhere and run jiffshot.exe. Nothing is installed.
-- Jiffshot lives in the notification area (the tray icon). Its menu
-  captures, records video, opens the editor and has Preferences.
+- Jiffshot lives in the notification area (the tray icon). Left-click it to
+  open the Capture Window; its menu captures, records video, opens the editor
+  and has Preferences.
 - Print Screen captures (Ctrl+Alt+Print Screen while another app, such
   as another capture tool or the Snipping Tool, holds Print Screen). Click
   a window, drag an area, or press F1 while selecting for all keys.

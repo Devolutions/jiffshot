@@ -119,6 +119,10 @@ impl TrayViewModel for TrayModel {
     fn capture_window(&mut self) -> Result<()> {
         run(TrayAction::CaptureWindow)
     }
+    fn show_capture_window(&mut self) -> Result<()> {
+        crate::app::post(|app| app.show_capture_window());
+        Ok(())
+    }
     fn show_editor(&mut self) -> Result<()> {
         crate::app::post(|app| app.show_editor());
         Ok(())

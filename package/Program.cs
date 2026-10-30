@@ -1,6 +1,6 @@
 // Builds the Jiffshot MSI: a per-machine install of jiffshot.exe and the
 // Rustolonia host libraries beside it into
-// C:\Program Files\Devolutions\jiffshot, with a Start menu shortcut and the
+// C:\Program Files\Devolutions\Jiffshot, with a Start menu shortcut and the
 // .jsd document association.
 //
 //   Jiffshot.Package.exe -bin <dir> -platform x64|arm64 [-version X.Y.Z] [-out <dir>]
@@ -23,7 +23,7 @@ internal static class Program
     private const string Vendor = "Devolutions";
     private const string Publisher = "Devolutions Inc.";
     private const string ProductName = "Jiffshot";
-    private const string InstallFolder = "jiffshot";
+    private const string InstallFolder = "Jiffshot";
     private const string ExecutableName = "jiffshot.exe";
     private const string DocumentProgId = "jiffshot.Document";
 
