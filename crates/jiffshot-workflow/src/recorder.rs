@@ -103,6 +103,8 @@ pub struct Control {
     /// The sound sources wanted; one that cannot start turns itself off.
     pub system: AtomicBool,
     pub microphone: AtomicBool,
+    pub system_silent: AtomicBool,
+    pub microphone_silent: AtomicBool,
 }
 
 impl Control {
@@ -261,16 +263,20 @@ const DEFAULT_AUDIO: media::AudioSpec = media::AudioSpec { sample_rate: 48_000, 
 struct Source {
     microphone: bool,
     capture: Option<AudioCapture>,
+    silence: SilenceMonitor,
     /// It could not start or join; it stays off for this take.
     failed: bool,
 }
 
 impl Source {
-    fn follow(&mut self, wanted: &AtomicBool, spec: media::AudioSpec, control: &Control) {
+    fn follow(&mut self, wanted: &AtomicBool, silent: &AtomicBool, spec: media::AudioSpec, control: &Control) {
         let on = wanted.load(Ordering::Relaxed);
         if on && self.capture.is_none() && !self.failed {
             match start_audio(self.microphone, control) {
-                Some(c) if c.spec == spec => self.capture = Some(c),
+                Some(c) if c.spec == spec => {
+                    self.capture = Some(c);
+                    self.silence.start(Instant::now());
+                }
                 Some(c) => {
                     let what = if self.microphone { "microphone" } else { "system sound" };
                     control.note(format!("{what} left out: {} Hz, the recording is {} Hz", c.spec.sample_rate, spec.sample_rate));
@@ -283,7 +289,43 @@ impl Source {
             }
         } else if !on && self.capture.is_some() {
             self.capture = None;
+            self.silence.reset();
+            silent.store(false, Ordering::Relaxed);
         }
+    }
+
+    fn update_silence(&self, now: Instant, silent: &AtomicBool) {
+        silent.store(self.capture.is_some() && self.silence.is_silent(now), Ordering::Relaxed);
+    }
+}
+
+const SILENCE_WARNING_AFTER: Duration = Duration::from_secs(5);
+const SIGNAL_RMS_THRESHOLD: u64 = 400;
+
+#[derive(Default)]
+struct SilenceMonitor {
+    last_signal: Option<Instant>,
+}
+
+impl SilenceMonitor {
+    fn start(&mut self, now: Instant) {
+        self.last_signal = Some(now);
+    }
+
+    fn reset(&mut self) {
+        self.last_signal = None;
+    }
+
+    fn observe(&mut self, samples: &[i16], now: Instant) {
+        let energy = samples.iter().map(|sample| u64::from(sample.unsigned_abs()).pow(2)).sum::<u64>();
+        let has_signal = !samples.is_empty() && energy / samples.len() as u64 >= SIGNAL_RMS_THRESHOLD.pow(2);
+        if has_signal {
+            self.last_signal = Some(now);
+        }
+    }
+
+    fn is_silent(&self, now: Instant) -> bool {
+        self.last_signal.is_some_and(|last_signal| now.saturating_duration_since(last_signal) >= SILENCE_WARNING_AFTER)
     }
 }
 
@@ -300,8 +342,8 @@ pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) 
     media::startup()?;
     let spec = VideoSpec::for_size(rect.width as u32, rect.height as u32, options.fps.clamp(5, 60));
     let rect = Rect::new(rect.x, rect.y, spec.width as i32, spec.height as i32);
-    let mut system = Source { microphone: false, capture: None, failed: false };
-    let mut microphone = Source { microphone: true, capture: None, failed: false };
+    let mut system = Source { microphone: false, capture: None, silence: SilenceMonitor::default(), failed: false };
+    let mut microphone = Source { microphone: true, capture: None, silence: SilenceMonitor::default(), failed: false };
     // The track takes the format of the first source that starts.
     if control.on(&control.system) {
         system.capture = start_audio(false, control);
@@ -324,6 +366,12 @@ pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) 
     let mut mixer: Option<Mixer> = None;
     let mut clicks = Clicks::default();
     let started = Instant::now();
+    if system.capture.is_some() {
+        system.silence.start(started);
+    }
+    if microphone.capture.is_some() {
+        microphone.silence.start(started);
+    }
     let mut paused_for = Duration::ZERO;
     let mut paused_at: Option<Instant> = None;
     let mut written = 0i64;
@@ -340,8 +388,8 @@ pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) 
     while !control.stop.load(Ordering::Acquire) {
         let now = Instant::now();
         // The toolbar's switches.
-        system.follow(&control.system, audio_spec, control);
-        microphone.follow(&control.microphone, audio_spec, control);
+        system.follow(&control.system, &control.system_silent, audio_spec, control);
+        microphone.follow(&control.microphone, &control.microphone_silent, audio_spec, control);
         match (system.capture.is_some() && microphone.capture.is_some(), mixer.is_some()) {
             (true, false) => mixer = Some(Mixer::default()),
             (false, true) => mixer = None,
@@ -363,6 +411,10 @@ pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) 
             paused_at.get_or_insert(now);
             drain(&system.capture);
             drain(&microphone.capture);
+            system.silence.start(now);
+            microphone.silence.start(now);
+            control.system_silent.store(false, Ordering::Relaxed);
+            control.microphone_silent.store(false, Ordering::Relaxed);
             std::thread::sleep(Duration::from_millis(15));
             continue;
         }
@@ -377,6 +429,7 @@ pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) 
             let mut out: Vec<Vec<i16>> = Vec::new();
             if let Some(m) = &microphone.capture {
                 for mut block in m.samples.try_iter() {
+                    microphone.silence.observe(&block, now);
                     if let Some(g) = gate.as_mut() {
                         g.process(&mut block);
                     }
@@ -388,6 +441,7 @@ pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) 
             }
             if let Some(s) = &system.capture {
                 for block in s.samples.try_iter() {
+                    system.silence.observe(&block, now);
                     match mixer.as_mut() {
                         Some(mx) => mx.push_a(&block),
                         None => out.push(block),
@@ -408,6 +462,8 @@ pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) 
                 writer.write_audio(&media::silence(gap), audio_frames * HNS_PER_SECOND / rate, gap as i64 * HNS_PER_SECOND / rate)?;
                 audio_frames += gap as i64;
             }
+            system.update_silence(now, &control.system_silent);
+            microphone.update_silence(now, &control.microphone_silent);
         }
         // A constant frame rate: frame n shows at n * frame_time. When a
         // grab takes longer than a frame, the frame is repeated, so the
@@ -477,6 +533,13 @@ fn countdown(rect: Rect, seconds: u32) -> bool {
 /// The toolbar's state, as the app draws it.
 fn toolbar_state(control: &Control, settings: &Settings) -> serde_json::Value {
     let on = |f: &AtomicBool| f.load(Ordering::Relaxed);
+    let mut notes = control.audio.lock().unwrap().clone().into_iter().collect::<Vec<_>>();
+    if on(&control.system_silent) {
+        notes.push("No sound detected from system audio. Check the selected output device.".to_owned());
+    }
+    if on(&control.microphone_silent) {
+        notes.push("No sound detected from the microphone. Check the selected input device.".to_owned());
+    }
     json!({
         "millis": control.millis.load(Ordering::Relaxed),
         "frames": control.frames.load(Ordering::Relaxed),
@@ -491,7 +554,7 @@ fn toolbar_state(control: &Control, settings: &Settings) -> serde_json::Value {
         "microphone": on(&control.microphone),
         "draw": screendraw::active(),
         "draw_offered": settings.screen_draw,
-        "note": control.audio.lock().unwrap().clone(),
+        "note": (!notes.is_empty()).then(|| notes.join("\n")),
         "keys": { "pause": key_names().0, "stop": key_names().1 },
     })
 }
@@ -601,5 +664,51 @@ pub fn record(rect: Rect, settings: &Settings) -> Result<Option<PathBuf>, String
             path.display()
         ));
         return Ok(Some(path));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn silence_warning_waits_five_seconds_and_clears_on_signal() {
+        let start = Instant::now();
+        let mut monitor = SilenceMonitor::default();
+        monitor.start(start);
+
+        assert!(!monitor.is_silent(start + SILENCE_WARNING_AFTER - Duration::from_millis(1)));
+        assert!(monitor.is_silent(start + SILENCE_WARNING_AFTER));
+
+        monitor.observe(&[1000; 960], start + SILENCE_WARNING_AFTER);
+        assert!(!monitor.is_silent(start + SILENCE_WARNING_AFTER));
+        assert!(monitor.is_silent(start + SILENCE_WARNING_AFTER * 2));
+    }
+
+    #[test]
+    fn silence_monitor_ignores_levels_below_the_signal_threshold() {
+        let start = Instant::now();
+        let mut monitor = SilenceMonitor::default();
+        monitor.start(start);
+
+        monitor.observe(&[399; 960], start + SILENCE_WARNING_AFTER - Duration::from_millis(1));
+        assert!(monitor.is_silent(start + SILENCE_WARNING_AFTER));
+
+        monitor.observe(&[400; 960], start + SILENCE_WARNING_AFTER);
+        assert!(!monitor.is_silent(start + SILENCE_WARNING_AFTER));
+    }
+
+    #[test]
+    fn toolbar_note_names_silent_sources_without_hiding_capture_notes() {
+        let control = Control::default();
+        control.system_silent.store(true, Ordering::Relaxed);
+        control.microphone_silent.store(true, Ordering::Relaxed);
+        control.note("no webcam: unavailable".to_owned());
+
+        let note = toolbar_state(&control, &Settings::default())["note"].as_str().unwrap().to_owned();
+
+        assert!(note.contains("no webcam: unavailable"), "{note}");
+        assert!(note.contains("No sound detected from system audio."), "{note}");
+        assert!(note.contains("No sound detected from the microphone."), "{note}");
     }
 }
