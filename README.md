@@ -119,7 +119,8 @@ package/bin/Release/net472/Jiffshot.Package.exe -bin target/release -platform x6
 
 The MSI lands in `package/out` as `Devolutions.Jiffshot-x64-0.1.0.msi`
 (with the selected architecture and version; `-out` picks another folder).
-Programs and Features lists it as **Devolutions Jiffshot**. For ARM64, pass
+Programs and Features lists it as **Devolutions Jiffshot** under publisher
+**Devolutions Inc.**. For ARM64, pass
 the ARM64 build's folder and `-platform arm64`. The version comes from
 `Cargo.toml` unless `-version` gives one. CI builds both MSIs from its builds
 (`jiffshot-win-x64-msi`, `jiffshot-win-arm64-msi`), and installs and

@@ -20,6 +20,7 @@ namespace Jiffshot.Package;
 internal static class Program
 {
     private const string Vendor = "Devolutions";
+    private const string Publisher = "Devolutions Inc.";
     private const string ProductName = "Jiffshot";
     private const string InstallFolder = "jiffshot";
     private const string ExecutableName = "jiffshot.exe";
@@ -91,7 +92,7 @@ internal static class Program
             },
             ControlPanelInfo = new ProductInfo
             {
-                Manufacturer = Vendor,
+                Manufacturer = Publisher,
                 ProductIcon = o.Icon,
                 UrlInfoAbout = "https://github.com/Devolutions/jiffshot",
                 HelpLink = "https://github.com/Devolutions/jiffshot/issues",
