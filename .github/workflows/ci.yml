@@ -300,3 +300,146 @@ jobs:
           name: jiffshot-${{ matrix.rid }}-msi
           path: msi/*.msi
           if-no-files-found: error
+
+  msix:
+    name: ${{ matrix.rid }} MSIX
+    environment:
+      name: ${{ inputs.signing_environment || '' }}
+    permissions:
+      contents: read
+      id-token: write
+    needs: build
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            architecture: x64
+            test: true
+          - rid: win-arm64
+            architecture: arm64
+            test: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: jiffshot-${{ matrix.rid }}
+          path: bin
+
+      - name: Build the MSIX
+        shell: pwsh
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+          PACKAGE_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cargoToml = Get-Content -LiteralPath Cargo.toml -Raw
+          if ($cargoToml -notmatch '(?ms)^\[workspace\.package\].*?^\s*version\s*=\s*"(?<v>[0-9]+\.[0-9]+\.[0-9]+)"') {
+            throw 'Could not read [workspace.package] version from Cargo.toml'
+          }
+          $workspaceVersion = $Matches['v']
+          $expectedVersion = if ([string]::IsNullOrWhiteSpace($env:EXPECTED_VERSION)) {
+            $workspaceVersion
+          } elseif ($env:EXPECTED_VERSION -ne $workspaceVersion) {
+            throw "Input version '$env:EXPECTED_VERSION' does not match Cargo.toml '$workspaceVersion'"
+          } else {
+            $env:EXPECTED_VERSION
+          }
+          $stage = 'msix\stage'
+          $assets = Join-Path $stage 'Assets'
+          New-Item -ItemType Directory -Force -Path $assets | Out-Null
+          $binaries = @(Get-ChildItem -LiteralPath bin -File |
+            Where-Object { $_.Name -eq 'jiffshot.exe' -or $_.Extension -eq '.dll' })
+          if (-not ($binaries | Where-Object { $_.Name -eq 'jiffshot.exe' })) { throw 'jiffshot.exe is missing from the build artifact' }
+          if (-not ($binaries | Where-Object { $_.Name -eq 'rustolonia_host.dll' })) { throw 'rustolonia_host.dll is missing from the build artifact' }
+          $binaries | Copy-Item -Destination $stage
+          $exe = (Resolve-Path (Join-Path $stage 'jiffshot.exe')).Path
+          foreach ($logo in @(
+            @{ Size = 150; Name = 'Square150x150Logo.png' },
+            @{ Size = 44; Name = 'Square44x44Logo.png' },
+            @{ Size = 50; Name = 'StoreLogo.png' }
+          )) {
+            $logoPath = Join-Path $assets $logo.Name
+            $process = Start-Process -FilePath $exe `
+              -ArgumentList @('--write-logo', [string]$logo.Size, "`"$logoPath`"") `
+              -Wait -PassThru
+            if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $logoPath -PathType Leaf)) {
+              throw "Failed to generate MSIX logo $($logo.Name)"
+            }
+          }
+          $signature = Get-AuthenticodeSignature -LiteralPath $exe
+          $publisher = if ($signature.Status -eq 'Valid' -and $null -ne $signature.SignerCertificate) {
+            $signature.SignerCertificate.Subject
+          } else {
+            'CN=Devolutions Jiffshot CI'
+          }
+          [xml]$manifest = Get-Content -LiteralPath package\AppxManifest.xml -Raw
+          $namespace = [System.Xml.XmlNamespaceManager]::new($manifest.NameTable)
+          $namespace.AddNamespace('appx', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+          $identity = $manifest.SelectSingleNode('/appx:Package/appx:Identity', $namespace)
+          if ($null -eq $identity) { throw 'Package identity is missing from package\AppxManifest.xml' }
+          $identity.SetAttribute('Version', "$expectedVersion.0")
+          $identity.SetAttribute('ProcessorArchitecture', $env:PACKAGE_ARCHITECTURE)
+          $identity.SetAttribute('Publisher', $publisher)
+          $manifest.Save((Join-Path $stage 'AppxManifest.xml'))
+          $sdkBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+          $makeAppx = Get-ChildItem -LiteralPath $sdkBin -Directory |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'x64\makeappx.exe') } |
+            Sort-Object { [version]$_.Name } -Descending |
+            Select-Object -First 1 |
+            ForEach-Object { Join-Path $_.FullName 'x64\makeappx.exe' }
+          if (-not $makeAppx) { throw "Windows SDK MakeAppx.exe was not found under $sdkBin" }
+          $output = "msix\Devolutions.Jiffshot-$env:PACKAGE_ARCHITECTURE-$expectedVersion.msix"
+          & $makeAppx pack /d $stage /p $output /o
+          if ($LASTEXITCODE -ne 0) { throw "MakeAppx failed with exit code $LASTEXITCODE" }
+          Get-Item -LiteralPath $output | Format-Table Name, Length
+
+      - name: Sign MSIX
+        if: github.event_name != 'pull_request' && inputs.signing_environment != ''
+        uses: ./.github/actions/sign
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          TRUSTED_SIGNING_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_PROFILE_NAME }}
+          TRUSTED_SIGNING_TIMESTAMP_SERVER: ${{ vars.TRUSTED_SIGNING_TIMESTAMP_SERVER || 'http://timestamp.acs.microsoft.com/' }}
+        with:
+          install_test_signing_root: ${{ inputs.signing_environment == 'publish-test' }}
+          files: msix/*.msix
+
+      - name: Install and uninstall
+        if: matrix.test && github.event_name != 'pull_request' && inputs.signing_environment != ''
+        shell: pwsh
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = if ([string]::IsNullOrWhiteSpace($env:EXPECTED_VERSION)) {
+            if ((Get-Content -LiteralPath Cargo.toml -Raw) -notmatch '(?ms)^\[workspace\.package\].*?^\s*version\s*=\s*"(?<v>[0-9]+\.[0-9]+\.[0-9]+)"') {
+              throw 'Could not read [workspace.package] version from Cargo.toml'
+            }
+            $Matches['v']
+          } else {
+            $env:EXPECTED_VERSION
+          }
+          $msix = "msix\Devolutions.Jiffshot-x64-$version.msix"
+          Add-AppxPackage -Path $msix -ErrorAction Stop
+          $installed = Get-AppxPackage -Name Devolutions.Jiffshot
+          if ($null -eq $installed -or $installed.Version.ToString() -ne "$version.0") {
+            throw "The installed Jiffshot MSIX does not match version $version"
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $installed.InstallLocation 'jiffshot.exe'))) {
+            throw 'The installed MSIX does not contain jiffshot.exe'
+          }
+          Remove-AppxPackage -Package $installed.PackageFullName -ErrorAction Stop
+          if (Get-AppxPackage -Name Devolutions.Jiffshot) { throw 'Jiffshot MSIX is still installed after removal' }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jiffshot-${{ matrix.rid }}-msix
+          path: msix/*.msix
+          if-no-files-found: error
