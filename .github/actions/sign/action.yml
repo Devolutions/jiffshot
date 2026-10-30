@@ -1,0 +1,81 @@
+name: Sign Windows artifacts
+description: Sign and verify binaries or MSIs using psign and Azure Trusted Signing.
+inputs:
+  files:
+    description: Newline-separated file paths or patterns to sign.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Validate signing configuration and install psign
+      shell: pwsh
+      env:
+        PSIGN_VERSION: 0.6.2
+        PSIGN_SHA256: 326cae780044dc980833a9dd3250b9cf51d46faae9f693c59319560b24df4ba9
+      run: |
+        $ErrorActionPreference = 'Stop'
+        foreach ($name in @(
+          'AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID',
+          'TRUSTED_SIGNING_ENDPOINT', 'TRUSTED_SIGNING_ACCOUNT_NAME', 'TRUSTED_SIGNING_PROFILE_NAME'
+        )) {
+          if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+            throw "Required signing configuration is missing: $name"
+          }
+        }
+        $toolRoot = Join-Path $env:RUNNER_TEMP 'psign-tool'
+        New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
+        $archive = Join-Path $toolRoot 'psign-tool.zip'
+        Invoke-WebRequest "https://github.com/Devolutions/psign/releases/download/v$env:PSIGN_VERSION/psign-tool-windows-x64.zip" -OutFile $archive
+        $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($hash -ne $env:PSIGN_SHA256) { throw "psign download checksum mismatch: $hash" }
+        Expand-Archive $archive -DestinationPath $toolRoot -Force
+        $tool = Join-Path $toolRoot 'psign-tool.exe'
+        & $tool --version
+        if ($LASTEXITCODE -ne 0) { throw 'psign could not be executed.' }
+        $toolRoot >> $env:GITHUB_PATH
+
+    - name: Azure login for Trusted Signing
+      uses: azure/login@v2
+      with:
+        client-id: ${{ env.AZURE_CLIENT_ID }}
+        tenant-id: ${{ env.AZURE_TENANT_ID }}
+        subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Sign and verify
+      shell: pwsh
+      env:
+        SIGNING_FILES: ${{ inputs.files }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $accessToken = az account get-access-token `
+          --scope https://codesigning.azure.net/.default --query accessToken --output tsv
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($accessToken)) {
+          throw 'Failed to acquire a Trusted Signing access token.'
+        }
+        Write-Output "::add-mask::$accessToken"
+        $targets = @(
+          foreach ($pattern in ($env:SIGNING_FILES -split '\r?\n')) {
+            if ([string]::IsNullOrWhiteSpace($pattern)) { continue }
+            $files = @(Get-Item -Path $pattern.Trim() -ErrorAction Stop)
+            if ($files.Count -eq 0) { throw "No signing targets match: $pattern" }
+            foreach ($file in $files) {
+              if ($file.PSIsContainer) { throw "Signing target is a directory: $file" }
+              $file.FullName
+            }
+          }
+        )
+        if ($targets.Count -eq 0) { throw 'No signing targets were supplied.' }
+        foreach ($target in ($targets | Sort-Object -Unique)) {
+          psign-tool --mode portable --verbose sign `
+            --artifact-signing-endpoint "$env:TRUSTED_SIGNING_ENDPOINT" `
+            --artifact-signing-account-name "$env:TRUSTED_SIGNING_ACCOUNT_NAME" `
+            --artifact-signing-profile-name "$env:TRUSTED_SIGNING_PROFILE_NAME" `
+            --artifact-signing-access-token "$accessToken" `
+            --timestamp-url "$env:TRUSTED_SIGNING_TIMESTAMP_SERVER" `
+            --timestamp-digest sha256 --digest sha256 --exit-codes azure "$target"
+          if ($LASTEXITCODE -ne 0) { throw "Trusted Signing failed for $target (exit $LASTEXITCODE)." }
+          $signature = Get-AuthenticodeSignature -LiteralPath $target
+          if ($signature.Status -ne 'Valid' -or $null -eq $signature.TimeStamperCertificate) {
+            throw "Signature or timestamp verification failed for ${target}: $($signature.StatusMessage)"
+          }
+        }
