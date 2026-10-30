@@ -20,6 +20,7 @@
 //! jiffshot --record-selftest DIR SECS   record a generated page
 //! jiffshot --quit                       stop the running instance
 //! jiffshot --write-icon OUT.ico         write the program icon (assets/jiffshot.ico)
+//! jiffshot --write-logo SIZE OUT.png    render the logo as a square PNG
 //! ```
 
 mod hud;
@@ -591,7 +592,13 @@ pub fn run_command(args: &[String]) -> Option<i32> {
     unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
     screen::enable_per_monitor_dpi();
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        ["--write-icon", out] => std::fs::write(out, icon::ico()),
+        ["--write-icon", out] => icon::ico().and_then(|bytes| std::fs::write(out, bytes)),
+        ["--write-logo", size, out] => size
+            .parse::<u32>()
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "logo size must be a positive whole number"))
+            .and_then(icon::png)
+            .and_then(|bytes| std::fs::write(out, bytes)),
+        ["--write-logo", ..] => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "usage: --write-logo SIZE OUT.png")),
         ["--monitors"] => {
             print_monitors(&screen::monitors());
             Ok(())

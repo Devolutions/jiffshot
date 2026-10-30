@@ -12,4 +12,5 @@ jiffshot-capture = { path = "../jiffshot-capture" }
 jiffshot-doc = { path = "../jiffshot-doc" }
 windows.workspace = true
 tiny-skia.workspace = true
+resvg = { version = "0.45", default-features = false }
 windows-sys.workspace = true
