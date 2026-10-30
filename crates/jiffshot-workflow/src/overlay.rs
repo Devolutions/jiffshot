@@ -37,6 +37,8 @@ pub enum Mode {
     Fixed(i32, i32),
     /// For recording: G shows standard-size guides.
     Video,
+    /// For recording: a 1920 × 1080 rectangle, placed by clicking.
+    VideoFixed,
 }
 
 /// What the user picked, in screen coordinates.
@@ -86,12 +88,14 @@ const DRAG_THRESHOLD: i32 = 3;
 
 /// Standard recording sizes the G key shows.
 pub const GUIDES: &[(i32, i32)] = &[(1920, 1080), (1280, 720), (640, 480), (320, 240)];
+const FIXED_VIDEO_SIZE: (i32, i32) = GUIDES[0];
 
 /// The F1 help, one line each.
 pub const HELP: &[&str] = &[
     "Click: window (wheel: parent / child)   ·   Drag: region",
     "Shift: square   ·   Ctrl: 16:9   ·   Ctrl+Shift: 4:3",
     "Arrows: move 1 px (Shift: 10)   ·   Shift+Enter: start a region at the pointer",
+    "Video: 1 places a fixed 1920 × 1080 recording area; press 1 again for freeform",
     "Enter / Space: capture   ·   F: this screen   ·   A: all screens",
     "M: magnifier   ·   G: video size guides   ·   F1: this help   ·   Esc: cancel",
 ];
@@ -102,7 +106,8 @@ fn hint(mode: Mode) -> &'static str {
         Mode::Freehand => "Draw around the area to capture  ·  Esc: cancel  ·  F1: help",
         Mode::MultiArea => "Drag each area to capture, then press Enter  ·  Backspace: remove the last  ·  Esc: cancel",
         Mode::Fixed(..) => "Click to place the fixed-size area  ·  Arrows: nudge  ·  Esc: cancel",
-        Mode::Video => "Click a window or drag the area to record  ·  G: size guides  ·  Shift: square, Ctrl: 16:9, Ctrl+Shift: 4:3  ·  Esc: cancel",
+        Mode::Video => "Click a window or drag the area to record  ·  1: fixed 1920 × 1080  ·  G: guides  ·  Shift: square, Ctrl: 16:9, Ctrl+Shift: 4:3  ·  Esc: cancel",
+        Mode::VideoFixed => "Click to place the 1920 × 1080 recording area  ·  1: freeform  ·  Arrows: nudge  ·  Esc: cancel",
         Mode::Normal => "Click a window or drag a region  ·  Wheel: parent / child  ·  F: screen  ·  A: all screens  ·  F1: help  ·  Esc: cancel",
     }
 }
@@ -236,7 +241,12 @@ impl Overlay {
         if let (true, Some(press)) = (self.dragging, self.press) {
             return Lit::Region(constrained(press, self.cursor, self.shift, self.ctrl).intersect(self.bounds()).unwrap_or_default());
         }
-        if let Mode::Fixed(w, h) = self.mode {
+        let fixed_size = match self.mode {
+            Mode::Fixed(w, h) => Some((w, h)),
+            Mode::VideoFixed => Some(FIXED_VIDEO_SIZE),
+            _ => None,
+        };
+        if let Some((w, h)) = fixed_size {
             let (cx, cy) = self.cursor;
             let b = self.bounds();
             let x = (cx - w / 2).clamp(b.x, (b.right() - w).max(b.x));
@@ -287,7 +297,7 @@ impl Overlay {
             hint: hint(self.mode),
             magnifier: self.show_magnifier,
             help: self.show_help,
-            guides: self.show_guides && self.mode == Mode::Video,
+            guides: self.show_guides && matches!(self.mode, Mode::Video | Mode::VideoFixed),
             dragging: self.dragging,
         }
     }
@@ -312,9 +322,11 @@ impl Overlay {
 
     pub fn pointer_moved(&mut self, x: i32, y: i32) {
         self.cursor = (x, y);
-        if let (false, Some((px, py))) = (self.dragging, self.press) {
-            if (x - px).abs() > DRAG_THRESHOLD || (y - py).abs() > DRAG_THRESHOLD {
-                self.dragging = true;
+        if self.mode != Mode::VideoFixed {
+            if let (false, Some((px, py))) = (self.dragging, self.press) {
+                if (x - px).abs() > DRAG_THRESHOLD || (y - py).abs() > DRAG_THRESHOLD {
+                    self.dragging = true;
+                }
             }
         }
         if self.mode == Mode::Freehand && self.press.is_some() && self.path.last() != Some(&(x, y)) {
@@ -345,6 +357,14 @@ impl Overlay {
                 if let Some(r) = self.press.and_then(|p| constrained(p, self.cursor, self.shift, self.ctrl).intersect(self.bounds())) {
                     self.regions.push(r);
                 }
+            }
+            self.press = None;
+            self.dragging = false;
+            return;
+        }
+        if self.mode == Mode::VideoFixed {
+            if self.press.is_some() {
+                self.select_lit();
             }
             self.press = None;
             self.dragging = false;
@@ -397,6 +417,7 @@ impl Overlay {
             VK_RIGHT => return Some((x + step, y)),
             VK_UP => return Some((x, y - step)),
             VK_DOWN => return Some((x, y + step)),
+            VK_RETURN | VK_SPACE if self.mode == Mode::VideoFixed => self.select_lit(),
             VK_RETURN if shift && !self.dragging => {
                 // A region started from the keyboard: arrows size it, Enter
                 // finishes.
@@ -426,6 +447,8 @@ impl Overlay {
             VK_F1 => self.show_help = !self.show_help,
             _ if vk == b'M' as u16 => self.show_magnifier = !self.show_magnifier,
             _ if vk == b'G' as u16 => self.show_guides = !self.show_guides,
+            _ if vk == b'1' as u16 && self.mode == Mode::Video => self.mode = Mode::VideoFixed,
+            _ if vk == b'1' as u16 && self.mode == Mode::VideoFixed => self.mode = Mode::Video,
             _ if vk == b'F' as u16 => self.outcome = Some(Some(Selection::Monitor(self.to_screen(self.monitor().0)))),
             _ if vk == b'A' as u16 => self.outcome = Some(Some(Selection::Desktop(self.to_screen(self.bounds())))),
             _ => {}
@@ -625,5 +648,29 @@ mod tests {
         assert_eq!(o.key(VK_RIGHT, true), Some((110, 100)));
         o.key(b'F' as u16, false);
         assert!(matches!(o.outcome, Some(Some(Selection::Monitor(r))) if r == Rect::new(0, 0, 1000, 600)));
+    }
+
+    #[test]
+    fn video_fixed_region_can_be_toggled_and_placed() {
+        let monitors = vec![Monitor {
+            rect: Rect::new(0, 0, 2560, 1440),
+            work: Rect::new(0, 0, 2560, 1400),
+            dpi: 96,
+            primary: true,
+            device: "A".into(),
+        }];
+        let mut o = Overlay::new(Frame::new(2560, 1440), (0, 0), Targets::default(), monitors, (1200, 700)).unwrap();
+        o.mode = Mode::Video;
+
+        o.key(b'1' as u16, false);
+        assert_eq!(o.view().lit, Rect::new(240, 160, 1920, 1080));
+        o.key(b'1' as u16, false);
+        assert_eq!(o.view().lit_kind, 2, "the second press restores normal video selection");
+
+        o.key(b'1' as u16, false);
+        o.pointer_pressed(1200, 700);
+        o.pointer_moved(1300, 800);
+        o.pointer_released(1300, 800);
+        assert!(matches!(o.outcome, Some(Some(Selection::Region(r))) if r == Rect::new(340, 260, 1920, 1080)));
     }
 }
