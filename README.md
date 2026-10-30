@@ -121,9 +121,12 @@ Run **Release** from GitHub Actions with a version matching `Cargo.toml` (for
 example, `0.1.0`, without `v`). Update and commit the workspace version before
 releasing a new version. Dry runs are enabled by default and can run on any
 branch using `publish-test`; they upload signed packages without creating a tag
-or release. To publish, select master and disable `dry_run`, which uses
-`publish-prod`. The workflow rejects production releases from other branches,
-version mismatches, and existing tags.
+or release. For test signing, the workflow retrieves the `publish-test`
+profile root with psign and trusts it only in each ephemeral runner's current
+user certificate store, so Authenticode validation remains enabled. To publish,
+select master and disable `dry_run`, which uses `publish-prod` and does not
+install the test root. The workflow rejects production releases from other
+branches, version mismatches, and existing tags.
 
 Both modes retain the portable and MSI Actions artifacts plus a `release-assets`
 artifact containing x64/ARM64 MSIs, portable ZIPs, and `SHA256SUMS.txt`. After all
