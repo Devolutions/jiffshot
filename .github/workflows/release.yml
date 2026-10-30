@@ -79,9 +79,44 @@ jobs:
       signing_environment: ${{ needs.preflight.outputs.signing_environment }}
     secrets: inherit
 
+  test-signing-root:
+    name: Retrieve test signing root
+    if: ${{ inputs.dry_run && needs.packages.result == 'success' }}
+    needs: [preflight, packages]
+    runs-on: windows-latest
+    environment:
+      name: publish-test
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login for Trusted Signing
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Retrieve and trust test signing root
+        uses: ./.github/actions/trust-test-signing-root
+        with:
+          endpoint: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          account_name: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          profile_name: ${{ secrets.TRUSTED_SIGNING_PROFILE_NAME }}
+          certificate_path: ${{ runner.temp }}\artifact-signing-test-root.cer
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-signing-root
+          path: ${{ runner.temp }}\artifact-signing-test-root.cer
+          if-no-files-found: error
+
   release:
     name: Collect artifacts and publish
-    needs: [preflight, packages]
+    needs: [preflight, packages, test-signing-root]
+    if: ${{ always() && needs.preflight.result == 'success' && needs.packages.result == 'success' && (!inputs.dry_run || needs.test-signing-root.result == 'success') }}
     runs-on: windows-latest
     permissions:
       contents: write
@@ -96,6 +131,38 @@ jobs:
           pattern: jiffshot-*
           path: artifacts
 
+      - name: Download test signing root
+        if: inputs.dry_run
+        uses: actions/download-artifact@v4
+        with:
+          name: test-signing-root
+          path: signing-root
+
+      - name: Trust test signing root
+        if: inputs.dry_run
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $certificatePath = 'signing-root\artifact-signing-test-root.cer'
+          if (-not (Test-Path -LiteralPath $certificatePath -PathType Leaf)) {
+            throw "Missing test signing root: $certificatePath"
+          }
+          $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            (Resolve-Path -LiteralPath $certificatePath).Path
+          )
+          $constraints = $certificate.Extensions |
+            Where-Object { $_.Oid.Value -eq '2.5.29.19' } |
+            Select-Object -First 1
+          if ($null -eq $constraints -or -not $constraints.CertificateAuthority -or $certificate.Subject -ne $certificate.Issuer) {
+            throw 'The downloaded Artifact Signing certificate is not a self-signed CA root.'
+          }
+          Import-Certificate -FilePath $certificatePath -CertStoreLocation 'Cert:\CurrentUser\Root' |
+            Out-Null
+          $trustedRoot = Get-ChildItem 'Cert:\CurrentUser\Root' |
+            Where-Object { $_.Thumbprint -eq $certificate.Thumbprint } |
+            Select-Object -First 1
+          if ($null -eq $trustedRoot) { throw 'The Artifact Signing profile root was not installed.' }
+
       - name: Assemble release assets
         shell: pwsh
         run: |
@@ -108,7 +175,9 @@ jobs:
             foreach ($path in @("$portable\jiffshot.exe", "$portable\rustolonia_host.dll", $msi)) {
               if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing release file: $path" }
               $signature = Get-AuthenticodeSignature -LiteralPath $path
-              if ($signature.Status -ne 'Valid' -or $null -eq $signature.TimeStamperCertificate) {
+              if ($signature.Status -ne 'Valid' `
+                  -or $null -eq $signature.SignerCertificate `
+                  -or $null -eq $signature.TimeStamperCertificate) {
                 throw "Invalid release signature or timestamp for ${path}: $($signature.StatusMessage)"
               }
             }

@@ -95,6 +95,7 @@ jobs:
           TRUSTED_SIGNING_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_PROFILE_NAME }}
           TRUSTED_SIGNING_TIMESTAMP_SERVER: ${{ vars.TRUSTED_SIGNING_TIMESTAMP_SERVER || 'http://timestamp.acs.microsoft.com/' }}
         with:
+          install_test_signing_root: ${{ inputs.signing_environment == 'publish-test' }}
           files: |
             jiffshot-${{ matrix.rid }}\jiffshot.exe
             jiffshot-${{ matrix.rid }}\rustolonia_host.dll
@@ -161,6 +162,7 @@ jobs:
           TRUSTED_SIGNING_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_PROFILE_NAME }}
           TRUSTED_SIGNING_TIMESTAMP_SERVER: ${{ vars.TRUSTED_SIGNING_TIMESTAMP_SERVER || 'http://timestamp.acs.microsoft.com/' }}
         with:
+          install_test_signing_root: ${{ inputs.signing_environment == 'publish-test' }}
           files: msi\*.msi
 
       - name: Install and uninstall
