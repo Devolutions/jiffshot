@@ -43,7 +43,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Rust
         shell: pwsh
@@ -55,7 +55,7 @@ jobs:
           rustc --version
 
       - name: Cache Cargo and the Rustolonia host
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -100,7 +100,7 @@ jobs:
             jiffshot-${{ matrix.rid }}\jiffshot.exe
             jiffshot-${{ matrix.rid }}\rustolonia_host.dll
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: jiffshot-${{ matrix.rid }}
           path: jiffshot-${{ matrix.rid }}
@@ -126,9 +126,9 @@ jobs:
             platform: arm64
             test: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: jiffshot-${{ matrix.rid }}
           path: bin
@@ -188,7 +188,7 @@ jobs:
           Invoke-Msiexec "/x `"$msi`" /qn /l*v msiexec.log"
           if (Test-Path $exe) { throw "$exe is still there after uninstalling" }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: jiffshot-${{ matrix.rid }}-msi
           path: msi/*.msi
