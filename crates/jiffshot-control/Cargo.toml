@@ -1,0 +1,11 @@
+[package]
+name = "jiffshot-control"
+description = "Jiffshot's local control protocol: the messages and the named pipe between jiffshot-cli and the running Jiffshot"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+windows-sys.workspace = true

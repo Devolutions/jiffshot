@@ -22,8 +22,12 @@
 //! jiffshot --write-icon OUT.ico         write the program icon (assets/jiffshot.ico)
 //! jiffshot --write-logo SIZE OUT.png    render the logo as a square PNG
 //! ```
+//!
+//! The running instance also serves `jiffshot-cli` (scripts and AI agents)
+//! over a named pipe; see `control.rs` and `docs/cli.md`.
 
 mod hud;
+mod control;
 mod screendraw;
 mod stepcap;
 mod vfx;
@@ -548,6 +552,8 @@ pub fn forward_to_running(mode: Option<usize>) {
 /// (the tray's Exit), `app.quit` runs on that thread.
 pub fn start_engine(initial: Option<usize>, app: Hooks) -> std::io::Result<std::thread::JoinHandle<i32>> {
     let _ = HOOKS.set(app);
+    // Scripts and agents drive this instance through `jiffshot-cli`.
+    control::start();
     std::thread::Builder::new().name("jiffshot-capture".into()).spawn(move || {
         let code = tray::run(initial);
         if let Some(hooks) = hooks() {

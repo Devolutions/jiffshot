@@ -1,0 +1,15 @@
+[package]
+name = "jiffshot-cli"
+description = "jiffshot-cli: drives the running Jiffshot from scripts and AI agents (screenshots, recordings, step guides, input)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "jiffshot-cli"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+jiffshot-control = { path = "../jiffshot-control" }
+windows-sys.workspace = true

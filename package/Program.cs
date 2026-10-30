@@ -1,12 +1,13 @@
-// Builds the Jiffshot MSI: a per-machine install of jiffshot.exe and the
-// Rustolonia host libraries beside it into
-// C:\Program Files\Devolutions\Jiffshot, with a Start menu shortcut and the
-// .jsd document association.
+// Builds the Jiffshot MSI: a per-machine install of jiffshot.exe, its
+// command-line client jiffshot-cli.exe and the Rustolonia host libraries
+// beside them into C:\Program Files\Devolutions\Jiffshot, with a Start menu
+// shortcut and the .jsd document association.
 //
 //   Jiffshot.Package.exe -bin <dir> -platform x64|arm64 [-version X.Y.Z] [-out <dir>]
 //
-// -bin is the folder holding jiffshot.exe and its DLLs (a Cargo release
-// output or a CI artifact). The version defaults to the one in Cargo.toml.
+// -bin is the folder holding jiffshot.exe, jiffshot-cli.exe and the DLLs (a
+// Cargo release output or a CI artifact). The version defaults to the one in
+// Cargo.toml.
 
 using System;
 using System.Diagnostics;
@@ -25,6 +26,7 @@ internal static class Program
     private const string ProductName = "Jiffshot";
     private const string InstallFolder = "Jiffshot";
     private const string ExecutableName = "jiffshot.exe";
+    private const string CliName = "jiffshot-cli.exe";
     private const string DocumentProgId = "jiffshot.Document";
 
     /// <summary>Identifies Jiffshot across versions: never change it.</summary>
@@ -63,7 +65,11 @@ internal static class Program
         var installDir = $"[{InstallDirProperty}]";
         var program = new File(exe,
             new FileShortcut(ProductName, "%ProgramMenu%") { WorkingDirectory = InstallDirProperty });
-        var files = new WixEntity[] { program }.Concat(libraries.Select(l => new File(l))).ToArray();
+        // The command-line client for scripts and AI agents.
+        var cli = Path.Combine(o.Bin, CliName);
+        if (!System.IO.File.Exists(cli))
+            throw new FileNotFoundException($"{CliName} is not in {o.Bin}");
+        var files = new WixEntity[] { program, new File(cli) }.Concat(libraries.Select(l => new File(l))).ToArray();
 
         var project = new Project($"{Vendor} {ProductName}",
             // %ProgramFiles% is the 32-bit folder in WixSharp's ARM64 packages.

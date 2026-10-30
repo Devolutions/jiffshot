@@ -248,6 +248,22 @@ jiffshot.exe --list-windows                 # List detected window and child-ele
 jiffshot.exe --quit                         # Stop the running Jiffshot instance
 ```
 
+### Automation and AI agents: `jiffshot-cli`
+
+`jiffshot-cli.exe`, installed beside `jiffshot.exe`, drives the running Jiffshot (starting it if needed) so a script or an AI agent can screenshot, record and narrate a demo of any desktop software without anyone clicking through it by hand. Every command prints one JSON object and returns a meaningful exit code. It can click, type, press keys, find text by OCR and controls by UI Automation, and wait for windows or text.
+
+```powershell
+jiffshot-cli windows --process notepad
+jiffshot-cli record start --window 0x86070A --out C:\demo\demo.mp4 --clicks
+jiffshot-cli type "Hello from an agent\n" --window 0x86070A
+jiffshot-cli click --window 0x86070A --element File
+jiffshot-cli record stop                       # waits for the finished MP4
+jiffshot-cli run demo.json                     # a whole scripted sequence
+jiffshot-cli help agent                        # the guide for AI agents
+```
+
+See [docs/cli.md](docs/cli.md) for every command, the JSON output and scripted sequences.
+
 ## Where Captures & Settings Are Stored
 
 - **Captures Library:** `Pictures\Jiffshot` by default (follows Windows Pictures folder redirection such as OneDrive; configurable in **Preferences ▸ Library** or overridden via the `JIFFSHOT_LIBRARY` environment variable).
@@ -266,7 +282,9 @@ Jiffshot is written in Rust with its UI built on [Rustolonia](https://github.com
 |---|---|
 | `crates/jiffshot-capture/` | Monitors and DPI, screen grabs, window targets, clipboard, OCR, media (recording and playback), the library, settings |
 | `crates/jiffshot-doc/` | Documents: annotation objects, rendering, editing and undo, effects, smart tools, `.jsd` and image files |
-| `crates/jiffshot-workflow/` | The capture side: tray, hotkeys, selection overlay, recording, capture panels, post-capture workflow, command-line modes |
+| `crates/jiffshot-workflow/` | The capture side: tray, hotkeys, selection overlay, recording, capture panels, post-capture workflow, command-line modes, the control server for `jiffshot-cli` |
+| `crates/jiffshot-control/` | The local control protocol: JSON requests over a per-user named pipe |
+| `crates/jiffshot-cli/` | `jiffshot-cli.exe`: the command-line client for scripts and AI agents |
 | `app/` | `jiffshot.exe`: the editor's model (`src/app.rs`, view models in `src/vm.rs`), every window (`src/ui/`) and the capture side, in one process |
 | `package/` | The MSI installer (WixSharp) and MSIX manifest |
 
