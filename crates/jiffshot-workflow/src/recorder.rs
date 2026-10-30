@@ -552,6 +552,8 @@ fn toolbar_state(control: &Control, settings: &Settings) -> serde_json::Value {
         "webcam_circle": on(&control.webcam_circle),
         "system": on(&control.system),
         "microphone": on(&control.microphone),
+        "system_silent": on(&control.system_silent),
+        "microphone_silent": on(&control.microphone_silent),
         "draw": screendraw::active(),
         "draw_offered": settings.screen_draw,
         "note": (!notes.is_empty()).then(|| notes.join("\n")),
@@ -699,6 +701,21 @@ mod tests {
     }
 
     #[test]
+    fn silence_monitor_reset_starts_a_fresh_warning_window() {
+        let start = Instant::now();
+        let mut monitor = SilenceMonitor::default();
+        monitor.start(start);
+        monitor.observe(&[1000; 960], start + Duration::from_secs(4));
+
+        monitor.reset();
+        assert!(!monitor.is_silent(start + Duration::from_secs(30)));
+
+        monitor.start(start + Duration::from_secs(30));
+        assert!(!monitor.is_silent(start + Duration::from_secs(35) - Duration::from_millis(1)));
+        assert!(monitor.is_silent(start + Duration::from_secs(35)));
+    }
+
+    #[test]
     fn toolbar_note_names_silent_sources_without_hiding_capture_notes() {
         let control = Control::default();
         control.system_silent.store(true, Ordering::Relaxed);
@@ -710,5 +727,20 @@ mod tests {
         assert!(note.contains("no webcam: unavailable"), "{note}");
         assert!(note.contains("No sound detected from system audio."), "{note}");
         assert!(note.contains("No sound detected from the microphone."), "{note}");
+        assert!(toolbar_state(&control, &Settings::default())["system_silent"].as_bool().unwrap());
+        assert!(toolbar_state(&control, &Settings::default())["microphone_silent"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn toolbar_state_identifies_only_the_silent_source() {
+        let control = Control::default();
+        control.microphone_silent.store(true, Ordering::Relaxed);
+
+        let state = toolbar_state(&control, &Settings::default());
+
+        assert_eq!(state["system_silent"], false);
+        assert_eq!(state["microphone_silent"], true);
+        assert!(state["note"].as_str().unwrap().contains("microphone"));
+        assert!(!state["note"].as_str().unwrap().contains("system audio"));
     }
 }
