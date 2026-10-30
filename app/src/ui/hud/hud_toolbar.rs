@@ -23,6 +23,7 @@ const BLUE: Color = Color::rgb(0x2F, 0x80, 0xED);
 const GREEN: Color = Color::rgb(0x2E, 0xA0, 0x43);
 const LIVE: Color = Color::rgb(0xFF, 0x52, 0x52);
 const HELD: Color = Color::rgb(0xFF, 0xC1, 0x07);
+const WARNING: Color = Color::rgb(0xFF, 0xA0, 0x00);
 const WHITE: Color = Color::rgb(0xFF, 0xFF, 0xFF);
 const ICONS: &str = "Segoe Fluent Icons, Segoe MDL2 Assets";
 
@@ -292,9 +293,11 @@ pub struct RecordingToolbar {
     mini_time: TextBlock,
     dot: Ellipse,
     mini_dot: Ellipse,
+    mini_warning: Border,
     note: Border,
     note_text: TextBlock,
     shown_paused: Cell<bool>,
+    shown_audio_silence: Cell<(bool, bool)>,
     /// The pause and stop tooltips shown, so they are set only when they change.
     shown_tips: std::cell::RefCell<(String, String)>,
     _subscriptions: Vec<EventSubscription>,
@@ -355,6 +358,18 @@ impl RecordingToolbar {
         let mini_time = time_text(16.0)?;
         let dot_big = dot(9.0)?;
         let mini_dot = dot(8.0)?;
+        let mini_warning_text = TextBlock::new()?
+            .text("!")?
+            .font_size(15.0)?
+            .foreground(Brush::solid(WHITE))?
+            .horizontal_alignment(HorizontalAlignment::Center)?
+            .vertical_alignment(VerticalAlignment::Center)?;
+        let mini_warning = Border::new()?
+            .background(Brush::solid(WARNING))?
+            .corner_radius(8.0)?
+            .padding((5.0, 1.0))?
+            .visible(false)?
+            .child(Some(&mini_warning_text))?;
         let note_text = TextBlock::new()?
             .font_size(12.0)?
             .foreground(Brush::solid(Color::rgb(0xE8, 0xEA, 0xED)))?
@@ -436,6 +451,7 @@ impl RecordingToolbar {
                 8.0,
                 &[
                     &mini_stop.border,
+                    &mini_warning,
                     &row(6.0, &[&mini_dot, &mini_time])?.margin((4.0, 0.0, 4.0, 0.0))?,
                     &expand.border,
                 ],
@@ -471,9 +487,11 @@ impl RecordingToolbar {
             mini_time,
             dot: dot_big,
             mini_dot,
+            mini_warning,
             note,
             note_text,
             shown_paused: Cell::new(false),
+            shown_audio_silence: Cell::new((false, false)),
             shown_tips: Default::default(),
             _subscriptions: subs,
         })
@@ -518,10 +536,38 @@ impl RecordingToolbar {
         self.cursor_menu.fill(switch("cursor"))?;
         self.webcam.fill(switch("webcam"))?;
         self.webcam_menu.fill(switch("webcam"))?;
-        self.system.fill(switch("system"))?;
+        let system_silent = is("system_silent");
+        let microphone_silent = is("microphone_silent");
+        self.system.fill(if system_silent { WARNING } else { switch("system") })?;
         self.system.glyph.set_text(if is("system") { "\u{E767}" } else { "\u{E74F}" })?;
-        self.microphone.fill(switch("microphone"))?;
+        self.microphone.fill(if microphone_silent { WARNING } else { switch("microphone") })?;
         self.microphone.strike.set_visible(!is("microphone"))?;
+        let audio_silence = (system_silent, microphone_silent);
+        if self.shown_audio_silence.get() != audio_silence {
+            let system_tip = if system_silent {
+                "No system audio detected. Check the selected output device."
+            } else {
+                "Record system sound"
+            };
+            let microphone_tip = if microphone_silent {
+                "No microphone audio detected. Check the selected input device."
+            } else {
+                "Record the microphone"
+            };
+            self.system.border.set_tool_tip_tip(system_tip)?;
+            self.microphone.border.set_tool_tip_tip(microphone_tip)?;
+            let warning_tip = match audio_silence {
+                (true, true) => "No audio detected from system sound or the microphone. Check both devices.",
+                (true, false) => system_tip,
+                (false, true) => microphone_tip,
+                (false, false) => "",
+            };
+            self.mini_warning.set_visible(!warning_tip.is_empty())?;
+            if !warning_tip.is_empty() {
+                self.mini_warning.set_tool_tip_tip(warning_tip)?;
+            }
+            self.shown_audio_silence.set(audio_silence);
+        }
         let note = state.get("note").and_then(Value::as_str).unwrap_or_default();
         self.note_text.set_text(note)?;
         self.note.set_visible(!note.is_empty())
