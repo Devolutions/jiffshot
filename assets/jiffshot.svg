@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="184" height="184" viewBox="0 0 184 184">
+  <title>Jiffshot</title>
+  <rect width="184" height="184" rx="40" fill="#F5EAFA"/>
+  <path d="M74 45H45V74 M110 45H139V74 M45 110V139H74 M110 139H139V110"
+        fill="none" stroke="#9933CC" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M97 58L71 96H88L80 126L114 83H97Z" fill="#9933CC"/>
+</svg>

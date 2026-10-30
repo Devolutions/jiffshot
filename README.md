@@ -85,6 +85,22 @@ file in the editor, `--capture`, `--record`, `--window` and the other capture
 flags start a capture, and `--quit` ends it; a second launch hands its request
 to the one already running. Closing the editor keeps Jiffshot in the tray.
 
+### Logo assets
+
+`assets/jiffshot.svg` is the source for the program logo. Regenerate the
+Windows icon (all nine sizes) and rebuild the executable to embed it:
+
+```powershell
+cargo run --release -p jiffshot -- --write-icon assets\jiffshot.ico
+cargo build --release -p jiffshot
+```
+
+To export a square PNG from the SVG, choose a size from 1 through 4096 pixels:
+
+```powershell
+cargo run --release -p jiffshot -- --write-logo 512 jiffshot-512.png
+```
+
 ## Installer
 
 `package/` builds a per-machine MSI with [WixSharp](https://github.com/oleg-shilo/wixsharp)
