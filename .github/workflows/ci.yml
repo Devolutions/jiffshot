@@ -5,6 +5,11 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build, sign with publish-test, and validate without creating a release
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -16,6 +21,11 @@ concurrency:
 jobs:
   build:
     name: ${{ matrix.rid }}
+    environment:
+      name: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || inputs.dry_run) && (inputs.dry_run && 'publish-test' || 'publish-prod') || '' }}
+    permissions:
+      contents: read
+      id-token: write
     # win-arm64 is cross-built on x64 (Visual Studio's ARM64 tools are on the
     # image), so it is built but not run.
     runs-on: windows-latest
@@ -72,6 +82,21 @@ jobs:
           Copy-Item "$out/jiffshot.exe", "$out/*.dll", "app/README-portable.txt" -Destination $dir
           Get-ChildItem $dir | Format-Table Name, Length
 
+      - name: Sign portable binaries
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || inputs.dry_run)
+        uses: ./.github/actions/sign
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          TRUSTED_SIGNING_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_PROFILE_NAME }}
+        with:
+          files: |
+            jiffshot-${{ matrix.rid }}\jiffshot.exe
+            jiffshot-${{ matrix.rid }}\rustolonia_host.dll
+
       - uses: actions/upload-artifact@v4
         with:
           name: jiffshot-${{ matrix.rid }}
@@ -80,6 +105,11 @@ jobs:
 
   msi:
     name: ${{ matrix.rid }} MSI
+    environment:
+      name: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || inputs.dry_run) && (inputs.dry_run && 'publish-test' || 'publish-prod') || '' }}
+    permissions:
+      contents: read
+      id-token: write
     needs: build
     runs-on: windows-latest
     strategy:
@@ -116,6 +146,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-ChildItem msi | Format-Table Name, Length
 
+      - name: Sign MSI
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || inputs.dry_run)
+        uses: ./.github/actions/sign
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          TRUSTED_SIGNING_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_PROFILE_NAME }}
+        with:
+          files: msi\*.msi
+
       - name: Install and uninstall
         if: matrix.test
         shell: pwsh
@@ -129,6 +172,9 @@ jobs:
           Invoke-Msiexec "/i `"$msi`" /qn /l*v msiexec.log"
           if (-not (Test-Path $exe)) { throw "$exe is missing" }
           if (-not (Test-Path "$env:ProgramFiles\Devolutions\jiffshot\rustolonia_host.dll")) { throw "the Rustolonia host is missing" }
+          $product = @(Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' |
+            Where-Object { $_.DisplayName -eq 'Devolutions Jiffshot' })
+          if ($product.Count -ne 1) { throw 'Expected one Devolutions Jiffshot entry in Programs and Features' }
           $open = (Get-ItemProperty "HKLM:\Software\Classes\jiffshot.Document\shell\open\command").'(default)'
           if ($open -notlike "*jiffshot.exe*") { throw "the .jsd association is wrong: $open" }
           Get-ChildItem "$env:ProgramFiles\Devolutions\jiffshot" | Format-Table Name, Length

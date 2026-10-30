@@ -58,7 +58,7 @@ internal static class Program
             new FileShortcut(ProductName, "%ProgramMenu%") { WorkingDirectory = InstallDirProperty });
         var files = new WixEntity[] { program }.Concat(libraries.Select(l => new File(l))).ToArray();
 
-        var project = new Project(ProductName,
+        var project = new Project($"{Vendor} {ProductName}",
             // %ProgramFiles% is the 32-bit folder in WixSharp's ARM64 packages.
             new Dir($@"%ProgramFiles64Folder%\{Vendor}", new InstallDir(InstallFolder, files)),
             // Jiffshot documents open in Jiffshot (a running one opens them in its editor).
@@ -81,7 +81,7 @@ internal static class Program
             InstallPrivileges = InstallPrivileges.elevated,
             Language = "en-US",
             OutDir = o.Out,
-            OutFileName = $"Jiffshot-{o.PlatformName}-{o.Version}",
+            OutFileName = $"{Vendor}.{ProductName}-{o.PlatformName}-{o.Version}",
             UI = WUI.WixUI_ProgressOnly,
             MajorUpgrade = new MajorUpgrade
             {

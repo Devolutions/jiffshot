@@ -101,11 +101,30 @@ dotnet build package -c Release
 package/bin/Release/net472/Jiffshot.Package.exe -bin target/release -platform x64
 ```
 
-The MSI lands in `package/out` (`-out` picks another folder). For ARM64, pass
+The MSI lands in `package/out` as `Devolutions.Jiffshot-x64-0.1.0.msi`
+(with the selected architecture and version; `-out` picks another folder).
+Programs and Features lists it as **Devolutions Jiffshot**. For ARM64, pass
 the ARM64 build's folder and `-platform arm64`. The version comes from
 `Cargo.toml` unless `-version` gives one. CI builds both MSIs from its builds
 (`jiffshot-win-x64-msi`, `jiffshot-win-arm64-msi`), and installs and
 uninstalls the x64 one.
+
+On master pushes and manual runs on master, CI signs the portable executable
+and Rustolonia host DLL before packaging them into the MSI, then signs the MSI.
+These runs use the `publish-prod` GitHub environment. Manual runs with
+`dry_run=true` sign and validate on any branch using `publish-test`, without
+creating a tag or release. Pull requests and other manual runs on non-master
+branches produce unsigned artifacts.
+Signing uses psign and Azure Trusted Signing with the same secrets as
+`Devolutions/windbg-tool`: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
+`AZURE_SUBSCRIPTION_ID`, `TRUSTED_SIGNING_ENDPOINT`,
+`TRUSTED_SIGNING_ACCOUNT_NAME`, and `TRUSTED_SIGNING_PROFILE_NAME`.
+The Azure identity must allow GitHub Actions OIDC authentication for this
+repository's selected environment and have signing access to the profile.
+`TRUSTED_SIGNING_TIMESTAMP_SERVER` is an optional repository variable, defaulting
+to `http://timestamp.acs.microsoft.com/`. Missing signing configuration or
+failed signature/timestamp verification fails the build rather than uploading
+unsigned artifacts from master.
 
 ## Testing
 
