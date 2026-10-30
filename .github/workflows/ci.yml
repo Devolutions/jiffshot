@@ -188,13 +188,22 @@ jobs:
           name: jiffshot-${{ matrix.rid }}
           path: bin
 
-      - name: Install WiX 3.14
+      - name: Install WiX Toolset
         shell: pwsh
         run: |
-          choco install wixtoolset --version 3.14.0 --allow-downgrade --force --no-progress
-          $wix = "${env:ProgramFiles(x86)}\WiX Toolset v3.14\bin"
-          if (-not (Test-Path "$wix\light.exe")) { throw "WiX is not in $wix" }
-          "WIXSHARP_WIXDIR=$wix" >> $env:GITHUB_ENV
+          winget install --id WiXToolset.WiXCLI --version 5.0.2.0 --exact --source winget `
+            --accept-source-agreements --accept-package-agreements
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $wixDir = Join-Path $env:ProgramFiles 'WiX Toolset v5.0\bin'
+          $wixExe = Join-Path $wixDir 'wix.exe'
+          if (-not (Test-Path -LiteralPath $wixExe -PathType Leaf)) {
+            throw "WiX CLI was not installed at $wixExe"
+          }
+          $wixVersion = (& $wixExe --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $wixVersion -notmatch '^5\.0\.2(?:\b|[+-])') {
+            throw "Expected WiX CLI 5.0.2, got '$wixVersion'"
+          }
+          $wixDir >> $env:GITHUB_PATH
 
       - name: Build the MSI
         shell: pwsh
