@@ -90,6 +90,7 @@ jobs:
       id-token: write
     uses: ./.github/workflows/ci.yml
     with:
+      version: ${{ needs.preflight.outputs.version }}
       signing_environment: ${{ needs.preflight.outputs.signing_environment }}
     secrets: inherit
 
@@ -195,6 +196,10 @@ jobs:
                   -or $null -eq $signature.TimeStamperCertificate) {
                 throw "Invalid release signature or timestamp for ${path}: $($signature.StatusMessage)"
               }
+            }
+            $exeInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path "$portable\jiffshot.exe"))
+            if ($exeInfo.ProductVersion -ne $env:RELEASE_VERSION -or $exeInfo.FileVersion -ne "$env:RELEASE_VERSION.0") {
+              throw "Release jiffshot.exe ($arch) version ($($exeInfo.FileVersion) / $($exeInfo.ProductVersion)) does not match $env:RELEASE_VERSION"
             }
             Copy-Item -LiteralPath $msi -Destination "release\$msiName"
             Compress-Archive -Path "$portable\*" `

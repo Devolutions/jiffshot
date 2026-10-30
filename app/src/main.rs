@@ -540,3 +540,48 @@ fn main() -> rustolonia::Result<()> {
     ui::detach_all();
     result
 }
+
+#[cfg(test)]
+#[allow(dead_code)]
+mod resource_tests {
+    include!("../../assets/icon_res.rs");
+
+    #[test]
+    fn pe_version_parts_parses_semver_and_strips_suffixes() {
+        assert_eq!(pe_version_parts("0.1.0"), [0, 1, 0, 0]);
+        assert_eq!(pe_version_parts("1.2.3.4"), [1, 2, 3, 4]);
+        assert_eq!(pe_version_parts("2.5.14-rc.1+build.9"), [2, 5, 14, 0]);
+    }
+
+    #[test]
+    fn version_info_embeds_fixed_info_and_strings() {
+        let block = version_info("1.2.3");
+        let total_len = u16::from_le_bytes([block[0], block[1]]) as usize;
+        assert_eq!(total_len, block.len());
+        assert_eq!(u16::from_le_bytes([block[2], block[3]]), 52);
+        assert_eq!(u16::from_le_bytes([block[4], block[5]]), 0);
+        // VS_FIXEDFILEINFO starts at offset 40 (6-byte header + "VS_VERSION_INFO\0" in UTF-16 + 2-byte pad).
+        assert_eq!(u32::from_le_bytes(block[40..44].try_into().unwrap()), 0xFEEF_04BD);
+        assert_eq!(u32::from_le_bytes(block[48..52].try_into().unwrap()), 0x0001_0002);
+        assert_eq!(u32::from_le_bytes(block[52..56].try_into().unwrap()), 0x0003_0000);
+        assert_eq!(u32::from_le_bytes(block[56..60].try_into().unwrap()), 0x0001_0002);
+        assert_eq!(u32::from_le_bytes(block[60..64].try_into().unwrap()), 0x0003_0000);
+        let utf16: Vec<u16> = block
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&b| u16::from_le_bytes(b))
+            .collect();
+        let decoded = String::from_utf16_lossy(&utf16);
+        for expected in [
+            "Devolutions Inc.",
+            "Devolutions Jiffshot",
+            "jiffshot.exe",
+            "1.2.3.0",
+            "1.2.3",
+        ] {
+            assert!(decoded.contains(expected), "missing {expected:?} in VS_VERSION_INFO");
+        }
+    }
+}
+

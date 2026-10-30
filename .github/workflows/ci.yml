@@ -7,6 +7,10 @@ on:
   workflow_dispatch:
   workflow_call:
     inputs:
+      version:
+        description: Version to stamp and verify on built binaries; defaults to Cargo.toml
+        type: string
+        default: ''
       signing_environment:
         description: GitHub environment for signing; empty produces unsigned CI artifacts
         type: string
@@ -67,20 +71,71 @@ jobs:
           restore-keys: ${{ matrix.rid }}-
 
       - name: Build
+        env:
+          JIFFSHOT_VERSION: ${{ inputs.version }}
         run: cargo build --release --locked -p jiffshot --target ${{ matrix.target }}
 
       - name: Test
         if: matrix.test
+        env:
+          JIFFSHOT_VERSION: ${{ inputs.version }}
         run: cargo test --release --locked --workspace --target ${{ matrix.target }}
 
       - name: Package
         shell: pwsh
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
         run: |
+          $ErrorActionPreference = 'Stop'
           # The build script puts the Rustolonia host next to jiffshot.exe.
           $out = "target/${{ matrix.target }}/release"
           $dir = "jiffshot-${{ matrix.rid }}"
           New-Item -ItemType Directory -Path $dir | Out-Null
           Copy-Item "$out/jiffshot.exe", "$out/*.dll", "app/README-portable.txt" -Destination $dir
+          $cargoToml = Get-Content -LiteralPath Cargo.toml -Raw
+          if ($cargoToml -notmatch '(?ms)^\[workspace\.package\].*?^\s*version\s*=\s*"(?<v>[0-9]+\.[0-9]+\.[0-9]+)"') {
+            throw 'Could not read [workspace.package] version from Cargo.toml'
+          }
+          $workspaceVersion = $Matches['v']
+          $expectedVersion = if ([string]::IsNullOrWhiteSpace($env:EXPECTED_VERSION)) {
+            $workspaceVersion
+          } elseif ($env:EXPECTED_VERSION -ne $workspaceVersion) {
+            throw "Input version '$env:EXPECTED_VERSION' does not match Cargo.toml '$workspaceVersion'"
+          } else {
+            $env:EXPECTED_VERSION
+          }
+          $expectedFileVersion = "$expectedVersion.0"
+          $exeInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path "$dir/jiffshot.exe"))
+          if ($exeInfo.CompanyName -ne 'Devolutions Inc.') {
+            throw "jiffshot.exe CompanyName '$($exeInfo.CompanyName)' does not match 'Devolutions Inc.'"
+          }
+          if ($exeInfo.ProductName -ne 'Devolutions Jiffshot') {
+            throw "jiffshot.exe ProductName '$($exeInfo.ProductName)' does not match 'Devolutions Jiffshot'"
+          }
+          if ([string]::IsNullOrWhiteSpace($exeInfo.FileDescription)) {
+            throw 'jiffshot.exe is missing FileDescription'
+          }
+          if ($exeInfo.OriginalFilename -ne 'jiffshot.exe') {
+            throw "jiffshot.exe OriginalFilename '$($exeInfo.OriginalFilename)' does not match 'jiffshot.exe'"
+          }
+          if ($exeInfo.FileVersion -ne $expectedFileVersion) {
+            throw "jiffshot.exe FileVersion '$($exeInfo.FileVersion)' does not match '$expectedFileVersion'"
+          }
+          if ($exeInfo.ProductVersion -ne $expectedVersion) {
+            throw "jiffshot.exe ProductVersion '$($exeInfo.ProductVersion)' does not match '$expectedVersion'"
+          }
+          if ($cargoToml -notmatch 'rustolonia\s*=\s*\{[^}]*tag\s*=\s*"v(?<rv>[0-9]+\.[0-9]+\.[0-9]+)"') {
+            throw 'Could not read rustolonia tag from Cargo.toml'
+          }
+          $rustoloniaVersion = $Matches['rv']
+          $hostInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path "$dir/rustolonia_host.dll"))
+          if ($hostInfo.FileVersion -ne "$rustoloniaVersion.0") {
+            throw "rustolonia_host.dll FileVersion '$($hostInfo.FileVersion)' does not match '$rustoloniaVersion.0'"
+          }
+          if (-not $hostInfo.ProductVersion.StartsWith($rustoloniaVersion)) {
+            throw "rustolonia_host.dll ProductVersion '$($hostInfo.ProductVersion)' does not start with '$rustoloniaVersion'"
+          }
+          Write-Host "Version OK: jiffshot.exe FileVersion=$($exeInfo.FileVersion) ProductVersion=$($exeInfo.ProductVersion); rustolonia_host.dll FileVersion=$($hostInfo.FileVersion)"
           Get-ChildItem $dir | Format-Table Name, Length
 
       - name: Sign portable binaries
@@ -143,10 +198,38 @@ jobs:
 
       - name: Build the MSI
         shell: pwsh
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
         run: |
-          dotnet build package -c Release
+          $ErrorActionPreference = 'Stop'
+          $cargoToml = Get-Content -LiteralPath Cargo.toml -Raw
+          if ($cargoToml -notmatch '(?ms)^\[workspace\.package\].*?^\s*version\s*=\s*"(?<v>[0-9]+\.[0-9]+\.[0-9]+)"') {
+            throw 'Could not read [workspace.package] version from Cargo.toml'
+          }
+          $expectedVersion = if ([string]::IsNullOrWhiteSpace($env:EXPECTED_VERSION)) {
+            $Matches['v']
+          } elseif ($env:EXPECTED_VERSION -ne $Matches['v']) {
+            throw "Input version '$env:EXPECTED_VERSION' does not match Cargo.toml '$($Matches['v'])'"
+          } else {
+            $env:EXPECTED_VERSION
+          }
+          dotnet build package -c Release -p:Version=$expectedVersion
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          package/bin/Release/net472/Jiffshot.Package.exe -bin bin -platform ${{ matrix.platform }} -out msi
+          $pkgExe = Resolve-Path 'package/bin/Release/net472/Jiffshot.Package.exe'
+          $pkgInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($pkgExe)
+          if ($pkgInfo.CompanyName -ne 'Devolutions Inc.') {
+            throw "Jiffshot.Package.exe CompanyName '$($pkgInfo.CompanyName)' does not match 'Devolutions Inc.'"
+          }
+          if ($pkgInfo.ProductName -ne 'Devolutions Jiffshot') {
+            throw "Jiffshot.Package.exe ProductName '$($pkgInfo.ProductName)' does not match 'Devolutions Jiffshot'"
+          }
+          if ($pkgInfo.FileVersion -ne "$expectedVersion.0") {
+            throw "Jiffshot.Package.exe FileVersion '$($pkgInfo.FileVersion)' does not match '$expectedVersion.0'"
+          }
+          if (-not $pkgInfo.ProductVersion.StartsWith($expectedVersion)) {
+            throw "Jiffshot.Package.exe ProductVersion '$($pkgInfo.ProductVersion)' does not start with '$expectedVersion'"
+          }
+          & $pkgExe -bin bin -platform ${{ matrix.platform }} -version $expectedVersion -out msi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-ChildItem msi | Format-Table Name, Length
 
@@ -182,6 +265,10 @@ jobs:
             Where-Object { $_.DisplayName -eq 'Devolutions Jiffshot' })
           if ($product.Count -ne 1) { throw 'Expected one Devolutions Jiffshot entry in Programs and Features' }
           if ($product[0].Publisher -ne 'Devolutions Inc.') { throw "Expected Publisher 'Devolutions Inc.', got '$($product[0].Publisher)'" }
+          $installedVer = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($exe)
+          if ($installedVer.ProductVersion -ne $product[0].DisplayVersion -or $installedVer.FileVersion -ne "$($product[0].DisplayVersion).0") {
+            throw "Installed jiffshot.exe version ($($installedVer.FileVersion) / $($installedVer.ProductVersion)) does not match MSI DisplayVersion '$($product[0].DisplayVersion)'"
+          }
           $open = (Get-ItemProperty "HKLM:\Software\Classes\jiffshot.Document\shell\open\command").'(default)'
           if ($open -notlike "*jiffshot.exe*") { throw "the .jsd association is wrong: $open" }
           Get-ChildItem "$env:ProgramFiles\Devolutions\jiffshot" | Format-Table Name, Length

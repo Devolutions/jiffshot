@@ -9,6 +9,7 @@
 // output or a CI artifact). The version defaults to the one in Cargo.toml.
 
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -50,6 +51,11 @@ internal static class Program
         var exe = Path.Combine(o.Bin, ExecutableName);
         if (!System.IO.File.Exists(exe))
             throw new FileNotFoundException($"{ExecutableName} is not in {o.Bin}");
+        var exeVersion = FileVersionInfo.GetVersionInfo(exe);
+        var expectedFileVersion = $"{o.Version.Major}.{o.Version.Minor}.{o.Version.Build}.0";
+        if (exeVersion.FileVersion != expectedFileVersion || exeVersion.ProductVersion != o.Version.ToString())
+            throw new InvalidDataException(
+                $"{ExecutableName} has version '{exeVersion.FileVersion}' / '{exeVersion.ProductVersion}', expected '{expectedFileVersion}' / '{o.Version}'");
         var libraries = Directory.GetFiles(o.Bin, "*.dll");
         if (!libraries.Any(l => Path.GetFileName(l).Equals("rustolonia_host.dll", StringComparison.OrdinalIgnoreCase)))
             throw new FileNotFoundException($"the Rustolonia host (rustolonia_host.dll) is not in {o.Bin}");

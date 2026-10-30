@@ -11,6 +11,11 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <RootNamespace>Jiffshot.Package</RootNamespace>
+    <Version Condition="'$(Version)' == ''">0.1.0</Version>
+    <Company>Devolutions Inc.</Company>
+    <Product>Devolutions Jiffshot</Product>
+    <Description>Jiffshot MSI packager</Description>
+    <Copyright>Copyright (c) Devolutions Inc.</Copyright>
   </PropertyGroup>
 
   <ItemGroup>

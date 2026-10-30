@@ -1,12 +1,13 @@
-//! Embeds the program icon (see assets/icon_res.rs) and puts Rustolonia's
-//! host next to `jiffshot.exe`, so the build output folder runs as it is and
-//! can be zipped as the portable app.
+//! Embeds the program icon and version resource (see assets/icon_res.rs) and
+//! puts Rustolonia's host next to `jiffshot.exe`, so the build output folder
+//! runs as it is and can be zipped as the portable app.
 
 include!("../assets/icon_res.rs");
 
 use std::path::PathBuf;
 
 fn main() {
+    println!("cargo:rerun-if-changed=../assets/icon_res.rs");
     embed_icon("../assets/jiffshot.ico");
     copy_host();
 }
