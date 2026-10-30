@@ -1,2 +1,7 @@
 # Rust
 /target/
+
+# MSI packaging (package/)
+/package/bin/
+/package/obj/
+/package/out/

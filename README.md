@@ -50,6 +50,7 @@ and captures go to `Pictures\Jiffshot` unless changed.
 | `crates/jiffshot-doc/` | Documents: annotation objects, rendering, editing and undo, effects, smart tools, `.jsd` and image files |
 | `crates/jiffshot-workflow/` | The capture side: tray, hotkeys, selection overlay, recording, capture panels, post-capture workflow, command-line modes |
 | `app/` | `jiffshot.exe`: the editor's model (`src/app.rs`, view models in `src/vm.rs`), every window (`src/ui/`) and the capture side, in one process |
+| `package/` | The MSI installer, built with WixSharp |
 
 ## Building
 
@@ -83,6 +84,28 @@ With no arguments Jiffshot starts in the tray. `jiffshot.exe FILE` opens a
 file in the editor, `--capture`, `--record`, `--window` and the other capture
 flags start a capture, and `--quit` ends it; a second launch hands its request
 to the one already running. Closing the editor keeps Jiffshot in the tray.
+
+## Installer
+
+`package/` builds a per-machine MSI with [WixSharp](https://github.com/oleg-shilo/wixsharp)
+on WiX 3.14. It installs `jiffshot.exe` and the host DLLs into
+`C:\Program Files\Devolutions\jiffshot`, adds a Start menu shortcut and
+associates `.jsd` documents; installing a newer MSI upgrades the old one. It
+needs the .NET SDK (the packager is a small .NET Framework program) and WiX
+3.14 (`choco install wixtoolset --version 3.14.0`, or set `WIXSHARP_WIXDIR`
+to its `bin` folder):
+
+```powershell
+cargo build --release -p jiffshot
+dotnet build package -c Release
+package/bin/Release/net472/Jiffshot.Package.exe -bin target/release -platform x64
+```
+
+The MSI lands in `package/out` (`-out` picks another folder). For ARM64, pass
+the ARM64 build's folder and `-platform arm64`. The version comes from
+`Cargo.toml` unless `-version` gives one. CI builds both MSIs from its builds
+(`jiffshot-win-x64-msi`, `jiffshot-win-arm64-msi`), and installs and
+uninstalls the x64 one.
 
 ## Testing
 

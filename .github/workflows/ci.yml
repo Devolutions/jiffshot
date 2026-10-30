@@ -77,3 +77,66 @@ jobs:
           name: jiffshot-${{ matrix.rid }}
           path: jiffshot-${{ matrix.rid }}
           if-no-files-found: error
+
+  msi:
+    name: ${{ matrix.rid }} MSI
+    needs: build
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            platform: x64
+            test: true
+          - rid: win-arm64
+            platform: arm64
+            test: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: jiffshot-${{ matrix.rid }}
+          path: bin
+
+      - name: Install WiX 3.14
+        shell: pwsh
+        run: |
+          choco install wixtoolset --version 3.14.0 --allow-downgrade --force --no-progress
+          $wix = "${env:ProgramFiles(x86)}\WiX Toolset v3.14\bin"
+          if (-not (Test-Path "$wix\light.exe")) { throw "WiX is not in $wix" }
+          "WIXSHARP_WIXDIR=$wix" >> $env:GITHUB_ENV
+
+      - name: Build the MSI
+        shell: pwsh
+        run: |
+          dotnet build package -c Release
+          package/bin/Release/net472/Jiffshot.Package.exe -bin bin -platform ${{ matrix.platform }} -out msi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem msi | Format-Table Name, Length
+
+      - name: Install and uninstall
+        if: matrix.test
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem msi/*.msi).FullName
+          $exe = "$env:ProgramFiles\Devolutions\jiffshot\jiffshot.exe"
+          function Invoke-Msiexec($arguments) {
+            $p = Start-Process msiexec.exe -ArgumentList $arguments -Wait -PassThru
+            if ($p.ExitCode -ne 0) { Get-Content msiexec.log -Tail 50; throw "msiexec $arguments exited with $($p.ExitCode)" }
+          }
+          Invoke-Msiexec "/i `"$msi`" /qn /l*v msiexec.log"
+          if (-not (Test-Path $exe)) { throw "$exe is missing" }
+          if (-not (Test-Path "$env:ProgramFiles\Devolutions\jiffshot\rustolonia_host.dll")) { throw "the Rustolonia host is missing" }
+          $open = (Get-ItemProperty "HKLM:\Software\Classes\jiffshot.Document\shell\open\command").'(default)'
+          if ($open -notlike "*jiffshot.exe*") { throw "the .jsd association is wrong: $open" }
+          Get-ChildItem "$env:ProgramFiles\Devolutions\jiffshot" | Format-Table Name, Length
+          Invoke-Msiexec "/x `"$msi`" /qn /l*v msiexec.log"
+          if (Test-Path $exe) { throw "$exe is still there after uninstalling" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jiffshot-${{ matrix.rid }}-msi
+          path: msi/*.msi
+          if-no-files-found: error
