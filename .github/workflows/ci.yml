@@ -181,6 +181,7 @@ jobs:
           $product = @(Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' |
             Where-Object { $_.DisplayName -eq 'Devolutions Jiffshot' })
           if ($product.Count -ne 1) { throw 'Expected one Devolutions Jiffshot entry in Programs and Features' }
+          if ($product[0].Publisher -ne 'Devolutions Inc.') { throw "Expected Publisher 'Devolutions Inc.', got '$($product[0].Publisher)'" }
           $open = (Get-ItemProperty "HKLM:\Software\Classes\jiffshot.Document\shell\open\command").'(default)'
           if ($open -notlike "*jiffshot.exe*") { throw "the .jsd association is wrong: $open" }
           Get-ChildItem "$env:ProgramFiles\Devolutions\jiffshot" | Format-Table Name, Length
