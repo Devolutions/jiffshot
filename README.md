@@ -109,12 +109,35 @@ the ARM64 build's folder and `-platform arm64`. The version comes from
 (`jiffshot-win-x64-msi`, `jiffshot-win-arm64-msi`), and installs and
 uninstalls the x64 one.
 
-On master pushes and manual runs on master, CI signs the portable executable
-and Rustolonia host DLL before packaging them into the MSI, then signs the MSI.
-These runs use the `publish-prod` GitHub environment. Manual runs with
-`dry_run=true` sign and validate on any branch using `publish-test`, without
-creating a tag or release. Pull requests and other manual runs on non-master
-branches produce unsigned artifacts.
+## Releases
+
+`ci.yml` builds and tests unsigned portable packages and MSIs for pushes to
+master, pull requests, and manual runs. `release.yml` reuses those jobs with
+signing enabled: it signs the portable executable and Rustolonia host DLL before
+building the MSI, then signs the MSI. The x64 MSI is installed and uninstalled
+before the release can proceed.
+
+Run **Release** from GitHub Actions with a version matching `Cargo.toml` (for
+example, `0.1.0`, without `v`). Update and commit the workspace version before
+releasing a new version. Dry runs are enabled by default and can run on any
+branch using `publish-test`; they upload signed packages without creating a tag
+or release. To publish, select master and disable `dry_run`, which uses
+`publish-prod`. The workflow rejects production releases from other branches,
+version mismatches, and existing tags.
+
+Both modes retain the portable and MSI Actions artifacts plus a `release-assets`
+artifact containing x64/ARM64 MSIs, portable ZIPs, and `SHA256SUMS.txt`. After all
+builds, signing, and validation succeed, a production run creates `v<version>`
+at the dispatched commit and publishes a GitHub Release with those same files
+attached. Do not create the tag manually.
+
+```powershell
+# Validate signed packages without publishing (defaults to dry_run=true).
+gh workflow run release.yml --ref master -f version=0.1.0
+# Create the tag and release after validation.
+gh workflow run release.yml --ref master -f version=0.1.0 -f dry_run=false
+```
+
 Signing uses psign and Azure Trusted Signing with the same secrets as
 `Devolutions/windbg-tool`: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
 `AZURE_SUBSCRIPTION_ID`, `TRUSTED_SIGNING_ENDPOINT`,
@@ -124,7 +147,7 @@ repository's selected environment and have signing access to the profile.
 `TRUSTED_SIGNING_TIMESTAMP_SERVER` is an optional repository variable, defaulting
 to `http://timestamp.acs.microsoft.com/`. Missing signing configuration or
 failed signature/timestamp verification fails the build rather than uploading
-unsigned artifacts from master.
+unsigned release artifacts.
 
 ## Testing
 

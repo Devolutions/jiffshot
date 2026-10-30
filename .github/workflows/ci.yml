@@ -5,24 +5,25 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+  workflow_call:
     inputs:
-      dry_run:
-        description: Build, sign with publish-test, and validate without creating a release
-        type: boolean
-        default: false
+      signing_environment:
+        description: GitHub environment for signing; empty produces unsigned CI artifacts
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
     name: ${{ matrix.rid }}
     environment:
-      name: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || inputs.dry_run) && (inputs.dry_run && 'publish-test' || 'publish-prod') || '' }}
+      name: ${{ inputs.signing_environment || '' }}
     permissions:
       contents: read
       id-token: write
@@ -83,7 +84,7 @@ jobs:
           Get-ChildItem $dir | Format-Table Name, Length
 
       - name: Sign portable binaries
-        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || inputs.dry_run)
+        if: github.event_name != 'pull_request' && inputs.signing_environment != ''
         uses: ./.github/actions/sign
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
@@ -107,7 +108,7 @@ jobs:
   msi:
     name: ${{ matrix.rid }} MSI
     environment:
-      name: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || inputs.dry_run) && (inputs.dry_run && 'publish-test' || 'publish-prod') || '' }}
+      name: ${{ inputs.signing_environment || '' }}
     permissions:
       contents: read
       id-token: write
@@ -143,12 +144,13 @@ jobs:
         shell: pwsh
         run: |
           dotnet build package -c Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           package/bin/Release/net472/Jiffshot.Package.exe -bin bin -platform ${{ matrix.platform }} -out msi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-ChildItem msi | Format-Table Name, Length
 
       - name: Sign MSI
-        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || inputs.dry_run)
+        if: github.event_name != 'pull_request' && inputs.signing_environment != ''
         uses: ./.github/actions/sign
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
