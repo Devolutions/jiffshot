@@ -119,25 +119,28 @@ before the release can proceed.
 
 Run **Release** from GitHub Actions with a version matching `Cargo.toml` (for
 example, `0.1.0`, without `v`). Update and commit the workspace version before
-releasing a new version. Dry runs are enabled by default and can run on any
-branch using `publish-test`; they upload signed packages without creating a tag
-or release. For test signing, the workflow retrieves the `publish-test`
-profile root with psign and trusts it only in each ephemeral runner's current
-user certificate store, so Authenticode validation remains enabled. To publish,
-select master and disable `dry_run`, which uses `publish-prod` and does not
-install the test root. The workflow rejects production releases from other
-branches, version mismatches, and existing tags.
+releasing a new version. Dry runs are enabled by default and upload signed
+packages without creating a tag or release. The `github_env` input selects the
+signing environment independently of `dry_run`: on master, `auto` (the default)
+and `prod` use `publish-prod`, while `test` uses `publish-test`. Other branches
+always use `publish-test` and only permit dry runs, even if `prod` is requested.
+For test signing, the workflow retrieves the `publish-test` profile root with
+psign and trusts it only in each ephemeral runner's current user certificate
+store, so Authenticode validation remains enabled. A non-dry-run dispatch with
+`github_env=test` publishes test-signed artifacts that are not publicly trusted.
+The workflow rejects non-dry-run releases from other branches, version
+mismatches, and existing tags.
 
 Both modes retain the portable and MSI Actions artifacts plus a `release-assets`
 artifact containing x64/ARM64 MSIs, portable ZIPs, and `SHA256SUMS.txt`. After all
-builds, signing, and validation succeed, a production run creates `v<version>`
-at the dispatched commit and publishes a GitHub Release with those same files
+builds, signing, and validation succeed, a non-dry-run creates `v<version>` at
+the dispatched commit and publishes a GitHub Release with those same files
 attached. Do not create the tag manually.
 
 ```powershell
-# Validate signed packages without publishing (defaults to dry_run=true).
-gh workflow run release.yml --ref master -f version=0.1.0
-# Create the tag and release after validation.
+# Validate with test signing without publishing (defaults to dry_run=true).
+gh workflow run release.yml --ref master -f version=0.1.0 -f github_env=test
+# Create the tag and release with production signing after validation.
 gh workflow run release.yml --ref master -f version=0.1.0 -f dry_run=false
 ```
 

@@ -8,9 +8,18 @@ on:
         required: true
         type: string
       dry_run:
-        description: Sign with publish-test and upload artifacts without creating a tag or release
+        description: Build, sign, and validate packages without creating a tag or release
         type: boolean
         default: true
+      github_env:
+        description: GitHub environment for Azure Trusted Signing
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - test
+          - prod
 
 permissions:
   contents: read
@@ -36,6 +45,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ inputs.version }}
           DRY_RUN: ${{ inputs.dry_run }}
+          REQUESTED_ENV: ${{ inputs.github_env }}
         run: |
           import os
           import re
@@ -45,6 +55,10 @@ jobs:
 
           version = os.environ["RELEASE_VERSION"]
           dry_run = os.environ["DRY_RUN"] == "true"
+          requested_environment = os.environ["REQUESTED_ENV"]
+          if requested_environment not in ("auto", "test", "prod"):
+              raise SystemExit("GitHub environment must be auto, test, or prod.")
+          is_master = os.environ["GITHUB_REF"] == "refs/heads/master"
           if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version):
               raise SystemExit("Version must be X.Y.Z without a v prefix or prerelease suffix.")
           if any(int(part) > limit for part, limit in zip(version.split("."), (255, 255, 65535))):
@@ -55,15 +69,15 @@ jobs:
               raise SystemExit(f"Requested version {version} does not match Cargo.toml ({workspace_version}).")
           tag = f"v{version}"
           if not dry_run:
-              if os.environ["GITHUB_REF"] != "refs/heads/master":
-                  raise SystemExit("Production releases must run from master; use a dry run on other branches.")
+              if not is_master:
+                  raise SystemExit("Non-dry-run releases must run from master; use a dry run on other branches.")
               existing = subprocess.run(
                   ["git", "ls-remote", "--tags", "origin", f"refs/tags/{tag}"],
                   check=True, capture_output=True, text=True,
               )
               if existing.stdout.strip():
                   raise SystemExit(f"Tag {tag} already exists; release versions cannot be overwritten.")
-          environment = "publish-test" if dry_run else "publish-prod"
+          environment = "publish-test" if not is_master or requested_environment == "test" else "publish-prod"
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
               output.write(f"version={version}\ntag={tag}\nsigning_environment={environment}\n")
           print(f"Version: {version}; tag: {tag}; signing environment: {environment}; dry run: {dry_run}")
@@ -81,11 +95,11 @@ jobs:
 
   test-signing-root:
     name: Retrieve test signing root
-    if: ${{ inputs.dry_run && needs.packages.result == 'success' }}
+    if: ${{ needs.preflight.outputs.signing_environment == 'publish-test' && needs.packages.result == 'success' }}
     needs: [preflight, packages]
     runs-on: windows-latest
     environment:
-      name: publish-test
+      name: ${{ needs.preflight.outputs.signing_environment }}
     permissions:
       contents: read
       id-token: write
@@ -116,13 +130,14 @@ jobs:
   release:
     name: Collect artifacts and publish
     needs: [preflight, packages, test-signing-root]
-    if: ${{ always() && needs.preflight.result == 'success' && needs.packages.result == 'success' && (!inputs.dry_run || needs.test-signing-root.result == 'success') }}
+    if: ${{ always() && needs.preflight.result == 'success' && needs.packages.result == 'success' && (needs.preflight.outputs.signing_environment == 'publish-prod' || needs.test-signing-root.result == 'success') }}
     runs-on: windows-latest
     permissions:
       contents: write
     env:
       RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
       RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+      SIGNING_ENVIRONMENT: ${{ needs.preflight.outputs.signing_environment }}
     steps:
       - uses: actions/checkout@v4
 
@@ -132,14 +147,14 @@ jobs:
           path: artifacts
 
       - name: Download test signing root
-        if: inputs.dry_run
+        if: ${{ needs.preflight.outputs.signing_environment == 'publish-test' }}
         uses: actions/download-artifact@v4
         with:
           name: test-signing-root
           path: signing-root
 
       - name: Trust test signing root
-        if: inputs.dry_run
+        if: ${{ needs.preflight.outputs.signing_environment == 'publish-test' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -216,4 +231,4 @@ jobs:
         if: inputs.dry_run
         shell: pwsh
         run: |
-          "Dry run completed for $env:RELEASE_TAG. Signed packages and SHA256SUMS.txt are in the release-assets artifact. No tag or GitHub Release was created." >> $env:GITHUB_STEP_SUMMARY
+          "Dry run completed for $env:RELEASE_TAG using $env:SIGNING_ENVIRONMENT. Signed packages and SHA256SUMS.txt are in the release-assets artifact. No tag or GitHub Release was created." >> $env:GITHUB_STEP_SUMMARY
