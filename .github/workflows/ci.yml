@@ -251,16 +251,27 @@ jobs:
       - name: Install and uninstall
         if: matrix.test
         shell: pwsh
+        env:
+          SIGNING_ENVIRONMENT: ${{ inputs.signing_environment }}
         run: |
           $msi = (Get-ChildItem msi/*.msi).FullName
           $exe = "$env:ProgramFiles\Devolutions\jiffshot\jiffshot.exe"
+          $hostDll = "$env:ProgramFiles\Devolutions\jiffshot\rustolonia_host.dll"
           function Invoke-Msiexec($arguments) {
             $p = Start-Process msiexec.exe -ArgumentList $arguments -Wait -PassThru
             if ($p.ExitCode -ne 0) { Get-Content msiexec.log -Tail 50; throw "msiexec $arguments exited with $($p.ExitCode)" }
           }
           Invoke-Msiexec "/i `"$msi`" /qn /l*v msiexec.log"
           if (-not (Test-Path $exe)) { throw "$exe is missing" }
-          if (-not (Test-Path "$env:ProgramFiles\Devolutions\jiffshot\rustolonia_host.dll")) { throw "the Rustolonia host is missing" }
+          if (-not (Test-Path $hostDll)) { throw "the Rustolonia host is missing" }
+          if ('${{ github.event_name }}' -ne 'pull_request' -and -not [string]::IsNullOrWhiteSpace($env:SIGNING_ENVIRONMENT)) {
+            foreach ($installedPath in @($exe, $hostDll)) {
+              $sig = Get-AuthenticodeSignature -LiteralPath $installedPath
+              if ($sig.Status -ne 'Valid' -or $null -eq $sig.SignerCertificate -or $null -eq $sig.TimeStamperCertificate) {
+                throw "Installed binary signature verification failed for ${installedPath}: $($sig.StatusMessage)"
+              }
+            }
+          }
           $product = @(Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' |
             Where-Object { $_.DisplayName -eq 'Devolutions Jiffshot' })
           if ($product.Count -ne 1) { throw 'Expected one Devolutions Jiffshot entry in Programs and Features' }

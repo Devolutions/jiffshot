@@ -27,14 +27,18 @@ runs:
         CERTIFICATE_PATH: ${{ inputs.certificate_path }}
       run: |
         $ErrorActionPreference = 'Stop'
-        $toolRoot = Join-Path $env:RUNNER_TEMP "psign-root-$env:PSIGN_VERSION"
+        $toolRoot = Join-Path $env:RUNNER_TEMP "psign-$env:PSIGN_VERSION"
         New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
         $archive = Join-Path $toolRoot 'psign-tool.zip'
-        Invoke-WebRequest "https://github.com/Devolutions/psign/releases/download/v$env:PSIGN_VERSION/psign-tool-windows-x64.zip" -OutFile $archive
+        if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+          Invoke-WebRequest "https://github.com/Devolutions/psign/releases/download/v$env:PSIGN_VERSION/psign-tool-windows-x64.zip" -OutFile $archive
+        }
         $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($hash -ne $env:PSIGN_SHA256) { throw "psign download checksum mismatch: $hash" }
-        Expand-Archive $archive -DestinationPath $toolRoot -Force
         $tool = Join-Path $toolRoot 'psign-tool.exe'
+        if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) {
+          Expand-Archive $archive -DestinationPath $toolRoot -Force
+        }
         if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) { throw "psign tool is missing: $tool" }
 
         $accessToken = az account get-access-token `
@@ -46,7 +50,7 @@ runs:
 
         $certificatePath = [IO.Path]::GetFullPath($env:CERTIFICATE_PATH)
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $certificatePath) | Out-Null
-        & $tool artifact-signing-root `
+        & $tool portable artifact-signing-root `
           --endpoint $env:TRUSTED_SIGNING_ENDPOINT `
           --account-name $env:TRUSTED_SIGNING_ACCOUNT_NAME `
           --profile-name $env:TRUSTED_SIGNING_PROFILE_NAME `
@@ -61,10 +65,16 @@ runs:
         if ($null -eq $constraints -or -not $constraints.CertificateAuthority -or $certificate.Subject -ne $certificate.Issuer) {
           throw 'The downloaded Artifact Signing certificate is not a self-signed CA root.'
         }
-        Import-Certificate -FilePath $certificatePath -CertStoreLocation 'Cert:\CurrentUser\Root' |
-          Out-Null
-        $trustedRoot = Get-ChildItem 'Cert:\CurrentUser\Root' |
+        $storeLocation = 'Cert:\LocalMachine\Root'
+        try {
+          Import-Certificate -FilePath $certificatePath -CertStoreLocation $storeLocation | Out-Null
+        }
+        catch {
+          $storeLocation = 'Cert:\CurrentUser\Root'
+          Import-Certificate -FilePath $certificatePath -CertStoreLocation $storeLocation | Out-Null
+        }
+        $trustedRoot = Get-ChildItem $storeLocation |
           Where-Object { $_.Thumbprint -eq $certificate.Thumbprint } |
           Select-Object -First 1
         if ($null -eq $trustedRoot) { throw 'The Artifact Signing profile root was not installed.' }
-        Write-Output "Trusted test-signing root: $($certificate.Subject) ($($certificate.Thumbprint))"
+        Write-Output "Trusted test-signing root in ${storeLocation}: $($certificate.Subject) ($($certificate.Thumbprint))"
