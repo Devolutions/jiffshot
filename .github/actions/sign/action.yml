@@ -14,8 +14,8 @@ runs:
     - name: Validate signing configuration and install psign
       shell: pwsh
       env:
-        PSIGN_VERSION: 0.6.2
-        PSIGN_SHA256: 326cae780044dc980833a9dd3250b9cf51d46faae9f693c59319560b24df4ba9
+        PSIGN_VERSION: 0.8.1
+        PSIGN_SHA256: cb3637318189a8ec99fdd467e76731760025ee2e797768335894dbf27129bbb2
       run: |
         $ErrorActionPreference = 'Stop'
         foreach ($name in @(
@@ -26,10 +26,12 @@ runs:
             throw "Required signing configuration is missing: $name"
           }
         }
-        $toolRoot = Join-Path $env:RUNNER_TEMP 'psign-tool'
+        $toolRoot = Join-Path $env:RUNNER_TEMP "psign-$env:PSIGN_VERSION"
         New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
         $archive = Join-Path $toolRoot 'psign-tool.zip'
-        Invoke-WebRequest "https://github.com/Devolutions/psign/releases/download/v$env:PSIGN_VERSION/psign-tool-windows-x64.zip" -OutFile $archive
+        if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+          Invoke-WebRequest "https://github.com/Devolutions/psign/releases/download/v$env:PSIGN_VERSION/psign-tool-windows-x64.zip" -OutFile $archive
+        }
         $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($hash -ne $env:PSIGN_SHA256) { throw "psign download checksum mismatch: $hash" }
         Expand-Archive $archive -DestinationPath $toolRoot -Force
