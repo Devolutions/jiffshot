@@ -92,6 +92,7 @@ jobs:
           TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
           TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
           TRUSTED_SIGNING_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_PROFILE_NAME }}
+          TRUSTED_SIGNING_TIMESTAMP_SERVER: ${{ vars.TRUSTED_SIGNING_TIMESTAMP_SERVER || 'http://timestamp.acs.microsoft.com/' }}
         with:
           files: |
             jiffshot-${{ matrix.rid }}\jiffshot.exe
@@ -156,6 +157,7 @@ jobs:
           TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
           TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
           TRUSTED_SIGNING_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_PROFILE_NAME }}
+          TRUSTED_SIGNING_TIMESTAMP_SERVER: ${{ vars.TRUSTED_SIGNING_TIMESTAMP_SERVER || 'http://timestamp.acs.microsoft.com/' }}
         with:
           files: msi\*.msi
 

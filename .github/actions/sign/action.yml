@@ -45,7 +45,6 @@ runs:
       shell: pwsh
       env:
         SIGNING_FILES: ${{ inputs.files }}
-        TRUSTED_SIGNING_TIMESTAMP_SERVER: ${{ vars.TRUSTED_SIGNING_TIMESTAMP_SERVER || 'http://timestamp.acs.microsoft.com/' }}
       run: |
         $ErrorActionPreference = 'Stop'
         $accessToken = az account get-access-token `
