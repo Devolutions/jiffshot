@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["app", "crates/jiffshot-capture", "crates/jiffshot-doc", "crates/jiffshot-workflow"]
+members = ["app", "crates/jiffshot-capture", "crates/jiffshot-cli", "crates/jiffshot-control", "crates/jiffshot-doc", "crates/jiffshot-workflow"]
 
 [workspace.package]
 version = "0.1.0"
@@ -43,6 +43,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_Storage_Xps",
     "Win32_System_Com",

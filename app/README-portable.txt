@@ -12,6 +12,8 @@ Getting started
   as another capture tool or the Snipping Tool, holds Print Screen). Click
   a window, drag an area, or press F1 while selecting for all keys.
 - Closing the editor keeps Jiffshot in the tray; the tray's Exit quits.
+- jiffshot-cli.exe drives Jiffshot from scripts and AI agents (screenshots,
+  recordings, step guides, clicks and typing). Run "jiffshot-cli help".
 
 Where things go
 - Captures: Pictures\Jiffshot (Preferences > Library to change it).
