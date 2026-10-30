@@ -304,7 +304,7 @@ cargo run --release -p jiffshot -- --write-logo 512 jiffshot-512.png
 
 ### Building the MSI Installer
 
-`package/` builds a per-machine MSI with [WixSharp](https://github.com/oleg-shilo/wixsharp) on WiX 3.14. It installs `jiffshot.exe` and the host DLLs into `C:\Program Files\Devolutions\Jiffshot`, adds a Start menu shortcut and associates `.jsd` documents; installing a newer MSI upgrades the old one. It needs the .NET SDK (the packager is a small .NET Framework program) and WiX 3.14 (`choco install wixtoolset --version 3.14.0`, or set `WIXSHARP_WIXDIR` to its `bin` folder):
+`package/` builds a per-machine MSI with [WixSharp](https://github.com/oleg-shilo/wixsharp) on its WiX 4+ stream. It installs `jiffshot.exe` and the host DLLs into `C:\Program Files\Devolutions\Jiffshot`, adds a Start menu shortcut and associates `.jsd` documents; installing a newer MSI upgrades the old one. It needs the .NET SDK (the packager is a small .NET Framework program) and WiX CLI 5.0.2 (`winget install --id WiXToolset.WiXCLI --version 5.0.2.0 --exact`) with `wix.exe` on `PATH`:
 
 ```powershell
 cargo build --release -p jiffshot

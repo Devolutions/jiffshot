@@ -84,8 +84,7 @@ internal static class Program
             Platform = o.Platform,
             // Windows Installer 5 (Windows 7 and later): ARM64 packages need it.
             InstallerVersion = 500,
-            InstallScope = InstallScope.perMachine,
-            InstallPrivileges = InstallPrivileges.elevated,
+            Scope = InstallScope.perMachine,
             Language = "en-US",
             OutDir = o.Out,
             OutFileName = $"{Vendor}.{ProductName}-{o.PlatformName}-{o.Version}",
@@ -109,13 +108,12 @@ internal static class Program
         // jiffshot.exe stays the key path, and the validation rules that
         // assume a per-user Start menu do not apply.
         AutoElements.DisableAutoUserProfileRegistry = true;
-        project.LightOptions = "-sice:ICE38 -sice:ICE43 -sice:ICE57";
         // WixSharp marks only the file components 64-bit on ARM64; the
         // registry ones must be too, or they land in the 32-bit view.
         project.WixSourceGenerated += doc =>
         {
             foreach (var component in doc.Descendants().Where(e => e.Name.LocalName == "Component"))
-                component.SetAttributeValue("Win64", "yes");
+                component.SetAttributeValue("Bitness", "always64");
         };
 
         // Light leaves an MSI behind even when validation fails, and BuildMsi
