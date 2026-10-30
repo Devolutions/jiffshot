@@ -1,7 +1,7 @@
 //! The notification-area icon and its menu, on Rustolonia's Rust-built tray
 //! ([`rustolonia::ShellTray`]). The switches show the [`TrayViewModelSink`]
 //! values and the menu is rebuilt when Recent captures changes; left-click
-//! captures.
+//! opens the Capture window.
 
 use crate::vm::{TrayBinding, TrayViewModel, TrayViewModelSink};
 use rustolonia::{AppScope, Effect, Result, ShellTray, TrayEvent, TrayMenuItem};
@@ -130,7 +130,10 @@ fn menu(sink: &TrayViewModelSink) -> Vec<TrayMenuItem> {
 fn clicked(binding: &TrayBinding, event: TrayEvent) {
     let sink = binding.sink;
     let id = match event {
-        TrayEvent::Activate => CAPTURE,
+        TrayEvent::Activate => {
+            binding.model.run(|m| m.show_capture_window());
+            return;
+        }
         TrayEvent::MenuItem(id) => id,
     };
     if let Some((_, _, signal)) = switches(&sink).into_iter().find(|(i, ..)| *i == id) {
