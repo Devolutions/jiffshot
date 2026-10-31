@@ -3,9 +3,63 @@
 use gst::prelude::*;
 use gstreamer as gst;
 
+mod mp4;
+
 // Keep Ubuntu's previous encoder and bitrate when it is installed.
 const FACTORIES: [&str; 2] = ["voaacenc", "fdkaacenc"];
 const BITRATE: i32 = 128_000;
+// AACENC_InfoStruct.nDelay for FDK's AAC-LC mode is two 1024-sample frames.
+// gstfdkaacenc (through 1.26.11) does not signal this delay to downstream muxers.
+const FDK_LC_DELAY: u64 = 2_048;
+// VisualOn's published encoder delay (also used by FFmpeg's libvo-aacenc wrapper).
+const VO_LC_DELAY: u64 = 1_600;
+const AAC_FRAME_SAMPLES: u64 = 1_024;
+const AUDIO_RATE: u32 = 48_000;
+
+/// Source sample count needed to distinguish codec padding from audible media.
+pub(super) struct Timing {
+    frames: u64,
+    delay: u64,
+}
+
+/// Snapshots negotiated source audio before stopping the pipeline clears its caps.
+pub(super) fn mp4_timing(pipeline: &gst::Pipeline) -> Result<Option<Timing>, String> {
+    let Some(encoder) = pipeline.by_name("aac-encoder") else {
+        return Ok(None);
+    };
+    let factory = encoder.factory().map(|factory| factory.name().to_string());
+    let delay = match factory.as_deref() {
+        Some("fdkaacenc") => FDK_LC_DELAY,
+        Some("voaacenc") => VO_LC_DELAY,
+        _ => return Err("AAC stage has an unsupported encoder".to_owned()),
+    };
+    let counter = pipeline
+        .by_name("aac-input-counter")
+        .ok_or_else(|| "AAC stage has no source sample counter".to_owned())?;
+    let bytes = counter
+        .property::<gst::Structure>("stats")
+        .get::<u64>("num-bytes")
+        .map_err(|error| format!("could not read AAC source sample count: {error}"))?;
+    Ok(Some(Timing {
+        frames: source_frames(bytes)?,
+        delay,
+    }))
+}
+
+fn source_frames(bytes: u64) -> Result<u64, String> {
+    if bytes == 0 || !bytes.is_multiple_of(4) {
+        return Err("AAC source must contain complete stereo S16LE frames".to_owned());
+    }
+    Ok(bytes / 4)
+}
+
+/// Finalizes AAC priming/padding as an MP4 presentation edit, retaining codec packets.
+pub(super) fn finalize_mp4(path: &std::path::Path, timing: Option<Timing>) -> Result<(), String> {
+    if let Some(timing) = timing {
+        mp4::finalize(path, timing.frames, timing.delay, AUDIO_RATE)?;
+    }
+    Ok(())
+}
 
 fn select_with(mut available: impl FnMut(&str) -> bool) -> Result<&'static str, String> {
     FACTORIES
@@ -61,6 +115,31 @@ pub(super) fn encoder() -> Result<gst::Element, String> {
             builder.build().map_err(|error| error.to_string())
         },
     )?;
+    let input_format = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("format", "S16LE")
+                .field("layout", "interleaved")
+                .field("rate", AUDIO_RATE as i32)
+                .field("channels", 2i32)
+                .build(),
+        )
+        .build()
+        .map_err(|error| format!("could not create AAC input format: {error}"))?;
+    let counter = gst::ElementFactory::make("identity")
+        .name("aac-input-counter")
+        // concat's per-input segments must not reset/drain the codec mid-stream:
+        // FDK otherwise loses delayed tail samples and emits zero-duration packets.
+        .property("single-segment", true)
+        .build()
+        .map_err(|error| format!("could not count AAC input samples: {error}"))?;
+    if encoder
+        .factory()
+        .is_some_and(|factory| factory.name() == "voaacenc")
+    {
+        finish_visualon_tail(&counter)?;
+    }
     // FDK also supports HE-AAC/LD. Pin the original AAC-LC contract, not those modes.
     let filter = gst::ElementFactory::make("capsfilter")
         .property(
@@ -75,12 +154,11 @@ pub(super) fn encoder() -> Result<gst::Element, String> {
         .build()
         .map_err(|error| format!("could not create AAC-LC format filter: {error}"))?;
     let bin = gst::Bin::new();
-    bin.add_many([&encoder, &filter])
+    bin.add_many([&input_format, &counter, &encoder, &filter])
         .map_err(|error| format!("could not assemble AAC encoder: {error}"))?;
-    encoder
-        .link(&filter)
+    gst::Element::link_many([&input_format, &counter, &encoder, &filter])
         .map_err(|error| format!("could not connect AAC-LC format filter: {error}"))?;
-    for (name, element) in [("sink", &encoder), ("src", &filter)] {
+    for (name, element) in [("sink", &input_format), ("src", &filter)] {
         let target = element
             .static_pad(name)
             .ok_or_else(|| format!("AAC encoder has no {name} pad"))?;
@@ -94,6 +172,89 @@ pub(super) fn encoder() -> Result<gst::Element, String> {
     Ok(bin.upcast())
 }
 
+fn visualon_padding_frames(frames: u64) -> Result<u64, String> {
+    frames
+        .checked_add(VO_LC_DELAY)
+        .and_then(|count| count.checked_next_multiple_of(AAC_FRAME_SAMPLES))
+        .map(|total| total - frames)
+        .ok_or_else(|| "AAC source sample count overflow".to_owned())
+}
+
+fn finish_visualon_tail(counter: &gst::Element) -> Result<(), String> {
+    // voaacenc discards partial input frames and does not drain its 1600-sample
+    // lookahead. Feed complete zero-padded codec frames at EOS, then exclude
+    // that padding in the presentation edit. Original source counting stays
+    // upstream of these pushes, so silence never becomes part of the timeline.
+    let pad = counter
+        .static_pad("src")
+        .ok_or("AAC counter has no output pad")?;
+    let weak = counter.downgrade();
+    let last_end = std::sync::Arc::new(std::sync::Mutex::new(None::<gst::ClockTime>));
+    let observed_end = last_end.clone();
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        if let Some(buffer) = info.buffer() {
+            *observed_end.lock().expect("AAC timestamp lock") = buffer
+                .pts()
+                .zip(buffer.duration())
+                .map(|(pts, duration)| pts + duration);
+        }
+        gst::PadProbeReturn::Ok
+    })
+    .ok_or("could not observe AAC source timestamps")?;
+    // Intercept before identity marks its source pad EOS. Pushing from an
+    // EOS source-pad probe itself would fail with FlowError::Eos.
+    counter
+        .static_pad("sink")
+        .ok_or("AAC counter has no input pad")?
+        .add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+            if info
+                .event()
+                .is_some_and(|event| event.type_() == gst::EventType::Eos)
+            {
+                let Some(counter) = weak.upgrade() else {
+                    return gst::PadProbeReturn::Drop;
+                };
+                let result = (|| -> Result<(), String> {
+                    let bytes = counter
+                        .property::<gst::Structure>("stats")
+                        .get::<u64>("num-bytes")
+                        .map_err(|error| error.to_string())?;
+                    let frames = visualon_padding_frames(source_frames(bytes)?)?;
+                    let pts = last_end
+                        .lock()
+                        .expect("AAC timestamp lock")
+                        .ok_or("AAC source ended without a timestamped buffer")?;
+                    let mut buffer = gst::Buffer::with_size(frames as usize * 4)
+                        .map_err(|error| error.to_string())?;
+                    let buffer_mut = buffer
+                        .get_mut()
+                        .ok_or("AAC padding buffer is not writable")?;
+                    buffer_mut
+                        .map_writable()
+                        .map_err(|error| error.to_string())?
+                        .as_mut_slice()
+                        .fill(0);
+                    buffer_mut.set_pts(pts);
+                    buffer_mut.set_duration(gst::ClockTime::from_nseconds(
+                        frames * 1_000_000_000 / u64::from(AUDIO_RATE),
+                    ));
+                    counter
+                        .static_pad("src")
+                        .ok_or("AAC counter has no output pad")?
+                        .push(buffer)
+                        .map_err(|error| format!("could not drain VisualOn AAC tail: {error}"))?;
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    gst::element_error!(counter, gst::StreamError::Encode, ["{error}"]);
+                    return gst::PadProbeReturn::Drop;
+                }
+            }
+            gst::PadProbeReturn::Ok
+        })
+        .ok_or("could not install AAC tail finalization")?;
+    Ok(())
+}
 /// Connects the shared encoder between named endpoints of a parsed pipeline.
 ///
 /// # Errors
@@ -121,6 +282,48 @@ pub(super) fn add_to_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_accounting_rejects_empty_and_incomplete_stereo_frames() {
+        for bytes in [0, 1, 2, 3, 5, u64::MAX] {
+            assert_eq!(
+                source_frames(bytes).expect_err("invalid stereo byte count"),
+                "AAC source must contain complete stereo S16LE frames"
+            );
+        }
+        for (bytes, frames) in [
+            (4, 1),
+            (8, 2),
+            (191_996, 47_999),
+            (u64::MAX - 3, u64::MAX / 4),
+        ] {
+            assert_eq!(
+                source_frames(bytes).expect("complete stereo frames"),
+                frames
+            );
+        }
+    }
+
+    #[test]
+    fn visualon_tail_padding_completes_partial_frames_and_codec_lookahead_without_overflow() {
+        for (source, padding) in [
+            (1, 2047),
+            (1023, 2049),
+            (1024, 2048),
+            (47999, 2177),
+            (48000, 2176),
+        ] {
+            assert_eq!(
+                visualon_padding_frames(source).expect("tail padding"),
+                padding
+            );
+            assert!((source + padding).is_multiple_of(1024));
+            assert!(source + padding >= source + VO_LC_DELAY);
+        }
+        assert!(visualon_padding_frames(u64::MAX)
+            .expect_err("overflow must fail")
+            .contains("overflow"));
+    }
 
     #[test]
     fn selects_ubuntu_encoder_when_only_voaacenc_is_available() {
@@ -213,15 +416,15 @@ mod tests {
     fn selected_encoder_negotiates_lc_stereo_and_decodes_a_resampled_tone() {
         gst::init().expect("GStreamer should initialize");
         let selected = select_factory().expect("a real AAC encoder must be installed");
+        let directory = tempfile::tempdir().expect("temporary media directory");
+        let path = directory.path().join("resampled.mp4");
         let pipeline = gst::parse::launch(
             "audiotestsrc freq=440 num-buffers=100 samplesperbuffer=441 \
              ! audio/x-raw,format=F32LE,rate=44100,channels=2,layout=interleaved \
              ! audioconvert ! audioresample \
              ! audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved \
              ! identity name=input \
-             aacparse name=parser ! avdec_aac ! audioconvert \
-             ! audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved \
-             ! appsink name=decoded sync=false",
+             aacparse name=parser ! mp4mux movie-timescale=48000 ! filesink name=output",
         )
         .expect("headless audio pipeline should parse")
         .downcast::<gst::Pipeline>()
@@ -239,42 +442,25 @@ mod tests {
             selected
         );
         assert_eq!(encoder.property::<i32>("bitrate"), 128_000);
-        let sink = pipeline
-            .by_name("decoded")
-            .expect("pipeline should have a decoded sink")
-            .downcast::<gstreamer_app::AppSink>()
-            .expect("decoded sink should be an appsink");
+        pipeline
+            .by_name("output")
+            .expect("media output")
+            .set_property("location", path.to_string_lossy().as_ref());
         pipeline
             .set_state(gst::State::Playing)
-            .expect("AAC encoding and decoding should start");
-        let mut audio = Vec::new();
-        loop {
-            let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_seconds(10)) else {
-                assert!(sink.is_eos(), "AAC decoding must finish, not stall");
-                break;
-            };
-            let caps = sample.caps().expect("decoded audio should have caps");
-            let format = caps.structure(0).expect("audio format should be present");
-            assert_eq!(format.get::<String>("format").expect("PCM format"), "S16LE");
-            assert_eq!(format.get::<i32>("rate").expect("PCM rate"), 48_000);
-            assert_eq!(format.get::<i32>("channels").expect("PCM channels"), 2);
-            assert_eq!(
-                format.get::<String>("layout").expect("PCM layout"),
-                "interleaved"
-            );
-            let map = sample
-                .buffer()
-                .expect("decoded sample should have a buffer")
-                .map_readable()
-                .expect("decoded PCM should be readable");
-            let (frames, remainder) = map.as_slice().as_chunks::<4>();
-            assert!(remainder.is_empty(), "stereo PCM frames must be complete");
-            audio.extend(
-                frames
-                    .iter()
-                    .map(|frame| i16::from_le_bytes([frame[0], frame[1]])),
-            );
-        }
+            .expect("AAC encoding should start");
+        let message = pipeline
+            .bus()
+            .expect("encoder bus")
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(10),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .expect("AAC encoding must finish");
+        assert!(
+            matches!(message.view(), gst::MessageView::Eos(_)),
+            "{message:?}"
+        );
         let parser_caps = pipeline
             .by_name("parser")
             .expect("pipeline should have an AAC parser")
@@ -314,13 +500,96 @@ mod tests {
             input.get::<i32>("channels").expect("encoder PCM channels"),
             2
         );
+        let source_frames = pipeline
+            .by_name("aac-input-counter")
+            .expect("source counter")
+            .property::<gst::Structure>("stats")
+            .get::<u64>("num-bytes")
+            .expect("source byte count")
+            / 4;
+        // The finite resampler covers sample positions through (44100-1)/44100.
+        // Its exclusive output endpoint is 47999, not a codec-dependent allowance.
+        assert_eq!(source_frames, (44_100u64 - 1) * 48_000 / 44_100 + 1);
+        let timing = mp4_timing(&pipeline).expect("AAC source accounting");
+        if let Some(ref timing) = timing {
+            assert_eq!(
+                timing.frames, source_frames,
+                "presentation must use the actual resampled source count"
+            );
+        }
         pipeline
             .set_state(gst::State::Null)
             .expect("headless audio pipeline should stop");
-        assert!(
-            (47_000..=50_000).contains(&audio.len()),
-            "one second of resampled AAC should decode to about 48000 frames, got {}",
-            audio.len()
+        finalize_mp4(&path, timing).expect("gapless presentation should finalize");
+        // Elementary AAC is whole codec frames; audible length belongs to MP4's edit.
+        let decoder = gst::parse::launch(
+            "filesrc name=input ! qtdemux ! avdec_aac ! audioconvert \
+             ! audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved \
+             ! appsink name=decoded sync=false",
+        )
+        .expect("audio decoder")
+        .downcast::<gst::Pipeline>()
+        .expect("decoder pipeline");
+        decoder
+            .by_name("input")
+            .expect("decoder input")
+            .set_property("location", path.to_string_lossy().as_ref());
+        let sink = decoder
+            .by_name("decoded")
+            .expect("decoded sink")
+            .downcast::<gstreamer_app::AppSink>()
+            .expect("PCM appsink");
+        decoder
+            .set_state(gst::State::Playing)
+            .expect("AAC decoding should start");
+        let mut audio = Vec::new();
+        loop {
+            let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_seconds(10)) else {
+                assert!(sink.is_eos(), "AAC decoding must finish, not stall");
+                break;
+            };
+            let caps = sample.caps().expect("decoded audio caps");
+            let format = caps.structure(0).expect("decoded audio format");
+            assert_eq!(format.get::<String>("format").expect("PCM format"), "S16LE");
+            assert_eq!(format.get::<i32>("rate").expect("PCM rate"), 48_000);
+            assert_eq!(format.get::<i32>("channels").expect("PCM channels"), 2);
+            assert_eq!(
+                format.get::<String>("layout").expect("PCM layout"),
+                "interleaved"
+            );
+            let buffer = sample.buffer().expect("decoded PCM buffer");
+            let pts = buffer.pts().expect("PCM timestamp");
+            let segment = sample
+                .segment()
+                .and_then(|s| s.downcast_ref::<gst::ClockTime>())
+                .expect("PCM presentation segment");
+            assert_eq!(
+                (segment
+                    .to_stream_time(pts)
+                    .expect("PCM stream time")
+                    .nseconds()
+                    * 48_000
+                    + 500_000_000)
+                    / 1_000_000_000,
+                audio.len() as u64,
+                "decoded samples must be contiguous on the audible timeline"
+            );
+            let map = buffer.map_readable().expect("decoded PCM");
+            let (frames, remainder) = map.as_slice().as_chunks::<4>();
+            assert!(remainder.is_empty(), "stereo PCM frames must be complete");
+            audio.extend(
+                frames
+                    .iter()
+                    .map(|frame| i16::from_le_bytes([frame[0], frame[1]])),
+            );
+        }
+        decoder
+            .set_state(gst::State::Null)
+            .expect("audio decoder should stop");
+        assert_eq!(
+            audio.len() as u64,
+            source_frames,
+            "audible duration must exclude codec delay/padding exactly"
         );
         let window = &audio[4_800..28_800];
         let crossings = window
@@ -335,6 +604,18 @@ mod tests {
         assert!(
             window.iter().any(|sample| sample.unsigned_abs() > 5_000),
             "decoded audio must contain the tone, not silence"
+        );
+        let (mut dot, mut signal_energy, mut reference_energy) = (0.0, 0.0, 0.0);
+        for (index, &sample) in audio.iter().enumerate().take(9_600).skip(4_800) {
+            let reference = (std::f64::consts::TAU * 440.0 * index as f64 / 48_000.0).sin();
+            dot += f64::from(sample) * reference;
+            signal_energy += f64::from(sample).powi(2);
+            reference_energy += reference * reference;
+        }
+        let correlation = dot / (signal_energy * reference_energy).sqrt();
+        assert!(
+            correlation > 0.98,
+            "decoded source phase must not shift by codec priming: {correlation}"
         );
     }
 }

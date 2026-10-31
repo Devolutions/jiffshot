@@ -1276,9 +1276,11 @@ fn recording_pipeline_with_layout(
         .build()
         .map_err(|error| format!("could not create H.264 parser: {error}"))?;
     let muxer = gst::ElementFactory::make("mp4mux")
+        .property("movie-timescale", 48_000u32)
         .build()
         .map_err(|error| format!("could not create MP4 muxer: {error}"))?;
     let sink = gst::ElementFactory::make("filesink")
+        .name("recording-file-sink")
         .property("location", path.to_string_lossy().as_ref())
         .build()
         .map_err(|error| format!("could not create recording file: {error}"))?;
@@ -1749,10 +1751,19 @@ pub(super) fn finish_recording(pipeline: &gst::Pipeline) -> Result<(), String> {
     } else {
         Err("could not finalize the recording".to_owned())
     };
+    let timing = result.and_then(|_| super::aac::mp4_timing(pipeline));
     let stop_result = pipeline
         .set_state(gst::State::Null)
         .map_err(|error| format!("could not stop recording pipeline: {error}"));
-    result.and(stop_result.map(|_| ()))
+    let timing = timing.and_then(|timing| stop_result.map(|_| timing))?;
+    if timing.is_some() {
+        let path = pipeline
+            .by_name("recording-file-sink")
+            .ok_or_else(|| "recording has no output file sink".to_owned())?
+            .property::<String>("location");
+        super::aac::finalize_mp4(Path::new(&path), timing)?;
+    }
+    Ok(())
 }
 
 fn save_pipewire_frame(fd: i32, node_id: u32, path: &Path) -> Result<(), String> {

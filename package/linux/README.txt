@@ -50,6 +50,17 @@ Fedora:
   create is reported, not silently replaced. Both use 128 kbit/s AAC-LC with raw
   framing through aacparse into MP4; upstream conversion/resampling negotiates
   interleaved S16LE audio. No encoder alias or test skip is provided.
+  Recording and exports count the actual 48 kHz stereo source samples and
+  finalize MP4 presentation edits after EOS. The edit excludes AAC-LC priming
+  (FDK: 2048 samples; VisualOn: 1600 samples) and terminal codec padding without
+  discarding compressed packets or moving video timestamps/chunk offsets.
+  VisualOn's non-draining wrapper receives complete padded frames at EOS so
+  the real source tail is encoded; that padding is not audible. A continuous
+  encoder input segment avoids resets between concatenated source intervals.
+  Editing uses presentation/stream time, not priming-offset media timestamps.
+  Invalid or unsupported timing metadata fails explicitly. Native media tests
+  verify decoded sample counts, tone boundaries/tails and repeated-edit sync,
+  not just installed factory names or padded elementary-AAC frame counts.
 
 Run "jiffshot --capture", "--capture-interactive", "--grab-text", "--scrolling",
 "--scrolling-horizontal", "--panoramic", "--interval", or "--record" to start an action

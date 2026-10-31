@@ -566,7 +566,7 @@ fn export_audio_ranges(
            ! audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved \
            ! identity name=audio-encoder-input \
          aacparse name=audio-parser ! queue ! mux. \
-         mp4mux name=mux ! filesink name=output",
+         mp4mux name=mux movie-timescale=48000 ! filesink name=output",
     )
     .map_err(|error| format!("could not build audio export pipeline: {error}"))?
     .downcast::<gst::Pipeline>()
@@ -627,10 +627,12 @@ fn export_audio_ranges(
             _ => Err("audio export ended unexpectedly".to_owned()),
         }
     })();
+    let timing = result.and_then(|_| super::aac::mp4_timing(&pipeline));
     let stopped = pipeline
         .set_state(gst::State::Null)
         .map_err(|error| format!("could not stop audio export pipeline: {error}"));
-    finish_decoder(result, stopped)
+    let timing = finish_decoder(timing, stopped)?;
+    super::aac::finalize_mp4(destination, timing)
 }
 
 fn export_audio_range(
@@ -681,6 +683,7 @@ fn export_audio_range(
         let pts = buffer
             .pts()
             .ok_or_else(|| "audio decoder returned a buffer without a timestamp".to_owned())?;
+        let pts = audio_presentation_time(&sample, pts)?;
         let mapped = buffer
             .map_readable()
             .map_err(|error| format!("could not read decoded audio: {error}"))?;
@@ -727,6 +730,19 @@ fn export_audio_range(
 fn audio_frame_at(time: gst::ClockTime) -> u64 {
     ((u128::from(time.nseconds()) * u128::from(AUDIO_EXPORT_RATE) + 500_000_000) / 1_000_000_000)
         as u64
+}
+
+fn audio_presentation_time(
+    sample: &gst::Sample,
+    pts: gst::ClockTime,
+) -> Result<gst::ClockTime, String> {
+    sample
+        .segment()
+        .and_then(|segment| segment.downcast_ref::<gst::ClockTime>())
+        .and_then(|segment| segment.to_stream_time(pts))
+        .ok_or_else(|| {
+            "audio decoder returned a timestamp outside its presentation segment".to_owned()
+        })
 }
 
 fn push_silence(
@@ -1463,6 +1479,91 @@ mod tests {
     use super::*;
 
     #[test]
+    fn audio_presentation_uses_edit_and_seek_offsets_on_the_source_sample_grid() {
+        gst::init().expect("GStreamer should initialize");
+        let delay = gst::ClockTime::from_nseconds(2_048_000_000_000 / 48_000);
+        for seek in [gst::ClockTime::ZERO, gst::ClockTime::from_mseconds(750)] {
+            let mut segment = gst::FormattedSegment::<gst::ClockTime>::new();
+            segment.set_start(delay + seek);
+            segment.set_time(seek);
+            segment.set_stop(delay + gst::ClockTime::from_seconds(3));
+            for delta in [
+                gst::ClockTime::ZERO,
+                gst::ClockTime::from_nseconds(20_833),
+                gst::ClockTime::from_mseconds(500),
+            ] {
+                let sample = gst::Sample::builder().segment(&segment).build();
+                let stream = audio_presentation_time(&sample, delay + seek + delta)
+                    .expect("audible timestamp");
+                assert_eq!(
+                    stream,
+                    seek + delta,
+                    "codec priming is not a source timeline offset"
+                );
+                assert_eq!(
+                    audio_frame_at(stream),
+                    audio_frame_at(seek) + audio_frame_at(delta)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_tone_boundaries_and_end_survive_aac_segment_changes() {
+        gst::init().expect("GStreamer should initialize");
+        let directory = tempfile::tempdir().expect("media directory");
+        let path = directory.path().join("continuous source.mp4");
+        write_test_video_with_audio(&path);
+        let audio = decode_test_audio(&path);
+        assert_eq!(
+            audio.len(),
+            144_000,
+            "three source intervals must retain every audible sample"
+        );
+        assert_eq!(
+            video_duration(&path).expect("A/V duration"),
+            gst::ClockTime::from_seconds(3)
+        );
+        for (time, tone) in [
+            (0.01, 440.0),
+            (0.97, 440.0),
+            (1.01, 880.0),
+            (1.97, 880.0),
+            (2.01, 1320.0),
+            (2.97, 1320.0),
+        ] {
+            assert_short_frequency_at(&audio, time, tone);
+        }
+    }
+
+    #[test]
+    fn repeated_trimming_keeps_source_tone_boundaries_without_accumulating_aac_delay() {
+        gst::init().expect("GStreamer should initialize");
+        let directory = tempfile::tempdir().expect("media directory");
+        let source = directory.path().join("source.mp4");
+        let first = directory.path().join("first.mp4");
+        let second = directory.path().join("second.mp4");
+        write_test_video_with_audio(&source);
+        trim_video(&source, &first, 0.75, 2.25).expect("first trim");
+        trim_video(&first, &second, 0.125, 1.375).expect("second trim");
+        let audio = decode_test_audio(&second);
+        assert_eq!(
+            audio.len(),
+            60_000,
+            "two edits must retain exactly 1.25 seconds of audible source"
+        );
+        for (time, tone) in [
+            (0.095, 440.0),
+            (0.135, 880.0),
+            (1.095, 880.0),
+            (1.135, 1320.0),
+            (1.22, 1320.0),
+        ] {
+            assert_short_frequency_at(&audio, time, tone);
+        }
+    }
+
+    #[test]
     fn identifies_supported_video_extensions_without_case_sensitivity() {
         assert!(is_video_path(Path::new("clip.MP4")));
         assert!(is_video_path(Path::new("clip.webm")));
@@ -1828,11 +1929,14 @@ mod tests {
             .expect("trimming a video with audio should succeed");
 
         let audio = decode_test_audio(&destination);
-        assert!(
-            (70_000..=74_000).contains(&audio.len()),
-            "trimmed audio should last approximately 1.5 seconds, got {} samples",
-            audio.len()
+        assert_eq!(
+            audio.len(),
+            72_000,
+            "trimmed audible audio must last exactly 1.5 seconds"
         );
+        for (time, tone) in [(0.22, 440.0), (0.26, 880.0), (1.22, 880.0), (1.26, 1320.0)] {
+            assert_short_frequency_at(&audio, time, tone);
+        }
         assert_frequency_at(&audio, 0.10, 440.0);
         assert_frequency_at(&audio, 0.55, 880.0);
         assert_frequency_at(&audio, 1.35, 1320.0);
@@ -1953,11 +2057,20 @@ mod tests {
             .expect("cutting a video with audio should succeed");
 
         let audio = decode_test_audio(&destination);
-        assert!(
-            (94_000..=98_000).contains(&audio.len()),
-            "cut audio should last approximately two seconds, got {} samples",
-            audio.len()
+        assert_eq!(
+            audio.len(),
+            96_000,
+            "cut audible audio must last exactly two seconds"
         );
+        for (time, tone) in [
+            (0.47, 440.0),
+            (0.51, 880.0),
+            (0.97, 880.0),
+            (1.01, 1320.0),
+            (1.97, 1320.0),
+        ] {
+            assert_short_frequency_at(&audio, time, tone);
+        }
         assert_frequency_at(&audio, 0.15, 440.0);
         assert_frequency_at(&audio, 0.70, 880.0);
         assert_frequency_at(&audio, 1.20, 1320.0);
@@ -2662,7 +2775,7 @@ mod tests {
 
     fn write_test_video_with_audio(path: &Path) {
         let pipeline = gst::parse::launch(
-            "mp4mux name=mux ! filesink name=output \
+            "mp4mux name=mux movie-timescale=48000 ! filesink name=output \
              videotestsrc num-buffers=90 ! video/x-raw,width=64,height=48,framerate=30/1 \
                ! videoconvert ! x264enc tune=zerolatency ! h264parse ! queue ! mux. \
              concat name=audio ! audioconvert ! audioresample ! identity name=audio-encoder-input \
@@ -2698,9 +2811,13 @@ mod tests {
             matches!(message.view(), gst::MessageView::Eos(_)),
             "audio/video fixture should finish normally: {message:?}"
         );
+        let timing =
+            super::super::aac::mp4_timing(&pipeline).expect("fixture audio should be counted");
         pipeline
             .set_state(gst::State::Null)
             .expect("audio/video fixture should stop");
+        super::super::aac::finalize_mp4(path, timing)
+            .expect("fixture AAC should retain gapless timing");
     }
 
     fn write_test_video_with_unknown_audio(path: &Path) {
@@ -2787,10 +2904,43 @@ mod tests {
                 let map = buffer
                     .map_readable()
                     .expect("decoded audio should be readable");
+                let pts = buffer.pts().expect("decoded PCM timestamp");
+                let segment = sample
+                    .segment()
+                    .and_then(|s| s.downcast_ref::<gst::ClockTime>())
+                    .expect("decoded PCM presentation segment");
+                let start = audio_frame_at(
+                    audio_presentation_time(&sample, pts).expect("presentation timestamp"),
+                );
+                let stop = audio_frame_at(
+                    segment
+                        .to_stream_time(segment.stop().expect("audible stop"))
+                        .expect("presentation endpoint"),
+                );
+                assert_eq!(
+                    start,
+                    audio.len() as u64,
+                    "audible PCM must remain sample-aligned and contiguous"
+                );
+                let (frames, remainder) = map.as_slice().as_chunks::<4>();
+                assert!(
+                    remainder.is_empty(),
+                    "decoded stereo frames must be complete"
+                );
+                let audible = frames.len().min((stop - start) as usize);
+                // FDK's decoder can round a clipped terminal buffer outward by one
+                // sample. The declared exclusive presentation endpoint is authoritative.
+                assert!(
+                    frames.len() - audible <= 1,
+                    "only sub-sample clipping quantization may lie outside the edit"
+                );
+                assert_eq!(
+                    audio_frame_at(buffer.duration().expect("PCM duration")) as usize,
+                    audible,
+                    "the audible count must agree with the declared buffer duration"
+                );
                 audio.extend(
-                    map.as_slice()
-                        .as_chunks::<4>()
-                        .0
+                    frames[..audible]
                         .iter()
                         .map(|frame| i16::from_le_bytes([frame[0], frame[1]])),
                 );
@@ -2834,6 +2984,24 @@ mod tests {
         assert!(
             (frequency - expected_hz).abs() <= 50.0,
             "audio at {start_seconds}s should contain {expected_hz}Hz, got {frequency}Hz"
+        );
+    }
+
+    fn assert_short_frequency_at(audio: &[i16], time: f64, expected: f64) {
+        let start = (time * 48_000.0) as usize;
+        let window = &audio[start..start + 960];
+        let crossings = window
+            .windows(2)
+            .filter(|pair| pair[0] < 0 && pair[1] >= 0)
+            .count();
+        let actual = crossings as f64 * 50.0;
+        assert!(
+            (actual - expected).abs() <= 50.0,
+            "the 20 ms source window at {time}s must contain {expected}Hz, got {actual}Hz"
+        );
+        assert!(
+            window.iter().any(|sample| sample.unsigned_abs() > 5_000),
+            "the source boundary/tail must contain real audio, not replacement silence"
         );
     }
 
