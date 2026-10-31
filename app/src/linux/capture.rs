@@ -129,7 +129,7 @@ async fn close_portal_session<T>(
         .close()
         .await
         .map_err(|error| format!("could not close screen capture session: {error}"));
-    crate::portal_linux::combine_session_results(result, closed)
+    crate::linux::portal::combine_session_results(result, closed)
 }
 
 pub(super) async fn open_portal_stream(cursor: CursorMode) -> Result<PortalStream, String> {
@@ -660,7 +660,7 @@ async fn close_recording_session<T>(
         }
     }
     .await;
-    crate::portal_linux::combine_session_results(result, closed)
+    crate::linux::portal::combine_session_results(result, closed)
 }
 
 async fn recording_pipewire_remote(
@@ -762,7 +762,7 @@ where
         .map_err(|error| {
             format!("could not close the unexpected screen capture request: {error}")
         })?;
-        return crate::portal_linux::combine_session_results(
+        return crate::linux::portal::combine_session_results(
             Err(format!(
                 "screen capture returned an unexpected request handle: {actual_path}"
             )),
@@ -1172,7 +1172,7 @@ pub fn save_capture(document: &jiffshot_doc::Document) -> Result<PathBuf, String
 }
 
 pub fn capture_directory() -> Result<PathBuf, String> {
-    crate::settings_linux::capture_directory()
+    crate::linux::settings::capture_directory()
 }
 
 pub fn recent_captures() -> Result<Vec<PathBuf>, String> {
@@ -1181,7 +1181,7 @@ pub fn recent_captures() -> Result<Vec<PathBuf>, String> {
 }
 
 fn recent_captures_in(directory: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut captures = crate::library_linux::capture_files_in(directory)?;
+    let mut captures = crate::linux::library::capture_files_in(directory)?;
     captures.sort_by(|(left_path, left_time), (right_path, right_time)| {
         right_time
             .cmp(left_time)
@@ -1808,7 +1808,7 @@ pub(super) fn pipewire_source(fd: i32, node_id: u32) -> Result<gst::Element, Str
         .property("path", node_id.to_string())
         .build()
         .map_err(|error| format!("could not create PipeWire capture source: {error}"))?;
-    crate::portal_frame_linux::guard_screen_frames(&source)?;
+    crate::linux::portal_frame::guard_screen_frames(&source)?;
     Ok(source)
 }
 
@@ -1874,7 +1874,7 @@ mod tests {
 
     #[test]
     fn portal_close_failures_and_capture_failures_are_reported() {
-        use crate::portal_linux::combine_session_results;
+        use crate::linux::portal::combine_session_results;
         assert_eq!(combine_session_results(Ok(7), Ok(())), Ok(7));
         assert_eq!(
             combine_session_results::<u8>(Err("capture failed".into()), Ok(())),
@@ -2216,7 +2216,7 @@ mod tests {
             .expect("portal recording should succeed")
             .expect("portal recording should be saved");
             stopper.join().expect("recording stopper should finish");
-            let frame = crate::video_linux::frame_at(&path, 0.5)
+            let frame = crate::linux::video::frame_at(&path, 0.5)
                 .expect("recording should contain a decodable frame");
             std::fs::remove_file(path).expect("test recording should be removed");
             frame
@@ -2278,7 +2278,7 @@ mod tests {
             .expect("portal recording should finalize")
             .expect("portal recording should be saved");
         stop_result.expect("recording should still accept a stop request");
-        let frame = crate::video_linux::frame_at(&recording, 0.5)
+        let frame = crate::linux::video::frame_at(&recording, 0.5)
             .expect("recording should contain a decodable frame after half a second");
         assert_eq!(frame.size(), (width, height));
         assert_expected_desktop_color(&frame);
@@ -2418,9 +2418,9 @@ mod tests {
             (700..=1900).contains(&duration),
             "restart must discard the previous 2.5-second segment, got {duration}ms"
         );
-        let first = crate::video_linux::first_frame(&recording)
+        let first = crate::linux::video::first_frame(&recording)
             .expect("restarted recording should contain a first frame");
-        let frame = crate::video_linux::frame_at(&recording, 0.5)
+        let frame = crate::linux::video::frame_at(&recording, 0.5)
             .expect("restarted recording should contain a new frame");
         assert_eq!(first.size(), frame.size());
         assert_expected_desktop_color(&frame);
@@ -2429,7 +2429,7 @@ mod tests {
             last_timestamp > gst::ClockTime::from_mseconds(700),
             "restarted recording should retain its final screen frame"
         );
-        let last = crate::video_linux::frame_at(
+        let last = crate::linux::video::frame_at(
             &recording,
             last_timestamp.nseconds() as f64 / 1_000_000_000.0,
         )
@@ -2489,7 +2489,7 @@ mod tests {
         let audio = decode_recording_audio(&recording);
         assert_audio_frequency(&audio, 440.0);
         assert_audio_frequency(&audio, 880.0);
-        let frame = crate::video_linux::frame_at(&recording, 0.5)
+        let frame = crate::linux::video::frame_at(&recording, 0.5)
             .expect("recording with audio should contain a decodable frame");
         assert_expected_desktop_color(&frame);
         std::fs::remove_file(&recording).expect("test recording should be removed");
@@ -2556,7 +2556,7 @@ mod tests {
             "portal recording should exclude the 2.5-second pause, got {duration}ms"
         );
         for time in [0.2, 1.5] {
-            let frame = crate::video_linux::frame_at(&recording, time)
+            let frame = crate::linux::video::frame_at(&recording, time)
                 .expect("portal recording should contain frames around the pause");
             assert_expected_desktop_color(&frame);
         }
@@ -2606,10 +2606,10 @@ mod tests {
             .expect("portal recording with webcam should be saved");
         stop_result.expect("recording should still accept a stop request");
 
-        let first = crate::video_linux::first_frame(&recording)
+        let first = crate::linux::video::first_frame(&recording)
             .expect("webcam recording should contain a decodable first frame");
         assert_expected_desktop_color(&first);
-        let frame = crate::video_linux::frame_at(&recording, 0.8)
+        let frame = crate::linux::video::frame_at(&recording, 0.8)
             .expect("webcam recording should contain a decodable frame");
         assert_expected_desktop_color(&frame);
         let (width, height) = frame.size();
@@ -2673,7 +2673,7 @@ mod tests {
             .expect("portal circular webcam recording should be saved");
         stop_result.expect("recording should still accept a stop request");
 
-        let frame = crate::video_linux::frame_at(&recording, 0.8)
+        let frame = crate::linux::video::frame_at(&recording, 0.8)
             .expect("portal circular webcam recording should contain a decodable frame");
         assert_eq!(frame.size(), (1280, 720), "Sway fixture dimensions changed");
         assert_expected_desktop_color(&frame);
@@ -2941,7 +2941,7 @@ mod tests {
             "recording duration should exclude the 2.5-second pause, got {duration}ms"
         );
         for (time, expected) in [(0.2, "red"), (1.2, "green")] {
-            let frame = crate::video_linux::frame_at(&path, time)
+            let frame = crate::linux::video::frame_at(&path, time)
                 .expect("recording should contain frames before and after the pause");
             let pixel = frame
                 .flatten()
@@ -3034,7 +3034,7 @@ mod tests {
             .join()
             .expect("recording thread should finish")
             .expect("recording stopped while paused should finalize");
-        crate::video_linux::first_frame(&path)
+        crate::linux::video::first_frame(&path)
             .expect("recording stopped while paused should contain decodable video");
         assert_audio_frequency(&decode_recording_audio(&path), 440.0);
         let uri = gst::glib::filename_to_uri(&path, None).expect("recording should have a URI");
@@ -3153,7 +3153,7 @@ mod tests {
             );
         }
         let reopened =
-            crate::video_linux::first_frame(&path).expect("finalized MP4 should be decodable");
+            crate::linux::video::first_frame(&path).expect("finalized MP4 should be decodable");
         assert!(
             reopened.size().0 > 0 && reopened.size().1 > 0,
             "finalized MP4 should contain a decodable frame"
@@ -3205,7 +3205,7 @@ mod tests {
             bytes.windows(4).any(|window| window == b"soun"),
             "MP4 should contain a microphone audio track"
         );
-        crate::video_linux::first_frame(&path)
+        crate::linux::video::first_frame(&path)
             .expect("audio recording MP4 should retain decodable video");
         assert_audio_frequency(&decode_recording_audio(&path), 440.0);
     }
@@ -3241,7 +3241,7 @@ mod tests {
         let audio = decode_recording_audio(&path);
         assert_audio_frequency(&audio, 440.0);
         assert_audio_frequency(&audio, 880.0);
-        crate::video_linux::first_frame(&path)
+        crate::linux::video::first_frame(&path)
             .expect("mixed audio recording should retain decodable video");
     }
 
@@ -3775,7 +3775,7 @@ mod tests {
                 .set_state(gst::State::Null)
                 .expect("webcam recording should stop");
 
-            let frame = crate::video_linux::frame_at(&path, 0.4)
+            let frame = crate::linux::video::frame_at(&path, 0.4)
                 .expect("webcam recording should contain a decodable frame");
             assert_eq!(frame.size(), (320, 240));
             let pixmap = frame.flatten();
@@ -3887,7 +3887,7 @@ mod tests {
             .set_state(gst::State::Null)
             .expect("circular webcam recording should stop");
 
-        let frame = crate::video_linux::frame_at(&path, 0.4)
+        let frame = crate::linux::video::frame_at(&path, 0.4)
             .expect("circular webcam recording should contain a decodable frame");
         assert_eq!(frame.size(), (320, 240));
         let pixmap = frame.flatten();
@@ -3972,7 +3972,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1200));
         finish_recording(&pipeline).expect("webcam recording should finalize");
 
-        let frame = crate::video_linux::frame_at(&path, 0.5)
+        let frame = crate::linux::video::frame_at(&path, 0.5)
             .expect("webcam recording should contain a decodable frame");
         assert_eq!(
             frame.size(),
@@ -4060,7 +4060,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(700));
         finish_recording(&pipeline).expect("webcam recording should finalize");
 
-        let frame = crate::video_linux::first_frame(&path)
+        let frame = crate::linux::video::first_frame(&path)
             .expect("recording should contain a decodable first frame");
         let pixel = frame
             .flatten()
@@ -4098,7 +4098,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1100));
         finish_recording(&pipeline).expect("webcam recording should finalize");
 
-        let frame = crate::video_linux::frame_at(&path, 0.8)
+        let frame = crate::linux::video::frame_at(&path, 0.8)
             .expect("recording should contain a late frame");
         let pixel = frame
             .flatten()
@@ -4363,5 +4363,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "../tests/recording_frame_rate/capture_tests.rs"]
+#[path = "../../tests/recording_frame_rate/capture_tests.rs"]
 mod recording_frame_rate_regression;

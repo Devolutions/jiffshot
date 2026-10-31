@@ -1,8 +1,8 @@
 //! Interval capture from one portal-selected screen or window.
 
-use crate::capture_linux::CaptureCursor;
-use crate::frame_stream_linux::{document_from_frame, frame_from_sample};
-use crate::settings_linux::IntervalPreferences;
+use crate::linux::capture::CaptureCursor;
+use crate::linux::frame_stream::{document_from_frame, frame_from_sample};
+use crate::linux::settings::IntervalPreferences;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -40,19 +40,19 @@ pub(super) async fn capture(
     progress: impl FnMut(Progress),
 ) -> Result<Completed, String> {
     gst::init().map_err(|error| format!("could not initialize GStreamer: {error}"))?;
-    let stream = crate::capture_linux::open_portal_stream(cursor.portal_mode()).await?;
+    let stream = crate::linux::capture::open_portal_stream(cursor.portal_mode()).await?;
     let options = Options {
         interval: Duration::from_secs(u64::from(preferences.seconds())),
         skip_identical: preferences.skip_identical(),
         first_frame_timeout: FIRST_FRAME_TIMEOUT,
     };
-    let result = crate::capture_linux::pipewire_source(stream.remote.as_raw_fd(), stream.node_id)
+    let result = crate::linux::capture::pipewire_source(stream.remote.as_raw_fd(), stream.node_id)
         .and_then(|source| {
             capture_from_source(
                 source,
                 options,
                 stop,
-                crate::capture_linux::save_capture,
+                crate::linux::capture::save_capture,
                 progress,
             )
         });
@@ -66,7 +66,7 @@ fn capture_from_source(
     mut save: impl FnMut(&Document) -> Result<PathBuf, String>,
     mut progress: impl FnMut(Progress),
 ) -> Result<Completed, String> {
-    crate::frame_stream_linux::with_source(source, "interval capture", |sink, bus| {
+    crate::linux::frame_stream::with_source(source, "interval capture", |sink, bus| {
         capture_frames(sink, bus, options, &stop, &mut save, &mut progress)
     })
 }

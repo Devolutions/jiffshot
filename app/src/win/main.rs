@@ -1,23 +1,6 @@
+use super::{app, capture_window, drag_out, ocr, settings, tray, video, vm, vm_support, winutil};
+use crate::{canvas, ui};
 // Windows application entry point; the shared editor model is in jiffshot-doc.
-
-mod app;
-mod canvas;
-mod capture_window;
-mod drag_out;
-mod library;
-mod library_tags;
-mod ocr;
-mod prefs;
-mod settings;
-mod share;
-mod trace;
-mod tray;
-mod ui;
-mod ui_only;
-mod video;
-mod vm;
-mod vm_support;
-mod winutil;
 
 use app::act;
 use jiffshot_doc::editor::Tool;
@@ -503,7 +486,7 @@ impl MainViewModel for Model {
     }
 }
 
-fn main() -> rustolonia::Result<()> {
+pub(crate) fn run() -> rustolonia::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Command-line tools and self-tests run and exit without the app.
     if let Some(code) = jiffshot_workflow::run_command(&args) {
@@ -599,7 +582,7 @@ fn main() -> rustolonia::Result<()> {
 #[cfg(test)]
 #[allow(dead_code)]
 mod resource_tests {
-    include!("../../assets/icon_res.rs");
+    include!("../../../assets/icon_res.rs");
 
     #[test]
     fn pe_version_parts_parses_semver_and_strips_suffixes() {

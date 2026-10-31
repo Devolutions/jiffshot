@@ -146,7 +146,7 @@ impl ksni::Tray for Item {
 
 fn tray_icon() -> Result<Vec<u8>, String> {
     let image = image::load_from_memory_with_format(
-        include_bytes!("../../assets/jiffshot-tray.png"),
+        include_bytes!("../../../assets/jiffshot-tray.png"),
         image::ImageFormat::Png,
     )
     .map_err(|error| format!("could not load the tray icon: {error}"))?
@@ -358,7 +358,7 @@ mod tests {
     fn tray_icon_matches_the_embedded_argb_pixels() {
         let pixels = tray_icon().expect("the embedded icon should decode");
         let source = image::load_from_memory_with_format(
-            include_bytes!("../../assets/jiffshot-tray.png"),
+            include_bytes!("../../../assets/jiffshot-tray.png"),
             image::ImageFormat::Png,
         )
         .expect("the original icon should decode")

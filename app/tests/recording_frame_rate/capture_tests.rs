@@ -536,7 +536,7 @@ fn assert_frame_pixels(
     expected_screen: [u8; 3],
     webcam_xy: (u32, u32),
 ) {
-    let frame = crate::video_linux::frame_at(path, seconds)
+    let frame = crate::linux::video::frame_at(path, seconds)
         .expect("recording should contain a decodable frame at the requested time");
     let image = frame.flatten();
     for (point, expected) in [(screen_xy, expected_screen), (webcam_xy, [0, 0, 255])] {
@@ -681,11 +681,11 @@ fn record_virtual_portal(case: PortalRecordingCase) -> PathBuf {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .expect("real-portal test should use a private runtime directory");
-    crate::settings_linux::set_capture_directory(&runtime.join("frame-rate-captures"))
+    crate::linux::settings::set_capture_directory(&runtime.join("frame-rate-captures"))
         .expect("real-portal captures should use the private runtime directory");
-    crate::settings_linux::set_recording_frame_rate(RecordingFrameRate::Fps24)
+    crate::linux::settings::set_recording_frame_rate(RecordingFrameRate::Fps24)
         .expect("the selected rate should be saved");
-    let selected = crate::settings_linux::recording_frame_rate()
+    let selected = crate::linux::settings::recording_frame_rate()
         .expect("the selected rate should load at recording start");
     assert_eq!(selected, RecordingFrameRate::Fps24);
     let (commands, receiver) = async_channel::bounded(8);
@@ -711,7 +711,7 @@ fn record_virtual_portal(case: PortalRecordingCase) -> PathBuf {
                 assert_eq!(next_state(), RecordingState::Recording);
             }
             PortalRecordingCase::Restart => {
-                crate::settings_linux::set_recording_frame_rate(RecordingFrameRate::Fps60)
+                crate::linux::settings::set_recording_frame_rate(RecordingFrameRate::Fps60)
                     .expect("a new preference should save while recording");
                 commands
                     .send_blocking(RecordingCommand::Restart)
@@ -818,7 +818,7 @@ fn portal_fixed_rate_pause_preserves_video_webcam_and_virtual_audio() {
 fn portal_fixed_rate_restart_keeps_original_choice_and_discards_old_segment() {
     let path = record_virtual_portal(PortalRecordingCase::Restart);
     assert_eq!(
-        crate::settings_linux::recording_frame_rate()
+        crate::linux::settings::recording_frame_rate()
             .expect("the changed preference should remain saved"),
         RecordingFrameRate::Fps60
     );

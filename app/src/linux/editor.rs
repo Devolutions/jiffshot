@@ -453,7 +453,7 @@ pub(super) fn apply_document_effect(
 
 pub(super) fn capture_info(source: Option<&Path>) -> Result<String, String> {
     let metadata = source
-        .map(super::library_linux::read_metadata)
+        .map(super::library::read_metadata)
         .transpose()?
         .unwrap_or_default();
     let mut parts = [

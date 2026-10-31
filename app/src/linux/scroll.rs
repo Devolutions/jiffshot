@@ -9,7 +9,7 @@ use jiffshot_doc::Document;
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
-use crate::frame_stream_linux::{document_from_frame, frame_from_sample};
+use crate::linux::frame_stream::{document_from_frame, frame_from_sample};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
@@ -353,8 +353,8 @@ pub(super) async fn capture(
     progress: impl FnMut(Progress),
 ) -> Result<Option<Captured>, String> {
     gst::init().map_err(|error| format!("could not initialize GStreamer: {error}"))?;
-    let stream = crate::capture_linux::open_portal_stream(CursorMode::Hidden).await?;
-    let result = crate::capture_linux::pipewire_source(stream.remote.as_raw_fd(), stream.node_id)
+    let stream = crate::linux::capture::open_portal_stream(CursorMode::Hidden).await?;
+    let result = crate::linux::capture::pipewire_source(stream.remote.as_raw_fd(), stream.node_id)
         .and_then(|source| capture_from_source(source, mode, stop, progress));
     stream.finish(result).await
 }
@@ -366,7 +366,7 @@ fn capture_from_source(
     mut progress: impl FnMut(Progress),
 ) -> Result<Option<Captured>, String> {
     let description = format!("{} capture", mode.description());
-    crate::frame_stream_linux::with_source(source, &description, |sink, bus| {
+    crate::linux::frame_stream::with_source(source, &description, |sink, bus| {
         capture_frames(sink, bus, mode, &stop, &mut progress)
     })
 }

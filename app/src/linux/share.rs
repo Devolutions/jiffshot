@@ -86,7 +86,7 @@ fn portal_result(result: Result<(), ashpd::Error>, action: &str) -> Result<bool,
 }
 
 pub(super) fn copy_automatically(source: &Path) -> Result<Option<PathBuf>, String> {
-    let directory = crate::settings_linux::automatic_copy_directory()?;
+    let directory = crate::linux::settings::automatic_copy_directory()?;
     copy_automatically_to(source, directory.as_deref())
 }
 

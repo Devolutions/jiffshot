@@ -852,7 +852,7 @@ fn export_video_ranges(
                         .map_err(|error| format!("could not create video export source: {error}"))?
                         .downcast::<gst_app::AppSrc>()
                         .map_err(|_| "could not initialize the video export source".to_owned())?;
-                    let pipeline = crate::capture_linux::recording_pipeline(
+                    let pipeline = crate::linux::capture::recording_pipeline(
                         source.clone().upcast(),
                         &staged_path,
                     )?;
@@ -900,7 +900,7 @@ fn export_video_ranges(
         let pipeline = output_pipeline
             .as_ref()
             .ok_or_else(|| "the selected video ranges contain no frames".to_owned())?;
-        crate::capture_linux::finish_recording(pipeline)?;
+        crate::linux::capture::finish_recording(pipeline)?;
         if !staged_path.is_file() {
             return Err("video export did not create an MP4 file".to_owned());
         }
@@ -1152,7 +1152,8 @@ fn trim_video_pipeline(
     let staging = tempfile::tempdir_in(directory)
         .map_err(|error| format!("could not create temporary video export: {error}"))?;
     let staged_path: PathBuf = staging.path().join("trimmed.mp4");
-    let pipeline = crate::capture_linux::recording_pipeline(appsrc.clone().upcast(), &staged_path)?;
+    let pipeline =
+        crate::linux::capture::recording_pipeline(appsrc.clone().upcast(), &staged_path)?;
     let output_bus = pipeline
         .bus()
         .ok_or_else(|| "video export pipeline has no event bus".to_owned())?;
@@ -1191,7 +1192,7 @@ fn trim_video_pipeline(
             stopped,
         );
     }
-    crate::capture_linux::finish_recording(&pipeline)?;
+    crate::linux::capture::finish_recording(&pipeline)?;
     if !staged_path.is_file() {
         return Err("video export did not create an MP4 file".to_owned());
     }

@@ -1,10 +1,10 @@
 //! Persistent Linux preferences used by the capture and editor workflows.
 
-use crate::capture_linux::{
+use crate::linux::capture::{
     CaptureCursor, RecordingFrameRate, WebcamConfiguration, WebcamCorner, WebcamLayout, WebcamShape,
 };
-use crate::schedule_linux::{ScheduleDay, ScheduleTime};
-use crate::shortcut_linux::{RecordingStartShortcut, ShortcutOptions};
+use crate::linux::schedule::{ScheduleDay, ScheduleTime};
+use crate::linux::shortcut::{RecordingStartShortcut, ShortcutOptions};
 use serde_json::{Map, Value};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -2392,5 +2392,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "../tests/recording_frame_rate/settings_tests.rs"]
+#[path = "../../tests/recording_frame_rate/settings_tests.rs"]
 mod recording_frame_rate_regression;

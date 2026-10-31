@@ -45,7 +45,7 @@ pub(super) struct CaptureMetadata {
 }
 
 pub fn search_captures(query: &str, filter: CaptureFilter) -> Result<Vec<PathBuf>, String> {
-    search_captures_in(&crate::capture_linux::capture_directory()?, query, filter)
+    search_captures_in(&crate::linux::capture::capture_directory()?, query, filter)
 }
 
 fn search_captures_in(

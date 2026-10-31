@@ -74,8 +74,8 @@ impl RecordingStartShortcut {
             .ok_or_else(|| "select a recording shortcut audio option".to_owned())
     }
 
-    pub(super) fn audio(self) -> Option<crate::capture_linux::RecordingAudio> {
-        use crate::capture_linux::RecordingAudio;
+    pub(super) fn audio(self) -> Option<crate::linux::capture::RecordingAudio> {
+        use crate::linux::capture::RecordingAudio;
 
         match self {
             Self::Disabled => None,
@@ -165,7 +165,7 @@ pub(super) async fn listen(
             .await
             .map_err(|error| format!("could not close global shortcut session: {error}"))
     };
-    crate::portal_linux::combine_session_results(result, closed)
+    crate::linux::portal::combine_session_results(result, closed)
 }
 
 async fn listen_in_session(
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn recording_start_choices_map_to_expected_audio_modes() {
-        use crate::capture_linux::RecordingAudio;
+        use crate::linux::capture::RecordingAudio;
 
         let expected = [
             None,

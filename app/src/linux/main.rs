@@ -1,34 +1,9 @@
-mod autostart_linux;
-mod canvas;
-mod capture_linux;
-mod clipboard_linux;
-mod editor_linux;
-mod file_dialog_linux;
-mod frame_stream_linux;
-mod interval_linux;
-mod launch_linux;
-mod library_linux;
-mod library_tags;
-mod notification_linux;
-mod ocr_linux;
-mod portal_frame_linux;
-mod portal_linux;
-mod schedule_linux;
-mod screenshot_linux;
-mod scroll_linux;
-mod settings_linux;
-mod share_linux;
-mod shortcut_linux;
-mod template_linux;
-mod trace;
-mod tray_linux;
-#[path = "ui_linux.rs"]
-#[allow(dead_code)]
-mod ui;
-mod ui_only;
-mod video_linux;
-
-use file_dialog_linux::PickerOutcome;
+use super::{
+    autostart, capture, clipboard, editor, file_dialog, interval, launch, library, notification,
+    ocr, schedule, screenshot, scroll, settings, share, shortcut, template, tray, video,
+};
+use crate::{canvas, ui};
+use file_dialog::PickerOutcome;
 use jiffshot_doc::combine::Arrangement;
 use jiffshot_doc::editor::{Editor, Tool, TOOLS};
 use jiffshot_doc::{effects, Document, Rgba};
@@ -48,12 +23,11 @@ use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::time::Duration;
 
-static RECORDING: parking_lot::Mutex<
-    Option<async_channel::Sender<capture_linux::RecordingCommand>>,
-> = parking_lot::Mutex::new(None);
+static RECORDING: parking_lot::Mutex<Option<async_channel::Sender<capture::RecordingCommand>>> =
+    parking_lot::Mutex::new(None);
 struct ActiveScrollCapture {
-    mode: scroll_linux::Mode,
-    stop: async_channel::Sender<scroll_linux::Action>,
+    mode: scroll::Mode,
+    stop: async_channel::Sender<scroll::Action>,
 }
 
 static SCROLL_CAPTURE: parking_lot::Mutex<Option<ActiveScrollCapture>> =
@@ -79,12 +53,11 @@ static SINGLE_CAPTURES_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static LIBRARY_REQUEST: AtomicU64 = AtomicU64::new(0);
 static LIBRARY_OPEN_REQUEST: AtomicU64 = AtomicU64::new(0);
 static AUTOMATIC_COPY_REQUEST: AtomicU64 = AtomicU64::new(0);
-static DOCUMENT_LOAD_REQUESTS: editor_linux::DocumentLoadRequests =
-    editor_linux::DocumentLoadRequests::new();
+static DOCUMENT_LOAD_REQUESTS: editor::DocumentLoadRequests = editor::DocumentLoadRequests::new();
 static DOCUMENT_SOURCE: parking_lot::Mutex<Option<PathBuf>> = parking_lot::Mutex::new(None);
 struct ActiveTray {
     id: u64,
-    session: tray_linux::Session,
+    session: tray::Session,
 }
 static TRAY: parking_lot::Mutex<Option<ActiveTray>> = parking_lot::Mutex::new(None);
 static NEXT_TRAY_ID: AtomicU64 = AtomicU64::new(0);
@@ -183,14 +156,14 @@ struct ScreenPresetControls {
     name: Signal<String>,
     delay: Signal<String>,
     cursor: Signal<bool>,
-    presets: Signal<Vec<settings_linux::ScreenCapturePreset>>,
+    presets: Signal<Vec<settings::ScreenCapturePreset>>,
 }
 
 impl ScreenPresetControls {
     fn new(
-        presets: Vec<settings_linux::ScreenCapturePreset>,
+        presets: Vec<settings::ScreenCapturePreset>,
         delay: u64,
-        cursor: capture_linux::CaptureCursor,
+        cursor: capture::CaptureCursor,
     ) -> Self {
         Self {
             visible: Signal::new(false),
@@ -262,8 +235,8 @@ impl EditorControls {
         self.shadow.set_if_changed(style.shadow);
     }
 
-    fn style_inputs(self) -> editor_linux::StyleInputs {
-        editor_linux::StyleInputs {
+    fn style_inputs(self) -> editor::StyleInputs {
+        editor::StyleInputs {
             stroke: self.stroke.get(),
             fill: self.fill.get(),
             text_color: self.text_color.get(),
@@ -286,7 +259,7 @@ struct LibraryControls {
     pinned: Signal<bool>,
     query: Signal<String>,
     active_query: Signal<String>,
-    filter: Signal<library_linux::CaptureFilter>,
+    filter: Signal<library::CaptureFilter>,
     recent: Signal<bool>,
 }
 
@@ -299,7 +272,7 @@ impl LibraryControls {
             pinned: Signal::new(false),
             query: Signal::new(String::new()),
             active_query: Signal::new(String::new()),
-            filter: Signal::new(library_linux::CaptureFilter::All),
+            filter: Signal::new(library::CaptureFilter::All),
             recent: Signal::new(true),
         }
     }
@@ -334,20 +307,20 @@ struct ShortcutUi {
     webcam: Signal<bool>,
 }
 
-fn main() -> Result<()> {
-    let launch = match launch_linux::parse(std::env::args_os().skip(1)) {
+pub(crate) fn run() -> Result<()> {
+    let launch = match launch::parse(std::env::args_os().skip(1)) {
         Ok(launch) => launch,
         Err(error) => {
-            eprintln!("jiffshot: {error}\n\n{}", launch_linux::USAGE);
+            eprintln!("jiffshot: {error}\n\n{}", launch::USAGE);
             std::process::exit(2);
         }
     };
     match launch {
-        launch_linux::Launch::Help => {
-            println!("{}", launch_linux::USAGE);
+        launch::Launch::Help => {
+            println!("{}", launch::USAGE);
             return Ok(());
         }
-        launch_linux::Launch::Version => {
+        launch::Launch::Version => {
             println!("jiffshot {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
@@ -356,7 +329,7 @@ fn main() -> Result<()> {
     App::load_from_env()?.run(move |scope| {
         let document = Document::blank(1280, 720, Rgba::WHITE);
         let mut initial_status = "Open an image or .jsd document to start editing.".to_owned();
-        match settings_linux::theme() {
+        match settings::theme() {
             Ok(theme) => {
                 if let Err(error) = scope.set_requested_theme_variant(theme_variant(&theme)) {
                     initial_status = format!("{initial_status} Could not apply theme: {error}");
@@ -368,17 +341,17 @@ fn main() -> Result<()> {
             }
         }
         let mut shortcuts_valid = true;
-        let preferred_shortcut = match settings_linux::global_capture_shortcut() {
+        let preferred_shortcut = match settings::global_capture_shortcut() {
             Ok(shortcut) => shortcut,
             Err(error) => {
                 shortcuts_valid = false;
                 initial_status = format!(
                     "{initial_status} Could not load the global shortcut preference: {error}"
                 );
-                settings_linux::DEFAULT_GLOBAL_CAPTURE_SHORTCUT.to_owned()
+                settings::DEFAULT_GLOBAL_CAPTURE_SHORTCUT.to_owned()
             }
         };
-        let recording_shortcut_preference = match settings_linux::global_recording_shortcuts() {
+        let recording_shortcut_preference = match settings::global_recording_shortcuts() {
             Ok(enabled) => enabled,
             Err(error) => {
                 shortcuts_valid = false;
@@ -388,17 +361,17 @@ fn main() -> Result<()> {
                 false
             }
         };
-        let recording_start_preference = match settings_linux::global_recording_start() {
+        let recording_start_preference = match settings::global_recording_start() {
             Ok(choice) => choice,
             Err(error) => {
                 shortcuts_valid = false;
                 initial_status = format!(
                     "{initial_status} Could not load the recording start shortcut preference: {error}"
                 );
-                shortcut_linux::RecordingStartShortcut::Disabled
+                shortcut::RecordingStartShortcut::Disabled
             }
         };
-        let shortcut_preference = match settings_linux::global_shortcuts_enabled() {
+        let shortcut_preference = match settings::global_shortcuts_enabled() {
             Ok(enabled) => enabled,
             Err(error) => {
                 initial_status = format!(
@@ -407,7 +380,7 @@ fn main() -> Result<()> {
                 false
             }
         };
-        let copy_capture_preference = match settings_linux::copy_capture_to_clipboard() {
+        let copy_capture_preference = match settings::copy_capture_to_clipboard() {
             Ok(enabled) => enabled,
             Err(error) => {
                 initial_status = format!(
@@ -416,7 +389,7 @@ fn main() -> Result<()> {
                 false
             }
         };
-        let tray_preference = match settings_linux::tray_enabled() {
+        let tray_preference = match settings::tray_enabled() {
             Ok(enabled) => enabled,
             Err(error) => {
                 initial_status =
@@ -424,7 +397,7 @@ fn main() -> Result<()> {
                 false
             }
         };
-        let capture_delay_preference = match settings_linux::capture_delay_seconds() {
+        let capture_delay_preference = match settings::capture_delay_seconds() {
             Ok(seconds) => seconds,
             Err(error) => {
                 initial_status =
@@ -432,7 +405,7 @@ fn main() -> Result<()> {
                 0
             }
         };
-        let screen_capture_presets = match settings_linux::screen_capture_presets() {
+        let screen_capture_presets = match settings::screen_capture_presets() {
             Ok(presets) => presets,
             Err(error) => {
                 initial_status =
@@ -440,24 +413,24 @@ fn main() -> Result<()> {
                 Vec::new()
             }
         };
-        let interval_preference = match settings_linux::interval_preferences() {
+        let interval_preference = match settings::interval_preferences() {
             Ok(preferences) => preferences,
             Err(error) => {
                 initial_status =
                     format!("{initial_status} Could not load interval preferences: {error}");
-                settings_linux::IntervalPreferences::default()
+                settings::IntervalPreferences::default()
             }
         };
-        let schedule_preference = match settings_linux::schedule_preferences() {
+        let schedule_preference = match settings::schedule_preferences() {
             Ok(preferences) => preferences,
             Err(error) => {
                 initial_status =
                     format!("{initial_status} Could not load the daily capture schedule: {error}");
-                settings_linux::SchedulePreferences::default()
+                settings::SchedulePreferences::default()
             }
         };
-        let default_cursors = settings_linux::CursorPreferences::default();
-        let capture_cursor_preference = match settings_linux::capture_cursor() {
+        let default_cursors = settings::CursorPreferences::default();
+        let capture_cursor_preference = match settings::capture_cursor() {
             Ok(cursor) => cursor,
             Err(error) => {
                 initial_status =
@@ -465,7 +438,7 @@ fn main() -> Result<()> {
                 default_cursors.capture
             }
         };
-        let recording_cursor_preference = match settings_linux::recording_cursor() {
+        let recording_cursor_preference = match settings::recording_cursor() {
             Ok(cursor) => cursor,
             Err(error) => {
                 initial_status = format!(
@@ -474,25 +447,25 @@ fn main() -> Result<()> {
                 default_cursors.recording
             }
         };
-        let recording_frame_rate_preference = match settings_linux::recording_frame_rate() {
+        let recording_frame_rate_preference = match settings::recording_frame_rate() {
             Ok(frame_rate) => frame_rate,
             Err(error) => {
                 initial_status = format!(
                     "{initial_status} Could not load the recording frame rate: {error}"
                 );
-                capture_linux::RecordingFrameRate::Source
+                capture::RecordingFrameRate::Source
             }
         };
-        let webcam_preference = match settings_linux::webcam_configuration() {
+        let webcam_preference = match settings::webcam_configuration() {
             Ok(configuration) => configuration,
             Err(error) => {
                 initial_status =
                     format!("{initial_status} Could not load webcam preferences: {error}");
-                capture_linux::WebcamConfiguration::default()
+                capture::WebcamConfiguration::default()
             }
         };
         let mut editor = Editor::new(document);
-        match ocr_linux::Recognizer::new() {
+        match ocr::Recognizer::new() {
             Ok(recognizer) => editor.analyzer = Some(Box::new(recognizer)),
             Err(error) => {
                 initial_status = format!("{initial_status} OCR unavailable: {error}");
@@ -502,7 +475,7 @@ fn main() -> Result<()> {
 
         let view = ui::canvas_view::CanvasView::new(scope)?;
         let canvas = ui::UiOnly::new(view.clone());
-        let recent = match capture_linux::recent_captures() {
+        let recent = match capture::recent_captures() {
             Ok(recent) => recent,
             Err(error) => {
                 initial_status = format!("{initial_status} Capture library unavailable: {error}");
@@ -512,7 +485,7 @@ fn main() -> Result<()> {
         let captures = Signal::new(recent);
         let status = Signal::new(initial_status);
         let initial_load = match &launch {
-            launch_linux::Launch::Editor(Some(_)) => begin_document_load(status),
+            launch::Launch::Editor(Some(_)) => begin_document_load(status),
             _ => None,
         };
         let webcam = Signal::new(false);
@@ -535,7 +508,7 @@ fn main() -> Result<()> {
         let webcam_size = Signal::new(webcam_preference.layout().size_percent().to_string());
         let webcam_corner = Signal::new(
             webcam_preference.layout().corner().index()
-                + if webcam_preference.layout().shape() == capture_linux::WebcamShape::Circle {
+                + if webcam_preference.layout().shape() == capture::WebcamShape::Circle {
                     4
                 } else {
                     0
@@ -600,9 +573,9 @@ fn main() -> Result<()> {
                 let canvas = canvas.clone();
                 move |scope| {
                     let direction = if horizontal_scrolling.get() {
-                        scroll_linux::Direction::Horizontal
+                        scroll::Direction::Horizontal
                     } else {
-                        scroll_linux::Direction::Vertical
+                        scroll::Direction::Vertical
                     };
                     toggle_scrolling_capture(
                         scope,
@@ -610,7 +583,7 @@ fn main() -> Result<()> {
                         status,
                         captures,
                         library,
-                        scroll_linux::Mode::Scrolling(direction),
+                        scroll::Mode::Scrolling(direction),
                     )
                 }
             }))
@@ -631,7 +604,7 @@ fn main() -> Result<()> {
                         status,
                         captures,
                         library,
-                        capture_linux::RecordingAudio::Disabled,
+                        capture::RecordingAudio::Disabled,
                         webcam.get(),
                     )
                 }
@@ -676,7 +649,7 @@ fn main() -> Result<()> {
                         status,
                         captures,
                         library,
-                        capture_linux::RecordingAudio::Microphone,
+                        capture::RecordingAudio::Microphone,
                         webcam.get(),
                     )
                 }
@@ -688,7 +661,7 @@ fn main() -> Result<()> {
                         status,
                         captures,
                         library,
-                        capture_linux::RecordingAudio::System,
+                        capture::RecordingAudio::System,
                         webcam.get(),
                     )
                 }
@@ -702,7 +675,7 @@ fn main() -> Result<()> {
                             status,
                             captures,
                             library,
-                            capture_linux::RecordingAudio::SystemAndMicrophone,
+                            capture::RecordingAudio::SystemAndMicrophone,
                             webcam.get(),
                         )
                     }
@@ -710,14 +683,14 @@ fn main() -> Result<()> {
             ))
             .child(action_button("Restart recording", move |_| {
                 send_recording_command(
-                    capture_linux::RecordingCommand::Restart,
+                    capture::RecordingCommand::Restart,
                     "Restarting screen recording…",
                     status,
                 )
             }))
             .child(action_button("Cancel recording", move |_| {
                 send_recording_command(
-                    capture_linux::RecordingCommand::Cancel,
+                    capture::RecordingCommand::Cancel,
                     "Cancelling screen recording…",
                     status,
                 )
@@ -739,7 +712,7 @@ fn main() -> Result<()> {
                         status,
                         captures,
                         library,
-                        scroll_linux::Mode::Panoramic,
+                        scroll::Mode::Panoramic,
                     )
                 }
             }))
@@ -751,9 +724,9 @@ fn main() -> Result<()> {
                     .child(TextBlock::el().text("Recording start shortcut:"))
                     .child(
                         template_selector(
-                            shortcut_linux::RecordingStartShortcut::ALL
+                            shortcut::RecordingStartShortcut::ALL
                                 .into_iter()
-                                .map(shortcut_linux::RecordingStartShortcut::label),
+                                .map(shortcut::RecordingStartShortcut::label),
                             recording_start,
                             status,
                             "recording shortcut audio",
@@ -942,7 +915,7 @@ fn main() -> Result<()> {
                     .tool_tip_tip("Save capture preferences to apply this choice"),
             )
             .child(action_button("Save capture preferences", move |_| {
-                match settings_linux::set_copy_capture_to_clipboard(copy_capture.get()) {
+                match settings::set_copy_capture_to_clipboard(copy_capture.get()) {
                     Ok(()) => status.set_if_changed("Capture preferences saved.".to_owned()),
                     Err(error) => {
                         status.set_if_changed(format!("Could not save capture preferences: {error}"))
@@ -970,7 +943,7 @@ fn main() -> Result<()> {
             )
             .child(
                 action_button("Enable login startup", move |_| {
-                    match autostart_linux::enable() {
+                    match autostart::enable() {
                         Ok(()) => status.set_if_changed(
                             "Login startup enabled; Jiffshot uses the tray if available.".to_owned(),
                         ),
@@ -983,7 +956,7 @@ fn main() -> Result<()> {
             )
             .child(
                 action_button("Disable login startup", move |_| {
-                    match autostart_linux::disable() {
+                    match autostart::disable() {
                         Ok(()) => status.set_if_changed("Login startup disabled.".to_owned()),
                         Err(error) => status
                             .set_if_changed(format!("Could not disable login startup: {error}")),
@@ -1008,11 +981,11 @@ fn main() -> Result<()> {
                     .tool_tip_tip("Save cursor preferences to apply to new recordings"),
             )
             .child(action_button("Save cursor preferences", move |_| {
-                let preferences = settings_linux::CursorPreferences {
-                    capture: capture_linux::CaptureCursor::from_included(capture_cursor.get()),
-                    recording: capture_linux::CaptureCursor::from_included(recording_cursor.get()),
+                let preferences = settings::CursorPreferences {
+                    capture: capture::CaptureCursor::from_included(capture_cursor.get()),
+                    recording: capture::CaptureCursor::from_included(recording_cursor.get()),
                 };
-                match settings_linux::set_cursor_preferences(preferences) {
+                match settings::set_cursor_preferences(preferences) {
                     Ok(()) => status.set_if_changed("Cursor preferences saved.".to_owned()),
                     Err(error) => {
                         status.set_if_changed(format!("Could not save cursor preferences: {error}"))
@@ -1024,9 +997,9 @@ fn main() -> Result<()> {
             .child(TextBlock::el().text("Recording frame rate:"))
             .child(
                 template_selector(
-                    capture_linux::RecordingFrameRate::ALL
+                    capture::RecordingFrameRate::ALL
                         .into_iter()
-                        .map(capture_linux::RecordingFrameRate::label),
+                        .map(capture::RecordingFrameRate::label),
                     recording_frame_rate,
                     status,
                     "recording frame rate",
@@ -1034,8 +1007,8 @@ fn main() -> Result<()> {
                 .tool_tip_tip("Save the frame rate to apply it to new recordings"),
             )
             .child(action_button("Save recording frame rate", move |_| {
-                let result = capture_linux::RecordingFrameRate::from_index(recording_frame_rate.get())
-                    .and_then(settings_linux::set_recording_frame_rate);
+                let result = capture::RecordingFrameRate::from_index(recording_frame_rate.get())
+                    .and_then(settings::set_recording_frame_rate);
                 match result {
                     Ok(()) => status.set_if_changed("Recording frame rate saved.".to_owned()),
                     Err(error) => {
@@ -1058,7 +1031,7 @@ fn main() -> Result<()> {
                     .trim()
                     .parse::<u64>()
                     .map_err(|_| "the capture delay must be a whole number of seconds".to_owned())
-                    .and_then(settings_linux::set_capture_delay_seconds);
+                    .and_then(settings::set_capture_delay_seconds);
                 match result {
                     Ok(()) => status.set_if_changed("Capture delay saved.".to_owned()),
                     Err(error) => {
@@ -1114,12 +1087,12 @@ fn main() -> Result<()> {
                     let index = usize::try_from(webcam_corner.get())
                         .map_err(|_| "select a webcam position and shape".to_owned())?;
                     let shape = match index {
-                        0..=3 => capture_linux::WebcamShape::Rectangle,
-                        4..=7 => capture_linux::WebcamShape::Circle,
+                        0..=3 => capture::WebcamShape::Rectangle,
+                        4..=7 => capture::WebcamShape::Circle,
                         _ => return Err("select a webcam position and shape".to_owned()),
                     };
-                    let corner = capture_linux::WebcamCorner::ALL
-                        .get(index % capture_linux::WebcamCorner::ALL.len())
+                    let corner = capture::WebcamCorner::ALL
+                        .get(index % capture::WebcamCorner::ALL.len())
                         .copied()
                         .ok_or_else(|| "select a webcam position and shape".to_owned())?;
                     let size = webcam_size
@@ -1127,10 +1100,10 @@ fn main() -> Result<()> {
                         .trim()
                         .parse::<u8>()
                         .map_err(|_| "webcam size must be a whole percentage".to_owned())?;
-                    let layout = capture_linux::WebcamLayout::new(corner, size)?.with_shape(shape);
+                    let layout = capture::WebcamLayout::new(corner, size)?.with_shape(shape);
                     let configuration =
-                        capture_linux::WebcamConfiguration::new(&webcam_device.get(), layout)?;
-                    settings_linux::set_webcam_configuration(&configuration)
+                        capture::WebcamConfiguration::new(&webcam_device.get(), layout)?;
+                    settings::set_webcam_configuration(&configuration)
                 })();
                 match result {
                     Ok(()) => status.set_if_changed("Webcam preferences saved.".to_owned()),
@@ -1188,9 +1161,9 @@ fn main() -> Result<()> {
                 let result = schedule_time
                     .get()
                     .trim()
-                    .parse::<schedule_linux::ScheduleTime>()
+                    .parse::<schedule::ScheduleTime>()
                     .and_then(|time| {
-                        settings_linux::set_schedule_preferences(time, schedule_enabled.get())
+                        settings::set_schedule_preferences(time, schedule_enabled.get())
                     });
                 match result {
                     Ok(preferences) => {
@@ -1231,7 +1204,7 @@ fn main() -> Result<()> {
                     scope,
                     captures,
                     library,
-                    library_linux::CaptureFilter::All,
+                    library::CaptureFilter::All,
                     status,
                 )
             }))
@@ -1240,7 +1213,7 @@ fn main() -> Result<()> {
                     scope,
                     captures,
                     library,
-                    library_linux::CaptureFilter::Images,
+                    library::CaptureFilter::Images,
                     status,
                 )
             }))
@@ -1249,7 +1222,7 @@ fn main() -> Result<()> {
                     scope,
                     captures,
                     library,
-                    library_linux::CaptureFilter::Videos,
+                    library::CaptureFilter::Videos,
                     status,
                 )
             }))
@@ -1258,7 +1231,7 @@ fn main() -> Result<()> {
                     scope,
                     captures,
                     library,
-                    library_linux::CaptureFilter::Pinned,
+                    library::CaptureFilter::Pinned,
                     status,
                 )
             }))
@@ -1267,7 +1240,7 @@ fn main() -> Result<()> {
                     scope,
                     captures,
                     library,
-                    library_linux::CaptureFilter::Tagged,
+                    library::CaptureFilter::Tagged,
                     status,
                 )
             }))
@@ -1406,7 +1379,7 @@ fn main() -> Result<()> {
         wire_editor_shortcuts(scope, &window, canvas.clone(), status, captures, library)?;
         scope.mount(window)?;
         if tray_preference {
-            tray_ui.start(if matches!(launch, launch_linux::Launch::Background) {
+            tray_ui.start(if matches!(launch, launch::Launch::Background) {
                 TrayStart::BackgroundLaunch
             } else {
                 TrayStart::RestorePreference
@@ -1425,23 +1398,23 @@ fn main() -> Result<()> {
         let launch_scope = scope.clone();
         let launch_canvas = canvas.clone();
         scope.post(move || match launch {
-            launch_linux::Launch::Capture => {
+            launch::Launch::Capture => {
                 capture_screen(&launch_scope, launch_canvas, status, captures, library)
             }
-            launch_linux::Launch::InteractiveCapture => {
+            launch::Launch::InteractiveCapture => {
                 capture_interactive(&launch_scope, launch_canvas, status, captures, library)
             }
-            launch_linux::Launch::GrabText => grab_screen_text(&launch_scope, status),
-            launch_linux::Launch::Scrolling
-            | launch_linux::Launch::HorizontalScrolling
-            | launch_linux::Launch::Panoramic => {
+            launch::Launch::GrabText => grab_screen_text(&launch_scope, status),
+            launch::Launch::Scrolling
+            | launch::Launch::HorizontalScrolling
+            | launch::Launch::Panoramic => {
                 let mode = match launch {
-                    launch_linux::Launch::HorizontalScrolling => {
+                    launch::Launch::HorizontalScrolling => {
                         horizontal_scrolling.set_if_changed(true);
-                        scroll_linux::Mode::Scrolling(scroll_linux::Direction::Horizontal)
+                        scroll::Mode::Scrolling(scroll::Direction::Horizontal)
                     }
-                    launch_linux::Launch::Panoramic => scroll_linux::Mode::Panoramic,
-                    _ => scroll_linux::Mode::Scrolling(scroll_linux::Direction::Vertical),
+                    launch::Launch::Panoramic => scroll::Mode::Panoramic,
+                    _ => scroll::Mode::Scrolling(scroll::Direction::Vertical),
                 };
                 toggle_scrolling_capture(
                     &launch_scope,
@@ -1452,9 +1425,9 @@ fn main() -> Result<()> {
                     mode,
                 );
             }
-            launch_linux::Launch::Interval => {
+            launch::Launch::Interval => {
                 interval_visible.set_if_changed(true);
-                match settings_linux::interval_preferences() {
+                match settings::interval_preferences() {
                     Ok(preferences) => toggle_interval_capture(
                         &launch_scope,
                         status,
@@ -1467,15 +1440,15 @@ fn main() -> Result<()> {
                         .set_if_changed(format!("Could not load interval preferences: {error}")),
                 }
             }
-            launch_linux::Launch::Record => toggle_screen_recording(
+            launch::Launch::Record => toggle_screen_recording(
                 &launch_scope,
                 status,
                 captures,
                 library,
-                capture_linux::RecordingAudio::Disabled,
+                capture::RecordingAudio::Disabled,
                 false,
             ),
-            launch_linux::Launch::Editor(Some(path)) => {
+            launch::Launch::Editor(Some(path)) => {
                 if let Some(pending) = initial_load {
                     start_document_load(
                         &launch_scope,
@@ -1488,14 +1461,14 @@ fn main() -> Result<()> {
                     );
                 }
             }
-            launch_linux::Launch::Background if !tray_preference => status.set_if_changed(
+            launch::Launch::Background if !tray_preference => status.set_if_changed(
                 "Login startup opened the editor; enable the tray to start hidden.".to_owned(),
             ),
-            launch_linux::Launch::Background
+            launch::Launch::Background
             |
-            launch_linux::Launch::Editor(None)
-            | launch_linux::Launch::Help
-            | launch_linux::Launch::Version => {}
+            launch::Launch::Editor(None)
+            | launch::Launch::Help
+            | launch::Launch::Version => {}
         })?;
         Ok(())
     })
@@ -1511,7 +1484,7 @@ fn theme_variant(theme: &str) -> ThemeVariant {
 
 fn set_linux_theme(scope: &AppScope, theme: &'static str, status: Signal<String>) {
     match scope.set_requested_theme_variant(theme_variant(theme)) {
-        Ok(()) => match settings_linux::set_theme(theme) {
+        Ok(()) => match settings::set_theme(theme) {
             Ok(()) => status.set_if_changed(format!("Theme set to {theme}")),
             Err(error) => status.set_if_changed(format!(
                 "Theme set to {theme} for this session, but could not save the preference: {error}"
@@ -1595,8 +1568,8 @@ fn wire_editor_shortcuts(
         .map(|_| ())
 }
 
-fn selection_shortcut(key: Key, modifiers: i32) -> Option<editor_linux::SelectionAction> {
-    use editor_linux::SelectionAction as Action;
+fn selection_shortcut(key: Key, modifiers: i32) -> Option<editor::SelectionAction> {
+    use editor::SelectionAction as Action;
     const SHIFT: i32 = 1;
     const CONTROL: i32 = 2;
     const CONTROL_SHIFT: i32 = CONTROL | SHIFT;
@@ -1618,9 +1591,9 @@ fn selection_shortcut(key: Key, modifiers: i32) -> Option<editor_linux::Selectio
 fn apply_selection_action(
     canvas: &ui::UiOnly<ui::canvas_view::CanvasView>,
     status: Signal<String>,
-    action: editor_linux::SelectionAction,
+    action: editor::SelectionAction,
 ) {
-    let result = canvas::with_editor(|editor| editor_linux::selection_action(editor, action))
+    let result = canvas::with_editor(|editor| editor::selection_action(editor, action))
         .unwrap_or_else(|| Err("The editor is not available.".to_owned()));
     match result {
         Ok(message) => {
@@ -1669,7 +1642,7 @@ impl TrayUi {
         let id = NEXT_TRAY_ID.fetch_add(1, Ordering::Relaxed) + 1;
         let dispatcher = self.scope.clone();
         let ui = self.clone();
-        let session = match tray_linux::Session::start(move |event| {
+        let session = match tray::Session::start(move |event| {
             let ui = ui.clone();
             if let Err(error) = dispatcher.post(move || ui.handle_event(id, preference, event)) {
                 eprintln!("Could not report the system tray event: {error}");
@@ -1687,12 +1660,12 @@ impl TrayUi {
             .set_if_changed("Connecting to the desktop system tray…".to_owned());
     }
 
-    fn handle_event(&self, id: u64, preference: TrayStart, event: tray_linux::Event) {
+    fn handle_event(&self, id: u64, preference: TrayStart, event: tray::Event) {
         if !TRAY.lock().as_ref().is_some_and(|tray| tray.id == id) {
             return;
         }
         match event {
-            tray_linux::Event::Ready => {
+            tray::Event::Ready => {
                 if !TRAY
                     .lock()
                     .as_ref()
@@ -1701,7 +1674,7 @@ impl TrayUi {
                     return;
                 }
                 if matches!(preference, TrayStart::SavePreference) {
-                    if let Err(error) = settings_linux::set_tray_enabled(true) {
+                    if let Err(error) = settings::set_tray_enabled(true) {
                         TRAY.lock().take();
                         self.status.set_if_changed(format!(
                             "Could not save the system tray preference: {error}"
@@ -1725,7 +1698,7 @@ impl TrayUi {
                     );
                 }
             }
-            tray_linux::Event::Unavailable(error) => {
+            tray::Event::Unavailable(error) => {
                 TRAY.lock().take();
                 let message = format!(
                     "System tray unavailable: {error}. Jiffshot will stay visible; try enabling the tray again."
@@ -1740,13 +1713,13 @@ impl TrayUi {
                     }
                 }
             }
-            tray_linux::Event::Open if tray_is_active() => {
+            tray::Event::Open if tray_is_active() => {
                 if let Err(error) = self.show_window() {
                     self.status
                         .set_if_changed(format!("Could not open the Jiffshot window: {error}"));
                 }
             }
-            tray_linux::Event::Capture if tray_is_active() => match self.show_window() {
+            tray::Event::Capture if tray_is_active() => match self.show_window() {
                 Ok(()) => capture_screen(
                     &self.scope,
                     self.canvas.as_ref().clone(),
@@ -1758,7 +1731,7 @@ impl TrayUi {
                     .status
                     .set_if_changed(format!("Could not open the Jiffshot window: {error}")),
             },
-            tray_linux::Event::Quit if tray_is_active() => {
+            tray::Event::Quit if tray_is_active() => {
                 if tray_capture_in_progress() {
                     if let Err(error) = self.show_window() {
                         eprintln!("Could not restore the Jiffshot window: {error}");
@@ -1777,7 +1750,7 @@ impl TrayUi {
                         .set_if_changed(format!("Could not quit Jiffshot: {error}"));
                 }
             }
-            tray_linux::Event::Open | tray_linux::Event::Capture | tray_linux::Event::Quit => {}
+            tray::Event::Open | tray::Event::Capture | tray::Event::Quit => {}
         }
     }
 
@@ -1806,10 +1779,10 @@ fn report_capture_result(
     status: Signal<String>,
     summary: &'static str,
     message: String,
-    urgency: notification_linux::Urgency,
+    urgency: notification::Urgency,
 ) {
     if WINDOW_HIDDEN.load(Ordering::Acquire) {
-        notification_linux::send(summary, message.clone(), urgency);
+        notification::send(summary, message.clone(), urgency);
     }
     status.set_if_changed(message);
 }
@@ -1830,7 +1803,7 @@ fn tray_capture_in_progress() -> bool {
 }
 
 fn disable_tray(status: Signal<String>) {
-    match settings_linux::set_tray_enabled(false) {
+    match settings::set_tray_enabled(false) {
         Ok(()) => {
             TRAY.lock().take();
             status.set_if_changed(
@@ -1880,7 +1853,7 @@ fn editor_properties_panel(
             move |_| {
                 let text = controls.text.get();
                 editor_action(&canvas, status, "Text updated", |editor| {
-                    editor_linux::apply_text(editor, &text)
+                    editor::apply_text(editor, &text)
                 });
             }
         }))
@@ -1896,18 +1869,16 @@ fn editor_properties_panel(
                 };
                 let parameter = controls.effect_parameter.get();
                 match name {
-                    "Capture info" => {
-                        match editor_linux::validate_effect_parameter(name, &parameter) {
-                            Ok(()) => add_capture_info(scope, canvas.clone(), status),
-                            Err(error) => status.set_if_changed(error),
-                        }
-                    }
-                    "Watermark" => match editor_linux::watermark_opacity(&parameter) {
+                    "Capture info" => match editor::validate_effect_parameter(name, &parameter) {
+                        Ok(()) => add_capture_info(scope, canvas.clone(), status),
+                        Err(error) => status.set_if_changed(error),
+                    },
+                    "Watermark" => match editor::watermark_opacity(&parameter) {
                         Ok(opacity) => choose_watermark(scope, canvas.clone(), status, opacity),
                         Err(error) => status.set_if_changed(error),
                     },
                     _ => editor_action(&canvas, status, &format!("{name} applied"), |editor| {
-                        editor_linux::apply_effect(editor, name, &parameter)
+                        editor::apply_effect(editor, name, &parameter)
                     }),
                 }
             }
@@ -1922,7 +1893,7 @@ fn editor_properties_panel(
         )
         .child(TextBlock::el().text(move || {
             selected_effect_name(controls.effect_index.get())
-                .map(editor_linux::effect_parameter_hint)
+                .map(editor::effect_parameter_hint)
                 .unwrap_or("Select an image effect")
                 .to_owned()
         }));
@@ -1958,7 +1929,7 @@ fn editor_properties_panel(
             move |_| {
                 let inputs = controls.style_inputs();
                 editor_action(&canvas, status, "Style applied", |editor| {
-                    editor_linux::apply_style(editor, &inputs)
+                    editor::apply_style(editor, &inputs)
                 });
             }
         }));
@@ -1989,7 +1960,7 @@ fn editor_properties_panel(
             let canvas = canvas.clone();
             move |_| {
                 editor_action(&canvas, status, "Solid-colored edges trimmed.", |editor| {
-                    editor_linux::auto_trim(editor)
+                    editor::auto_trim(editor)
                 });
             }
         }))
@@ -2024,23 +1995,17 @@ fn editor_properties_panel(
         );
     let mut selection_actions = WrapPanel::el().orientation(Orientation::Horizontal);
     for (label, action) in [
-        ("Select all", editor_linux::SelectionAction::SelectAll),
-        ("Deselect", editor_linux::SelectionAction::Deselect),
-        ("Invert selection", editor_linux::SelectionAction::Invert),
-        ("Delete selected", editor_linux::SelectionAction::Delete),
-        (
-            "Duplicate selected",
-            editor_linux::SelectionAction::Duplicate,
-        ),
-        ("Group", editor_linux::SelectionAction::Group),
-        ("Ungroup", editor_linux::SelectionAction::Ungroup),
-        ("Bring forward", editor_linux::SelectionAction::BringForward),
-        ("Send backward", editor_linux::SelectionAction::SendBackward),
-        (
-            "Flatten selected",
-            editor_linux::SelectionAction::FlattenSelected,
-        ),
-        ("Flatten all", editor_linux::SelectionAction::FlattenAll),
+        ("Select all", editor::SelectionAction::SelectAll),
+        ("Deselect", editor::SelectionAction::Deselect),
+        ("Invert selection", editor::SelectionAction::Invert),
+        ("Delete selected", editor::SelectionAction::Delete),
+        ("Duplicate selected", editor::SelectionAction::Duplicate),
+        ("Group", editor::SelectionAction::Group),
+        ("Ungroup", editor::SelectionAction::Ungroup),
+        ("Bring forward", editor::SelectionAction::BringForward),
+        ("Send backward", editor::SelectionAction::SendBackward),
+        ("Flatten selected", editor::SelectionAction::FlattenSelected),
+        ("Flatten all", editor::SelectionAction::FlattenAll),
     ] {
         let canvas = canvas.clone();
         selection_actions = selection_actions.child(action_button(label, move |_| {
@@ -2074,15 +2039,15 @@ fn document_ocr(
         .spawn(move || {
             let result = (|| {
                 let image = snapshot.flatten();
-                let lines = ocr_linux::Recognizer::new()?.recognize(&image)?;
+                let lines = ocr::Recognizer::new()?.recognize(&image)?;
                 match action {
                     DocumentOcrAction::CopyText => {
-                        let text = editor_linux::recognized_text(&lines);
+                        let text = editor::recognized_text(&lines);
                         if text.is_empty() {
                             return Ok(DocumentOcrResult::NoText);
                         }
                         if !canvas::with_editor(|editor| {
-                            editor_linux::same_document(&snapshot, editor.document())
+                            editor::same_document(&snapshot, editor.document())
                         })
                         .unwrap_or(false)
                         {
@@ -2090,12 +2055,12 @@ fn document_ocr(
                                 .to_owned());
                         }
                         let count = text.lines().count();
-                        clipboard_linux::copy_text(text)?;
+                        clipboard::copy_text(text)?;
                         Ok(DocumentOcrResult::CopiedText(count))
                     }
                     DocumentOcrAction::SmartRedact => Ok(DocumentOcrResult::Redact(lines)),
                     DocumentOcrAction::Simplify => {
-                        let (document, bars) = editor_linux::simplify_document(&snapshot, &lines);
+                        let (document, bars) = editor::simplify_document(&snapshot, &lines);
                         Ok(DocumentOcrResult::Simplified(document, bars))
                     }
                 }
@@ -2109,12 +2074,12 @@ fn document_ocr(
                 }
                 Ok(DocumentOcrResult::Redact(lines)) => {
                     let result = canvas::with_editor(|editor| {
-                        if !editor_linux::same_document(&snapshot, editor.document()) {
+                        if !editor::same_document(&snapshot, editor.document()) {
                             return Err(
                                 "The document changed before recognition completed.".to_owned()
                             );
                         }
-                        Ok(editor_linux::smart_redact(editor, &lines))
+                        Ok(editor::smart_redact(editor, &lines))
                     })
                     .unwrap_or_else(|| Err("The editor is not available.".to_owned()));
                     match result {
@@ -2135,12 +2100,12 @@ fn document_ocr(
                 }
                 Ok(DocumentOcrResult::Simplified(document, bars)) => {
                     let result = canvas::with_editor(|editor| {
-                        if !editor_linux::same_document(&snapshot, editor.document()) {
+                        if !editor::same_document(&snapshot, editor.document()) {
                             return Err(
                                 "The document changed before simplification completed.".to_owned()
                             );
                         }
-                        editor_linux::apply_simplification(editor, document);
+                        editor::apply_simplification(editor, document);
                         Ok(())
                     })
                     .unwrap_or_else(|| Err("The editor is not available.".to_owned()));
@@ -2214,10 +2179,10 @@ fn screen_preset_panel(
                 .parse::<u64>()
                 .map_err(|_| "the capture delay must be a whole number of seconds".to_owned())
                 .and_then(|delay| {
-                    settings_linux::save_screen_capture_preset(
+                    settings::save_screen_capture_preset(
                         &name,
                         delay,
-                        capture_linux::CaptureCursor::from_included(controls.cursor.get()),
+                        capture::CaptureCursor::from_included(controls.cursor.get()),
                     )
                 });
             match result {
@@ -2234,7 +2199,7 @@ fn screen_preset_panel(
         }))
         .child(action_button("Delete screen preset", move |_| {
             let name = controls.name.get();
-            match settings_linux::delete_screen_capture_preset(&name) {
+            match settings::delete_screen_capture_preset(&name) {
                 Ok(presets) => {
                     controls.presets.set_if_changed(presets);
                     controls.name.set_if_changed(String::new());
@@ -2256,7 +2221,7 @@ fn screen_preset_panel(
                 .orientation(Orientation::Horizontal)
                 .children_for(
                     presets,
-                    |preset: &settings_linux::ScreenCapturePreset| preset.name().to_owned(),
+                    |preset: &settings::ScreenCapturePreset| preset.name().to_owned(),
                     move |preset| {
                         screen_preset_button(preset, canvas.clone(), status, captures, library)
                     },
@@ -2265,7 +2230,7 @@ fn screen_preset_panel(
 }
 
 fn screen_preset_button(
-    preset: Signal<settings_linux::ScreenCapturePreset>,
+    preset: Signal<settings::ScreenCapturePreset>,
     canvas: ui::UiOnly<ui::canvas_view::CanvasView>,
     status: Signal<String>,
     captures: Signal<Vec<PathBuf>>,
@@ -2279,9 +2244,8 @@ fn screen_preset_button(
             let action_scope = scope.clone();
             let canvas = canvas.clone();
             let name = name.clone();
-            button.clone().on_click(
-                scope,
-                move |_| match settings_linux::screen_capture_preset(&name) {
+            button.clone().on_click(scope, move |_| {
+                match settings::screen_capture_preset(&name) {
                     Ok(preset) => capture_screen_with_options(
                         &action_scope,
                         canvas.clone(),
@@ -2295,8 +2259,8 @@ fn screen_preset_button(
                     ),
                     Err(error) => status
                         .set_if_changed(format!("Could not run screen capture preset: {error}")),
-                },
-            )?;
+                }
+            })?;
             Ok(())
         })
 }
@@ -2337,7 +2301,7 @@ fn template_panel(
         .child(action_button("Create template", {
             let canvas = canvas.clone();
             move |_| {
-                let result = template_linux::create_template(
+                let result = template::create_template(
                     controls.layout.get(),
                     controls.theme.get(),
                     controls.captions.get(),
@@ -2374,7 +2338,7 @@ fn template_panel(
             let canvas = canvas.clone();
             move |_| {
                 editor_action(&canvas, status, "Zone image fit to frame.", |editor| {
-                    template_linux::set_selected_zone_fit(editor, true)
+                    template::set_selected_zone_fit(editor, true)
                 });
             }
         }))
@@ -2382,7 +2346,7 @@ fn template_panel(
             let canvas = canvas.clone();
             move |_| {
                 editor_action(&canvas, status, "Zone image cropped to frame.", |editor| {
-                    template_linux::set_selected_zone_fit(editor, false)
+                    template::set_selected_zone_fit(editor, false)
                 });
             }
         }))
@@ -2390,7 +2354,7 @@ fn template_panel(
             let canvas = canvas.clone();
             move |_| {
                 editor_action(&canvas, status, "Zone cleared.", |editor| {
-                    template_linux::clear_selected_zone(editor)
+                    template::clear_selected_zone(editor)
                 });
             }
         }))
@@ -2398,7 +2362,7 @@ fn template_panel(
             let canvas = canvas.clone();
             move |_| {
                 editor_action(&canvas, status, "Zone images swapped.", |editor| {
-                    template_linux::swap_selected_zones(editor)
+                    template::swap_selected_zones(editor)
                 });
             }
         }));
@@ -2414,7 +2378,7 @@ fn paste_template_zone(
     status: Signal<String>,
 ) {
     let target = canvas::with_editor(|editor| {
-        template_linux::selected_zone(editor).map(|id| (id, editor.document().background_arc()))
+        template::selected_zone(editor).map(|id| (id, editor.document().background_arc()))
     })
     .unwrap_or_else(|| Err("The editor is not available.".to_owned()));
     let (zone, background) = match target {
@@ -2429,8 +2393,7 @@ fn paste_template_zone(
     if let Err(error) = std::thread::Builder::new()
         .name("jiffshot-template-paste".to_owned())
         .spawn(move || {
-            let result =
-                clipboard_linux::paste_document().map(|document| document.background().clone());
+            let result = clipboard::paste_document().map(|document| document.background().clone());
             if let Err(error) = task_scope.post(move || match result {
                 Ok(image) => {
                     editor_action(&canvas, status, "Image pasted into zone.", |editor| {
@@ -2442,7 +2405,7 @@ fn paste_template_zone(
                                     .to_owned(),
                             );
                         }
-                        template_linux::fill_selected_zone(editor, image)
+                        template::fill_selected_zone(editor, image)
                     });
                 }
                 Err(error) => status.set_if_changed(error),
@@ -2500,8 +2463,7 @@ fn add_capture_info(
     };
     let source = DOCUMENT_SOURCE.lock().clone();
     start_interactive_effect(scope, pending, "Capture info", canvas, status, move || {
-        editor_linux::capture_info(source.as_deref())
-            .map(|text| effects::Effect::CaptureInfo { text })
+        editor::capture_info(source.as_deref()).map(|text| effects::Effect::CaptureInfo { text })
     });
 }
 
@@ -2526,7 +2488,7 @@ fn choose_watermark(
     let options = OpenFilePickerOptions::new()
         .title("Choose a watermark image")
         .file_type(filter);
-    let operation = match file_dialog_linux::open_file_picker(scope, &window, &options) {
+    let operation = match file_dialog::open_file_picker(scope, &window, &options) {
         Ok(operation) => operation,
         Err(error) => {
             status.set_if_changed(format!("Could not open watermark picker: {error}"));
@@ -2540,9 +2502,9 @@ fn choose_watermark(
         match canvas::with_editor(|editor| {
             DOCUMENT_LOAD_REQUESTS.state(&pending, editor.document())
         }) {
-            Some(editor_linux::DocumentLoadState::Ready) => {}
-            Some(editor_linux::DocumentLoadState::Superseded) => return,
-            Some(editor_linux::DocumentLoadState::DocumentChanged) => {
+            Some(editor::DocumentLoadState::Ready) => {}
+            Some(editor::DocumentLoadState::Superseded) => return,
+            Some(editor::DocumentLoadState::DocumentChanged) => {
                 status.set_if_changed(
                     "The document changed before the watermark was selected.".to_owned(),
                 );
@@ -2594,7 +2556,7 @@ fn choose_watermark(
 
 fn start_interactive_effect(
     scope: &AppScope,
-    pending: editor_linux::PendingDocumentLoad,
+    pending: editor::PendingDocumentLoad,
     name: &'static str,
     canvas: ui::UiOnly<ui::canvas_view::CanvasView>,
     status: Signal<String>,
@@ -2609,11 +2571,11 @@ fn start_interactive_effect(
             if let Err(error) = task_scope.post(move || {
                 let outcome = canvas::with_editor(|editor| {
                     match DOCUMENT_LOAD_REQUESTS.state(&pending, editor.document()) {
-                        editor_linux::DocumentLoadState::Ready => Some(result.and_then(|effect| {
-                            editor_linux::apply_document_effect(editor, name, effect)
+                        editor::DocumentLoadState::Ready => Some(result.and_then(|effect| {
+                            editor::apply_document_effect(editor, name, effect)
                         })),
-                        editor_linux::DocumentLoadState::Superseded => None,
-                        editor_linux::DocumentLoadState::DocumentChanged => Some(Err(format!(
+                        editor::DocumentLoadState::Superseded => None,
+                        editor::DocumentLoadState::DocumentChanged => Some(Err(format!(
                             "The document changed before {name} was ready."
                         ))),
                     }
@@ -2641,7 +2603,7 @@ fn library_organization_panel(
     captures: Signal<Vec<PathBuf>>,
     status: Signal<String>,
 ) -> El<StackPanel> {
-    let automatic_copy_label = Signal::new(match settings_linux::automatic_copy_directory() {
+    let automatic_copy_label = Signal::new(match settings::automatic_copy_directory() {
         Ok(directory) => format_automatic_copy_label(directory.as_deref()),
         Err(error) => {
             status.set_if_changed(format!(
@@ -2659,7 +2621,7 @@ fn library_organization_panel(
                 status.set_if_changed("Select a capture before editing tags.".to_owned());
                 return;
             };
-            match library_linux::set_tags(&path, &library.tags.get()) {
+            match library::set_tags(&path, &library.tags.get()) {
                 Ok(tags) => {
                     library.tags.set_if_changed(tags.join(", "));
                     let message = if tags.is_empty() {
@@ -2677,7 +2639,7 @@ fn library_organization_panel(
                 status.set_if_changed("Select a capture before changing its pin.".to_owned());
                 return;
             };
-            match library_linux::toggle_pin(&path) {
+            match library::toggle_pin(&path) {
                 Ok(pinned) => {
                     library.pinned.set_if_changed(pinned);
                     let message = if pinned {
@@ -2726,7 +2688,7 @@ fn library_organization_panel(
         )
         .child(action_button("Disable auto-copy", move |_| {
             AUTOMATIC_COPY_REQUEST.fetch_add(1, Ordering::AcqRel);
-            match settings_linux::set_automatic_copy_directory(None) {
+            match settings::set_automatic_copy_directory(None) {
                 Ok(()) => {
                     automatic_copy_label.set_if_changed(format_automatic_copy_label(None));
                     status.set_if_changed("Automatic capture copying disabled.".to_owned());
@@ -2761,7 +2723,7 @@ fn choose_automatic_copy_folder(scope: &AppScope, status: Signal<String>, label:
         .fetch_add(1, Ordering::AcqRel)
         .wrapping_add(1);
     let options = FolderPickerOptions::new().title("Choose folder for automatic capture copies");
-    let operation = match file_dialog_linux::open_folder_picker(scope, &window, &options) {
+    let operation = match file_dialog::open_folder_picker(scope, &window, &options) {
         Ok(operation) => operation,
         Err(error) => {
             status.set_if_changed(format!(
@@ -2796,7 +2758,7 @@ fn choose_automatic_copy_folder(scope: &AppScope, status: Signal<String>, label:
             }
             match result {
                 Ok(Some(directory)) => {
-                    match settings_linux::set_automatic_copy_directory(Some(&directory)) {
+                    match settings::set_automatic_copy_directory(Some(&directory)) {
                         Ok(()) => {
                             label.set_if_changed(format_automatic_copy_label(Some(&directory)));
                             status.set_if_changed(format!(
@@ -2849,9 +2811,9 @@ fn share_selected_capture(
         .spawn(move || {
             let result = futures_lite::future::block_on(async {
                 match action {
-                    ShareAction::OpenWith => share_linux::open_with(&path).await,
-                    ShareAction::Email => share_linux::email(&path).await,
-                    ShareAction::Print => share_linux::print_image(&path).await,
+                    ShareAction::OpenWith => share::open_with(&path).await,
+                    ShareAction::Email => share::email(&path).await,
+                    ShareAction::Print => share::print_image(&path).await,
                 }
             });
             let message = match (action, result) {
@@ -2890,7 +2852,7 @@ fn copy_selected_capture_dialog(
         return;
     };
     let options = FolderPickerOptions::new().title("Copy saved capture to folder");
-    let operation = match file_dialog_linux::open_folder_picker(scope, &window, &options) {
+    let operation = match file_dialog::open_folder_picker(scope, &window, &options) {
         Ok(operation) => operation,
         Err(error) => {
             status.set_if_changed(format!("Could not open folder picker: {error}"));
@@ -2928,7 +2890,7 @@ fn copy_selected_capture_dialog(
         if let Err(error) = std::thread::Builder::new()
             .name("jiffshot-copy-capture".to_owned())
             .spawn(move || {
-                let result = share_linux::copy_to_folder(&source, &directory);
+                let result = share::copy_to_folder(&source, &directory);
                 if let Err(error) = worker_scope.post(move || match result {
                     Ok(path) => status
                         .set_if_changed(format!("Copied saved capture to {}.", path.display())),
@@ -2998,7 +2960,7 @@ fn combine_images_dialog(
         .allow_multiple(true)
         .start_in(WellKnownFolder::Pictures)
         .file_type(filter);
-    let operation = match file_dialog_linux::open_file_picker(scope, &window, &options) {
+    let operation = match file_dialog::open_file_picker(scope, &window, &options) {
         Ok(operation) => operation,
         Err(error) => {
             status.set_if_changed(format!("Could not open image picker: {error}"));
@@ -3078,7 +3040,7 @@ fn open_capture(
     }
 }
 
-fn begin_document_load(status: Signal<String>) -> Option<editor_linux::PendingDocumentLoad> {
+fn begin_document_load(status: Signal<String>) -> Option<editor::PendingDocumentLoad> {
     match canvas::with_editor(|editor| editor.document().clone()) {
         Some(snapshot) => Some(DOCUMENT_LOAD_REQUESTS.begin(snapshot)),
         None => {
@@ -3092,15 +3054,15 @@ fn start_document_load(
     scope: &AppScope,
     path: PathBuf,
     kind: DocumentLoadKind,
-    pending: editor_linux::PendingDocumentLoad,
+    pending: editor::PendingDocumentLoad,
     canvas: ui::UiOnly<ui::canvas_view::CanvasView>,
     status: Signal<String>,
     library: Option<(LibraryControls, u64)>,
 ) {
     match canvas::with_editor(|editor| DOCUMENT_LOAD_REQUESTS.state(&pending, editor.document())) {
-        Some(editor_linux::DocumentLoadState::Ready) => {}
-        Some(editor_linux::DocumentLoadState::Superseded) => return,
-        Some(editor_linux::DocumentLoadState::DocumentChanged) => {
+        Some(editor::DocumentLoadState::Ready) => {}
+        Some(editor::DocumentLoadState::Superseded) => return,
+        Some(editor::DocumentLoadState::DocumentChanged) => {
             status
                 .set_if_changed("The document changed before the file could be opened.".to_owned());
             return;
@@ -3115,16 +3077,14 @@ fn start_document_load(
     if let Err(error) = std::thread::Builder::new()
         .name("jiffshot-open-document".to_owned())
         .spawn(move || {
-            let metadata = library.map(|_| library_linux::read_metadata(&path));
+            let metadata = library.map(|_| library::read_metadata(&path));
             let opened = match kind {
-                DocumentLoadKind::File if video_linux::is_video_path(&path) => {
-                    video_linux::first_frame(&path)
-                        .map(|document| (document, "Imported first video frame".to_owned()))
-                }
+                DocumentLoadKind::File if video::is_video_path(&path) => video::first_frame(&path)
+                    .map(|document| (document, "Imported first video frame".to_owned())),
                 DocumentLoadKind::File => {
                     jiffshot_doc::io::open(&path).map(|document| (document, "Opened".to_owned()))
                 }
-                DocumentLoadKind::VideoFrame(timestamp) => video_linux::frame_at(&path, timestamp)
+                DocumentLoadKind::VideoFrame(timestamp) => video::frame_at(&path, timestamp)
                     .map(|document| (document, format!("Imported frame at {timestamp} seconds"))),
             };
             if let Err(error) = task_scope.post(move || {
@@ -3135,13 +3095,11 @@ fn start_document_load(
                 }
                 let delivery = canvas::with_editor(|editor| {
                     match DOCUMENT_LOAD_REQUESTS.state(&pending, editor.document()) {
-                        editor_linux::DocumentLoadState::Superseded => {
-                            DocumentLoadDelivery::Superseded
-                        }
-                        editor_linux::DocumentLoadState::DocumentChanged => {
+                        editor::DocumentLoadState::Superseded => DocumentLoadDelivery::Superseded,
+                        editor::DocumentLoadState::DocumentChanged => {
                             DocumentLoadDelivery::DocumentChanged
                         }
-                        editor_linux::DocumentLoadState::Ready => match opened {
+                        editor::DocumentLoadState::Ready => match opened {
                             Ok((document, action)) => {
                                 load_editor_document(editor, document, Some(path.clone()));
                                 DocumentLoadDelivery::Loaded(action)
@@ -3214,7 +3172,7 @@ fn refresh_capture_library(
     context: Option<&str>,
 ) {
     LIBRARY_REQUEST.fetch_add(1, Ordering::AcqRel);
-    match capture_linux::recent_captures() {
+    match capture::recent_captures() {
         Ok(recent) => {
             let count = recent.len();
             replace_capture_library(captures, library, recent);
@@ -3246,7 +3204,7 @@ fn start_library_search(
     scope: &AppScope,
     captures: Signal<Vec<PathBuf>>,
     library: LibraryControls,
-    filter: library_linux::CaptureFilter,
+    filter: library::CaptureFilter,
     status: Signal<String>,
 ) {
     let query = library.query.get();
@@ -3281,7 +3239,7 @@ fn search_capture_library(
     scope: &AppScope,
     captures: Signal<Vec<PathBuf>>,
     query: String,
-    filter: library_linux::CaptureFilter,
+    filter: library::CaptureFilter,
     status: Signal<String>,
     context: Option<String>,
 ) {
@@ -3297,7 +3255,7 @@ fn search_capture_library(
     if let Err(error) = std::thread::Builder::new()
         .name("capture-library-search".to_owned())
         .spawn(move || {
-            let result = library_linux::search_captures(&query, filter);
+            let result = library::search_captures(&query, filter);
             if let Err(error) = task_scope.post(move || {
                 if LIBRARY_REQUEST.load(Ordering::Acquire) != request {
                     return;
@@ -3361,19 +3319,19 @@ fn enable_global_capture_shortcut(scope: &AppScope, ui: ShortcutUi) {
         );
         return;
     }
-    let recording_start =
-        match shortcut_linux::RecordingStartShortcut::from_index(recording_start.get()) {
-            Ok(choice) => choice,
-            Err(error) => {
-                status.set_if_changed(format!("Could not enable global shortcuts: {error}"));
-                return;
-            }
-        };
-    let options = shortcut_linux::ShortcutOptions {
+    let recording_start = match shortcut::RecordingStartShortcut::from_index(recording_start.get())
+    {
+        Ok(choice) => choice,
+        Err(error) => {
+            status.set_if_changed(format!("Could not enable global shortcuts: {error}"));
+            return;
+        }
+    };
+    let options = shortcut::ShortcutOptions {
         recording_controls: recording_controls.get(),
         recording_start,
     };
-    let trigger = match settings_linux::set_global_shortcuts(&preferred.get(), options) {
+    let trigger = match settings::set_global_shortcuts(&preferred.get(), options) {
         Ok(trigger) => trigger,
         Err(error) => {
             status.set_if_changed(format!(
@@ -3392,7 +3350,7 @@ fn enable_global_capture_shortcut(scope: &AppScope, ui: ShortcutUi) {
     let spawn_result = scope.spawn(async move {
         let bound_scope = task_scope.clone();
         let activation_scope = task_scope.clone();
-        let result = shortcut_linux::listen(
+        let result = shortcut::listen(
             trigger,
             options,
             receiver,
@@ -3404,10 +3362,10 @@ fn enable_global_capture_shortcut(scope: &AppScope, ui: ShortcutUi) {
                         .iter()
                         .map(|(action, trigger)| {
                             let label = match action {
-                                shortcut_linux::ShortcutAction::Capture => "capture",
-                                shortcut_linux::ShortcutAction::ToggleRecording => "start/stop",
-                                shortcut_linux::ShortcutAction::PauseRecording => "pause/resume",
-                                shortcut_linux::ShortcutAction::StopRecording => "stop",
+                                shortcut::ShortcutAction::Capture => "capture",
+                                shortcut::ShortcutAction::ToggleRecording => "start/stop",
+                                shortcut::ShortcutAction::PauseRecording => "pause/resume",
+                                shortcut::ShortcutAction::StopRecording => "stop",
                             };
                             format!("{label}: {trigger}")
                         })
@@ -3423,10 +3381,10 @@ fn enable_global_capture_shortcut(scope: &AppScope, ui: ShortcutUi) {
                 let action_canvas = canvas.clone();
                 activation_scope
                     .post(move || match action {
-                        shortcut_linux::ShortcutAction::Capture => {
+                        shortcut::ShortcutAction::Capture => {
                             capture_screen(&action_scope, action_canvas, status, captures, library)
                         }
-                        shortcut_linux::ShortcutAction::ToggleRecording => {
+                        shortcut::ShortcutAction::ToggleRecording => {
                             if let Some(audio) = options.recording_start.audio() {
                                 toggle_screen_recording(
                                     &action_scope,
@@ -3442,11 +3400,9 @@ fn enable_global_capture_shortcut(scope: &AppScope, ui: ShortcutUi) {
                                 );
                             }
                         }
-                        shortcut_linux::ShortcutAction::PauseRecording => {
-                            toggle_recording_pause(status)
-                        }
-                        shortcut_linux::ShortcutAction::StopRecording => send_recording_command(
-                            capture_linux::RecordingCommand::Stop,
+                        shortcut::ShortcutAction::PauseRecording => toggle_recording_pause(status),
+                        shortcut::ShortcutAction::StopRecording => send_recording_command(
+                            capture::RecordingCommand::Stop,
                             "Finalizing screen recording…",
                             status,
                         ),
@@ -3458,10 +3414,8 @@ fn enable_global_capture_shortcut(scope: &AppScope, ui: ShortcutUi) {
 
         *GLOBAL_SHORTCUT_STOP.lock() = None;
         let (message, failed) = match result {
-            Ok(shortcut_linux::ShortcutEnd::Stopped) => {
-                ("Global shortcuts disabled.".to_owned(), false)
-            }
-            Ok(shortcut_linux::ShortcutEnd::ClosedByDesktop) => {
+            Ok(shortcut::ShortcutEnd::Stopped) => ("Global shortcuts disabled.".to_owned(), false),
+            Ok(shortcut::ShortcutEnd::ClosedByDesktop) => {
                 ("The desktop closed the global shortcuts.".to_owned(), true)
             }
             Err(error) => (error, true),
@@ -3472,7 +3426,7 @@ fn enable_global_capture_shortcut(scope: &AppScope, ui: ShortcutUi) {
                     status,
                     "Global shortcuts unavailable",
                     message,
-                    notification_linux::Urgency::Critical,
+                    notification::Urgency::Critical,
                 );
             } else {
                 status.set_if_changed(message);
@@ -3490,7 +3444,7 @@ fn enable_global_capture_shortcut(scope: &AppScope, ui: ShortcutUi) {
 }
 
 fn disable_global_capture_shortcut(status: Signal<String>) {
-    if let Err(error) = settings_linux::disable_global_shortcuts() {
+    if let Err(error) = settings::disable_global_shortcuts() {
         status.set_if_changed(format!(
             "Could not disable the global shortcut preference: {error}"
         ));
@@ -3514,7 +3468,7 @@ fn disable_global_capture_shortcut(status: Signal<String>) {
 #[derive(Clone, Copy)]
 struct ScreenCaptureOptions {
     seconds: u64,
-    cursor: capture_linux::CaptureCursor,
+    cursor: capture::CaptureCursor,
 }
 
 fn screen_capture_available(status: Signal<String>) -> bool {
@@ -3523,7 +3477,7 @@ fn screen_capture_available(status: Signal<String>) -> bool {
             status,
             "Capture skipped",
             "Finish the daily capture before starting another capture.".to_owned(),
-            notification_linux::Urgency::Normal,
+            notification::Urgency::Normal,
         );
         return false;
     }
@@ -3540,26 +3494,26 @@ fn capture_screen(
     if !screen_capture_available(status) {
         return;
     }
-    let seconds = match settings_linux::capture_delay_seconds() {
+    let seconds = match settings::capture_delay_seconds() {
         Ok(seconds) => seconds,
         Err(error) => {
             report_capture_result(
                 status,
                 "Capture failed",
                 format!("Could not read the capture delay: {error}"),
-                notification_linux::Urgency::Critical,
+                notification::Urgency::Critical,
             );
             return;
         }
     };
-    let cursor = match settings_linux::capture_cursor() {
+    let cursor = match settings::capture_cursor() {
         Ok(cursor) => cursor,
         Err(error) => {
             report_capture_result(
                 status,
                 "Capture failed",
                 format!("Could not read the capture cursor setting: {error}"),
-                notification_linux::Urgency::Critical,
+                notification::Urgency::Critical,
             );
             return;
         }
@@ -3595,7 +3549,7 @@ fn capture_screen_with_options(
                 status,
                 "Capture skipped",
                 "A delayed capture is already in progress.".to_owned(),
-                notification_linux::Urgency::Normal,
+                notification::Urgency::Normal,
             );
             return;
         }
@@ -3619,26 +3573,25 @@ fn capture_screen_with_options(
         .spawn(move || {
             let result = if let Some((id, receiver)) = delayed {
                 let waiting_scope = task_scope.clone();
-                let result =
-                    futures_lite::future::block_on(capture_linux::capture_monitor_after_delay(
-                        cursor,
-                        Duration::from_secs(seconds),
-                        &receiver,
-                        move || {
-                            if let Err(error) = waiting_scope.post(move || {
-                                status.set_if_changed(format!(
-                                    "Capturing in {seconds} seconds; open the content to capture."
-                                ))
-                            }) {
-                                eprintln!("Could not report the capture countdown: {error}");
-                            }
-                        },
-                        move || finish_delayed_capture(id),
-                    ));
+                let result = futures_lite::future::block_on(capture::capture_monitor_after_delay(
+                    cursor,
+                    Duration::from_secs(seconds),
+                    &receiver,
+                    move || {
+                        if let Err(error) = waiting_scope.post(move || {
+                            status.set_if_changed(format!(
+                                "Capturing in {seconds} seconds; open the content to capture."
+                            ))
+                        }) {
+                            eprintln!("Could not report the capture countdown: {error}");
+                        }
+                    },
+                    move || finish_delayed_capture(id),
+                ));
                 finish_delayed_capture(id);
                 result
             } else {
-                futures_lite::future::block_on(capture_linux::capture_monitor(cursor)).map(Some)
+                futures_lite::future::block_on(capture::capture_monitor(cursor)).map(Some)
             };
             drop(active);
             match result {
@@ -3667,7 +3620,7 @@ fn capture_screen_with_options(
                             status,
                             "Capture failed",
                             error,
-                            notification_linux::Urgency::Critical,
+                            notification::Urgency::Critical,
                         )
                     }) {
                         eprintln!("Could not report the screen capture error: {post_error}");
@@ -3683,7 +3636,7 @@ fn capture_screen_with_options(
             status,
             "Capture failed",
             format!("Could not start screen capture: {error}"),
-            notification_linux::Urgency::Critical,
+            notification::Urgency::Critical,
         );
     }
 }
@@ -3730,7 +3683,7 @@ fn capture_interactive(
     if let Err(error) = std::thread::Builder::new()
         .name("jiffshot-desktop-screenshot".to_owned())
         .spawn(move || {
-            let result = futures_lite::future::block_on(screenshot_linux::capture_interactive());
+            let result = futures_lite::future::block_on(screenshot::capture_interactive());
             drop(active);
             match result {
                 Ok(Some(document)) => deliver_capture(
@@ -3783,17 +3736,17 @@ fn grab_screen_text(scope: &AppScope, status: Signal<String>) {
         .spawn(move || {
             let result: std::result::Result<GrabTextResult, String> = (|| {
                 let Some(document) =
-                    futures_lite::future::block_on(screenshot_linux::capture_interactive())?
+                    futures_lite::future::block_on(screenshot::capture_interactive())?
                 else {
                     return Ok(GrabTextResult::Cancelled);
                 };
-                let lines = ocr_linux::Recognizer::new()?.recognize(&document.flatten())?;
-                let text = editor_linux::recognized_text(&lines);
+                let lines = ocr::Recognizer::new()?.recognize(&document.flatten())?;
+                let text = editor::recognized_text(&lines);
                 if text.is_empty() {
                     return Ok(GrabTextResult::NoText);
                 }
                 let count = text.lines().count();
-                clipboard_linux::copy_text(text)?;
+                clipboard::copy_text(text)?;
                 Ok(GrabTextResult::Copied(count))
             })();
             drop(active);
@@ -3823,14 +3776,14 @@ enum CaptureDelivery {
     Screen,
     Interactive,
     Scrolling {
-        mode: scroll_linux::Mode,
+        mode: scroll::Mode,
         limit_reached: bool,
     },
 }
 
 struct CompletedCapture {
     document: Document,
-    pending: editor_linux::PendingDocumentLoad,
+    pending: editor::PendingDocumentLoad,
     delivery: CaptureDelivery,
 }
 
@@ -3840,11 +3793,11 @@ impl CaptureDelivery {
             Self::Screen => "Screen captured",
             Self::Interactive => "Desktop screenshot captured",
             Self::Scrolling {
-                mode: scroll_linux::Mode::Panoramic,
+                mode: scroll::Mode::Panoramic,
                 limit_reached: true,
             } => "Panoramic capture reached its size limit",
             Self::Scrolling {
-                mode: scroll_linux::Mode::Panoramic,
+                mode: scroll::Mode::Panoramic,
                 limit_reached: false,
             } => "Panoramic capture completed",
             Self::Scrolling {
@@ -3878,19 +3831,19 @@ fn deliver_capture(
         pending,
         delivery,
     } = completed;
-    let saved_path = capture_linux::save_capture(&document);
+    let saved_path = capture::save_capture(&document);
     let automatic_copy = saved_path
         .as_ref()
         .ok()
-        .map(|path| share_linux::copy_automatically(path));
-    let copied = match settings_linux::copy_capture_to_clipboard() {
-        Ok(true) => Some(clipboard_linux::copy_pixmap(document.flatten())),
+        .map(|path| share::copy_automatically(path));
+    let copied = match settings::copy_capture_to_clipboard() {
+        Ok(true) => Some(clipboard::copy_pixmap(document.flatten())),
         Ok(false) => None,
         Err(error) => Some(Err(format!(
             "could not read the capture clipboard preference: {error}"
         ))),
     };
-    let recent = capture_linux::recent_captures();
+    let recent = capture::recent_captures();
     let urgency = if saved_path.is_err()
         || copied.as_ref().is_some_and(std::result::Result::is_err)
         || automatic_copy
@@ -3898,28 +3851,28 @@ fn deliver_capture(
             .is_some_and(std::result::Result::is_err)
         || recent.is_err()
     {
-        notification_linux::Urgency::Critical
+        notification::Urgency::Critical
     } else {
-        notification_linux::Urgency::Normal
+        notification::Urgency::Normal
     };
     if let Err(error) = scope.post(move || {
         delivery.complete();
         let editor_state = canvas::with_editor(|editor| {
             let state = DOCUMENT_LOAD_REQUESTS.state(&pending, editor.document());
-            if state == editor_linux::DocumentLoadState::Ready {
+            if state == editor::DocumentLoadState::Ready {
                 load_editor_document(editor, document, saved_path.as_ref().ok().cloned());
             }
             state
         });
         let editor_notice = match editor_state {
-            Some(editor_linux::DocumentLoadState::Ready) => {
+            Some(editor::DocumentLoadState::Ready) => {
                 canvas.get().refresh();
                 None
             }
-            Some(editor_linux::DocumentLoadState::Superseded) => {
+            Some(editor::DocumentLoadState::Superseded) => {
                 Some("a newer open or capture request was kept")
             }
-            Some(editor_linux::DocumentLoadState::DocumentChanged) => {
+            Some(editor::DocumentLoadState::DocumentChanged) => {
                 Some("newer editor changes were kept")
             }
             None => Some("the editor was unavailable"),
@@ -3978,15 +3931,13 @@ fn toggle_scrolling_capture(
     status: Signal<String>,
     captures: Signal<Vec<PathBuf>>,
     library: LibraryControls,
-    mode: scroll_linux::Mode,
+    mode: scroll::Mode,
 ) {
     if let Some(active) = SCROLL_CAPTURE.lock().as_ref() {
         let same_kind = matches!(
             (active.mode, mode),
-            (
-                scroll_linux::Mode::Scrolling(_),
-                scroll_linux::Mode::Scrolling(_)
-            ) | (scroll_linux::Mode::Panoramic, scroll_linux::Mode::Panoramic)
+            (scroll::Mode::Scrolling(_), scroll::Mode::Scrolling(_))
+                | (scroll::Mode::Panoramic, scroll::Mode::Panoramic)
         );
         if !same_kind {
             status.set_if_changed(
@@ -3994,11 +3945,11 @@ fn toggle_scrolling_capture(
             );
             return;
         }
-        if active.stop.try_send(scroll_linux::Action::Finish).is_ok() {
+        if active.stop.try_send(scroll::Action::Finish).is_ok() {
             status.set_if_changed(
                 match active.mode {
-                    scroll_linux::Mode::Scrolling(_) => "Finishing scrolling capture…",
-                    scroll_linux::Mode::Panoramic => "Finishing panoramic capture…",
+                    scroll::Mode::Scrolling(_) => "Finishing scrolling capture…",
+                    scroll::Mode::Panoramic => "Finishing panoramic capture…",
                 }
                 .to_owned(),
             );
@@ -4025,46 +3976,44 @@ fn toggle_scrolling_capture(
     let (stop, receiver) = async_channel::bounded(1);
     *SCROLL_CAPTURE.lock() = Some(ActiveScrollCapture { mode, stop });
     status.set_if_changed(match mode {
-        scroll_linux::Mode::Scrolling(_) => {
+        scroll::Mode::Scrolling(_) => {
             "Choose a window or monitor for scrolling capture…".to_owned()
         }
-        scroll_linux::Mode::Panoramic => {
-            "Choose a window or monitor for panoramic capture…".to_owned()
-        }
+        scroll::Mode::Panoramic => "Choose a window or monitor for panoramic capture…".to_owned(),
     });
     let task_scope = scope.clone();
     if let Err(error) = std::thread::Builder::new()
         .name("jiffshot-scrolling-capture".to_owned())
         .spawn(move || {
             let progress_scope = task_scope.clone();
-            let result = futures_lite::future::block_on(scroll_linux::capture(
+            let result = futures_lite::future::block_on(scroll::capture(
                 mode,
                 receiver,
                 move |progress| {
                     let message = match progress {
-                        scroll_linux::Progress::Started => match mode {
-                            scroll_linux::Mode::Scrolling(scroll_linux::Direction::Vertical) => {
+                        scroll::Progress::Started => match mode {
+                            scroll::Mode::Scrolling(scroll::Direction::Vertical) => {
                                 "Scroll the selected content down slowly, then finish the capture."
                             }
-                            scroll_linux::Mode::Scrolling(scroll_linux::Direction::Horizontal) => {
+                            scroll::Mode::Scrolling(scroll::Direction::Horizontal) => {
                                 "Scroll the selected content right slowly, then finish the capture."
                             }
-                            scroll_linux::Mode::Panoramic => {
+                            scroll::Mode::Panoramic => {
                                 "Pan the selected content slowly in any direction, then finish the capture."
                             }
                         }
                         .to_owned(),
-                        scroll_linux::Progress::Advanced(extent) => {
+                        scroll::Progress::Advanced(extent) => {
                             format!(
                                 "Scrolling capture: {extent} pixels. Keep scrolling or finish the capture."
                             )
                         }
-                        scroll_linux::Progress::PanoramicAdvanced { width, height } => {
+                        scroll::Progress::PanoramicAdvanced { width, height } => {
                             format!(
                                 "Panoramic capture: {width} × {height} pixels. Keep panning or finish the capture."
                             )
                         }
-                        scroll_linux::Progress::LostOverlap => {
+                        scroll::Progress::LostOverlap => {
                             "Lost overlap; move back a little and scroll more slowly.".to_owned()
                         }
                     };
@@ -4096,8 +4045,8 @@ fn toggle_scrolling_capture(
                     if let Err(error) = task_scope.post(move || {
                         *SCROLL_CAPTURE.lock() = None;
                         status.set_if_changed(match mode {
-                            scroll_linux::Mode::Scrolling(_) => "Scrolling capture cancelled.",
-                            scroll_linux::Mode::Panoramic => "Panoramic capture cancelled.",
+                            scroll::Mode::Scrolling(_) => "Scrolling capture cancelled.",
+                            scroll::Mode::Panoramic => "Panoramic capture cancelled.",
                         }.to_owned());
                     }) {
                         *SCROLL_CAPTURE.lock() = None;
@@ -4108,14 +4057,14 @@ fn toggle_scrolling_capture(
                     if let Err(post_error) = task_scope.post(move || {
                         *SCROLL_CAPTURE.lock() = None;
                         let description = match mode {
-                            scroll_linux::Mode::Scrolling(_) => "Scrolling",
-                            scroll_linux::Mode::Panoramic => "Panoramic",
+                            scroll::Mode::Scrolling(_) => "Scrolling",
+                            scroll::Mode::Panoramic => "Panoramic",
                         };
                         report_capture_result(
                             status,
                             "Capture failed",
                             format!("{description} capture failed: {error}"),
-                            notification_linux::Urgency::Critical,
+                            notification::Urgency::Critical,
                         );
                     }) {
                         *SCROLL_CAPTURE.lock() = None;
@@ -4130,7 +4079,7 @@ fn toggle_scrolling_capture(
             status,
             "Capture failed",
             format!("Could not start scrolling capture: {error}"),
-            notification_linux::Urgency::Critical,
+            notification::Urgency::Critical,
         );
     }
 }
@@ -4171,7 +4120,7 @@ fn toggle_interval_capture(
         .trim()
         .parse::<u32>()
         .map_err(|_| "the interval must be a whole number of seconds".to_owned())
-        .and_then(|seconds| settings_linux::IntervalPreferences::new(seconds, skip_identical))
+        .and_then(|seconds| settings::IntervalPreferences::new(seconds, skip_identical))
     {
         Ok(preferences) => preferences,
         Err(error) => {
@@ -4179,7 +4128,7 @@ fn toggle_interval_capture(
             return;
         }
     };
-    let cursor = match settings_linux::capture_cursor() {
+    let cursor = match settings::capture_cursor() {
         Ok(cursor) => cursor,
         Err(error) => {
             status.set_if_changed(format!(
@@ -4188,7 +4137,7 @@ fn toggle_interval_capture(
             return;
         }
     };
-    if let Err(error) = settings_linux::set_interval_preferences(preferences) {
+    if let Err(error) = settings::set_interval_preferences(preferences) {
         status.set_if_changed(format!("Could not save interval preferences: {error}"));
         return;
     }
@@ -4202,20 +4151,20 @@ fn toggle_interval_capture(
             let progress_scope = task_scope.clone();
             let mut automatic_copy_failures = 0_u64;
             let mut first_automatic_copy_error = None;
-            let result = futures_lite::future::block_on(interval_linux::capture(
+            let result = futures_lite::future::block_on(interval::capture(
                 preferences,
                 cursor,
                 receiver,
                 |progress| match progress {
-                    interval_linux::Progress::Saved { count, path } => {
-                        let automatic_copy = share_linux::copy_automatically(&path);
+                    interval::Progress::Saved { count, path } => {
+                        let automatic_copy = share::copy_automatically(&path);
                         if let Err(error) = &automatic_copy {
                             automatic_copy_failures = automatic_copy_failures.saturating_add(1);
                             if first_automatic_copy_error.is_none() {
                                 first_automatic_copy_error = Some(error.clone());
                             }
                         }
-                        let recent = capture_linux::recent_captures();
+                        let recent = capture::recent_captures();
                         if let Err(error) = progress_scope.post(move || {
                             let mut message = format!(
                                 "Interval capture saved {count} image(s); latest: {}.",
@@ -4233,7 +4182,7 @@ fn toggle_interval_capture(
                             eprintln!("Could not report interval capture progress: {error}");
                         }
                     }
-                    interval_linux::Progress::Skipped { count } => {
+                    interval::Progress::Skipped { count } => {
                         if let Err(error) = progress_scope.post(move || {
                             status.set_if_changed(format!(
                                 "Interval capture active; skipped {count} unchanged frame(s)."
@@ -4247,9 +4196,9 @@ fn toggle_interval_capture(
             if let Err(error) = task_scope.post(move || {
                 *INTERVAL_CAPTURE.lock() = None;
                 let urgency = if result.is_err() || automatic_copy_failures > 0 {
-                    notification_linux::Urgency::Critical
+                    notification::Urgency::Critical
                 } else {
-                    notification_linux::Urgency::Normal
+                    notification::Urgency::Normal
                 };
                 let mut message = match result {
                     Ok(completed) => {
@@ -4288,7 +4237,7 @@ fn configure_daily_schedule(
     status: Signal<String>,
     captures: Signal<Vec<PathBuf>>,
     library: LibraryControls,
-    preferences: settings_linux::SchedulePreferences,
+    preferences: settings::SchedulePreferences,
 ) -> std::result::Result<(), String> {
     if let Some(previous) = DAILY_SCHEDULE.lock().take() {
         let _ = previous.stop.try_send(());
@@ -4305,9 +4254,9 @@ fn configure_daily_schedule(
         .name("jiffshot-daily-schedule".to_owned())
         .spawn(move || {
             let mut schedule =
-                schedule_linux::DailySchedule::new(preferences.time, preferences.last_fired);
+                schedule::DailySchedule::new(preferences.time, preferences.last_fired);
             loop {
-                match schedule_linux::LocalMinute::now() {
+                match schedule::LocalMinute::now() {
                     Ok(now) if schedule.should_fire(now) => {
                         let callback_scope = task_scope.clone();
                         if let Err(error) = task_scope.post(move || {
@@ -4334,7 +4283,7 @@ fn configure_daily_schedule(
                                     status,
                                     "Daily capture schedule stopped",
                                     format!("Daily capture schedule stopped: {error}"),
-                                    notification_linux::Urgency::Critical,
+                                    notification::Urgency::Critical,
                                 );
                             }
                         }) {
@@ -4378,23 +4327,23 @@ fn trigger_daily_capture(
     captures: Signal<Vec<PathBuf>>,
     library: LibraryControls,
     id: u64,
-    time: schedule_linux::ScheduleTime,
-    day: schedule_linux::ScheduleDay,
+    time: schedule::ScheduleTime,
+    day: schedule::ScheduleDay,
 ) {
     if !schedule_is_current(id) {
         return;
     }
-    match settings_linux::mark_schedule_fired(time, day) {
-        Ok(settings_linux::ScheduleClaim::Claimed) => {}
-        Ok(settings_linux::ScheduleClaim::AlreadyClaimed) => return,
-        Ok(settings_linux::ScheduleClaim::Changed) => {
+    match settings::mark_schedule_fired(time, day) {
+        Ok(settings::ScheduleClaim::Claimed) => {}
+        Ok(settings::ScheduleClaim::AlreadyClaimed) => return,
+        Ok(settings::ScheduleClaim::Changed) => {
             stop_daily_schedule(id);
             report_capture_result(
                 status,
                 "Daily capture stopped",
                 "Daily capture settings changed externally; save the schedule again to reload them."
                     .to_owned(),
-                notification_linux::Urgency::Critical,
+                notification::Urgency::Critical,
             );
             return;
         }
@@ -4405,7 +4354,7 @@ fn trigger_daily_capture(
                 format!(
                     "Could not record the daily capture attempt; capture was not started: {error}"
                 ),
-                notification_linux::Urgency::Critical,
+                notification::Urgency::Critical,
             );
             return;
         }
@@ -4420,18 +4369,18 @@ fn trigger_daily_capture(
             status,
             "Daily capture skipped",
             "Daily capture skipped because another capture or recording was active.".to_owned(),
-            notification_linux::Urgency::Normal,
+            notification::Urgency::Normal,
         );
         return;
     }
-    let cursor = match settings_linux::capture_cursor() {
+    let cursor = match settings::capture_cursor() {
         Ok(cursor) => cursor,
         Err(error) => {
             report_capture_result(
                 status,
                 "Daily capture failed",
                 format!("Daily capture could not read the capture cursor setting: {error}"),
-                notification_linux::Urgency::Critical,
+                notification::Urgency::Critical,
             );
             return;
         }
@@ -4441,7 +4390,7 @@ fn trigger_daily_capture(
             status,
             "Daily capture skipped",
             "A daily capture is already in progress.".to_owned(),
-            notification_linux::Urgency::Normal,
+            notification::Urgency::Normal,
         );
         return;
     }
@@ -4453,21 +4402,18 @@ fn trigger_daily_capture(
     if let Err(error) = std::thread::Builder::new()
         .name("jiffshot-daily-capture".to_owned())
         .spawn(move || {
-            let result = futures_lite::future::block_on(capture_linux::capture_monitor(cursor))
-                .and_then(|document| capture_linux::save_capture(&document));
+            let result = futures_lite::future::block_on(capture::capture_monitor(cursor))
+                .and_then(|document| capture::save_capture(&document));
             let automatic_copy = result
                 .as_ref()
                 .ok()
-                .map(|path| share_linux::copy_automatically(path));
-            let recent = result
-                .as_ref()
-                .ok()
-                .map(|_| capture_linux::recent_captures());
+                .map(|path| share::copy_automatically(path));
+            let recent = result.as_ref().ok().map(|_| capture::recent_captures());
             drop(active);
             if let Err(error) = task_scope.post(move || match result {
                 Ok(path) => {
                     let mut message = format!("Daily capture saved to {}.", path.display());
-                    let mut urgency = notification_linux::Urgency::Normal;
+                    let mut urgency = notification::Urgency::Normal;
                     if let Some(recent) = recent {
                         match recent {
                             Ok(recent) => replace_capture_library(captures, library, recent),
@@ -4475,12 +4421,12 @@ fn trigger_daily_capture(
                                 message.push_str(&format!(
                                     " Capture library could not refresh: {error}"
                                 ));
-                                urgency = notification_linux::Urgency::Critical;
+                                urgency = notification::Urgency::Critical;
                             }
                         }
                         if let Some(automatic_copy) = automatic_copy {
                             if automatic_copy.is_err() {
-                                urgency = notification_linux::Urgency::Critical;
+                                urgency = notification::Urgency::Critical;
                             }
                             append_automatic_copy_result(&mut message, automatic_copy);
                         }
@@ -4491,7 +4437,7 @@ fn trigger_daily_capture(
                     status,
                     "Daily capture failed",
                     format!("Daily capture failed: {error}"),
-                    notification_linux::Urgency::Critical,
+                    notification::Urgency::Critical,
                 ),
             }) {
                 eprintln!("Could not report daily capture result: {error}");
@@ -4502,18 +4448,18 @@ fn trigger_daily_capture(
             status,
             "Daily capture failed",
             format!("Could not start daily capture: {error}"),
-            notification_linux::Urgency::Critical,
+            notification::Urgency::Critical,
         );
     }
 }
 
 fn cancel_scrolling_capture(status: Signal<String>) {
     match SCROLL_CAPTURE.lock().as_ref() {
-        Some(active) if active.stop.try_send(scroll_linux::Action::Cancel).is_ok() => {
+        Some(active) if active.stop.try_send(scroll::Action::Cancel).is_ok() => {
             status.set_if_changed(
                 match active.mode {
-                    scroll_linux::Mode::Scrolling(_) => "Cancelling scrolling capture…",
-                    scroll_linux::Mode::Panoramic => "Cancelling panoramic capture…",
+                    scroll::Mode::Scrolling(_) => "Cancelling scrolling capture…",
+                    scroll::Mode::Panoramic => "Cancelling panoramic capture…",
                 }
                 .to_owned(),
             );
@@ -4529,7 +4475,7 @@ fn open_capture_folder(scope: &AppScope, status: Signal<String>) {
     let failed_status = status;
     if let Err(error) = scope.spawn(async move {
         let result = async {
-            let directory = capture_linux::capture_directory()?;
+            let directory = capture::capture_directory()?;
             std::fs::create_dir_all(&directory)
                 .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
             let file = std::fs::File::open(&directory)
@@ -4568,7 +4514,7 @@ fn choose_capture_folder(
         return;
     };
     let options = FolderPickerOptions::new().title("Choose Jiffshot captures folder");
-    let operation = match file_dialog_linux::open_folder_picker(scope, &window, &options) {
+    let operation = match file_dialog::open_folder_picker(scope, &window, &options) {
         Ok(operation) => operation,
         Err(error) => {
             status.set_if_changed(format!("Could not open folder picker: {error}"));
@@ -4587,8 +4533,8 @@ fn choose_capture_folder(
                     "the selected folder is not available as a local directory".to_owned()
                 })
                 .and_then(|directory| {
-                    settings_linux::set_capture_directory(&directory)?;
-                    Ok((directory, capture_linux::recent_captures()))
+                    settings::set_capture_directory(&directory)?;
+                    Ok((directory, capture::recent_captures()))
                 }),
             Ok(PickerOutcome::Cancelled) => return,
             Err(error) => Err(format!("could not choose captures folder: {error}")),
@@ -4631,7 +4577,7 @@ fn copy_image(scope: &AppScope, status: Signal<String>) {
     let task_scope = scope.clone();
     let failed_status = status;
     if let Err(error) = scope.spawn(async move {
-        let result = clipboard_linux::copy_pixmap(pixmap);
+        let result = clipboard::copy_pixmap(pixmap);
         if let Err(error) = task_scope.post(move || {
             status.set_if_changed(match result {
                 Ok(()) => "Copied image to the clipboard.".to_owned(),
@@ -4653,7 +4599,7 @@ fn paste_image(
     let task_scope = scope.clone();
     let failed_status = status;
     if let Err(error) = scope.spawn(async move {
-        let result = clipboard_linux::paste_document();
+        let result = clipboard::paste_document();
         if let Err(error) = task_scope.post(move || match result {
             Ok(document) => {
                 canvas::with_editor(|editor| load_editor_document(editor, document, None));
@@ -4674,11 +4620,11 @@ fn toggle_screen_recording(
     status: Signal<String>,
     captures: Signal<Vec<PathBuf>>,
     library: LibraryControls,
-    audio: capture_linux::RecordingAudio,
+    audio: capture::RecordingAudio,
     webcam: bool,
 ) {
     if let Some(commands) = RECORDING.lock().as_ref() {
-        match commands.try_send(capture_linux::RecordingCommand::Stop) {
+        match commands.try_send(capture::RecordingCommand::Stop) {
             Ok(()) => status.set_if_changed("Finalizing screen recording…".to_owned()),
             Err(async_channel::TrySendError::Full(_)) => {
                 status.set_if_changed("Recording controls are busy; try again.".to_owned())
@@ -4707,7 +4653,7 @@ fn toggle_screen_recording(
         return;
     }
 
-    let cursor = match settings_linux::recording_cursor() {
+    let cursor = match settings::recording_cursor() {
         Ok(cursor) => cursor,
         Err(error) => {
             status.set_if_changed(format!(
@@ -4716,7 +4662,7 @@ fn toggle_screen_recording(
             return;
         }
     };
-    let frame_rate = match settings_linux::recording_frame_rate() {
+    let frame_rate = match settings::recording_frame_rate() {
         Ok(frame_rate) => frame_rate,
         Err(error) => {
             status.set_if_changed(format!("Could not read the recording frame rate: {error}"));
@@ -4724,23 +4670,23 @@ fn toggle_screen_recording(
         }
     };
     let webcam = if webcam {
-        match settings_linux::webcam_configuration() {
-            Ok(configuration) => capture_linux::RecordingWebcam::Enabled(configuration),
+        match settings::webcam_configuration() {
+            Ok(configuration) => capture::RecordingWebcam::Enabled(configuration),
             Err(error) => {
                 status.set_if_changed(format!("Could not load webcam preferences: {error}"));
                 return;
             }
         }
     } else {
-        capture_linux::RecordingWebcam::Disabled
+        capture::RecordingWebcam::Disabled
     };
     let (commands, receiver) = async_channel::bounded(8);
     *RECORDING.lock() = Some(commands);
     let description = match audio {
-        capture_linux::RecordingAudio::Disabled => "Screen recording",
-        capture_linux::RecordingAudio::Microphone => "Screen and microphone recording",
-        capture_linux::RecordingAudio::System => "Screen and system sound recording",
-        capture_linux::RecordingAudio::SystemAndMicrophone => {
+        capture::RecordingAudio::Disabled => "Screen recording",
+        capture::RecordingAudio::Microphone => "Screen and microphone recording",
+        capture::RecordingAudio::System => "Screen and system sound recording",
+        capture::RecordingAudio::SystemAndMicrophone => {
             "Screen, system sound and microphone recording"
         }
     };
@@ -4754,7 +4700,7 @@ fn toggle_screen_recording(
         .name("jiffshot-screen-recording".to_owned())
         .spawn(move || {
             let state_scope = task_scope.clone();
-            let result = futures_lite::future::block_on(capture_linux::record_monitor_with_audio(
+            let result = futures_lite::future::block_on(capture::record_monitor_with_audio(
                 receiver,
                 audio,
                 webcam,
@@ -4762,14 +4708,14 @@ fn toggle_screen_recording(
                 frame_rate,
                 move |state| {
                     let message = match state {
-                        capture_linux::RecordingState::Starting => {
+                        capture::RecordingState::Starting => {
                             "Screen recording is still starting; try again."
                         }
-                        capture_linux::RecordingState::Recording => "Screen recording is active.",
-                        capture_linux::RecordingState::Paused => "Screen recording is paused.",
-                        capture_linux::RecordingState::Stopping => "Finalizing screen recording…",
-                        capture_linux::RecordingState::Restarting => "Restarting screen recording…",
-                        capture_linux::RecordingState::Cancelling => "Cancelling screen recording…",
+                        capture::RecordingState::Recording => "Screen recording is active.",
+                        capture::RecordingState::Paused => "Screen recording is paused.",
+                        capture::RecordingState::Stopping => "Finalizing screen recording…",
+                        capture::RecordingState::Restarting => "Restarting screen recording…",
+                        capture::RecordingState::Cancelling => "Cancelling screen recording…",
                     };
                     if let Err(error) =
                         state_scope.post(move || task_status.set_if_changed(message.to_owned()))
@@ -4782,8 +4728,8 @@ fn toggle_screen_recording(
                 .as_ref()
                 .ok()
                 .and_then(Option::as_ref)
-                .map(|path| share_linux::copy_automatically(path));
-            let recent = capture_linux::recent_captures();
+                .map(|path| share::copy_automatically(path));
+            let recent = capture::recent_captures();
             let posted_status = task_status;
             if let Err(post_error) = task_scope.post(move || {
                 *RECORDING.lock() = None;
@@ -4800,9 +4746,9 @@ fn toggle_screen_recording(
                         .as_ref()
                         .is_some_and(std::result::Result::is_err)
                 {
-                    notification_linux::Urgency::Critical
+                    notification::Urgency::Critical
                 } else {
-                    notification_linux::Urgency::Normal
+                    notification::Urgency::Normal
                 };
                 let mut message = match result {
                     Ok(Some(path)) => format!("{description} saved to {}", path.display()),
@@ -4827,21 +4773,21 @@ fn toggle_screen_recording(
             status,
             "Screen recording failed",
             format!("Could not start screen recording: {error}"),
-            notification_linux::Urgency::Critical,
+            notification::Urgency::Critical,
         );
     }
 }
 
 fn toggle_recording_pause(status: Signal<String>) {
     send_recording_command(
-        capture_linux::RecordingCommand::TogglePause,
+        capture::RecordingCommand::TogglePause,
         "Changing recording pause state…",
         status,
     );
 }
 
 fn send_recording_command(
-    command: capture_linux::RecordingCommand,
+    command: capture::RecordingCommand,
     sent_message: &str,
     status: Signal<String>,
 ) {
@@ -4883,7 +4829,7 @@ fn toggle_video_playback(
     let options = OpenFilePickerOptions::new()
         .title("Play video")
         .file_type(filter);
-    let operation = match file_dialog_linux::open_file_picker(scope, &window, &options) {
+    let operation = match file_dialog::open_file_picker(scope, &window, &options) {
         Ok(operation) => operation,
         Err(error) => {
             status.set_if_changed(format!("Could not open video picker: {error}"));
@@ -4946,26 +4892,25 @@ fn toggle_video_playback(
                 let spawn = std::thread::Builder::new()
                     .name("jiffshot-video-playback".to_owned())
                     .spawn(move || {
-                        let result =
-                            video_linux::play(&path, &thread_stop, &thread_paused, |document| {
-                                if pending_for_thread.swap(true, Ordering::AcqRel) {
-                                    return;
-                                }
-                                let canvas = callback_canvas.clone();
-                                let pending = pending_for_thread.clone();
-                                let source = path.clone();
-                                if let Err(error) = callback_scope.post(move || {
-                                    canvas::with_editor(|editor| {
-                                        load_editor_document(editor, document, Some(source));
-                                    });
-                                    canvas.get().refresh();
-                                    pending.store(false, Ordering::Release);
-                                }) {
-                                    eprintln!("Could not display a video frame: {error}");
-                                    pending_for_thread.store(false, Ordering::Release);
-                                    callback_stop.store(true, Ordering::Release);
-                                }
-                            });
+                        let result = video::play(&path, &thread_stop, &thread_paused, |document| {
+                            if pending_for_thread.swap(true, Ordering::AcqRel) {
+                                return;
+                            }
+                            let canvas = callback_canvas.clone();
+                            let pending = pending_for_thread.clone();
+                            let source = path.clone();
+                            if let Err(error) = callback_scope.post(move || {
+                                canvas::with_editor(|editor| {
+                                    load_editor_document(editor, document, Some(source));
+                                });
+                                canvas.get().refresh();
+                                pending.store(false, Ordering::Release);
+                            }) {
+                                eprintln!("Could not display a video frame: {error}");
+                                pending_for_thread.store(false, Ordering::Release);
+                                callback_stop.store(true, Ordering::Release);
+                            }
+                        });
                         clear_video_playback(&thread_stop);
                         let message = match result {
                             Ok(()) => "Video playback stopped.".to_owned(),
@@ -5033,7 +4978,7 @@ fn combine_videos_dialog(scope: &AppScope, status: Signal<String>) {
         .title("Select videos to combine in filename order")
         .allow_multiple(true)
         .file_type(filter);
-    let operation = match file_dialog_linux::open_file_picker(scope, &window, &options) {
+    let operation = match file_dialog::open_file_picker(scope, &window, &options) {
         Ok(operation) => operation,
         Err(error) => {
             status.set_if_changed(format!("Could not open video picker: {error}"));
@@ -5110,7 +5055,7 @@ fn save_combined_video_dialog(scope: &AppScope, sources: Vec<PathBuf>, status: S
         .start_in(WellKnownFolder::Pictures)
         .default_extension("mp4")
         .file_type(FileTypeFilter::new("MP4 video").with_extension("mp4"));
-    let operation = match file_dialog_linux::save_file_picker(scope, &window, &options) {
+    let operation = match file_dialog::save_file_picker(scope, &window, &options) {
         Ok(operation) => operation,
         Err(error) => {
             status.set_if_changed(format!("Could not open video save dialog: {error}"));
@@ -5146,7 +5091,7 @@ fn save_combined_video_dialog(scope: &AppScope, sources: Vec<PathBuf>, status: S
                 let result = std::thread::Builder::new()
                     .name("jiffshot-video-combine".to_owned())
                     .spawn(move || {
-                        let result = video_linux::combine_videos(&sources, &destination);
+                        let result = video::combine_videos(&sources, &destination);
                         if let Err(error) = thread_scope.post(move || match result {
                             Ok(()) => status.set_if_changed(format!(
                                 "Saved combined video to {destination_label}"
@@ -5220,7 +5165,7 @@ fn video_range_dialog(
             "Select video to trim"
         })
         .file_type(filter);
-    let operation = match file_dialog_linux::open_file_picker(scope, &window, &options) {
+    let operation = match file_dialog::open_file_picker(scope, &window, &options) {
         Ok(operation) => operation,
         Err(error) => {
             status.set_if_changed(format!("Could not open video picker: {error}"));
@@ -5299,7 +5244,7 @@ fn import_video_frame_dialog(
     let options = OpenFilePickerOptions::new()
         .title("Select video to import a frame from")
         .file_type(filter);
-    let operation = match file_dialog_linux::open_file_picker(scope, &window, &options) {
+    let operation = match file_dialog::open_file_picker(scope, &window, &options) {
         Ok(operation) => operation,
         Err(error) => {
             status.set_if_changed(format!("Could not open video picker: {error}"));
@@ -5366,7 +5311,7 @@ fn save_video_range(
         .start_in(WellKnownFolder::Pictures)
         .default_extension("mp4")
         .file_type(FileTypeFilter::new("MP4 video").with_extension("mp4"));
-    let operation = match file_dialog_linux::save_file_picker(scope, &window, &options) {
+    let operation = match file_dialog::save_file_picker(scope, &window, &options) {
         Ok(operation) => operation,
         Err(error) => {
             status.set_if_changed(format!("Could not open video save dialog: {error}"));
@@ -5408,9 +5353,9 @@ fn save_video_range(
                     })
                     .spawn(move || {
                         let result = if cut {
-                            video_linux::cut_video(&source, &destination, start, end)
+                            video::cut_video(&source, &destination, start, end)
                         } else {
-                            video_linux::trim_video(&source, &destination, start, end)
+                            video::trim_video(&source, &destination, start, end)
                         };
                         let reported_status = status;
                         if let Err(error) = thread_scope.post(move || match result {
@@ -5490,8 +5435,8 @@ impl VideoExport {
 
     fn export(self, source: &Path, destination: &Path) -> std::result::Result<(), String> {
         match self {
-            Self::Gif => video_linux::export_gif(source, destination),
-            Self::SilentMp4 => video_linux::export_silent_video(source, destination),
+            Self::Gif => video::export_gif(source, destination),
+            Self::SilentMp4 => video::export_silent_video(source, destination),
         }
     }
 }
@@ -5512,7 +5457,7 @@ fn export_video_dialog(scope: &AppScope, format: VideoExport, status: Signal<Str
             format.description()
         ))
         .file_type(filter);
-    let operation = match file_dialog_linux::open_file_picker(scope, &window, &options) {
+    let operation = match file_dialog::open_file_picker(scope, &window, &options) {
         Ok(operation) => operation,
         Err(error) => {
             status.set_if_changed(format!("Could not open video picker: {error}"));
@@ -5580,7 +5525,7 @@ fn save_video_export_dialog(
         .start_in(WellKnownFolder::Pictures)
         .default_extension(format.extension())
         .file_type(FileTypeFilter::new(format.description()).with_extension(format.extension()));
-    let operation = match file_dialog_linux::save_file_picker(scope, &window, &options) {
+    let operation = match file_dialog::save_file_picker(scope, &window, &options) {
         Ok(operation) => operation,
         Err(error) => {
             status.set_if_changed(format!("Could not open video export save dialog: {error}"));
@@ -5745,7 +5690,7 @@ fn open_document(
     let options = OpenFilePickerOptions::new()
         .title("Open image, video, or document")
         .file_type(filter);
-    let operation = match file_dialog_linux::open_file_picker(scope, &window, &options) {
+    let operation = match file_dialog::open_file_picker(scope, &window, &options) {
         Ok(operation) => operation,
         Err(error) => {
             status.set_if_changed(format!("Could not open file picker: {error}"));
@@ -5800,7 +5745,7 @@ fn save_document(scope: &AppScope, status: Signal<String>) {
         .start_in(WellKnownFolder::Pictures)
         .default_extension("jsd")
         .file_type(FileTypeFilter::new("Jiffshot document").with_extension("jsd"));
-    let operation = match file_dialog_linux::save_file_picker(scope, &window, &options) {
+    let operation = match file_dialog::save_file_picker(scope, &window, &options) {
         Ok(operation) => operation,
         Err(error) => {
             status.set_if_changed(format!("Could not open save dialog: {error}"));
@@ -5826,7 +5771,7 @@ fn export_image(scope: &AppScope, status: Signal<String>) {
         .start_in(WellKnownFolder::Pictures)
         .default_extension("png")
         .file_type(filter);
-    let operation = match file_dialog_linux::save_file_picker(scope, &window, &options) {
+    let operation = match file_dialog::save_file_picker(scope, &window, &options) {
         Ok(operation) => operation,
         Err(error) => {
             status.set_if_changed(format!("Could not open export dialog: {error}"));
@@ -5838,7 +5783,7 @@ fn export_image(scope: &AppScope, status: Signal<String>) {
 
 fn save_to_picker(
     scope: &AppScope,
-    operation: file_dialog_linux::PickerOperation,
+    operation: file_dialog::PickerOperation,
     status: Signal<String>,
     document: bool,
 ) {
@@ -5941,7 +5886,7 @@ mod tests {
 
     #[test]
     fn selection_shortcuts_require_their_exact_modifiers() {
-        use editor_linux::SelectionAction as Action;
+        use editor::SelectionAction as Action;
         for (key, modifiers, action) in [
             (Key::Delete, 0, Action::Delete),
             (Key::A, 2, Action::SelectAll),

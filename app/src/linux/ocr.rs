@@ -247,7 +247,7 @@ mod tests {
             "OCR should recognize the email in the rendered document: {lines:?}"
         );
         let mut editor = jiffshot_doc::editor::Editor::new(document);
-        assert_eq!(crate::editor_linux::smart_redact(&mut editor, &lines), 1);
+        assert_eq!(crate::linux::editor::smart_redact(&mut editor, &lines), 1);
         assert!(
             matches!(
                 editor.document().objects.last().map(|object| &object.kind),

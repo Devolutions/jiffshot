@@ -6,6 +6,7 @@
 //! callbacks reach the main and Capture windows' bindings through [`main`]
 //! and [`capture`], and carry anything else in a [`UiOnly`].
 
+#[path = "../../ui/canvas_view.rs"]
 pub mod canvas_view;
 mod capture_view;
 pub mod dialogs;
@@ -81,7 +82,7 @@ pub fn icon_file() -> String {
             .unwrap_or_else(std::env::temp_dir)
             .join("Jiffshot");
         let path = dir.join("jiffshot.ico");
-        let bytes = include_bytes!("../../../assets/jiffshot.ico");
+        let bytes = include_bytes!("../../../../assets/jiffshot.ico");
         if std::fs::read(&path).ok().as_deref() != Some(&bytes[..]) {
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(&path, bytes);
