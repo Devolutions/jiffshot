@@ -40,8 +40,10 @@ Prebuilt, Authenticode-signed packages for **Windows 10 and Windows 11** (`x64` 
 |---|---|---|
 | **`Devolutions.Jiffshot-x64-<version>.msi`** | Windows x64 (Intel / AMD) | Standard Windows Installer. Installs to `C:\Program Files\Devolutions\Jiffshot`, adds a Start Menu shortcut, and associates `.jsd` Jiffshot Document files. |
 | **`Devolutions.Jiffshot-arm64-<version>.msi`** | Windows ARM64 | Standard Windows Installer for Windows on ARM devices. |
-| **`Devolutions.Jiffshot-x64-<version>-portable.zip`** | Windows x64 (Intel / AMD) | Portable archive—unzip anywhere and run `jiffshot.exe`. Nothing is installed in the system. |
-| **`Devolutions.Jiffshot-arm64-<version>-portable.zip`** | Windows ARM64 | Portable archive for Windows on ARM devices. |
+| **`Devolutions.Jiffshot-x64-<version>.msix`** | Windows x64 (Intel / AMD) | Signed MSIX package. Install it to add Jiffshot to Windows; uninstall it from Installed apps. |
+| **`Devolutions.Jiffshot-arm64-<version>.msix`** | Windows ARM64 | Signed MSIX package for Windows on ARM devices. |
+| **`Devolutions.Jiffshot-x64-<version>.zip`** | Windows x64 (Intel / AMD) | Portable archive—unzip anywhere and run `jiffshot.exe`. Nothing is installed in the system. |
+| **`Devolutions.Jiffshot-arm64-<version>.zip`** | Windows ARM64 | Portable archive for Windows on ARM devices. |
 
 > **Note for Windows "N" editions:** Video recording uses Windows Media Foundation, which is omitted from Windows "N" SKUs by default. Install Microsoft's *Media Feature Pack* in Windows Optional Features to enable MP4 recording and playback.
 
@@ -266,7 +268,7 @@ Jiffshot is written in Rust with its UI built on [Rustolonia](https://github.com
 | `crates/jiffshot-doc/` | Documents: annotation objects, rendering, editing and undo, effects, smart tools, `.jsd` and image files |
 | `crates/jiffshot-workflow/` | The capture side: tray, hotkeys, selection overlay, recording, capture panels, post-capture workflow, command-line modes |
 | `app/` | `jiffshot.exe`: the editor's model (`src/app.rs`, view models in `src/vm.rs`), every window (`src/ui/`) and the capture side, in one process |
-| `package/` | The MSI installer, built with WixSharp |
+| `package/` | The MSI installer (WixSharp) and MSIX manifest |
 
 ### Compiling
 
@@ -285,7 +287,7 @@ rustup target add aarch64-pc-windows-msvc
 cargo build --release -p jiffshot --target aarch64-pc-windows-msvc
 ```
 
-CI (`.github/workflows/ci.yml`) builds both and uploads them as portable zips (`jiffshot-win-x64`, `jiffshot-win-arm64`). To move to a newer Rustolonia, change the tag on the two lines in `Cargo.toml`'s `[workspace.dependencies]`.
+CI (`.github/workflows/ci.yml`) builds both architectures and uploads portable ZIP, MSI, and MSIX artifacts (`jiffshot-win-x64`, `jiffshot-win-arm64`, and their `-msi` / `-msix` variants). To move to a newer Rustolonia, change the tag on the two lines in `Cargo.toml`'s `[workspace.dependencies]`.
 
 ### Logo Assets
 
@@ -316,11 +318,11 @@ The MSI lands in `package/out` as `Devolutions.Jiffshot-x64-0.1.0.msi` (with the
 
 ### Releases & Code Signing
 
-`ci.yml` builds and tests unsigned portable packages and MSIs for pushes to master, pull requests, and manual runs. `release.yml` reuses those jobs with signing enabled: it signs the portable executable and Rustolonia host DLL before building the MSI, then signs the MSI. The x64 MSI is installed and uninstalled before the release can proceed.
+`ci.yml` builds and tests unsigned portable packages, MSIs, and MSIX packages for pushes to master, pull requests, and manual runs. `release.yml` reuses those jobs with signing enabled: it signs the portable executable and Rustolonia host DLL before building the installers, then signs the MSI and MSIX. The x64 MSI is installed and uninstalled before the release can proceed; signed MSIX release builds are also installed and uninstalled.
 
 Run **Release** from GitHub Actions with a version matching `Cargo.toml` (for example, `0.1.0`, without `v`). Update and commit the workspace version before releasing a new version. Dry runs are enabled by default and upload signed packages without creating a tag or release. The `github_env` input selects the signing environment independently of `dry_run`: on master, `auto` (the default) and `prod` use `publish-prod`, while `test` uses `publish-test`. Other branches always use `publish-test` and only permit dry runs, even if `prod` is requested. For test signing, the workflow retrieves the `publish-test` profile root with psign and trusts it only in each ephemeral runner's current user certificate store, so Authenticode validation remains enabled. A non-dry-run dispatch with `github_env=test` publishes test-signed artifacts that are not publicly trusted. The workflow rejects non-dry-run releases from other branches, version mismatches, and existing tags.
 
-Both modes retain the portable and MSI Actions artifacts plus a `release-assets` artifact containing x64/ARM64 MSIs, portable ZIPs, and `SHA256SUMS.txt`. After all builds, signing, and validation succeed, a non-dry-run creates `v<version>` at the dispatched commit and publishes a GitHub Release with those same files attached. Do not create the tag manually.
+Both modes retain the portable, MSI, and MSIX Actions artifacts plus a `release-assets` artifact containing x64/ARM64 MSIs, MSIX packages, ZIP archives, and `SHA256SUMS.txt`. After all builds, signing, and validation succeed, a non-dry-run creates `v<version>` at the dispatched commit and publishes a GitHub Release with those same files attached. Do not create the tag manually.
 
 ```powershell
 # Validate with test signing without publishing (defaults to dry_run=true).
