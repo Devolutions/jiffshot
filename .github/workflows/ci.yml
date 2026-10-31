@@ -73,13 +73,20 @@ jobs:
       - name: Build
         env:
           JIFFSHOT_VERSION: ${{ inputs.version }}
-        run: cargo build --release --locked -p jiffshot --target ${{ matrix.target }}
+        run: cargo build --release --locked -p jiffshot -p jiffshot-cli --target ${{ matrix.target }}
 
       - name: Test
         if: matrix.test
         env:
           JIFFSHOT_VERSION: ${{ inputs.version }}
         run: cargo test --release --locked --workspace --target ${{ matrix.target }}
+
+      - name: Agent CLI artifact workflow
+        if: matrix.test
+        shell: pwsh
+        run: |
+          $env:JIFFSHOT_CLI_E2E = Join-Path (Get-Location) 'target\${{ matrix.target }}\release\jiffshot-cli.exe'
+          cargo test --release --locked -p jiffshot-workflow --target ${{ matrix.target }} cli_edits_artifacts_over_real_ipc_without_desktop_input -- --ignored --test-threads=1
 
       - name: Package
         shell: pwsh
@@ -91,7 +98,7 @@ jobs:
           $out = "target/${{ matrix.target }}/release"
           $dir = "jiffshot-${{ matrix.rid }}"
           New-Item -ItemType Directory -Path $dir | Out-Null
-          Copy-Item "$out/jiffshot.exe", "$out/*.dll", "app/README-portable.txt" -Destination $dir
+          Copy-Item "$out/jiffshot.exe", "$out/jiffshot-cli.exe", "$out/*.dll", "app/README-portable.txt" -Destination $dir
           $cargoToml = Get-Content -LiteralPath Cargo.toml -Raw
           if ($cargoToml -notmatch '(?ms)^\[workspace\.package\].*?^\s*version\s*=\s*"(?<v>[0-9]+\.[0-9]+\.[0-9]+)"') {
             throw 'Could not read [workspace.package] version from Cargo.toml'
@@ -153,6 +160,7 @@ jobs:
           install_test_signing_root: ${{ inputs.signing_environment == 'publish-test' }}
           files: |
             jiffshot-${{ matrix.rid }}\jiffshot.exe
+            jiffshot-${{ matrix.rid }}\jiffshot-cli.exe
             jiffshot-${{ matrix.rid }}\rustolonia_host.dll
 
       - uses: actions/upload-artifact@v7
@@ -266,6 +274,7 @@ jobs:
           $msi = (Get-ChildItem msi/*.msi).FullName
           $exe = "$env:ProgramFiles\Devolutions\Jiffshot\jiffshot.exe"
           $hostDll = "$env:ProgramFiles\Devolutions\Jiffshot\rustolonia_host.dll"
+          $cli = "$env:ProgramFiles\Devolutions\Jiffshot\jiffshot-cli.exe"
           function Invoke-Msiexec($arguments) {
             $p = Start-Process msiexec.exe -ArgumentList $arguments -Wait -PassThru
             if ($p.ExitCode -ne 0) { Get-Content msiexec.log -Tail 50; throw "msiexec $arguments exited with $($p.ExitCode)" }
@@ -273,8 +282,13 @@ jobs:
           Invoke-Msiexec "/i `"$msi`" /qn /l*v msiexec.log"
           if (-not (Test-Path $exe)) { throw "$exe is missing" }
           if (-not (Test-Path $hostDll)) { throw "the Rustolonia host is missing" }
+          if (-not (Test-Path $cli)) { throw "$cli is missing" }
+          # With no Jiffshot running, the CLI reports it as unavailable (exit code 3).
+          $reply = & $cli status --no-launch | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 3 -or $reply.error.code -ne 'unavailable') { throw "jiffshot-cli status: exit $LASTEXITCODE, $($reply | ConvertTo-Json -Compress)" }
+          $global:LASTEXITCODE = 0
           if ('${{ github.event_name }}' -ne 'pull_request' -and -not [string]::IsNullOrWhiteSpace($env:SIGNING_ENVIRONMENT)) {
-            foreach ($installedPath in @($exe, $hostDll)) {
+            foreach ($installedPath in @($exe, $cli, $hostDll)) {
               $sig = Get-AuthenticodeSignature -LiteralPath $installedPath
               if ($sig.Status -ne 'Valid' -or $null -eq $sig.SignerCertificate -or $null -eq $sig.TimeStamperCertificate) {
                 throw "Installed binary signature verification failed for ${installedPath}: $($sig.StatusMessage)"
@@ -356,8 +370,9 @@ jobs:
           $assets = Join-Path $stage 'Assets'
           New-Item -ItemType Directory -Force -Path $assets | Out-Null
           $binaries = @(Get-ChildItem -LiteralPath bin -File |
-            Where-Object { $_.Name -eq 'jiffshot.exe' -or $_.Extension -eq '.dll' })
+            Where-Object { $_.Name -in @('jiffshot.exe', 'jiffshot-cli.exe') -or $_.Extension -eq '.dll' })
           if (-not ($binaries | Where-Object { $_.Name -eq 'jiffshot.exe' })) { throw 'jiffshot.exe is missing from the build artifact' }
+          if (-not ($binaries | Where-Object { $_.Name -eq 'jiffshot-cli.exe' })) { throw 'jiffshot-cli.exe is missing from the build artifact' }
           if (-not ($binaries | Where-Object { $_.Name -eq 'rustolonia_host.dll' })) { throw 'rustolonia_host.dll is missing from the build artifact' }
           $binaries | Copy-Item -Destination $stage
           # Logo rendering is architecture-independent, but the ARM64 executable
@@ -441,6 +456,14 @@ jobs:
           }
           if (-not (Test-Path -LiteralPath (Join-Path $installed.InstallLocation 'jiffshot.exe'))) {
             throw 'The installed MSIX does not contain jiffshot.exe'
+          }
+          $cli = Join-Path $installed.InstallLocation 'jiffshot-cli.exe'
+          if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) {
+            throw 'The installed MSIX does not contain jiffshot-cli.exe'
+          }
+          $help = & $cli --help-agent
+          if ($LASTEXITCODE -ne 0 -or -not ($help -match '^jiffshot-cli for AI agents$')) {
+            throw "The installed jiffshot-cli.exe failed to run (exit $LASTEXITCODE)"
           }
           Remove-AppxPackage -Package $installed.PackageFullName -ErrorAction Stop
           if (Get-AppxPackage -Name Devolutions.Jiffshot) { throw 'Jiffshot MSIX is still installed after removal' }

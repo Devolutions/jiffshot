@@ -27,6 +27,15 @@ raw pointer stream) and a Rust-built tray icon.
   overlay as JSON) and takes work through `on_capture_thread`.
 - **Workers.** Finishing captures, recording (`recorder::record_to`) and
   scrolling captures.
+- **Control server** (`crates/jiffshot-workflow/src/control.rs`). A thread per
+  `jiffshot-cli` connection on a named pipe only this user can open
+  (`crates/jiffshot-control`). Commands run on that thread: screenshots,
+  recordings, Step Capture guides, SendInput, OCR and UI Automation. Headless
+  editable document sessions reuse `jiffshot-doc::Editor` without replacing the
+  user's GUI document; live recording annotations are composited by the recorder.
+  File-based video commands and the GUI share `jiffshot-capture::media::post`
+  for trimming, joining, overlays and exports. See
+  [cli.md](cli.md).
 
 A second launch hands its request to the running one (`--capture`, a file to
 open), passing on its right to take the foreground.

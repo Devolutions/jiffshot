@@ -196,7 +196,7 @@ jobs:
             $msi = "artifacts\jiffshot-win-$arch-msi\$msiName"
             $msixName = "Devolutions.Jiffshot-$arch-$env:RELEASE_VERSION.msix"
             $msix = "artifacts\jiffshot-win-$arch-msix\$msixName"
-            foreach ($required in @("$portable\jiffshot.exe", "$portable\rustolonia_host.dll", "$portable\README-portable.txt", $msi, $msix)) {
+            foreach ($required in @("$portable\jiffshot.exe", "$portable\jiffshot-cli.exe", "$portable\rustolonia_host.dll", "$portable\README-portable.txt", $msi, $msix)) {
               if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Missing release file: $required" }
             }
             $signedTargets = @(

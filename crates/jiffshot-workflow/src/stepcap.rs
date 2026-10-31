@@ -55,7 +55,7 @@ unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
 }
 
 /// "Click the Save button", from what UI Automation says is at `p`.
-fn describe(automation: Option<&IUIAutomation>, p: (i32, i32), right: bool) -> String {
+pub(crate) fn describe(automation: Option<&IUIAutomation>, p: (i32, i32), right: bool) -> String {
     let verb = if right { "Right-click" } else { "Click" };
     let element = automation.and_then(|a| unsafe { a.ElementFromPoint(WPOINT { x: p.0, y: p.1 }).ok() });
     let (name, kind) = match &element {
@@ -128,7 +128,7 @@ pub fn record() -> Option<Vec<Step>> {
     (!steps.is_empty()).then_some(steps)
 }
 
-fn frame_to_pixmap(f: &Frame) -> Option<tiny_skia::Pixmap> {
+pub(crate) fn frame_to_pixmap(f: &Frame) -> Option<tiny_skia::Pixmap> {
     let mut rgba = Vec::with_capacity(f.pixels.len());
     for p in f.pixels.chunks_exact(4) {
         rgba.extend_from_slice(&[p[2], p[1], p[0], 255]);
@@ -140,6 +140,11 @@ fn frame_to_pixmap(f: &Frame) -> Option<tiny_skia::Pixmap> {
 /// number, its caption and the screen zoomed around the click, with the
 /// click circled and a pointer stamp on it.
 pub fn guide(steps: &[Step]) -> Document {
+    guide_titled(steps, "How to …")
+}
+
+/// [`guide`] with its own title.
+pub fn guide_titled(steps: &[Step], title: &str) -> Document {
     const W: f32 = 1400.0;
     const SHOT: (f32, f32) = (1000.0, 560.0);
     let pad = 40.0;
@@ -149,7 +154,7 @@ pub fn guide(steps: &[Step]) -> Document {
     let ink = Rgba::rgb(0x22, 0x26, 0x2E);
     let accent = Rgba::rgb(0x1E, 0x6F, 0xD9);
     let text = |size: f32, bold: bool, color: Rgba| Style { font_size: size, bold, text_color: color, width: 0.0, fill: Rgba::TRANSPARENT, align: Align::Left, ..Style::default() };
-    doc.add(Kind::Text { rect: Box2::from_xywh(pad, 30.0, W - 2.0 * pad, 60.0), text: "How to …".into() }, text(40.0, true, ink));
+    doc.add(Kind::Text { rect: Box2::from_xywh(pad, 30.0, W - 2.0 * pad, 60.0), text: title.to_owned() }, text(40.0, true, ink));
     doc.add(Kind::Text { rect: Box2::from_xywh(pad, 88.0, W - 2.0 * pad, 30.0), text: format!("{} steps", steps.len()) }, text(18.0, false, Rgba::rgb(0x6B, 0x72, 0x80)));
     for (i, step) in steps.iter().enumerate() {
         let y = 140.0 + i as f32 * row;

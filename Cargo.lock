@@ -489,10 +489,31 @@ dependencies = [
 name = "jiffshot-capture"
 version = "0.1.0"
 dependencies = [
+ "image",
+ "jiffshot-doc",
  "png 0.17.16",
  "serde",
  "serde_json",
+ "tiny-skia",
  "windows",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "jiffshot-cli"
+version = "0.1.0"
+dependencies = [
+ "jiffshot-control",
+ "serde_json",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "jiffshot-control"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "windows-sys 0.59.0",
 ]
 
@@ -513,6 +534,7 @@ name = "jiffshot-workflow"
 version = "0.1.0"
 dependencies = [
  "jiffshot-capture",
+ "jiffshot-control",
  "jiffshot-doc",
  "resvg",
  "serde",

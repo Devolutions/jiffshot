@@ -93,7 +93,7 @@ fn hwheel(notches: i32) {
 
 /// Frames turned a quarter (columns become rows), so horizontal scrolling
 /// can use the vertical stitcher.
-fn transpose(f: &Frame) -> Frame {
+pub(crate) fn transpose(f: &Frame) -> Frame {
     let mut out = Frame::new(f.height, f.width);
     for y in 0..f.height as usize {
         for x in 0..f.width as usize {
