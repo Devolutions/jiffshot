@@ -46,6 +46,18 @@ def verify_image(path, work, expected):
     )
 
 
+async def test_mock_recording_cancel_closes_portal_session(driver, portal):
+    session, _request = portal.screen_starts[-1]
+    text = TextReader()
+    try:
+        driver.click(*await text.find_scrolling_label(driver, "Cancel recording"))
+        await wait_for(lambda: session in portal.closes, "closing the cancelled recording")
+        assert portal.capture_requests == 3, "cancellation must not request another source"
+    finally:
+        text.close()
+    print("PASS test_mock_recording_cancel_closes_portal_session", flush=True)
+
+
 async def mock_checks(driver, portal, settings, original):
     scroll(driver, "down")
     await asyncio.sleep(0.5)
@@ -114,9 +126,8 @@ async def mock_checks(driver, portal, settings, original):
     assert portal.capture_requests == 3, "an active recording must block interval capture"
     scroll(driver, "up")
     await asyncio.sleep(0.4)
-    driver.click(550, 140)
-    session, _request = portal.screen_starts[-1]
-    await wait_for(lambda: session in portal.closes, "closing the cancelled recording")
+    await test_mock_recording_cancel_closes_portal_session(driver, portal)
+    scroll(driver, "up")
     await asyncio.sleep(0.3)
 
     driver.click(300, 15)
