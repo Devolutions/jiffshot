@@ -19,6 +19,11 @@ geometry and stitching code. The Windows workflow engine remains under
 `crates/jiffshot-workflow/`; Linux workflows live in `app/src/linux/`, using
 XDG portals, PipeWire and GStreamer rather than Win32 capture APIs.
 
+Shared document text is rasterized with `ab_glyph`, loading system font files
+from explicit directories rather than through Fontconfig. Ubuntu and Fedora
+DejaVu font locations are supported; installing a font that Fontconfig can find
+is not sufficient if its directory is absent from the document font search.
+
 ## Windows UI and view models
 
 `app/src/win/vm.rs` holds the view models: each window's values are signals the

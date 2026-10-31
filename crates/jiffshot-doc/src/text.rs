@@ -125,6 +125,8 @@ fn font_dirs() -> Vec<PathBuf> {
     }
     for d in [
         "/usr/share/fonts/truetype/dejavu",
+        "/usr/share/fonts/dejavu-sans-fonts",
+        "/usr/share/fonts/dejavu",
         "/usr/share/fonts/TTF",
         "/usr/share/fonts",
         "/Library/Fonts",
@@ -413,6 +415,42 @@ mod tests {
             size,
             bold: false,
             italic: false,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_system_fonts_render_default_and_dejavu_text() {
+        for family in [DEFAULT_FAMILY, "DejaVu Sans"] {
+            let face = font(family, false, false).unwrap_or_else(|| {
+                panic!("the installed Linux font provider must supply {family}")
+            });
+            assert_ne!(
+                face.glyph_id('A'),
+                GlyphId(0),
+                "{family} must contain Latin glyphs"
+            );
+            let text_style = TextStyle {
+                family,
+                ..style(20.0)
+            };
+            let text = layout("Capture information", &text_style, None);
+            assert!(text.width() > 60.0, "{family} must measure visible text");
+            let mut pixels = Pixmap::new(240, 40).expect("test raster dimensions are valid");
+            draw(
+                &mut pixels,
+                (0, 0),
+                &text,
+                0.0,
+                0.0,
+                240.0,
+                Align::Left,
+                Rgba::BLACK,
+            );
+            assert!(
+                pixels.data().chunks(4).any(|pixel| pixel[3] > 200),
+                "{family} must rasterize visible text from the installed font"
+            );
         }
     }
 
