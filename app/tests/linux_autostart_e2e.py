@@ -208,6 +208,9 @@ async def main(binary, runtime):
                 subprocess.run(["desktop-file-validate", str(entry)], check=True)
                 desktop = Gio.DesktopAppInfo.new_from_filename(str(entry))
                 assert desktop is not None and desktop.get_is_hidden()
+                assert desktop.get_executable() == "/usr/bin/true", (
+                    "disabled portable startup must parse without Jiffshot on PATH"
+                )
                 entry.write_text("unmanaged startup configuration\n")
                 await click_label("Enable login startup")
                 await asyncio.sleep(0.5)

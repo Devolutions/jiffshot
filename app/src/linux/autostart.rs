@@ -48,10 +48,11 @@ fn enable_in(directory: &Path, launcher: &Path) -> Result<(), String> {
 }
 
 fn disable_in(directory: &Path) -> Result<(), String> {
+    // GLib validates Exec even for hidden entries; portable installs need no PATH entry.
     write_entry(
         directory,
         &format!(
-            "[Desktop Entry]\nType=Application\nName=Jiffshot\nExec=jiffshot\n\
+            "[Desktop Entry]\nType=Application\nName=Jiffshot\nExec=/usr/bin/true\n\
              Hidden=true\n{OWNERSHIP_MARKER}\n"
         ),
     )
@@ -148,6 +149,7 @@ mod tests {
         disable_in(&autostart).expect("startup should be disabled");
         let disabled = std::fs::read_to_string(&path).expect("disabled entry should be readable");
         assert!(disabled.contains("Hidden=true\n"));
+        assert!(disabled.contains("Exec=/usr/bin/true\n"));
         assert!(disabled.contains(OWNERSHIP_MARKER));
         enable_in(&autostart, &launcher).expect("startup should be re-enabled");
         assert!(!std::fs::read_to_string(path)
