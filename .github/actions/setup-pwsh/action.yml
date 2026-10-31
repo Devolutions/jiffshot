@@ -1,0 +1,91 @@
+name: Set up PowerShell
+description: >-
+  Install a pinned, SHA-256 verified PowerShell 7 release and Pester 5 on Linux
+  for the packaging scripts and their tests. An existing PowerShell 7.4 or newer
+  is reused unless force is true.
+
+inputs:
+  install-dir:
+    description: Absolute directory that receives the PowerShell release.
+    default: /opt/microsoft/powershell/7
+  force:
+    description: Install the pinned release even when pwsh 7.4 or newer exists.
+    default: 'false'
+  link:
+    description: Link the installed pwsh to /usr/bin/pwsh.
+    default: 'true'
+  pester:
+    description: Install the pinned Pester module for the current user.
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Install PowerShell
+      shell: bash
+      env:
+        PWSH_VERSION: 7.6.9
+        PWSH_SHA256_X64: 1da6d6d6035d651f20e70ddee7c4c15ac6ab8b9fb40ee92240d91263f28a884b
+        PWSH_SHA256_ARM64: 02eb9991af447c7e7fe881acde195961afd397c40b8eb1c2b3856b84ec2d85f2
+        INSTALL_DIR: ${{ inputs.install-dir }}
+        FORCE: ${{ inputs.force }}
+        LINK: ${{ inputs.link }}
+      run: |
+        set -euo pipefail
+        if [ "$FORCE" != true ] && command -v pwsh >/dev/null &&
+          pwsh -NoProfile -Command 'if ($PSVersionTable.PSVersion -lt [semver]"7.4.0") { exit 1 }'; then
+          echo "Using existing PowerShell $(pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')"
+          exit 0
+        fi
+        case "$(uname -m)" in
+          x86_64) arch=x64; sha256=$PWSH_SHA256_X64 ;;
+          aarch64) arch=arm64; sha256=$PWSH_SHA256_ARM64 ;;
+          *) echo "Unsupported PowerShell architecture: $(uname -m)" >&2; exit 1 ;;
+        esac
+        case "$INSTALL_DIR" in
+          /*/*) ;;
+          *) echo "install-dir must be an absolute directory below /: $INSTALL_DIR" >&2; exit 1 ;;
+        esac
+        sudo=
+        if [ "$(id -u)" != 0 ]; then sudo=sudo; fi
+        archive="${RUNNER_TEMP:?}/powershell-$PWSH_VERSION-linux-$arch.tar.gz"
+        curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$archive" \
+          "https://github.com/PowerShell/PowerShell/releases/download/v$PWSH_VERSION/powershell-$PWSH_VERSION-linux-$arch.tar.gz"
+        printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --strict
+        $sudo rm -rf "$INSTALL_DIR"
+        $sudo mkdir -p "$INSTALL_DIR"
+        $sudo tar -xzf "$archive" -C "$INSTALL_DIR"
+        $sudo chmod 0755 "$INSTALL_DIR/pwsh"
+        rm -f "$archive"
+        if [ "$LINK" = true ]; then
+          $sudo ln -sfn "$INSTALL_DIR/pwsh" /usr/bin/pwsh
+        fi
+        "$INSTALL_DIR/pwsh" -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+
+    - name: Install Pester
+      if: inputs.pester == 'true'
+      shell: pwsh
+      env:
+        PESTER_VERSION: 5.9.1
+        PESTER_SHA256: 8dd4060fc3bc895f05bd655e4ab82abe346de54a4e6415dfb727cc8378672b69
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $version = $env:PESTER_VERSION
+        if (Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -eq [version]$version }) {
+          "Using existing Pester $version"
+          return
+        }
+        $package = Join-Path $env:RUNNER_TEMP "pester.$version.nupkg"
+        Invoke-WebRequest -Uri "https://www.powershellgallery.com/api/v2/package/Pester/$version" -OutFile $package
+        $actual = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -cne $env:PESTER_SHA256) { throw "Pester $version package hash mismatch: $actual" }
+        $modules = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'powershell/Modules'
+        $destination = Join-Path $modules "Pester/$version"
+        Remove-Item -LiteralPath $destination -Recurse -Force -ErrorAction Ignore
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($package, $destination)
+        foreach ($metadata in '_rels', 'package', '[Content_Types].xml', 'Pester.nuspec') {
+          Remove-Item -LiteralPath (Join-Path $destination $metadata) -Recurse -Force -ErrorAction Ignore
+        }
+        Remove-Item -LiteralPath $package
+        Import-Module Pester -RequiredVersion $version
+        "Installed Pester $((Get-Module Pester).Version)"

@@ -837,14 +837,16 @@ fn portal_fixed_rate_gui_restart_and_command_line_use_saved_rate() {
         .expect("real GUI portal test should provide the app runtime");
     let script = std::env::var_os("JIFFSHOT_FRAME_RATE_GUI_SCRIPT")
         .expect("real GUI portal test should provide its driver script");
-    let output = std::process::Command::new("python3")
+    let output = std::process::Command::new("pwsh")
+        .arg("-NoProfile")
+        .arg("-File")
         .arg(script)
-        .arg("--binary")
+        .arg("-Binary")
         .arg(app)
-        .arg("--runtime-dir")
+        .arg("-RuntimeDir")
         .arg(runtime)
-        .arg("--real-portal")
-        .arg("--capture-dir")
+        .arg("-RealPortal")
+        .arg("-CaptureDir")
         .arg(directory.path())
         .output()
         .expect("the real GUI driver should start");

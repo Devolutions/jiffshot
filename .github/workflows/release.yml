@@ -221,8 +221,8 @@ jobs:
             Compress-Archive -Path "$portable\*" `
               -DestinationPath "release\Devolutions.Jiffshot-$arch-$env:RELEASE_VERSION.zip"
           }
-          python package/linux/assemble_release.py --artifact-dir artifacts `
-            --output-dir release --version "$env:RELEASE_VERSION"
+          pwsh -NoProfile -File package/linux/assemble-release.ps1 -ArtifactDir artifacts `
+            -OutputDir release -Version "$env:RELEASE_VERSION"
           if ($LASTEXITCODE -ne 0) { throw 'Linux release assembly requires all six verified x64/ARM64 packages and their checksums.' }
           Get-ChildItem release -File | Sort-Object Name | ForEach-Object {
             '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name

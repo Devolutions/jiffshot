@@ -287,14 +287,16 @@ installing or removing a package does not modify or delete them.
 
 Building packages from the repository on native Ubuntu 24.04 x64 or ARM64:
   cargo build --release --locked -p jiffshot
-  sudo apt install python3 binutils dpkg-dev desktop-file-utils
-  python3 package/linux/build.py --format tar.gz deb
+  sudo apt install binutils dpkg-dev desktop-file-utils
+  # Also install PowerShell 7.4 or newer (pwsh); see
+  # https://learn.microsoft.com/powershell/scripting/install/install-ubuntu
+  pwsh package/linux/build.ps1 -Format tar.gz,deb
 
 Build the Fedora binary and RPM on native Fedora 43 on each architecture
 (or in a Fedora 43 container on a matching native runner):
   sudo dnf install gcc-c++ clang-devel leptonica-devel tesseract-devel \
     pkgconf-pkg-config gstreamer1-devel gstreamer1-plugins-base-devel \
-    python3 binutils rpm-build desktop-file-utils dnf5-plugins
+    binutils rpm-build desktop-file-utils dnf5-plugins libicu
   sudo dnf config-manager setopt fedora-cisco-openh264.enabled=1
   sudo dnf install \
     gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free \
@@ -304,7 +306,9 @@ Build the Fedora binary and RPM on native Fedora 43 on each architecture
   sudo dnf swap ffmpeg-free ffmpeg --allowerasing
   sudo dnf install gstreamer1-plugins-ugly gstreamer1-plugins-bad-freeworld
   cargo build --release --locked -p jiffshot
-  python3 package/linux/build.py --format rpm --output-dir package/out/linux-rpm
+  # Also install PowerShell 7.4 or newer (pwsh); see
+  # https://learn.microsoft.com/powershell/scripting/install/install-rhel
+  pwsh package/linux/build.ps1 -Format rpm -OutputDir package/out/linux-rpm
 
 The CI Fedora container explicitly installs media plugins, PipeWire's GStreamer
 source, English OCR data and DejaVu Sans fonts before workspace tests; development
@@ -319,36 +323,36 @@ tests, which encode and decode audio using the selected AAC encoder and verify
 tone content, timing, mixing and edits on each native architecture.
 
 Override the release directory (including CARGO_TARGET_DIR builds):
-  python3 package/linux/build.py --build-dir /tmp/jiffshot-linux-target/release
+  pwsh package/linux/build.ps1 -BuildDir /tmp/jiffshot-linux-target/release
 
 Outputs default to package/out/linux. The default formats are tar.gz and DEB.
-Select --format rpm for the native Fedora build. DEB and RPM cannot be selected
+Select -Format rpm for the native Fedora build. DEB and RPM cannot be selected
 together, and the builder rejects Ubuntu's incompatible OCR ABI for Fedora RPMs.
 Fedora inputs must require libleptonica.so.6 and must not require liblept.so.5.
 All four inputs must be valid little-endian ELF64 for one supported architecture;
-every private library must be a shared object. --arch x64 or --arch arm64 is an
+every private library must be a shared object. -Arch x64 or -Arch arm64 is an
 optional assertion against actual ELF headers, never a relabeling option.
 Tar names/top directories use linux-x64 or linux-arm64; DEB architecture and
 filenames use amd64 or arm64; RPM target and filenames use x86_64 or aarch64.
---version (or JIFFSHOT_VERSION) must match the
+-Version (or JIFFSHOT_VERSION) must match the
 workspace's X.Y.Z version. SOURCE_DATE_EPOCH controls archive timestamps
 (default: 0). SHA256SUMS-linux-x64.txt or SHA256SUMS-linux-arm64.txt covers the
 generated artifacts. Keep Ubuntu and Fedora outputs in separate directories;
 each invocation writes its own checksum manifest.
 The script never modifies the build input or installs the application.
 
-Package tests:
+Package tests (Pester 5):
+  pwsh -c 'Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser -Force'
   # Unit/regression tests only, no compiled application required:
-  (cd package/linux && python3 -m unittest test_build.PackageBuilderTests test_architecture -v)
+  pwsh package/linux/run-tests.ps1 -ExcludeTag PackageContent
   # Real packages from native builds; use JIFFSHOT_TEST_ARCH=arm64 on ARM64:
-  JIFFSHOT_TEST_FORMATS=tar.gz,deb python3 -m unittest discover \
-    -s package/linux -p 'test_*.py' -v
+  JIFFSHOT_TEST_FORMATS=tar.gz,deb pwsh package/linux/run-tests.ps1
   JIFFSHOT_TEST_FORMATS=rpm JIFFSHOT_PACKAGE_DIR=package/out/linux-rpm \
-    python3 -m unittest discover -s package/linux -p 'test_*.py' -v
+    pwsh package/linux/run-tests.ps1
   # Content tests default to the native machine; CI explicitly asserts the arch.
   # Synthetic ARM64 ELF unit tests do not execute an ARM64 runtime.
   sudo apt install xvfb x11-utils
-  python3 package/linux/smoke.py --launcher /path/to/extracted/bin/jiffshot
+  pwsh package/linux/smoke.ps1 -Launcher /path/to/extracted/bin/jiffshot
 The smoke test uses a private Xvfb display, temporary settings, and a generated
 image. It requires a visible app window and all three private runtimes loaded,
 then stops its own processes. CI also verifies clean installation/removal and
@@ -357,40 +361,51 @@ WSLg may expose a read-only /tmp/.X11-unix; in that case run the smoke test
 in an isolated container/rootfs instead of changing WSLg's socket directory.
 
 The source CI also tests global shortcuts, responsive file loading, native
-file-picker fallback, image
-export and effects, saved-capture sharing, webcam preferences, screenshots,
-screen text OCR, timed, interval and daily capture, tray and login startup
-with a private Xvfb display and mock D-Bus services. It requires
-python3-dbus-next, libxtst6, libgtk-3-0t64, dbus, Xvfb, xclip, xwininfo,
-gcc, and English Tesseract data:
-  dbus-run-session -- python3 app/tests/linux_shortcuts_e2e.py \
-    --binary target/release/jiffshot --runtime-dir target/release
-  dbus-run-session -- python3 app/tests/linux_load_e2e.py \
-    --binary target/release/jiffshot --runtime-dir target/release
-  dbus-run-session -- python3 app/tests/linux_export_e2e.py \
-    --binary target/release/jiffshot --runtime-dir target/release
-  dbus-run-session -- python3 app/tests/linux_file_dialog_fallback_e2e.py \
-    --binary target/release/jiffshot --runtime-dir target/release
-  dbus-run-session -- python3 app/tests/linux_interactive_effects_e2e.py \
-    --binary target/release/jiffshot --runtime-dir target/release
-  dbus-run-session -- python3 app/tests/linux_share_e2e.py \
-    --binary target/release/jiffshot --runtime-dir target/release
-  dbus-run-session -- python3 app/tests/linux_webcam_e2e.py \
-    --binary target/release/jiffshot --runtime-dir target/release
-  dbus-run-session -- python3 app/tests/linux_screenshot_e2e.py \
-    --binary target/release/jiffshot --runtime-dir target/release
-  dbus-run-session -- python3 app/tests/linux_grab_text_e2e.py \
-    --binary target/release/jiffshot --runtime-dir target/release
-  dbus-run-session -- python3 app/tests/linux_timed_capture_e2e.py \
-    --binary target/release/jiffshot --runtime-dir target/release
-  dbus-run-session -- python3 app/tests/linux_interval_e2e.py \
-    --binary target/release/jiffshot --runtime-dir target/release
-  dbus-run-session -- python3 app/tests/linux_schedule_e2e.py \
-    --binary target/release/jiffshot --runtime-dir target/release
-  dbus-run-session -- python3 app/tests/linux_tray_e2e.py \
-    --binary target/release/jiffshot --runtime-dir target/release
-  dbus-run-session -- python3 app/tests/linux_autostart_e2e.py \
-    --binary target/release/jiffshot --runtime-dir target/release
+file-picker fallback, image and GIF export and effects, saved-capture sharing,
+webcam and frame-rate preferences, screenshots, automatic copies, screen text
+OCR, timed, interval and daily capture, screen presets, tray and login startup
+with a private Xvfb display and mock D-Bus services. The drivers are
+PowerShell 7.4+ scripts; on first run they download Tmds.DBus.Protocol
+0.95.2 from nuget.org into ~/.cache/jiffshot-e2e and verify its SHA256 (set
+JIFFSHOT_E2E_TMDS_DBUS to a local Tmds.DBus.Protocol.dll to skip the
+download). They require pwsh, libxtst6, libgtk-3-0t64, dbus, Xvfb, xclip,
+xwininfo, and English Tesseract data:
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_shortcuts_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_load_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_export_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_file_dialog_fallback_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_interactive_effects_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_video_export_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_share_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_webcam_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_recording_frame_rate_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_screenshot_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_automatic_copy_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_grab_text_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_timed_capture_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_screen_presets_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_interval_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_schedule_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_tray_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_autostart_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
 This mock does not verify a real desktop's shortcut activation.
 
 The source repository does not currently specify an application license;

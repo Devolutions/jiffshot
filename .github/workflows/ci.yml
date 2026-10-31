@@ -219,9 +219,10 @@ jobs:
             xclip \
             libxtst6 \
             libgtk-3-0t64 \
-            python3-dbus-next \
-            python3-gi \
             dbus
+
+      - name: Set up PowerShell and Pester
+        uses: ./.github/actions/setup-pwsh
 
       - name: Set up Rust
         run: |
@@ -253,108 +254,108 @@ jobs:
 
       - name: Test Linux global shortcut portal integration
         run: |
-          dbus-run-session -- python3 app/tests/linux_shortcuts_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_shortcuts_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux editor responsiveness
         run: |
-          dbus-run-session -- python3 app/tests/linux_load_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_load_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux export dialog
         run: |
-          dbus-run-session -- python3 app/tests/linux_export_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_export_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux native file picker fallback
         run: |
-          dbus-run-session -- python3 app/tests/linux_file_dialog_fallback_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_file_dialog_fallback_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux interactive editor effects
         run: |
-          dbus-run-session -- python3 app/tests/linux_interactive_effects_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_interactive_effects_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux video GIF export
         run: |
-          dbus-run-session -- python3 app/tests/linux_video_export_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_video_export_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux saved-capture sharing
         run: |
-          dbus-run-session -- python3 app/tests/linux_share_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_share_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux webcam preferences
         run: |
-          dbus-run-session -- python3 app/tests/linux_webcam_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_webcam_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux recording frame-rate GUI
         run: |
-          dbus-run-session -- python3 app/tests/linux_recording_frame_rate_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_recording_frame_rate_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux interactive screenshots
         run: |
-          dbus-run-session -- python3 app/tests/linux_screenshot_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_screenshot_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux automatic capture copies
         run: |
-          dbus-run-session -- python3 app/tests/linux_automatic_copy_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_automatic_copy_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux screen text capture
         run: |
-          dbus-run-session -- python3 app/tests/linux_grab_text_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_grab_text_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux timed capture
         run: |
-          dbus-run-session -- python3 app/tests/linux_timed_capture_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_timed_capture_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux screen capture presets
         run: |
-          dbus-run-session -- python3 app/tests/linux_screen_presets_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_screen_presets_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux interval capture controls
         run: |
-          dbus-run-session -- python3 app/tests/linux_interval_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_interval_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux daily capture scheduling
         run: |
-          dbus-run-session -- python3 app/tests/linux_schedule_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_schedule_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux tray and background capture
         run: |
-          dbus-run-session -- python3 app/tests/linux_tray_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_tray_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Test Linux login startup
         run: |
-          dbus-run-session -- python3 app/tests/linux_autostart_e2e.py \
-            --binary target/release/jiffshot --runtime-dir target/release
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_autostart_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
 
       - name: Package Ubuntu tar.gz and DEB
-        run: python3 package/linux/build.py --arch "${{ matrix.arch }}" --format tar.gz deb
+        run: pwsh -NoProfile -File package/linux/build.ps1 -Arch "${{ matrix.arch }}" -Format tar.gz,deb
 
       - name: Test Linux package builder and contents
         env:
           JIFFSHOT_TEST_FORMATS: tar.gz,deb
-        run: python3 -m unittest discover -s package/linux -p 'test_*.py' -v
+        run: pwsh -NoProfile -File package/linux/run-tests.ps1
 
       - name: Smoke-test the relocated portable package
         run: |
           mkdir -p "$RUNNER_TEMP/jiffshot portable"
           tar -xzf package/out/linux/*.tar.gz -C "$RUNNER_TEMP/jiffshot portable"
           launcher=$(find "$RUNNER_TEMP/jiffshot portable" -path '*/bin/jiffshot' -type f)
-          python3 package/linux/smoke.py --launcher "$launcher"
+          pwsh -NoProfile -File package/linux/smoke.ps1 -Launcher "$launcher"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -390,7 +391,7 @@ jobs:
             git tar gzip curl ca-certificates gcc-c++ clang-devel dnf5-plugins \
             leptonica-devel tesseract-devel pkgconf-pkg-config \
             gstreamer1-devel gstreamer1-plugins-base-devel \
-            python3 binutils rpm-build cpio desktop-file-utils
+            libicu binutils rpm-build cpio desktop-file-utils
           # Enable this before installing libav/FFmpeg, which can require OpenH264.
           dnf config-manager setopt fedora-cisco-openh264.enabled=1
           dnf install --setopt=install_weak_deps=False -y \
@@ -425,6 +426,9 @@ jobs:
 
       - uses: actions/checkout@v7
 
+      - name: Set up PowerShell and Pester
+        uses: ./.github/actions/setup-pwsh
+
       - name: Set up Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
@@ -451,13 +455,13 @@ jobs:
         run: cargo build --release --locked -p jiffshot
 
       - name: Package native Fedora RPM
-        run: python3 package/linux/build.py --arch "${{ matrix.arch }}" --format rpm --output-dir package/out/linux-rpm
+        run: pwsh -NoProfile -File package/linux/build.ps1 -Arch "${{ matrix.arch }}" -Format rpm -OutputDir package/out/linux-rpm
 
       - name: Test RPM builder and contents
         env:
           JIFFSHOT_TEST_FORMATS: rpm
           JIFFSHOT_PACKAGE_DIR: package/out/linux-rpm
-        run: python3 -m unittest discover -s package/linux -p 'test_*.py' -v
+        run: pwsh -NoProfile -File package/linux/run-tests.ps1
 
       - uses: actions/upload-artifact@v7
         with:
@@ -509,10 +513,19 @@ jobs:
           name: ${{ matrix.artifact }}
           path: package/out/install
 
+      - name: Download PowerShell for the clean install container
+        uses: ./.github/actions/setup-pwsh
+        with:
+          install-dir: ${{ runner.temp }}/powershell
+          force: 'true'
+          link: 'false'
+          pester: 'false'
+
       - name: Clean install, desktop registration, launch, and uninstall
         run: |
           test "$(uname -m)" = "${{ matrix.machine }}"
-          docker run --rm --volume "$PWD:/work:ro" "${{ matrix.image }}" \
+          docker run --rm --volume "$PWD:/work:ro" \
+            --volume "$RUNNER_TEMP/powershell:/opt/microsoft/powershell/7:ro" "${{ matrix.image }}" \
             bash -ceu '
               test "$(uname -m)" = "$2"
               cd /work/package/out/install
@@ -520,17 +533,18 @@ jobs:
               if [ "$1" = deb ]; then
                 apt-get update -qq
                 apt-get install --no-install-recommends -y \
-                  /work/package/out/install/*.deb python3 xvfb x11-utils
+                  /work/package/out/install/*.deb libicu74 xvfb x11-utils
                 test "$(dpkg-query -W -f=\${Architecture} jiffshot)" = "$3"
               else
                 dnf install --setopt=install_weak_deps=False -y \
-                  /work/package/out/install/*.rpm python3 /usr/bin/Xvfb /usr/bin/xwininfo
+                  /work/package/out/install/*.rpm libicu /usr/bin/Xvfb /usr/bin/xwininfo
                 test "$(rpm -q --queryformat "%{ARCH}" jiffshot)" = "$3"
               fi
-              python3 /work/package/linux/validate_installed.py --arch "$4"
+              ln -s /opt/microsoft/powershell/7/pwsh /usr/local/bin/pwsh
+              pwsh -NoProfile -File /work/package/linux/validate-installed.ps1 -Arch "$4"
               grep -F "application/x-jiffshot=" /usr/share/applications/mimeinfo.cache
               grep -F "application/x-jiffshot" /usr/share/mime/globs2
-              python3 /work/package/linux/smoke.py --launcher /usr/bin/jiffshot
+              pwsh -NoProfile -File /work/package/linux/smoke.ps1 -Launcher /usr/bin/jiffshot
               mkdir -p /root/.config/Jiffshot
               touch /root/.config/Jiffshot/package-removal-sentinel
               if [ "$1" = deb ]; then
