@@ -248,7 +248,15 @@ jiffshot.exe --quit                         # Stop the running Jiffshot instance
 
 ### Automation and AI agents: `jiffshot-cli`
 
-`jiffshot-cli.exe`, installed beside `jiffshot.exe`, drives the running Jiffshot (starting it if needed) so a script or an AI agent can screenshot, record and narrate a demo of any desktop software without anyone clicking through it by hand. Every command prints one JSON object and returns a meaningful exit code. It can click, type, press keys, find text by OCR and controls by UI Automation, and wait for windows or text.
+`jiffshot-cli.exe`, installed beside `jiffshot.exe`, drives the running Jiffshot (starting it if needed) so a script or an AI agent can screenshot, record and annotate a desktop software demo without anyone clicking through it by hand. Every command prints one JSON object and returns a meaningful exit code. It can click, type, press keys, find text by OCR and controls by UI Automation, and wait for windows or text.
+
+The CLI also supports bounded scrolling captures, live recording annotations,
+webcam/audio controls, headless editable image documents (all annotation tools,
+undo/redo, transforms, effects and templates), and video trimming/joining,
+timed overlays and MP4/GIF exports. Scripted sequences can reuse typed results
+between steps and always execute cleanup. See the
+[capability coverage and boundaries](docs/cli.md#capability-review-and-boundaries)
+for what is supported and what still needs an external tool.
 
 ```powershell
 jiffshot-cli windows --process notepad

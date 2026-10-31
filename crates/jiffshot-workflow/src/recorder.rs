@@ -20,6 +20,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use serde_json::json;
+use jiffshot_doc::object::{Kind, Style};
+use jiffshot_doc::{Document, Rgba, Pixmap};
 use windows_sys::Win32::Foundation::POINT;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, VK_F10, VK_F9,
@@ -103,6 +105,79 @@ pub struct Control {
     /// The sound sources wanted; one that cannot start turns itself off.
     pub system: AtomicBool,
     pub microphone: AtomicBool,
+    annotations: Mutex<Annotations>,
+}
+
+#[derive(Default)]
+struct Annotations {
+    size: Option<(u32, u32)>,
+    next_id: u64,
+    marks: Vec<(u64, Kind, Style, Option<u64>)>,
+    image: Option<Pixmap>,
+    document: Option<Document>,
+    dirty: bool,
+}
+
+impl Annotations {
+    fn blend(&mut self, frame: &mut Frame, now: u64) {
+        let before = self.marks.len();
+        self.marks.retain(|(_, _, _, end)| end.is_none_or(|end| now < end));
+        if self.dirty || self.marks.len() != before {
+            self.image = None;
+            self.document = None;
+            if !self.marks.is_empty() {
+                let mut doc = Document::blank(frame.width, frame.height, Rgba::TRANSPARENT);
+                for (_, kind, style, _) in &self.marks { doc.add(kind.clone(), style.clone()); }
+                if doc.objects.iter().any(|object| object.reads().is_some()) {
+                    self.document = Some(doc);
+                } else {
+                    self.image = Some(doc.flatten());
+                }
+            }
+            self.dirty = false;
+        }
+        if let Some(doc) = &mut self.document {
+            doc.set_background(crate::stepcap::frame_to_pixmap(frame).expect("valid recording frame"));
+            screendraw::blend_image(frame, &doc.flatten());
+        } else if let Some(image) = &self.image {
+            screendraw::blend_image(frame, image);
+        }
+    }
+}
+
+pub(crate) fn add_annotation(control: &Control, kind: Kind, style: Style, duration: Duration) -> Result<u64, String> {
+    let mut overlay = control.annotations.lock().expect("annotations lock poisoned");
+    if overlay.size.is_none() { return Err("recording frames are not ready".into()); }
+    if overlay.marks.len() >= 256 { return Err("at most 256 live annotations; use record.clear".into()); }
+    overlay.next_id += 1;
+    let id = overlay.next_id;
+    let end = (!duration.is_zero()).then(|| control.millis.load(Ordering::Relaxed).saturating_add(duration.as_millis() as u64));
+    overlay.marks.push((id, kind, style, end));
+    overlay.dirty = true;
+    Ok(id)
+}
+
+pub(crate) fn clear_annotations(control: &Control) {
+    let mut overlay = control.annotations.lock().expect("annotations lock poisoned");
+    overlay.marks.clear();
+    overlay.dirty = true;
+}
+
+static RECORDING_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn is_recording() -> bool { RECORDING_ACTIVE.load(Ordering::Acquire) }
+
+struct RecordingLease;
+
+impl RecordingLease {
+    fn acquire() -> Result<Self, String> {
+        RECORDING_ACTIVE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| Self).map_err(|_| "another recording is already running (tray or CLI)".into())
+    }
+}
+
+impl Drop for RecordingLease {
+    fn drop(&mut self) { RECORDING_ACTIVE.store(false, Ordering::Release); }
 }
 
 impl Control {
@@ -297,6 +372,7 @@ fn cursor_in(rect: Rect) -> Option<(i32, i32)> {
 /// Records `rect` into `path` until `control.stop` is set. Runs on the
 /// calling thread.
 pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) -> Result<VideoSpec, String> {
+    let _lease = RecordingLease::acquire()?;
     media::startup()?;
     let spec = VideoSpec::for_size(rect.width as u32, rect.height as u32, options.fps.clamp(5, 60));
     let rect = Rect::new(rect.x, rect.y, spec.width as i32, spec.height as i32);
@@ -329,6 +405,7 @@ pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) 
     let mut written = 0i64;
     let mut audio_frames = 0i64;
     let mut frame = Frame::new(spec.width, spec.height);
+    control.annotations.lock().expect("annotations lock poisoned").size = Some((spec.width, spec.height));
     let drain = |c: &Option<AudioCapture>| {
         if let Some(c) = c {
             while c.samples.try_recv().is_ok() {}
@@ -421,6 +498,7 @@ pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) 
         frame.pixels.copy_from_slice(pixels);
         // Screen Draw's window is left out of captures; its marks go in here.
         screendraw::blend_into(&mut frame);
+        control.annotations.lock().expect("annotations lock poisoned").blend(&mut frame, (t / 10_000) as u64);
         let pointer = cursor_in(rect);
         if let (true, Some(p)) = (control.on(&control.highlight), pointer) {
             vfx::highlight(&mut frame, p);
@@ -601,5 +679,98 @@ pub fn record(rect: Rect, settings: &Settings) -> Result<Option<PathBuf>, String
             path.display()
         ));
         return Ok(Some(path));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jiffshot_doc::{Box2, object::ShapeKind};
+
+    #[test]
+    fn live_annotations_render_expire_and_clear_without_input() {
+        let control = Control::default();
+        control.annotations.lock().expect("annotations").size = Some((80, 60));
+        let kind = Kind::Shape { rect: Box2::from_xywh(10.0, 10.0, 30.0, 20.0), shape: ShapeKind::Rectangle };
+        let style = Style { fill: Rgba::RED, width: 0.0, ..Style::default() };
+        let id = add_annotation(&control, kind.clone(), style.clone(), Duration::from_millis(100)).expect("annotation");
+        assert_eq!(id, 1);
+        let mut before_expiry = Frame::new(80, 60);
+        control.annotations.lock().expect("annotations").blend(&mut before_expiry, 99);
+        let pixel = (15 * before_expiry.stride()) + 15 * 4;
+        assert_eq!(&before_expiry.pixels[pixel..pixel + 3], &[Rgba::RED.b, Rgba::RED.g, Rgba::RED.r]);
+        let mut at_expiry = Frame::new(80, 60);
+        control.annotations.lock().expect("annotations").blend(&mut at_expiry, 100);
+        assert_eq!(&at_expiry.pixels[pixel..pixel + 3], &[0, 0, 0]);
+        add_annotation(&control, kind, style, Duration::ZERO).expect("persistent annotation");
+        let mut persistent = Frame::new(80, 60);
+        control.annotations.lock().expect("annotations").blend(&mut persistent, 100_000);
+        assert_ne!(&persistent.pixels[pixel..pixel + 3], &[0, 0, 0]);
+        clear_annotations(&control);
+        let mut cleared = Frame::new(80, 60);
+        control.annotations.lock().expect("annotations").blend(&mut cleared, 100_000);
+        assert_eq!(&cleared.pixels[pixel..pixel + 3], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn recording_lease_prevents_competing_owners_and_releases() {
+        let lease = RecordingLease::acquire().expect("first recorder");
+        assert!(RecordingLease::acquire().is_err());
+        drop(lease);
+        assert!(RecordingLease::acquire().is_ok());
+    }
+
+    #[test]
+    fn live_magnification_samples_each_frame_and_expires() {
+        use jiffshot_doc::object::Object;
+        use jiffshot_doc::Pt;
+        let control = Control::default();
+        control.annotations.lock().expect("annotations").size = Some((100, 60));
+        let kind = Kind::Group { objects: vec![Object::new(1, Kind::Magnify {
+            rect: Box2::from_xywh(10.0, 10.0, 20.0, 20.0),
+            zoom: 2.0,
+            ellipse: false,
+            offset: Pt::new(40.0, 0.0),
+        }, Style { width: 0.0, ..Style::default() })] };
+        add_annotation(&control, kind, Style::default(), Duration::from_millis(100)).expect("annotation");
+        for (now, source) in [(0, Rgba::RED), (50, Rgba::BLUE), (100, Rgba::RED)] {
+            let mut frame = Frame::new(100, 60);
+            for y in 10..30 {
+                for x in 10..30 {
+                    let at = y * frame.stride() + x * 4;
+                    frame.pixels[at..at + 4].copy_from_slice(&[source.b, source.g, source.r, 0]);
+                }
+            }
+            control.annotations.lock().expect("annotations").blend(&mut frame, now);
+            let expected = if now < 100 { (source.r, source.g, source.b) } else { (0, 0, 0) };
+            assert_eq!(frame.rgb(60, 20), Some(expected));
+            assert_eq!(frame.rgb(5, 5), Some((0, 0, 0)));
+        }
+    }
+
+    #[test]
+    fn live_pixelation_uses_recorded_pixels() {
+        use jiffshot_doc::object::BlurMode;
+        let control = Control::default();
+        control.annotations.lock().expect("annotations").size = Some((80, 60));
+        add_annotation(&control, Kind::Blur {
+            rect: Box2::from_xywh(10.0, 10.0, 20.0, 20.0),
+            mode: BlurMode::Pixelate,
+            amount: 10.0,
+        }, Style::default(), Duration::ZERO).expect("annotation");
+        let mut frame = Frame::new(80, 60);
+        for y in 10..30 {
+            for x in 10..30 {
+                let at = y * frame.stride() + x * 4;
+                let red = if (x + y) % 2 == 0 { 255 } else { 0 };
+                frame.pixels[at..at + 4].copy_from_slice(&[0, 0, red, 0]);
+            }
+        }
+        control.annotations.lock().expect("annotations").blend(&mut frame, 0);
+        let (red, green, blue) = frame.rgb(15, 15).expect("pixel");
+        assert!((120..=135).contains(&red));
+        assert_eq!((green, blue), (0, 0));
+        assert_eq!(frame.rgb(15, 15), frame.rgb(16, 15));
+        assert_eq!(frame.rgb(5, 5), Some((0, 0, 0)));
     }
 }

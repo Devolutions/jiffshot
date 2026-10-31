@@ -128,7 +128,7 @@ pub fn record() -> Option<Vec<Step>> {
     (!steps.is_empty()).then_some(steps)
 }
 
-fn frame_to_pixmap(f: &Frame) -> Option<tiny_skia::Pixmap> {
+pub(crate) fn frame_to_pixmap(f: &Frame) -> Option<tiny_skia::Pixmap> {
     let mut rgba = Vec::with_capacity(f.pixels.len());
     for p in f.pixels.chunks_exact(4) {
         rgba.extend_from_slice(&[p[2], p[1], p[0], 255]);

@@ -1,12 +1,14 @@
 //! Video in the editor: scrubbing and playback (frames shown on the
 //! canvas), trimming, export to MP4 or animated GIF, and taking a frame
 //! into the image editor. Decoding and encoding use Media Foundation
-//! through `jiffshot_capture::media`.
+//! through the shared `jiffshot_capture::media` post-production engine.
 
 use crate::app::{self, App};
 use crate::canvas::with_editor;
 use jiffshot_capture::media::{Reader, VideoFrame, VideoSpec, Writer, HNS_PER_SECOND};
-use jiffshot_doc::{raster, Document, Pixmap};
+use jiffshot_capture::media::post::{self, paste_fitted, Audio, Mp4Options};
+pub use jiffshot_capture::media::post::{GifOptions, Segment};
+use jiffshot_doc::{Document, Pixmap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -22,11 +24,7 @@ fn seconds(hns: i64) -> f64 {
 
 /// A decoded frame as an opaque pixmap.
 pub fn to_pixmap(frame: &VideoFrame) -> Option<Pixmap> {
-    let mut rgba = Vec::with_capacity(frame.bgra.len());
-    for p in frame.bgra.chunks_exact(4) {
-        rgba.extend_from_slice(&[p[2], p[1], p[0], 255]);
-    }
-    Pixmap::from_vec(rgba, tiny_skia::IntSize::from_wh(frame.width, frame.height)?)
+    post::to_pixmap(frame)
 }
 
 struct Player {
@@ -192,143 +190,17 @@ fn play(app: &mut App) {
     publish(app);
 }
 
-/// Fits a frame into `w` x `h` (BGRA), scaled to fit and centered on
-/// black; a frame of that size is copied as it is.
-fn fit_frame(frame: &VideoFrame, w: usize, h: usize) -> Vec<u8> {
-    let mut out = vec![0u8; w * h * 4];
-    let (fw, fh) = (frame.width as usize, frame.height as usize);
-    if fw >= w && fh >= h && fw - w < 2 && fh - h < 2 {
-        // Even sizes for H.264: drop an odd last row or column.
-        for y in 0..h {
-            let src = y * fw * 4;
-            out[y * w * 4..(y + 1) * w * 4].copy_from_slice(&frame.bgra[src..src + w * 4]);
-        }
-        return out;
-    }
-    if let Some(pm) = to_pixmap(frame) {
-        paste_fitted(&pm, &mut out, w, h);
-    }
-    out
-}
-
-/// Draws `pm` scaled to fit and centered into the BGRA buffer `out`.
-fn paste_fitted(pm: &Pixmap, out: &mut [u8], w: usize, h: usize) {
-    let scale = (w as f64 / pm.width() as f64).min(h as f64 / pm.height() as f64);
-    let sw = ((pm.width() as f64 * scale).round() as u32).clamp(1, w as u32);
-    let sh = ((pm.height() as f64 * scale).round() as u32).clamp(1, h as u32);
-    let small = if (sw, sh) == (pm.width(), pm.height()) { Some(pm.clone()) } else { raster::resample(pm, sw, sh) };
-    let Some(small) = small else { return };
-    let (x0, y0) = ((w - sw as usize) / 2, (h - sh as usize) / 2);
-    for (i, p) in small.pixels().iter().enumerate() {
-        let (x, y) = (i % sw as usize, i / sw as usize);
-        // Premultiplied, so this is the picture over black.
-        let d = ((y0 + y) * w + x0 + x) * 4;
-        out[d..d + 4].copy_from_slice(&[p.blue(), p.green(), p.red(), 0]);
-    }
-}
-
-/// One piece of a new video: `(file, from, to)` in seconds.
-pub type Segment = (PathBuf, f64, f64);
-
 /// Writes the segments one after another to a new MP4 (re-encoded) at the
 /// first one's size; others are fitted in. Audio is kept when `audio` is
 /// set and every source has the same sound format.
 fn export_segments(segments: &[Segment], out: &Path, audio: bool, progress: impl Fn(f64)) -> Result<(), String> {
-    let first = Reader::open(&segments.first().ok_or("nothing to export")?.0)?;
-    let spec = VideoSpec::for_size(first.width, first.height, first.fps.round().max(1.0) as u32);
-    let usable = |a: Option<jiffshot_capture::media::AudioSpec>| a.filter(|a| (a.sample_rate == 44_100 || a.sample_rate == 48_000) && a.channels <= 2);
-    let mut audio_spec = if audio { usable(first.audio) } else { None };
-    drop(first);
-    for (path, ..) in &segments[1..] {
-        if audio_spec.is_some() && usable(Reader::open(path)?.audio) != audio_spec {
-            audio_spec = None;
-        }
-    }
-    let mut writer = Writer::create(out, spec, audio_spec)?;
-    let frame_time = HNS_PER_SECOND / spec.fps as i64;
-    let rate = audio_spec.map_or(48_000, |a| a.sample_rate) as i64;
-    let channels = audio_spec.map_or(2, |a| a.channels) as i64;
-    let (w, h) = (spec.width as usize, spec.height as usize);
-    let total = segments.iter().map(|(_, a, b)| (b - a).max(0.0)).sum::<f64>().max(0.01);
-    let mut base = 0i64;
-    let mut done = 0.0;
-    for (source, from, to) in segments {
-        let mut video = Reader::open(source)?;
-        let mut sound = match audio_spec {
-            Some(_) => {
-                let mut r = Reader::open(source)?;
-                r.select_video(false)?;
-                r.select_audio(true)?;
-                r.seek(hns(*from))?;
-                Some(r)
-            }
-            None => None,
-        };
-        let (start, end) = (hns(*from), hns(*to));
-        video.seek(start)?;
-        let mut pending_audio: Option<(i64, Vec<i16>)> = None;
-        let mut audio_done = sound.is_none();
-        while let Some(frame) = video.next_video()? {
-            if frame.time + frame_time / 2 < start {
-                continue;
-            }
-            if frame.time >= end {
-                break;
-            }
-            writer.write_frame(&fit_frame(&frame, w, h), base + (frame.time - start).max(0), frame_time)?;
-            // Audio up to this frame's time, from the second reader.
-            while !audio_done {
-                let block = match pending_audio.take() {
-                    Some(b) => Some(b),
-                    None => sound.as_mut().unwrap().next_audio()?,
-                };
-                let Some((at, pcm)) = block else {
-                    audio_done = true;
-                    break;
-                };
-                if at > frame.time + frame_time {
-                    pending_audio = Some((at, pcm));
-                    break;
-                }
-                if at >= start && at < end {
-                    let n = pcm.len() as i64 / channels;
-                    writer.write_audio(&pcm, base + at - start, n * HNS_PER_SECOND / rate)?;
-                }
-            }
-            progress((done + seconds(frame.time - start)) / total);
-        }
-        base += end - start;
-        done += to - from;
-    }
-    writer.finish()
+    let options = Mp4Options { audio: if audio { Audio::PreserveCompatible } else { Audio::Mute }, ..Mp4Options::default() };
+    post::export_mp4(segments, out, options, progress).map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// Copies the trimmed range to a new MP4 (re-encoded, audio included).
 fn export_mp4(source: &Path, out: &Path, (from, to): (f64, f64), progress: impl Fn(f64)) -> Result<(), String> {
     export_segments(&[(source.to_path_buf(), from, to)], out, true, progress)
-}
-
-/// GIF choices: frames a second, largest width, loop, fade the end to
-/// black, dither.
-#[derive(Clone, Copy, Debug)]
-pub struct GifOptions {
-    pub fps: f64,
-    pub max_width: u32,
-    pub looped: bool,
-    pub fade: bool,
-    pub dither: bool,
-}
-
-/// A 4x4 ordered-dither offset, so smooth gradients survive the 256-color
-/// palette as fine patterns instead of bands.
-fn dither(rgba: &mut image::RgbaImage) {
-    const BAYER: [[i32; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
-    for (x, y, p) in rgba.enumerate_pixels_mut() {
-        let d = (BAYER[(y % 4) as usize][(x % 4) as usize] - 8) * 2;
-        for c in 0..3 {
-            p.0[c] = (p.0[c] as i32 + d).clamp(0, 255) as u8;
-        }
-    }
 }
 
 /// Makes a video from pictures, each shown for its time in `seconds` (the
@@ -393,47 +265,7 @@ fn slideshow(images: &[PathBuf], out: &Path, seconds: &[f64], sound: Option<(jif
 
 /// Writes the trimmed range as an animated GIF.
 fn export_gif(source: &Path, out: &Path, (from, to): (f64, f64), options: GifOptions, progress: impl Fn(f64)) -> Result<(), String> {
-    use image::codecs::gif::{GifEncoder, Repeat};
-    let GifOptions { fps, max_width, .. } = options;
-    let mut reader = Reader::open(source)?;
-    let scale = (max_width as f64 / reader.width as f64).min(1.0);
-    let (w, h) = (((reader.width as f64 * scale).round() as u32).max(1), ((reader.height as f64 * scale).round() as u32).max(1));
-    let file = std::fs::File::create(out).map_err(|e| e.to_string())?;
-    let mut encoder = GifEncoder::new_with_speed(std::io::BufWriter::new(file), 10);
-    encoder.set_repeat(if options.looped { Repeat::Infinite } else { Repeat::Finite(0) }).map_err(|e| e.to_string())?;
-    reader.seek(hns(from))?;
-    let step = 1.0 / fps;
-    let mut next = from;
-    let delay = image::Delay::from_numer_denom_ms((1000.0 / fps).round() as u32, 1);
-    while let Some(frame) = reader.next_video()? {
-        let t = seconds(frame.time);
-        if t > to {
-            break;
-        }
-        if t + 1e-3 < next {
-            continue;
-        }
-        next += step;
-        let Some(pm) = to_pixmap(&frame) else { continue };
-        let small = if scale < 1.0 { raster::resample(&pm, w, h).ok_or("resize failed")? } else { pm };
-        let mut rgba = jiffshot_doc::io::to_rgba_image(&small);
-        // The last half second fades to black.
-        let left = to - t;
-        if options.fade && left < 0.5 {
-            let k = (left / 0.5).clamp(0.0, 1.0);
-            for p in rgba.pixels_mut() {
-                for c in 0..3 {
-                    p.0[c] = (p.0[c] as f64 * k) as u8;
-                }
-            }
-        }
-        if options.dither {
-            dither(&mut rgba);
-        }
-        encoder.encode_frame(image::Frame::from_parts(rgba, 0, 0, delay)).map_err(|e| e.to_string())?;
-        progress((t - from) / (to - from).max(0.01));
-    }
-    Ok(())
+    post::export_gif(source, out, (from, to), options, progress).map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// Runs `work` (given a progress callback) off the UI thread, reporting
@@ -481,7 +313,7 @@ fn run_export(app: &mut App, gif: bool) {
         }
         app.set_status(format!("Exporting {}…", out.display()));
         let (fps, max_width) = prefs.gif();
-        let options = GifOptions { fps, max_width, looped: prefs.gif_loop, fade: prefs.gif_fade, dither: prefs.gif_dither };
+        let options = GifOptions { fps, max_width, looped: prefs.gif_loop, fade: prefs.gif_fade, dither: prefs.gif_dither, overlays: Vec::new() };
         in_background(out, false, move |out, progress| if gif { export_gif(&source, out, trim, options, progress) } else { export_mp4(&source, out, trim, progress) });
     });
 }
@@ -738,7 +570,7 @@ mod tests {
     /// Writes a short clip, then exports a trimmed MP4 and a GIF of it.
     #[test]
     fn trims_and_exports() {
-        let dir = std::env::temp_dir().join(format!("jiffshot-video-{}", std::process::id()));
+        let dir = std::env::current_dir().unwrap().join(format!(".jiffshot-video-tests-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("clip.mp4");
         let spec = VideoSpec::for_size(160, 120, 10);
@@ -754,7 +586,7 @@ mod tests {
         let r = Reader::open(&mp4).unwrap();
         assert!((seconds(r.duration) - 1.0).abs() < 0.25, "trimmed to about a second: {}", seconds(r.duration));
         let gif = dir.join("clip.gif");
-        let options = GifOptions { fps: 5.0, max_width: 80, looped: true, fade: true, dither: true };
+        let options = GifOptions { fps: 5.0, max_width: 80, looped: true, fade: true, dither: true, overlays: Vec::new() };
         export_gif(&src, &gif, (0.0, 3.0), options, |_| {}).unwrap();
         let decoder = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(std::fs::File::open(&gif).unwrap())).unwrap();
         let frames = image::AnimationDecoder::into_frames(decoder).collect_frames().unwrap();

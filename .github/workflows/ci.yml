@@ -81,6 +81,13 @@ jobs:
           JIFFSHOT_VERSION: ${{ inputs.version }}
         run: cargo test --release --locked --workspace --target ${{ matrix.target }}
 
+      - name: Agent CLI artifact workflow
+        if: matrix.test
+        shell: pwsh
+        run: |
+          $env:JIFFSHOT_CLI_E2E = Join-Path (Get-Location) 'target\${{ matrix.target }}\release\jiffshot-cli.exe'
+          cargo test --release --locked -p jiffshot-workflow --target ${{ matrix.target }} cli_edits_artifacts_over_real_ipc_without_desktop_input -- --ignored --test-threads=1
+
       - name: Package
         shell: pwsh
         env:
