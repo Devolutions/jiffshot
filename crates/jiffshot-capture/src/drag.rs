@@ -97,9 +97,11 @@ mod tests {
         drop(data);
         // SAFETY: matches the OleInitialize above.
         unsafe { OleUninitialize() };
+        let canonical = |paths: &[PathBuf]| paths.iter().map(|p| std::fs::canonicalize(p).unwrap()).collect::<Vec<_>>();
+        let got = canonical(&got);
+        let expected = canonical(&files);
         let _ = std::fs::remove_dir_all(&dir);
-        let lower = |v: &[PathBuf]| v.iter().map(|p| p.to_string_lossy().to_lowercase()).collect::<Vec<_>>();
-        assert_eq!(lower(&got), lower(&files));
+        assert_eq!(got, expected);
     }
 
     #[test]
