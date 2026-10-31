@@ -328,6 +328,11 @@ jobs:
           name: jiffshot-${{ matrix.rid }}
           path: bin
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: jiffshot-win-x64
+          path: logo-bin
+
       - name: Build the MSIX
         shell: pwsh
         env:
@@ -355,7 +360,9 @@ jobs:
           if (-not ($binaries | Where-Object { $_.Name -eq 'jiffshot.exe' })) { throw 'jiffshot.exe is missing from the build artifact' }
           if (-not ($binaries | Where-Object { $_.Name -eq 'rustolonia_host.dll' })) { throw 'rustolonia_host.dll is missing from the build artifact' }
           $binaries | Copy-Item -Destination $stage
-          $exe = (Resolve-Path (Join-Path $stage 'jiffshot.exe')).Path
+          # Logo rendering is architecture-independent, but the ARM64 executable
+          # cannot run on the x64 GitHub-hosted runner.
+          $exe = (Resolve-Path 'logo-bin\jiffshot.exe').Path
           foreach ($logo in @(
             @{ Size = 150; Name = 'Square150x150Logo.png' },
             @{ Size = 44; Name = 'Square44x44Logo.png' },
