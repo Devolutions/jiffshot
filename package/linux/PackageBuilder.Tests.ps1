@@ -262,6 +262,8 @@ Describe 'Package contents' -Tag PackageContent {
                 $unpacker = [System.Diagnostics.Process]::Start($info)
                 try {
                     $directories = @(Read-TarEntries $unpacker.StandardOutput.BaseStream | Where-Object Type -EQ 'Directory')
+                    # Drain trailing tar padding so dpkg-deb does not fail with a broken pipe.
+                    $unpacker.StandardOutput.BaseStream.CopyTo([System.IO.Stream]::Null)
                     $unpacker.StandardOutput.Close()
                     $unpacker.WaitForExit()
                     $unpacker.ExitCode | Should -Be 0
