@@ -147,7 +147,10 @@ jiffshot-cli record stop                        # returns path, size, duration, 
   `webcam_circle`, `webcam_corner`, `system` and `microphone`. For example:
   `record options --args '{"microphone":false,"webcam":true}'`.
   Check the returned `options` and `audio_note`: an unavailable camera or audio
-  device reports a note and turns off its switch.
+  device reports a note and turns off its switch. `record status` and `record stop`
+  also return `system_silent` and `microphone_silent`, indicating whether a source
+  has recently produced no detectable sound; the indicators clear when sound
+  resumes or recording is paused.
 - The recorder is exclusive across tray and CLI launches. A tray-started recording
   is reported as `tray_recording` but must be finalized from its toolbar; the CLI
   never silently takes it over. Concurrent CLI starts/stops are serialized.

@@ -370,8 +370,9 @@ jobs:
           $assets = Join-Path $stage 'Assets'
           New-Item -ItemType Directory -Force -Path $assets | Out-Null
           $binaries = @(Get-ChildItem -LiteralPath bin -File |
-            Where-Object { $_.Name -eq 'jiffshot.exe' -or $_.Extension -eq '.dll' })
+            Where-Object { $_.Name -in @('jiffshot.exe', 'jiffshot-cli.exe') -or $_.Extension -eq '.dll' })
           if (-not ($binaries | Where-Object { $_.Name -eq 'jiffshot.exe' })) { throw 'jiffshot.exe is missing from the build artifact' }
+          if (-not ($binaries | Where-Object { $_.Name -eq 'jiffshot-cli.exe' })) { throw 'jiffshot-cli.exe is missing from the build artifact' }
           if (-not ($binaries | Where-Object { $_.Name -eq 'rustolonia_host.dll' })) { throw 'rustolonia_host.dll is missing from the build artifact' }
           $binaries | Copy-Item -Destination $stage
           # Logo rendering is architecture-independent, but the ARM64 executable
@@ -455,6 +456,14 @@ jobs:
           }
           if (-not (Test-Path -LiteralPath (Join-Path $installed.InstallLocation 'jiffshot.exe'))) {
             throw 'The installed MSIX does not contain jiffshot.exe'
+          }
+          $cli = Join-Path $installed.InstallLocation 'jiffshot-cli.exe'
+          if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) {
+            throw 'The installed MSIX does not contain jiffshot-cli.exe'
+          }
+          $help = & $cli --help-agent
+          if ($LASTEXITCODE -ne 0 -or -not ($help -match '^jiffshot-cli for AI agents$')) {
+            throw "The installed jiffshot-cli.exe failed to run (exit $LASTEXITCODE)"
           }
           Remove-AppxPackage -Package $installed.PackageFullName -ErrorAction Stop
           if (Get-AppxPackage -Name Devolutions.Jiffshot) { throw 'Jiffshot MSIX is still installed after removal' }

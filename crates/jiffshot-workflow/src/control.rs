@@ -564,6 +564,8 @@ fn recording_json(r: &Recording) -> Value {
         "ended": r.worker.is_finished(),
         "error": c.error.lock().unwrap().clone(),
         "audio_note": c.audio.lock().unwrap().clone(),
+        "system_silent": c.system_silent.load(Ordering::Relaxed),
+        "microphone_silent": c.microphone_silent.load(Ordering::Relaxed),
         "options": {
             "cursor": c.cursor.load(Ordering::Relaxed), "highlight": c.highlight.load(Ordering::Relaxed),
             "clicks": c.clicks.load(Ordering::Relaxed), "webcam": c.webcam.load(Ordering::Relaxed),
@@ -773,6 +775,8 @@ fn record_stop(a: &Args, cancel: bool) -> Reply {
         "size_bytes": std::fs::metadata(&path).map_err(internal)?.len(),
         "started_at": started_at,
         "audio_note": control.audio.lock().unwrap().clone(),
+        "system_silent": control.system_silent.load(Ordering::Relaxed),
+        "microphone_silent": control.microphone_silent.load(Ordering::Relaxed),
     });
     *LAST_RECORDING.lock().unwrap() = Some(result.clone());
     Ok(result)
@@ -1240,6 +1244,40 @@ mod tests {
             let error = dispatch(command, &args(json!({ "__probe": 1 }))).err();
             assert!(error.is_none_or(|e| e.code != ErrorCode::Unsupported), "{command} is not dispatched");
         }
+    }
+
+    #[test]
+    fn recording_status_reports_each_silent_source_and_keeps_capture_notes() {
+        let control = Arc::new(recorder::Control::default());
+        *control.audio.lock().unwrap() = Some("no webcam: unavailable".into());
+        let recording = Recording {
+            id: "recording-test".into(),
+            key: None,
+            path: PathBuf::from("test.mp4"),
+            target: Value::Null,
+            fps: 30,
+            started_at: String::new(),
+            control: control.clone(),
+            worker: std::thread::spawn(|| Err("no recording started".into())),
+        };
+        let status = recording_json(&recording);
+        assert_eq!(status["system_silent"], false);
+        assert_eq!(status["microphone_silent"], false);
+        assert_eq!(status["audio_note"], "no webcam: unavailable");
+
+        control.system_silent.store(true, Ordering::Relaxed);
+        let status = recording_json(&recording);
+        assert_eq!(status["system_silent"], true);
+        assert_eq!(status["microphone_silent"], false);
+        assert_eq!(status["audio_note"], "no webcam: unavailable");
+
+        control.system_silent.store(false, Ordering::Relaxed);
+        control.microphone_silent.store(true, Ordering::Relaxed);
+        let status = recording_json(&recording);
+        assert_eq!(status["system_silent"], false);
+        assert_eq!(status["microphone_silent"], true);
+        assert_eq!(status["audio_note"], "no webcam: unavailable");
+        assert!(recording.worker.join().expect("test worker").is_err());
     }
 
     #[test]
