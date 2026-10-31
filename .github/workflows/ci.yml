@@ -387,10 +387,40 @@ jobs:
       - name: Install native Fedora build and packaging dependencies
         run: |
           dnf install --setopt=install_weak_deps=False -y \
-            git tar gzip curl ca-certificates gcc-c++ clang-devel \
+            git tar gzip curl ca-certificates gcc-c++ clang-devel dnf5-plugins \
             leptonica-devel tesseract-devel pkgconf-pkg-config \
             gstreamer1-devel gstreamer1-plugins-base-devel \
             python3 binutils rpm-build cpio desktop-file-utils
+          # Enable this before installing libav/FFmpeg, which can require OpenH264.
+          dnf config-manager setopt fedora-cisco-openh264.enabled=1
+          dnf install --setopt=install_weak_deps=False -y \
+            gstreamer1-plugins-base gstreamer1-plugins-good \
+            gstreamer1-plugins-bad-free gstreamer1-plugin-libav ffmpeg-free \
+            pipewire-gstreamer tesseract tesseract-langpack-eng \
+            fontconfig dejavu-sans-fonts
+
+      - name: Enable Fedora 43 RPM Fusion media codecs
+        run: |
+          test "$(rpm -E %fedora)" = 43
+          dnf install --setopt=install_weak_deps=False -y \
+            https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-43.noarch.rpm
+          # Follow RPM Fusion's supported full-codec swap, not Fedora's limited build.
+          dnf swap --setopt=install_weak_deps=False -y ffmpeg-free ffmpeg --allowerasing
+          dnf install --setopt=install_weak_deps=False -y \
+            gstreamer1-plugins-ugly gstreamer1-plugins-bad-freeworld
+
+      - name: Verify Fedora media and OCR dependency providers
+        run: |
+          # Fedora 43 provides fdkaacenc, not voaacenc. These are provider checks,
+          # not an encoder alias: the unchanged workspace tests still check app compatibility.
+          for element in jpegenc pngenc mp4mux x264enc h264parse aacparse \
+            fdkaacenc avdec_h264 avdec_aac pipewiresrc pulsesrc audiomixer; do
+            gst-inspect-1.0 --exists "$element"
+          done
+          languages=$(tesseract --list-langs)
+          printf '%s\n' "$languages" | grep -Fx eng
+          family=$(fc-match -f '%{family}\n' 'DejaVu Sans')
+          printf '%s\n' "$family" | grep -Fx 'DejaVu Sans'
 
       - uses: actions/checkout@v7
 

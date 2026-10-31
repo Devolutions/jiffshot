@@ -37,11 +37,17 @@ Fedora:
   Start Jiffshot from the application menu or run "jiffshot [image-video-or-jsd]".
   sudo dnf remove jiffshot
   H.264 recording and some import formats need extra codec plugins.
-  Enable the appropriate RPM Fusion repositories and install
-  gstreamer1-plugins-ugly and gstreamer1-libav where available.
+  Enable RPM Fusion Free for Fedora 43 and Fedora's Cisco OpenH264 repository,
+  install gstreamer1-plugins-ugly and gstreamer1-plugins-bad-freeworld, and use
+  gstreamer1-plugin-libav with RPM Fusion's full FFmpeg build (see below).
   The required GStreamer elements are x264enc, h264parse, mp4mux, voaacenc,
   aacparse, audiomixer, pipewiresrc, and pulsesrc. Missing elements are reported
   in the UI.
+  Fedora 43's GStreamer 1.26 release/update packages do not supply voaacenc;
+  they supply fdkaacenc in gstreamer1-plugins-bad-free instead. The application
+  must support the available AAC encoder before audio recording/export and all
+  native Fedora workspace tests can pass. Installing RPM Fusion alone does
+  not create a voaacenc factory. No encoder alias or test skip is provided.
 
 Run "jiffshot --capture", "--capture-interactive", "--grab-text", "--scrolling",
 "--scrolling-horizontal", "--panoramic", "--interval", or "--record" to start an action
@@ -275,9 +281,28 @@ Build the Fedora binary and RPM on native Fedora 43 on each architecture
 (or in a Fedora 43 container on a matching native runner):
   sudo dnf install gcc-c++ clang-devel leptonica-devel tesseract-devel \
     pkgconf-pkg-config gstreamer1-devel gstreamer1-plugins-base-devel \
-    python3 binutils rpm-build desktop-file-utils
+    python3 binutils rpm-build desktop-file-utils dnf5-plugins
+  sudo dnf config-manager setopt fedora-cisco-openh264.enabled=1
+  sudo dnf install \
+    gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free \
+    gstreamer1-plugin-libav ffmpeg-free pipewire-gstreamer \
+    tesseract tesseract-langpack-eng fontconfig dejavu-sans-fonts
+  sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-43.noarch.rpm
+  sudo dnf swap ffmpeg-free ffmpeg --allowerasing
+  sudo dnf install gstreamer1-plugins-ugly gstreamer1-plugins-bad-freeworld
   cargo build --release --locked -p jiffshot
   python3 package/linux/build.py --format rpm --output-dir package/out/linux-rpm
+
+The CI Fedora container explicitly installs media plugins, PipeWire's GStreamer
+source, English OCR data and DejaVu Sans fonts before workspace tests; development
+libraries alone are insufficient. These packages are available for x86_64 and
+aarch64 (OCR data/fonts are noarch). Repository setup follows
+https://rpmfusion.org/Configuration and https://rpmfusion.org/Howto/Multimedia .
+The correct Fedora libav plugin package is gstreamer1-plugin-libav, not
+gstreamer1-libav. Full FFmpeg requires Fedora's Cisco OpenH264 repository.
+Provider checks fail if codecs, English data or the expected font are missing;
+they do not replace native application tests or resolve the voaacenc compatibility
+limitation above.
 
 Override the release directory (including CARGO_TARGET_DIR builds):
   python3 package/linux/build.py --build-dir /tmp/jiffshot-linux-target/release

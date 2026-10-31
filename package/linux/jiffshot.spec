@@ -28,7 +28,7 @@ Requires:       desktop-file-utils
 Requires:       shared-mime-info
 Requires:       hicolor-icon-theme
 Recommends:     gstreamer1-plugins-ugly
-Recommends:     gstreamer1-libav
+Recommends:     gstreamer1-plugin-libav
 
 # Prebuilt files are stripped once by the shared payload builder.
 %global __os_install_post %{nil}

@@ -6,6 +6,7 @@ import io
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -438,6 +439,68 @@ class ArchitectureWorkflowTests(unittest.TestCase):
         match = re.search(rf"(?ms)^  {name}:\n(.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)", workflow)
         self.assertIsNotNone(match, f"missing job {name}")
         return match.group(1)
+
+    def step_script(self, job, name):
+        match = re.search(
+            rf"(?ms)^      - name: {re.escape(name)}\n        run: "
+            r"(?:\|\n(.*?)(?=^      - |\Z)|([^\n]+))", job,
+        )
+        self.assertIsNotNone(match, f"missing step {name}")
+        return match.group(1) if match.group(1) is not None else match.group(2)
+
+    def test_fedora_installs_media_pipewire_ocr_and_font_runtime_dependencies(self):
+        job = self.job("linux-rpm")
+        script = self.step_script(job, "Install native Fedora build and packaging dependencies")
+        tokens = set(shlex.split(script.replace("\\\n", ""), comments=True))
+        required = {
+            "gstreamer1-plugins-base", "gstreamer1-plugins-good", "gstreamer1-plugins-bad-free",
+            "gstreamer1-plugin-libav", "ffmpeg-free", "pipewire-gstreamer",
+            "tesseract", "tesseract-langpack-eng", "fontconfig", "dejavu-sans-fonts", "dnf5-plugins",
+        }
+        self.assertEqual(required - tokens, set(), "missing explicit Fedora runtime dependencies")
+        self.assertNotIn("gstreamer1-libav", tokens)
+        self.assertIn("dnf config-manager setopt fedora-cisco-openh264.enabled=1", script)
+        self.assertLess(script.index("fedora-cisco-openh264.enabled=1"),
+                        script.index("gstreamer1-plugin-libav"))
+        spec = (build.ASSETS / "jiffshot.spec").read_text()
+        self.assertIn("Recommends:     gstreamer1-plugin-libav\n", spec)
+        self.assertNotIn("Recommends:     gstreamer1-libav\n", spec)
+        self.assertLess(job.index("Install native Fedora build and packaging dependencies"),
+                        job.index("Test against native Fedora runtime libraries"))
+
+    def test_fedora_enables_free_codecs_and_full_ffmpeg_before_workspace_tests(self):
+        job = self.job("linux-rpm")
+        script = self.step_script(job, "Enable Fedora 43 RPM Fusion media codecs")
+        self.assertIn('test "$(rpm -E %fedora)" = 43', script)
+        tokens = set(shlex.split(script.replace("\\\n", ""), comments=True))
+        self.assertIn("https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-43.noarch.rpm", tokens)
+        self.assertIn("dnf config-manager setopt fedora-cisco-openh264.enabled=1", job)
+        self.assertIn("dnf swap --setopt=install_weak_deps=False -y ffmpeg-free ffmpeg --allowerasing", script)
+        self.assertTrue({"gstreamer1-plugins-ugly", "gstreamer1-plugins-bad-freeworld"}.issubset(tokens))
+        self.assertNotIn("--nogpgcheck", tokens)
+        self.assertLess(job.index("Enable Fedora 43 RPM Fusion media codecs"),
+                        job.index("Test against native Fedora runtime libraries"))
+        test = self.step_script(job, "Test against native Fedora runtime libraries")
+        self.assertEqual(shlex.split(test), ["cargo", "test", "--release", "--locked", "--workspace"])
+
+    def test_fedora_provider_checks_verify_codecs_english_and_font_without_aliasing(self):
+        job = self.job("linux-rpm")
+        script = self.step_script(job, "Verify Fedora media and OCR dependency providers")
+        tokens = shlex.split(script.replace("\\\n", ""), comments=True)
+        start = tokens.index("in") + 1
+        stop = tokens.index("do")
+        self.assertEqual(tokens[start:stop], [
+            "jpegenc", "pngenc", "mp4mux", "x264enc", "h264parse", "aacparse",
+            "fdkaacenc", "avdec_h264", "avdec_aac", "pipewiresrc", "pulsesrc", "audiomixer;",
+        ])
+        self.assertIn('gst-inspect-1.0 --exists "$element"', script)
+        self.assertIn("languages=$(tesseract --list-langs)", script)
+        self.assertIn("printf '%s\\n' \"$languages\" | grep -Fx eng", script)
+        self.assertIn("family=$(fc-match -f '%{family}\\n' 'DejaVu Sans')", script)
+        self.assertIn("printf '%s\\n' \"$family\" | grep -Fx 'DejaVu Sans'", script)
+        self.assertNotIn("voaacenc", tokens, "do not silently alias the unavailable AAC factory")
+        self.assertLess(job.index("Verify Fedora media and OCR dependency providers"),
+                        job.index("Test against native Fedora runtime libraries"))
 
     def test_ubuntu_and_fedora_use_both_native_runners_and_distinct_artifacts(self):
         for job_name, cache_prefix, suffix in (
