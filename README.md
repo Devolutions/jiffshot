@@ -140,6 +140,7 @@ Prebuilt, Authenticode-signed packages for **Windows 10 and Windows 11** (`x64` 
 
 - **Searchable Capture Library:** Every capture is stored in `Pictures\Jiffshot` (grouped into `YYYY-MM` folders) alongside a metadata sidecar recording the window title, application process, browser URL, dimensions, timestamp, tags, and pin status.
 - **Instant Filtering & Organization:** Filter by *Images*, *Videos*, *Pinned*, *Today*, *Last 7 days*, *Tagged*, specific applications (`App: ...`), websites (`Site: ...`), or tags (`Tag: ...`). Pin important items to the front, tag or rename captures in place, and select multiple items to combine them into a single image or slideshow.
+- **Copy & Drag Out:** Right-click any capture in the Library or the Recent Captures tray and choose **Copy** to put the image (with its edits) on the clipboard; videos and multiple picked captures are copied as files. Drag captures from the tray or Library straight into other applications such as Explorer, Outlook, Teams, or a browser.
 - **Editable `.jsd` Documents & Multi-Format Export:** Edits to library captures are saved automatically as non-destructive `.jsd` companion files, so annotations stay movable and editable whenever you reopen a capture. Export flat files to **PNG**, **JPEG**, **PDF**, **BMP**, **GIF**, and **WebP**.
 - **One Preferences Dialog:** Configure Capture behavior, Editor layout and theme, Library location, Share destinations, and global Hotkeys from a single window (`Ctrl+,`).
 

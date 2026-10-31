@@ -139,6 +139,8 @@ fn tile(s: MainViewModelSink, theme: Theme, key: u64) -> AnyEl {
         .corner_radius(6.0)
         .padding(4.0)
         .tool_tip_tip(move || fields.with(|f| f.info.clone()))
+        .on_pointer_entered(move |_| fields.with(|f| crate::drag_out::hover(&f.path)))
+        .on_pointer_exited(move |_| fields.with(|f| crate::drag_out::leave(&f.path)))
         .on_tapped(move |args| {
             if args.key_modifiers & CONTROL != 0 {
                 on_item(s, key, |m| m.toggle_select());
@@ -150,6 +152,8 @@ fn tile(s: MainViewModelSink, theme: Theme, key: u64) -> AnyEl {
     with_context_menu(
         card,
         vec![
+            MenuItem::el().header("Copy").command(on(|m| m.copy())).into(),
+            Separator::el().into(),
             MenuItem::el().header("Pin / unpin").command(on(|m| m.toggle_pin())).into(),
             MenuItem::el().header("Rename").item(edit_row(s, key, "", move || fields.with(|f| f.new_name.clone()), "Rename", |m, text| m.rename(text))).into(),
             MenuItem::el().header("Tags").item(edit_row(s, key, "tag, another tag", move || fields.with(|f| f.tag_text.clone()), "Set", |m, text| m.set_tags(text))).into(),

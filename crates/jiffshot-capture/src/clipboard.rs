@@ -205,6 +205,38 @@ pub fn copy_text(text: &str, owner: isize) -> io::Result<()> {
     put(owner, &[(CF_UNICODETEXT, &units)])
 }
 
+/// The `CF_HDROP` payload for `files`: a `DROPFILES` header followed by a
+/// double-NUL-terminated list of wide paths.
+fn hdrop_bytes(files: &[PathBuf]) -> Vec<u8> {
+    use windows_sys::Win32::UI::Shell::DROPFILES;
+    let header = std::mem::size_of::<DROPFILES>();
+    let mut bytes = vec![0u8; header];
+    let drop = DROPFILES {
+        pFiles: header as u32,
+        pt: windows_sys::Win32::Foundation::POINT { x: 0, y: 0 },
+        fNC: 0,
+        fWide: 1,
+    };
+    // SAFETY: DROPFILES is plain old data and `bytes` is large enough.
+    unsafe { std::ptr::write_unaligned(bytes.as_mut_ptr() as *mut DROPFILES, drop) };
+    for f in files {
+        bytes.extend(f.as_os_str().to_string_lossy().encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes));
+    }
+    bytes.extend([0, 0]);
+    bytes
+}
+
+/// Replaces the clipboard contents with files, as Explorer's Copy does, so
+/// they paste into Explorer, chat apps and mail.
+pub fn copy_files(files: &[PathBuf], owner: isize) -> io::Result<()> {
+    let hdrop = hdrop_bytes(files);
+    // DROPEFFECT_COPY: pasting in Explorer copies rather than moves.
+    let effect = 1u32.to_le_bytes();
+    // SAFETY: plain Win32 call with a NUL-terminated name.
+    let effect_format = unsafe { RegisterClipboardFormatW(wide("Preferred DropEffect").as_ptr()) };
+    put(owner, &[(CF_HDROP, &hdrop), (effect_format, &effect)])
+}
+
 /// Reads what the editor can paste, preferring images, then files, then
 /// text. `owner` is any window of this process.
 pub fn read(owner: isize) -> io::Result<Option<Pasted>> {
@@ -268,5 +300,17 @@ mod tests {
         assert_eq!((w, h), (3, 2));
         assert_eq!(&rgba[..4], &[3, 2, 1, 255], "top-left back as RGBA");
         assert_eq!(&rgba[12..16], &[6, 5, 4, 255]);
+    }
+
+    #[test]
+    fn hdrop_is_a_wide_double_nul_terminated_list() {
+        use windows_sys::Win32::UI::Shell::DROPFILES;
+        let bytes = hdrop_bytes(&[PathBuf::from(r"C:\a.png"), PathBuf::from(r"D:\b c.mp4")]);
+        let header = std::mem::size_of::<DROPFILES>();
+        let u32_at = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+        assert_eq!(u32_at(0) as usize, header, "pFiles");
+        assert_eq!(u32_at(header - 4), 1, "fWide");
+        let units: Vec<u16> = bytes[header..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        assert_eq!(String::from_utf16(&units).unwrap(), "C:\\a.png\0D:\\b c.mp4\0\0");
     }
 }

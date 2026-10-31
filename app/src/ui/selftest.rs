@@ -607,6 +607,22 @@ fn library_item(index: usize) -> Option<Rc<crate::vm::LibraryItemItem>> {
 
 fn library_steps(s: &mut Script) {
     let k = sink();
+    s.step(move |_| {
+        if let Some(first) = library_item(0) {
+            first.model.run(|m| m.copy());
+        }
+        300
+    })
+    .log(move |_| {
+        use jiffshot_capture::clipboard::{read, Pasted};
+        let pasted = match read(crate::winutil::main_hwnd()) {
+            Ok(Some(Pasted::Image { width, height, .. })) => format!("image {width}x{height}"),
+            Ok(Some(_)) => "something else".to_owned(),
+            Ok(None) => "nothing".to_owned(),
+            Err(error) => format!("error {error}"),
+        };
+        format!("library copy: {pasted}; status: {}", k.status.get_untracked())
+    });
     s.step(move |t| {
         let count = k.library.get_untracked().len();
         t.note = count.to_string();

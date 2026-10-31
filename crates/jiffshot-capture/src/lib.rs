@@ -8,6 +8,7 @@
 
 pub mod clipboard;
 pub mod config;
+pub mod drag;
 pub mod frame;
 pub mod gdi;
 pub mod geom;
