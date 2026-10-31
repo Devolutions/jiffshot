@@ -170,13 +170,27 @@ jobs:
           if-no-files-found: error
 
   linux:
-    name: linux-x64
-    runs-on: ubuntu-24.04
+    name: linux-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+            machine: x86_64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
     env:
       CARGO_TERM_COLOR: always
       JIFFSHOT_VERSION: ${{ inputs.version }}
+      JIFFSHOT_TEST_ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Assert native runner architecture
+        run: test "$(uname -m)" = "${{ matrix.machine }}"
 
       - name: Install Linux build and media dependencies
         run: |
@@ -225,8 +239,8 @@ jobs:
             ~/.cargo/git/db
             ~/.cache/rustolonia/host
             target
-          key: linux-x64-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: linux-x64-
+          key: ubuntu2404-linux-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ubuntu2404-linux-${{ matrix.arch }}-
 
       - name: Test
         run: cargo test --release --locked --workspace
@@ -328,12 +342,12 @@ jobs:
             --binary target/release/jiffshot --runtime-dir target/release
 
       - name: Package Ubuntu tar.gz and DEB
-        run: python3 package/linux/build.py --format tar.gz deb
+        run: python3 package/linux/build.py --arch "${{ matrix.arch }}" --format tar.gz deb
 
       - name: Test Linux package builder and contents
         env:
           JIFFSHOT_TEST_FORMATS: tar.gz,deb
-        run: python3 -m unittest discover -s package/linux -p test_build.py -v
+        run: python3 -m unittest discover -s package/linux -p 'test_*.py' -v
 
       - name: Smoke-test the relocated portable package
         run: |
@@ -344,18 +358,32 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: jiffshot-linux-x64
+          name: jiffshot-linux-${{ matrix.arch }}
           path: package/out/linux/*
           if-no-files-found: error
 
   linux-rpm:
-    name: linux-x64 Fedora RPM
-    runs-on: ubuntu-24.04
+    name: linux-${{ matrix.arch }} Fedora RPM
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+            machine: x86_64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
     container: fedora:43
     env:
       CARGO_TERM_COLOR: always
       JIFFSHOT_VERSION: ${{ inputs.version }}
+      JIFFSHOT_TEST_ARCH: ${{ matrix.arch }}
     steps:
+      - name: Assert native Fedora container architecture
+        run: test "$(uname -m)" = "${{ matrix.machine }}"
+
       - name: Install native Fedora build and packaging dependencies
         run: |
           dnf install --setopt=install_weak_deps=False -y \
@@ -382,41 +410,66 @@ jobs:
             ~/.cargo/git/db
             ~/.cache/rustolonia/host
             target
-          key: fedora43-linux-x64-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: fedora43-linux-x64-
+          key: fedora43-linux-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: fedora43-linux-${{ matrix.arch }}-
+
+      - name: Test against native Fedora runtime libraries
+        run: cargo test --release --locked --workspace
 
       - name: Build against Fedora runtime libraries
         run: cargo build --release --locked -p jiffshot
 
       - name: Package native Fedora RPM
-        run: python3 package/linux/build.py --format rpm --output-dir package/out/linux-rpm
+        run: python3 package/linux/build.py --arch "${{ matrix.arch }}" --format rpm --output-dir package/out/linux-rpm
 
       - name: Test RPM builder and contents
         env:
           JIFFSHOT_TEST_FORMATS: rpm
           JIFFSHOT_PACKAGE_DIR: package/out/linux-rpm
-        run: python3 -m unittest discover -s package/linux -p test_build.py -v
+        run: python3 -m unittest discover -s package/linux -p 'test_*.py' -v
 
       - uses: actions/upload-artifact@v7
         with:
-          name: jiffshot-linux-x64-rpm
+          name: jiffshot-linux-${{ matrix.arch }}-rpm
           path: package/out/linux-rpm/*
           if-no-files-found: error
 
   linux-package-install:
-    name: Install Linux packages (${{ matrix.format }})
+    name: Install Linux packages (${{ matrix.arch }}, ${{ matrix.format }})
     needs: [linux, linux-rpm]
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - format: deb
+            arch: x64
+            runner: ubuntu-24.04
+            machine: x86_64
+            package_arch: amd64
             image: ubuntu:24.04
             artifact: jiffshot-linux-x64
           - format: rpm
+            arch: x64
+            runner: ubuntu-24.04
+            machine: x86_64
+            package_arch: x86_64
             image: fedora:43
             artifact: jiffshot-linux-x64-rpm
+          - format: deb
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
+            package_arch: arm64
+            image: ubuntu:24.04
+            artifact: jiffshot-linux-arm64
+          - format: rpm
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
+            package_arch: aarch64
+            image: fedora:43
+            artifact: jiffshot-linux-arm64-rpm
     steps:
       - uses: actions/checkout@v7
 
@@ -427,16 +480,23 @@ jobs:
 
       - name: Clean install, desktop registration, launch, and uninstall
         run: |
+          test "$(uname -m)" = "${{ matrix.machine }}"
           docker run --rm --volume "$PWD:/work:ro" "${{ matrix.image }}" \
             bash -ceu '
+              test "$(uname -m)" = "$2"
+              cd /work/package/out/install
+              sha256sum --check "SHA256SUMS-linux-$4.txt"
               if [ "$1" = deb ]; then
                 apt-get update -qq
                 apt-get install --no-install-recommends -y \
                   /work/package/out/install/*.deb python3 xvfb x11-utils
+                test "$(dpkg-query -W -f=\${Architecture} jiffshot)" = "$3"
               else
                 dnf install --setopt=install_weak_deps=False -y \
                   /work/package/out/install/*.rpm python3 /usr/bin/Xvfb /usr/bin/xwininfo
+                test "$(rpm -q --queryformat "%{ARCH}" jiffshot)" = "$3"
               fi
+              python3 /work/package/linux/validate_installed.py --arch "$4"
               grep -F "application/x-jiffshot=" /usr/share/applications/mimeinfo.cache
               grep -F "application/x-jiffshot" /usr/share/mime/globs2
               python3 /work/package/linux/smoke.py --launcher /usr/bin/jiffshot
@@ -451,7 +511,7 @@ jobs:
               test ! -e /usr/bin/jiffshot
               test ! -e /usr/share/applications/com.devolutions.Jiffshot.desktop
               test -e /root/.config/Jiffshot/package-removal-sentinel
-            ' -- "${{ matrix.format }}"
+            ' -- "${{ matrix.format }}" "${{ matrix.machine }}" "${{ matrix.package_arch }}" "${{ matrix.arch }}"
 
   msi:
     name: ${{ matrix.rid }} MSI

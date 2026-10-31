@@ -2,6 +2,7 @@
 """Package a Linux release build with its private Rustolonia runtime."""
 
 import argparse
+from dataclasses import dataclass
 import gzip
 import hashlib
 import os
@@ -36,6 +37,20 @@ DEB_RUNTIME = (
 )
 
 
+@dataclass(frozen=True)
+class Architecture:
+    name: str
+    machine: int
+    deb: str
+    rpm: str
+
+
+ARCHITECTURES = {
+    "x64": Architecture("x64", 62, "amd64", "x86_64"),
+    "arm64": Architecture("arm64", 183, "arm64", "aarch64"),
+}
+
+
 def run(command, **kwargs):
     return subprocess.run(command, check=True, capture_output=True, text=True, **kwargs)
 
@@ -50,13 +65,34 @@ def package_version(expected=None):
     return version
 
 
-def validate_binary(path):
+def validate_binary(path, expected=None, *, shared=False):
     with path.open("rb") as binary:
-        header = binary.read(20)
-    if len(header) != 20 or header[:6] != b"\x7fELF\x02\x01":
+        header = binary.read(64)
+    if len(header) != 64 or header[:6] != b"\x7fELF\x02\x01":
         raise ValueError(f"{path} is not a little-endian 64-bit Linux ELF binary")
-    if struct.unpack_from("<H", header, 18)[0] != 62:
-        raise ValueError(f"{path} is not Linux x64; Linux packages currently support x64 only")
+    # System V (0) and GNU/Linux (3) are used by Linux executable/shared objects.
+    elf_type, machine, version = struct.unpack_from("<HHI", header, 16)
+    if header[6] != 1 or version != 1 or header[7] not in (0, 3) or header[8] != 0:
+        raise ValueError(f"{path} has an unsupported ELF version or Linux ABI")
+    if struct.unpack_from("<H", header, 52)[0] != 64:
+        raise ValueError(f"{path} has an invalid ELF64 header size")
+    if elf_type not in ((3,) if shared else (2, 3)):
+        raise ValueError(f"{path} is not an ELF {'shared object' if shared else 'executable or shared object'}")
+    architecture = next((arch for arch in ARCHITECTURES.values() if arch.machine == machine), None)
+    if architecture is None:
+        raise ValueError(f"{path} has unsupported ELF machine {machine}; expected Linux x64 or arm64")
+    if expected is not None and architecture != expected:
+        raise ValueError(f"{path} is Linux {architecture.name}, expected Linux {expected.name}")
+    return architecture
+
+
+def validate_build(build_dir, asserted_arch=None):
+    if asserted_arch is not None and asserted_arch not in ARCHITECTURES:
+        raise ValueError(f"unsupported architecture assertion: {asserted_arch!r}; expected x64 or arm64")
+    architecture = validate_binary(build_dir / "jiffshot", ARCHITECTURES.get(asserted_arch))
+    for name in RUNTIME_FILES[1:]:
+        validate_binary(build_dir / name, architecture, shared=True)
+    return architecture
 
 
 def require_tools(formats):
@@ -72,23 +108,24 @@ def require_tools(formats):
 
 def validate_rpm_input(build_dir):
     dependencies = run(["readelf", "--dynamic", str(build_dir / "jiffshot")]).stdout
-    if "[libleptonica.so.6]" not in dependencies:
+    if "[libleptonica.so.6]" not in dependencies or "[liblept.so.5]" in dependencies:
         raise ValueError(
             "RPM requires a native Fedora build linked to libleptonica.so.6; "
             "an Ubuntu 24.04 build linked to liblept.so.5 cannot be repackaged for Fedora"
         )
 
 
-def prepare_payload(build_dir, payload):
+def prepare_payload(build_dir, payload, architecture=None):
+    detected = validate_build(build_dir, architecture.name if architecture else None)
     runtime = payload / "lib/jiffshot"
     runtime.mkdir(parents=True)
     for name in RUNTIME_FILES:
         source = build_dir / name
-        validate_binary(source)
         destination = runtime / name
         shutil.copyfile(source, destination)
         destination.chmod(0o755)
         run(["strip", "--strip-debug", str(destination)])
+        validate_binary(destination, detected, shared=name != "jiffshot")
     files = (
         (ASSETS / "jiffshot", "bin/jiffshot", 0o755),
         (ASSETS / "com.devolutions.Jiffshot.desktop", "share/applications/com.devolutions.Jiffshot.desktop", 0o644),
@@ -126,7 +163,7 @@ def write_archive(payload, destination, top_directory, epoch):
                         archive.addfile(info)
 
 
-def build_deb(payload, work, version, env):
+def build_deb(payload, work, version, env, architecture):
     root = work / "deb"
     shutil.copytree(payload, root / "usr")
     root.chmod(0o755)
@@ -134,7 +171,7 @@ def build_deb(payload, work, version, env):
     metadata.mkdir(parents=True)
     (metadata / "control").write_text(
         f"Source: jiffshot\nSection: graphics\nPriority: optional\nMaintainer: {MAINTAINER}\n\n"
-        "Package: jiffshot\nArchitecture: amd64\nDescription: Jiffshot screen capture and editor\n",
+        f"Package: jiffshot\nArchitecture: {architecture.deb}\nDescription: Jiffshot screen capture and editor\n",
         encoding="utf-8",
     )
     # Scan every ELF, including the runtime loaded with dlopen. System package
@@ -154,7 +191,7 @@ def build_deb(payload, work, version, env):
     control.parent.mkdir()
     control.parent.chmod(0o755)
     control.write_text(
-        f"Package: jiffshot\nVersion: {version}\nArchitecture: amd64\n"
+        f"Package: jiffshot\nVersion: {version}\nArchitecture: {architecture.deb}\n"
         f"Maintainer: {MAINTAINER}\nSection: graphics\nPriority: optional\n"
         f"Installed-Size: {installed_size}\nDepends: {dependencies}\n"
         "Homepage: https://github.com/Devolutions/jiffshot\n"
@@ -164,26 +201,28 @@ def build_deb(payload, work, version, env):
         encoding="utf-8",
     )
     control.chmod(0o644)
-    destination = work / f"jiffshot_{version}_amd64.deb"
+    destination = work / f"jiffshot_{version}_{architecture.deb}.deb"
     run(["dpkg-deb", "--build", "--root-owner-group", "-Zxz", str(root), str(destination)], env=env)
     return destination
 
 
-def build_rpm(payload, work, version, env, epoch):
+def build_rpm(payload, work, version, env, epoch, architecture):
     topdir = work / "rpm"
     for name in ("BUILD", "BUILDROOT", "RPMS", "SOURCES", "SPECS", "SRPMS"):
         (topdir / name).mkdir(parents=True)
     write_archive(payload, topdir / "SOURCES/payload.tar.gz", f"jiffshot-{version}", epoch)
-    spec = (ASSETS / "jiffshot.spec").read_text(encoding="utf-8").replace("@VERSION@", version)
+    spec = (ASSETS / "jiffshot.spec").read_text(encoding="utf-8").replace(
+        "@VERSION@", version
+    ).replace("@ARCH@", architecture.rpm)
     spec_path = topdir / "SPECS/jiffshot.spec"
     spec_path.write_text(spec, encoding="utf-8")
     run(
-        ["rpmbuild", "-bb", "--define", f"_topdir {topdir}",
+        ["rpmbuild", "-bb", "--target", architecture.rpm, "--define", f"_topdir {topdir}",
          "--define", "use_source_date_epoch_as_buildtime 1",
          "--define", "clamp_mtime_to_source_date_epoch 1", str(spec_path)],
         env=env,
     )
-    destination = topdir / f"RPMS/x86_64/jiffshot-{version}-1.x86_64.rpm"
+    destination = topdir / f"RPMS/{architecture.rpm}/jiffshot-{version}-1.{architecture.rpm}.rpm"
     if not destination.is_file():
         raise ValueError(f"rpmbuild did not produce {destination.name}")
     return destination
@@ -196,6 +235,8 @@ def main():
     parser.add_argument("--version", default=os.environ.get("JIFFSHOT_VERSION") or None,
                         help="expected version; must match Cargo.toml (defaults to JIFFSHOT_VERSION)")
     parser.add_argument("--format", choices=("tar.gz", "deb", "rpm"), nargs="+", default=["tar.gz", "deb"])
+    parser.add_argument("--arch", choices=tuple(ARCHITECTURES),
+                        help="assert ELF architecture of every input; never relabel or cross-compile")
     args = parser.parse_args()
     if sys.platform != "linux":
         raise ValueError("run this packaging script on Linux (or in WSL)")
@@ -203,10 +244,9 @@ def main():
     formats = tuple(dict.fromkeys(args.format))
     if "deb" in formats and "rpm" in formats:
         raise ValueError("DEB and Fedora RPM require separate native builds; generate them in separate invocations")
-    require_tools(formats)
     build_dir = args.build_dir.resolve()
-    for name in RUNTIME_FILES:
-        validate_binary(build_dir / name)
+    architecture = validate_build(build_dir, args.arch)
+    require_tools(formats)
     if "rpm" in formats:
         validate_rpm_input(build_dir)
     epoch = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
@@ -216,23 +256,23 @@ def main():
     with tempfile.TemporaryDirectory(prefix="jiffshot-package-") as temporary:
         work = Path(temporary)
         payload = work / "payload"
-        prepare_payload(build_dir, payload)
+        prepare_payload(build_dir, payload, architecture)
         artifacts = []
         if "tar.gz" in formats:
-            destination = work / f"Devolutions.Jiffshot-linux-x64-{version}.tar.gz"
-            write_archive(payload, destination, f"jiffshot-{version}-linux-x64", epoch)
+            destination = work / f"Devolutions.Jiffshot-linux-{architecture.name}-{version}.tar.gz"
+            write_archive(payload, destination, f"jiffshot-{version}-linux-{architecture.name}", epoch)
             artifacts.append(destination)
         if "deb" in formats:
-            artifacts.append(build_deb(payload, work, version, env))
+            artifacts.append(build_deb(payload, work, version, env, architecture))
         if "rpm" in formats:
-            artifacts.append(build_rpm(payload, work, version, env, epoch))
+            artifacts.append(build_rpm(payload, work, version, env, epoch, architecture))
         output_dir = args.output_dir.resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         checksums = []
         for path in artifacts:
             with path.open("rb") as content:
                 checksums.append(f"{hashlib.file_digest(content, 'sha256').hexdigest()}  {path.name}\n")
-        sums = work / "SHA256SUMS-linux-x64.txt"
+        sums = work / f"SHA256SUMS-linux-{architecture.name}.txt"
         sums.write_text("".join(checksums), encoding="ascii")
         with tempfile.TemporaryDirectory(prefix=".jiffshot-", dir=output_dir) as publishing:
             for artifact in (*artifacts, sums):

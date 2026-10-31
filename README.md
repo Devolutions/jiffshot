@@ -45,8 +45,9 @@ Prebuilt, Authenticode-signed packages for **Windows 10 and Windows 11** (`x64` 
 | **`Devolutions.Jiffshot-x64-<version>.zip`** | Windows x64 (Intel / AMD) | Portable archive—unzip anywhere and run `jiffshot.exe`. Nothing is installed in the system. |
 | **`Devolutions.Jiffshot-arm64-<version>.zip`** | Windows ARM64 | Portable archive for Windows on ARM devices. |
 
-Linux x64 release builds are configured to produce a portable `.tar.gz` and
-Ubuntu 24.04 `.deb`, plus a separately built Fedora 43 `.rpm`. See
+Linux x64 and ARM64 release builds are configured to produce a portable `.tar.gz`
+and Ubuntu 24.04 `.deb`, plus a separately built native Fedora 43 `.rpm` for each
+architecture. See
 [Building and Installing Linux Packages](#building-and-installing-linux-packages)
 for their dependencies and current limitations. The Linux GUI requires X11 or
 XWayland; a Wayland-only session without XWayland is not supported by the
@@ -315,6 +316,15 @@ Jiffshot is written in Rust with its UI built on [Rustolonia](https://github.com
 | `app/` | Windows and Linux application entry points, editors, platform integrations, and UI |
 | `package/` | Windows MSI/MSIX packaging and Linux tar.gz, DEB, and RPM package builders |
 
+Platform implementations are isolated in `app/src/win/` and `app/src/linux/`,
+with suffix-free module names and a thin `app/src/main.rs` dispatcher. The canvas,
+document engine, tracing, and library-tag helpers stay shared; the shared canvas
+view remains under `app/src/ui/`. Windows capture backends live in
+`crates/jiffshot-capture/src/win/`, while the crate root retains its existing
+public API and shared frame, geometry, and stitching primitives. The Windows
+workflow engine remains in `jiffshot-workflow`; Linux workflows live under
+`app/src/linux/`.
+
 ### Compiling
 
 Jiffshot requires **Rust 1.88+** and depends on Rustolonia's `v12.1.2` release. The first build downloads the platform's prebuilt host (verified against the checksums pinned at the tag). No .NET SDK or Rustolonia checkout is required to build the application.
@@ -426,11 +436,11 @@ rustup target add aarch64-pc-windows-msvc
 cargo build --release -p jiffshot --target aarch64-pc-windows-msvc
 ```
 
-CI (`.github/workflows/ci.yml`) builds and tests Windows x64, cross-builds Windows ARM64, and runs Linux workspace tests, app Clippy, and package tests. Windows artifacts include portable ZIP, MSI, and MSIX packages for both architectures (`jiffshot-win-x64`, `jiffshot-win-arm64`, and their `-msi` / `-msix` variants). Linux x64 artifacts contain Ubuntu 24.04 tar.gz/DEB packages (`jiffshot-linux-x64`) and a separately compiled Fedora 43 RPM (`jiffshot-linux-x64-rpm`). Clean Ubuntu/Fedora container jobs check dependency resolution, desktop/MIME registration, isolated graphical startup, and removal without deleting user settings. The release workflow collects all formats into the release assets and `SHA256SUMS.txt`; Windows packages are signed, while Linux packages are currently unsigned. To move to a newer Rustolonia, change the tag on the two lines in `Cargo.toml`'s `[workspace.dependencies]`.
+CI (`.github/workflows/ci.yml`) builds and tests Windows x64 and cross-builds Windows ARM64. Linux uses native `ubuntu-24.04` (x64) and `ubuntu-24.04-arm` (ARM64) hosted runners: each runs workspace tests, app Clippy, package-content tests, and portable smoke tests. Fedora 43 containers on each native runner separately compile and test the Fedora build and RPM. Windows artifacts include portable ZIP, MSI, and MSIX packages for both architectures (`jiffshot-win-x64`, `jiffshot-win-arm64`, and their `-msi` / `-msix` variants). Linux artifacts contain Ubuntu 24.04 tar.gz/DEB packages (`jiffshot-linux-x64`, `jiffshot-linux-arm64`) and separately compiled Fedora 43 RPMs (`jiffshot-linux-x64-rpm`, `jiffshot-linux-arm64-rpm`), with architecture/distro-specific caches. Clean Ubuntu/Fedora containers on both native architectures verify package and installed ELF architecture, checksums, dependency resolution, desktop/MIME registration, isolated graphical startup, and removal without deleting user settings. Release assembly requires all six Linux packages and verifies their builder checksums before collecting them, per-architecture Linux checksums, and `SHA256SUMS.txt`; Windows packages are signed, while Linux packages are currently unsigned. Rustolonia [v12.1.2](https://github.com/Devolutions/rustolonia/releases/tag/v12.1.2) publishes both Linux x64 and ARM64 runtime host assets; this availability alone does not establish a successful native Jiffshot ARM64 build or smoke test. To move to a newer Rustolonia, change the tag on the two lines in `Cargo.toml`'s `[workspace.dependencies]`.
 
 ### Building and Installing Linux Packages
 
-On Ubuntu 24.04, after installing the Linux build dependencies above:
+On native Ubuntu 24.04 x64 or ARM64, after installing the Linux build dependencies above:
 
 ```sh
 cargo build --release --locked -p jiffshot
@@ -440,15 +450,15 @@ python3 package/linux/build.py --format tar.gz deb
 
 With a custom Cargo target directory, pass `--build-dir /path/to/target/release`. Outputs default to `package/out/linux`:
 
-| Format | Filename | Use |
-| --- | --- | --- |
-| Portable | `Devolutions.Jiffshot-linux-x64-0.1.0.tar.gz` | Extract, then run `jiffshot-0.1.0-linux-x64/bin/jiffshot` |
-| Ubuntu | `jiffshot_0.1.0_amd64.deb` | `sudo apt install ./jiffshot_0.1.0_amd64.deb` |
-| Fedora | `jiffshot-0.1.0-1.x86_64.rpm` | `sudo dnf install ./jiffshot-0.1.0-1.x86_64.rpm` |
+| Format | x64 filename | ARM64 filename | Use |
+| --- | --- | --- | --- |
+| Portable | `Devolutions.Jiffshot-linux-x64-0.1.0.tar.gz` | `Devolutions.Jiffshot-linux-arm64-0.1.0.tar.gz` | Extract, then run `jiffshot-0.1.0-linux-<arch>/bin/jiffshot` |
+| Ubuntu | `jiffshot_0.1.0_amd64.deb` | `jiffshot_0.1.0_arm64.deb` | `sudo apt install ./<matching-architecture>.deb` |
+| Fedora | `jiffshot-0.1.0-1.x86_64.rpm` | `jiffshot-0.1.0-1.aarch64.rpm` | `sudo dnf install ./<matching-architecture>.rpm` |
 
-The version is read from the workspace `Cargo.toml`; `--version` or `JIFFSHOT_VERSION` can assert the expected release version. `SHA256SUMS-linux-x64.txt` covers the formats generated by each invocation.
+The version is read from the workspace `Cargo.toml`; `--version` or `JIFFSHOT_VERSION` can assert the expected release version. Architecture is detected from the executable's ELF64 header and must match **every** bundled Rustolonia, SkiaSharp, and HarfBuzzSharp library. Invalid, unsupported, or mixed-architecture inputs are rejected before packaging. Optional `--arch x64` or `--arch arm64` asserts this identity; it never relabels or cross-compiles a binary. `SHA256SUMS-linux-x64.txt` or `SHA256SUMS-linux-arm64.txt` covers the formats generated by each invocation; use separate output directories for the Ubuntu and Fedora invocations, which have separate checksum manifests.
 
-**Build the RPM natively on Fedora 43**, with Fedora's development dependencies listed in [the Linux packaging instructions](package/linux/README.txt):
+**Build the RPM natively on Fedora 43 on each architecture**, with Fedora's development dependencies listed in [the Linux packaging instructions](package/linux/README.txt):
 
 ```sh
 cargo build --release --locked -p jiffshot
@@ -494,7 +504,7 @@ The MSI lands in `package/out` as `Devolutions.Jiffshot-x64-0.1.0.msi` (with the
 
 Run **Release** from GitHub Actions with a version matching `Cargo.toml` (for example, `0.1.0`, without `v`). Update and commit the workspace version before releasing a new version. Dry runs are enabled by default and upload signed packages without creating a tag or release. The `github_env` input selects the signing environment independently of `dry_run`: on master, `auto` (the default) and `prod` use `publish-prod`, while `test` uses `publish-test`. Other branches always use `publish-test` and only permit dry runs, even if `prod` is requested. For test signing, the workflow retrieves the `publish-test` profile root with psign and trusts it only in each ephemeral runner's current user certificate store, so Authenticode validation remains enabled. A non-dry-run dispatch with `github_env=test` publishes test-signed artifacts that are not publicly trusted. The workflow rejects non-dry-run releases from other branches, version mismatches, and existing tags.
 
-Both modes retain the portable, MSI, and MSIX Actions artifacts plus a `release-assets` artifact containing x64/ARM64 MSIs, MSIX packages, ZIP archives, and `SHA256SUMS.txt`. After all builds, signing, and validation succeed, a non-dry-run creates `v<version>` at the dispatched commit and publishes a GitHub Release with those same files attached. Do not create the tag manually.
+Both modes retain the portable, MSI, MSIX, and Linux Actions artifacts plus a `release-assets` artifact containing x64/ARM64 MSIs, MSIX packages, ZIP archives, all six Linux tar.gz/DEB/RPM packages, `SHA256SUMS-linux-x64.txt`, `SHA256SUMS-linux-arm64.txt`, and the overall `SHA256SUMS.txt`. Missing Linux formats, architectures, builder checksum manifests, or mismatched hashes block assembly. After all builds, signing, and validation succeed, a non-dry-run creates `v<version>` at the dispatched commit and publishes a GitHub Release with those same files attached. Do not create the tag manually.
 
 ```powershell
 # Validate with test signing without publishing (defaults to dry_run=true).

@@ -1,5 +1,5 @@
-Jiffshot for Linux x64
-=====================
+Jiffshot for Linux x64 and ARM64
+===============================
 
 The packages contain Jiffshot and its private Rustolonia, SkiaSharp, and
 HarfBuzzSharp native runtime. They do not bundle system libraries or codecs.
@@ -10,23 +10,30 @@ Ubuntu 24.04. The RPM is built separately on Fedora 43 and targets Fedora 43.
 Packages built elsewhere inherit that build distro's ELF ABI requirements.
 In particular, do not repackage an Ubuntu binary as a Fedora RPM: their
 Leptonica libraries have different SONAMEs. Build natively for each target.
-Other architectures and older distributions are not currently supported.
+Both x64 and ARM64 are configured for all three formats; other architectures and
+older distributions are not currently supported. Rustolonia v12.1.2 publishes
+linux-x64 and linux-arm64 runtime host assets. Host asset availability alone
+does not validate an application build: native CI must build, test and smoke
+the complete packages on each architecture.
 The GUI requires an X11 display or XWayland. The current Rustolonia host
 does not support a Wayland-only session without XWayland.
 
 Portable tar.gz:
-  Extract the archive and run ./jiffshot-VERSION-linux-x64/bin/jiffshot.
+  Extract the matching archive and run ./jiffshot-VERSION-linux-ARCH/bin/jiffshot,
+  where ARCH is x64 or arm64.
   The directory can be relocated, including to paths containing spaces.
   Add its bin directory to PATH to use "jiffshot" from a terminal.
   Desktop and MIME files are included but are not installed automatically.
 
 Debian / Ubuntu:
   sudo apt install ./jiffshot_VERSION_amd64.deb
+  On ARM64 use ./jiffshot_VERSION_arm64.deb instead.
   Start Jiffshot from the application menu or run "jiffshot [image-video-or-jsd]".
   sudo apt remove jiffshot
 
 Fedora:
   sudo dnf install ./jiffshot-VERSION-1.x86_64.rpm
+  On ARM64 use ./jiffshot-VERSION-1.aarch64.rpm instead.
   Start Jiffshot from the application menu or run "jiffshot [image-video-or-jsd]".
   sudo dnf remove jiffshot
   H.264 recording and some import formats need extra codec plugins.
@@ -259,12 +266,13 @@ README.md for current capabilities.
 Settings and captures live in the user's XDG config/Pictures directories;
 installing or removing a package does not modify or delete them.
 
-Building packages from the repository:
+Building packages from the repository on native Ubuntu 24.04 x64 or ARM64:
   cargo build --release --locked -p jiffshot
   sudo apt install python3 binutils dpkg-dev desktop-file-utils
   python3 package/linux/build.py --format tar.gz deb
 
-Build the Fedora binary and RPM on Fedora (or in a Fedora container):
+Build the Fedora binary and RPM on native Fedora 43 on each architecture
+(or in a Fedora 43 container on a matching native runner):
   sudo dnf install gcc-c++ clang-devel leptonica-devel tesseract-devel \
     pkgconf-pkg-config gstreamer1-devel gstreamer1-plugins-base-devel \
     python3 binutils rpm-build desktop-file-utils
@@ -277,16 +285,29 @@ Override the release directory (including CARGO_TARGET_DIR builds):
 Outputs default to package/out/linux. The default formats are tar.gz and DEB.
 Select --format rpm for the native Fedora build. DEB and RPM cannot be selected
 together, and the builder rejects Ubuntu's incompatible OCR ABI for Fedora RPMs.
+Fedora inputs must require libleptonica.so.6 and must not require liblept.so.5.
+All four inputs must be valid little-endian ELF64 for one supported architecture;
+every private library must be a shared object. --arch x64 or --arch arm64 is an
+optional assertion against actual ELF headers, never a relabeling option.
+Tar names/top directories use linux-x64 or linux-arm64; DEB architecture and
+filenames use amd64 or arm64; RPM target and filenames use x86_64 or aarch64.
 --version (or JIFFSHOT_VERSION) must match the
 workspace's X.Y.Z version. SOURCE_DATE_EPOCH controls archive timestamps
-(default: 0). SHA256SUMS-linux-x64.txt covers the generated artifacts.
+(default: 0). SHA256SUMS-linux-x64.txt or SHA256SUMS-linux-arm64.txt covers the
+generated artifacts. Keep Ubuntu and Fedora outputs in separate directories;
+each invocation writes its own checksum manifest.
 The script never modifies the build input or installs the application.
 
 Package tests:
+  # Unit/regression tests only, no compiled application required:
+  (cd package/linux && python3 -m unittest test_build.PackageBuilderTests test_architecture -v)
+  # Real packages from native builds; use JIFFSHOT_TEST_ARCH=arm64 on ARM64:
   JIFFSHOT_TEST_FORMATS=tar.gz,deb python3 -m unittest discover \
-    -s package/linux -p test_build.py -v
+    -s package/linux -p 'test_*.py' -v
   JIFFSHOT_TEST_FORMATS=rpm JIFFSHOT_PACKAGE_DIR=package/out/linux-rpm \
-    python3 -m unittest discover -s package/linux -p test_build.py -v
+    python3 -m unittest discover -s package/linux -p 'test_*.py' -v
+  # Content tests default to the native machine; CI explicitly asserts the arch.
+  # Synthetic ARM64 ELF unit tests do not execute an ARM64 runtime.
   sudo apt install xvfb x11-utils
   python3 package/linux/smoke.py --launcher /path/to/extracted/bin/jiffshot
 The smoke test uses a private Xvfb display, temporary settings, and a generated

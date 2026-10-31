@@ -5,7 +5,7 @@ Summary:        Screen capture, recording, and non-destructive image editor
 License:        LicenseRef-Unknown
 URL:            https://github.com/Devolutions/jiffshot
 Source0:        payload.tar.gz
-BuildArch:      x86_64
+BuildArch:      @ARCH@
 Requires:       /usr/bin/readlink
 Requires:       libX11.so.6()(64bit)
 Requires:       libICE.so.6()(64bit)

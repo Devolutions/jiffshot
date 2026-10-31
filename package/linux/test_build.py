@@ -4,6 +4,7 @@ import configparser
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import re
 import shutil
@@ -17,6 +18,15 @@ from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 import build
+
+
+def elf_header(machine=62, elf_type=3):
+    """Synthetic ELF64 header, never an executable runtime fixture."""
+    header = bytearray(64)
+    header[:7] = b"\x7fELF\x02\x01\x01"
+    struct.pack_into("<HHI", header, 16, elf_type, machine, 1)
+    struct.pack_into("<H", header, 52, 64)
+    return bytes(header)
 
 EXPECTED_FILES = {
     *(f"lib/jiffshot/{name}" for name in build.RUNTIME_FILES),
@@ -76,20 +86,17 @@ class PackageBuilderTests(unittest.TestCase):
             with patch.object(build, "ROOT", root), self.assertRaisesRegex(ValueError, "X.Y.Z"):
                 build.package_version()
 
-    def test_binary_validation_rejects_non_elf_and_non_x64_inputs(self):
+    def test_binary_validation_rejects_non_elf_and_unsupported_inputs(self):
         with tempfile.TemporaryDirectory() as temporary:
             binary = Path(temporary) / "binary"
             binary.write_bytes(b"not an ELF file")
             with self.assertRaisesRegex(ValueError, "ELF"):
                 build.validate_binary(binary)
-            header = bytearray(b"\x7fELF\x02\x01" + b"\0" * 14)
-            struct.pack_into("<H", header, 18, 183)
-            binary.write_bytes(header)
-            with self.assertRaisesRegex(ValueError, "x64"):
+            binary.write_bytes(elf_header(40))
+            with self.assertRaisesRegex(ValueError, "unsupported ELF machine 40"):
                 build.validate_binary(binary)
-            struct.pack_into("<H", header, 18, 62)
-            binary.write_bytes(header)
-            build.validate_binary(binary)
+            binary.write_bytes(elf_header())
+            self.assertEqual(build.validate_binary(binary).name, "x64")
 
     def test_missing_tools_are_reported_before_building(self):
         with patch.object(shutil, "which", return_value=None):
@@ -114,7 +121,7 @@ class PackageBuilderTests(unittest.TestCase):
             work = Path(temporary)
             inputs, payload = work / "release", work / "payload"
             inputs.mkdir()
-            content = b"\x7fELF\x02\x01" + b"\0" * 12 + struct.pack("<H", 62) + b"original debug data"
+            content = elf_header() + b"original debug data"
             for name in build.RUNTIME_FILES:
                 (inputs / name).write_bytes(content)
             previous_umask = os.umask(0o077)
@@ -188,20 +195,30 @@ class PackageBuilderTests(unittest.TestCase):
                 self.assertTrue(libraries.endswith(":/existing/libs"))
                 self.assertEqual(startup_launcher, str(launcher.resolve()))
 
+class PackageContentTests(unittest.TestCase):
     def test_requested_formats_have_complete_payload_metadata_and_checksums(self):
         version = build.package_version()
+        native_arch = {"x86_64": "x64", "aarch64": "arm64"}.get(platform.machine())
+        arch = os.environ.get("JIFFSHOT_TEST_ARCH", native_arch)
+        # Independent expectations: do not derive test identity from the builder.
+        deb_arch, rpm_arch, machine = {
+            "x64": ("amd64", "x86_64", 62),
+            "arm64": ("arm64", "aarch64", 183),
+        }[arch]
         output = Path(os.environ.get("JIFFSHOT_PACKAGE_DIR", build.ROOT / "package/out/linux")).resolve()
         formats = os.environ.get("JIFFSHOT_TEST_FORMATS", "tar.gz,deb,rpm").split(",")
         names = {
-            "tar.gz": f"Devolutions.Jiffshot-linux-x64-{version}.tar.gz",
-            "deb": f"jiffshot_{version}_amd64.deb",
-            "rpm": f"jiffshot-{version}-1.x86_64.rpm",
+            "tar.gz": f"Devolutions.Jiffshot-linux-{arch}-{version}.tar.gz",
+            "deb": f"jiffshot_{version}_{deb_arch}.deb",
+            "rpm": f"jiffshot-{version}-1.{rpm_arch}.rpm",
         }
         sums = dict(
             (name, digest) for digest, name in (
-                line.split("  ", 1) for line in (output / "SHA256SUMS-linux-x64.txt").read_text().splitlines()
+                line.split("  ", 1) for line in (output / f"SHA256SUMS-linux-{arch}.txt").read_text().splitlines()
             )
         )
+        self.assertTrue(formats, "no package formats requested")
+        self.assertEqual(set(sums), {names[format_name] for format_name in formats})
         with tempfile.TemporaryDirectory(prefix="jiffshot extracted ") as temporary:
             extracted = {}
             for format_name in formats:
@@ -212,7 +229,7 @@ class PackageBuilderTests(unittest.TestCase):
                     destination.mkdir()
                     if format_name == "tar.gz":
                         with tarfile.open(artifact) as archive:
-                            prefix = f"jiffshot-{version}-linux-x64"
+                            prefix = f"jiffshot-{version}-linux-{arch}"
                             self.assertTrue(all(
                                 member.name == prefix or member.name.startswith(prefix + "/")
                                 for member in archive
@@ -226,7 +243,7 @@ class PackageBuilderTests(unittest.TestCase):
                         root = destination / prefix
                     elif format_name == "deb":
                         metadata = build.run(["dpkg-deb", "-f", str(artifact), "Version", "Architecture"]).stdout
-                        self.assertEqual(metadata, f"Version: {version}\nArchitecture: amd64\n")
+                        self.assertEqual(metadata, f"Version: {version}\nArchitecture: {deb_arch}\n")
                         depends = build.run(["dpkg-deb", "-f", str(artifact), "Depends"]).stdout
                         for dependency in (
                             "libc6", "libtesseract5", "libx11-6", "libgtk-3-0t64",
@@ -250,11 +267,13 @@ class PackageBuilderTests(unittest.TestCase):
                     else:
                         self.assertEqual(build.run([
                             "rpm", "-qp", "--queryformat", "%{VERSION} %{RELEASE} %{ARCH}", str(artifact),
-                        ]).stdout, f"{version} 1 x86_64")
+                        ]).stdout, f"{version} 1 {rpm_arch}")
                         requires = build.run(["rpm", "-qp", "--requires", str(artifact)]).stdout
                         self.assertRegex(requires, r"(?m)^libtesseract\.so\.5(?:\.\d+)*\(\)\(64bit\)$")
                         for dependency in ("libX11.so.6()(64bit)", "gtk3", "pipewire-gstreamer"):
                             self.assertIn(dependency, requires)
+                        self.assertIn("libleptonica.so.6()(64bit)", requires)
+                        self.assertNotIn("liblept.so.5", requires)
                         modes = dict(line.split(" ", 1) for line in build.run([
                             "rpm", "-qp", "--queryformat", "[%{FILENAMES} %{FILEMODES:perms}\n]", str(artifact),
                         ]).stdout.splitlines())
@@ -273,7 +292,11 @@ class PackageBuilderTests(unittest.TestCase):
                     self.assertEqual((root / "bin/jiffshot").stat().st_mode & 0o777, 0o755)
                     self.assertNotIn(b"\r", (root / "bin/jiffshot").read_bytes())
                     for name in build.RUNTIME_FILES:
-                        build.validate_binary(root / "lib/jiffshot" / name)
+                        binary = root / "lib/jiffshot" / name
+                        header = binary.read_bytes()[:64]
+                        self.assertEqual(header[:7], b"\x7fELF\x02\x01\x01", name)
+                        self.assertEqual(struct.unpack_from("<H", header, 18)[0], machine, name)
+                        self.assertEqual(build.validate_binary(binary).name, arch)
                     desktop = root / "share/applications/com.devolutions.Jiffshot.desktop"
                     build.run(["desktop-file-validate", str(desktop)])
                     self.assertEqual(
