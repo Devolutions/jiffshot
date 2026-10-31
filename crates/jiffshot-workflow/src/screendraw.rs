@@ -207,6 +207,10 @@ pub fn hide() {
 /// Blends the marks into a recorded frame of the area.
 pub fn blend_into(frame: &mut Frame) {
     let Some(image) = state().as_ref().and_then(|s| s.image.clone()) else { return };
+    blend_image(frame, &image);
+}
+
+pub(crate) fn blend_image(frame: &mut Frame, image: &Pixmap) {
     let (w, h) = (image.width().min(frame.width) as usize, image.height().min(frame.height) as usize);
     let (src, stride) = (image.data(), image.width() as usize * 4);
     let dst_stride = frame.stride();

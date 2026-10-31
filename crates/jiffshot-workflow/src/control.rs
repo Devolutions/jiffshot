@@ -10,6 +10,8 @@
 
 mod find;
 mod input;
+mod document;
+mod video;
 
 use crate::{log, recorder, stepcap, workflow};
 use input::Button;
@@ -19,7 +21,7 @@ use jiffshot_capture::{screen, Rect};
 use jiffshot_control::{Error, ErrorCode, Request, Response};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -33,10 +35,14 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("windows", "visible top-level windows (filter by title, process, class)"),
     ("cursor", "where the pointer is"),
     ("screenshot", "capture a screen, window, region or the desktop to PNG"),
+    ("capture.scroll", "bounded automatic vertical or horizontal scroll-and-stitch capture"),
     ("record.start", "start recording a target to MP4; returns once frames flow"),
     ("record.status", "the running recording (or the last one)"),
     ("record.pause", "pause the recording"),
     ("record.resume", "resume the recording"),
+    ("record.options", "change cursor, click rings, camera and audio while recording"),
+    ("record.annotate", "add a live annotation to recorded frames"),
+    ("record.clear", "remove live recording annotations"),
     ("record.stop", "stop and finalize the MP4; returns its metadata"),
     ("record.cancel", "stop and delete the recording"),
     ("steps.start", "begin a step-by-step guide"),
@@ -56,6 +62,31 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("wait.window", "wait for a window to appear (or go away)"),
     ("wait.text", "wait for text to appear on screen (or go away)"),
     ("open", "open a capture in the editor, or show the editor"),
+    ("doc.tools", "annotation tools, variants, styles, effects and export formats"),
+    ("doc.list", "headless editable document sessions"),
+    ("doc.new", "create a blank editable document"),
+    ("doc.open", "load an image or editable .jsd into a document session"),
+    ("doc.status", "document objects, selection, size and undo/redo state"),
+    ("doc.add", "add a typed annotation object"),
+    ("doc.draw", "use an editor tool with document-space pointer points"),
+    ("doc.update", "edit an annotation's geometry, style or rotation"),
+    ("doc.image", "insert an image into the document"),
+    ("doc.select", "select objects by id"),
+    ("doc.action", "undo, redo, grouping, stacking, alignment and transforms"),
+    ("doc.crop", "crop the image and annotations"),
+    ("doc.resize", "resample or resize the canvas"),
+    ("doc.effect", "apply a named image effect"),
+    ("doc.ocr", "recognize text in the edited document"),
+    ("doc.simplify", "replace text with bars and reduce image colors"),
+    ("doc.redact", "cover recognized sensitive patterns with editable redactions"),
+    ("doc.combine", "combine document images or build an editable template"),
+    ("doc.save", "save an editable .jsd document"),
+    ("doc.export", "export flattened PNG, JPEG, BMP, GIF, WebP or PDF"),
+    ("doc.close", "release a document session"),
+    ("video.info", "inspect a saved video"),
+    ("video.frame", "extract a video frame to PNG"),
+    ("video.export", "trim, resize and annotate a video; export MP4 or GIF"),
+    ("video.join", "join video segments with optional timed overlays"),
     ("quit", "exit Jiffshot"),
 ];
 
@@ -95,10 +126,14 @@ fn dispatch(command: &str, a: &Args) -> Reply {
         "windows" => list_windows(a),
         "cursor" => a.only(&[]).map(|_| point_json(input::cursor())),
         "screenshot" => screenshot(a),
+        "capture.scroll" => capture_scroll(a),
         "record.start" => record_start(a),
         "record.status" => a.only(&[]).map(|_| record_status()),
         "record.pause" => record_pause(a, true),
         "record.resume" => record_pause(a, false),
+        "record.options" => record_options(a),
+        "record.annotate" => record_annotate(a),
+        "record.clear" => record_clear(a),
         "record.stop" => record_stop(a, false),
         "record.cancel" => record_stop(a, true),
         "steps.start" => steps_start(a),
@@ -119,6 +154,8 @@ fn dispatch(command: &str, a: &Args) -> Reply {
         "wait.text" => wait_text(a),
         "open" => open(a),
         "quit" => quit(a),
+        command if command.starts_with("doc.") => document::dispatch(command, a),
+        command if command.starts_with("video.") => video::dispatch(command, a),
         _ => Err(Error::new(ErrorCode::Unsupported, format!("unknown command {command:?}; `status` lists the commands"))),
     }
 }
@@ -212,7 +249,9 @@ impl Args {
     fn point(&self, key: &str) -> Result<Option<(i32, i32)>, Error> {
         let bad = || invalid(format!("{key} must be a point X,Y in screen pixels"));
         let pair = |x: Option<f64>, y: Option<f64>| match (x, y) {
-            (Some(x), Some(y)) => Ok(Some((x.round() as i32, y.round() as i32))),
+            (Some(x), Some(y)) if x.is_finite() && y.is_finite()
+                && (i32::MIN as f64..=i32::MAX as f64).contains(&x)
+                && (i32::MIN as f64..=i32::MAX as f64).contains(&y) => Ok(Some((x.round() as i32, y.round() as i32))),
             _ => Err(bad()),
         };
         match self.0.get(key) {
@@ -432,6 +471,59 @@ fn screenshot(a: &Args) -> Reply {
     }))
 }
 
+fn capture_scroll(a: &Args) -> Reply {
+    a.only(&with(&[TARGET, &["out", "horizontal", "max_frames", "timeout_ms", "settle_ms", "notches"]]))?;
+    let out = a.out("out", &["png"])?;
+    let horizontal = a.bool("horizontal")?;
+    let max_frames = a.int("max_frames", 2, 128)?.unwrap_or(32) as usize;
+    let timeout = a.millis("timeout_ms", 30_000)?;
+    let settle = a.millis("settle_ms", 300)?;
+    if timeout.is_zero() || settle.is_zero() { return Err(invalid("timeout_ms and settle_ms must be positive")); }
+    let notches = a.int("notches", 1, 20)?.unwrap_or(3) as i32;
+    let t = target(a, CaptureKind::Scrolling)?;
+    let mut capture = workflow::immediate(CaptureKind::Scrolling, t.rect, false).map_err(internal)?;
+    if let Some(w) = &t.window { capture.meta.window_title = Some(w.title.clone()); capture.meta.process = Some(w.process.clone()); }
+    let pixels_per_frame = u64::from(capture.frame.width) * u64::from(capture.frame.height);
+    if pixels_per_frame > 64_000_000 { return Err(invalid("scroll capture target exceeds 64 million pixels")); }
+    let transform = |f: jiffshot_capture::Frame| if horizontal { crate::modes::transpose(&f) } else { f };
+    let mut frames = vec![transform(capture.frame)];
+    struct RestoreCursor((i32, i32));
+    impl Drop for RestoreCursor {
+        fn drop(&mut self) { input::move_to(self.0, Duration::ZERO); }
+    }
+    let _restore = RestoreCursor(input::cursor());
+    input::move_to(t.rect.center(), Duration::ZERO);
+    if input::cursor() != t.rect.center() { return Err(internal("could not position the cursor inside the scroll target")); }
+    std::thread::sleep(settle.min(timeout));
+    frames[0] = transform(screen::grab(t.rect).map_err(internal)?);
+    let started = Instant::now();
+    let mut stopped = "frame_limit";
+    while frames.len() < max_frames {
+        if started.elapsed().saturating_add(settle) > timeout { stopped = "deadline"; break; }
+        if pixels_per_frame * (frames.len() as u64 + 1) > 64_000_000 { stopped = "pixel_limit"; break; }
+        if !input::scroll(if horizontal { notches } else { -notches }, horizontal) { return Err(internal("Windows rejected scroll input")); }
+        std::thread::sleep(settle);
+        let next = transform(screen::grab(t.rect).map_err(internal)?);
+        let previous = frames.last().ok_or_else(|| internal("no initial scroll frame"))?;
+        if next.pixels == previous.pixels { stopped = "no_movement"; break; }
+        if jiffshot_capture::stitch::vertical_step(previous, &next).is_none() {
+            return Err(invalid("scroll frames have no matching overlap; use a content-only region, fewer notches or a longer settle_ms"));
+        }
+        frames.push(next);
+    }
+    let frame_count = frames.len();
+    let stitched = jiffshot_capture::stitch::stitch_vertical(&frames).ok_or_else(|| internal("could not stitch scroll frames"))?;
+    capture.frame = transform(stitched);
+    capture.meta.width = capture.frame.width;
+    capture.meta.height = capture.frame.height;
+    let path = match out {
+        Some(path) => { capture.frame.save_png(&path).map_err(internal)?; path }
+        None => Library::new(jiffshot_capture::config::library_root()).save(&capture.frame, &capture.meta).map_err(internal)?,
+    };
+    Ok(json!({"path":path,"width":capture.frame.width,"height":capture.frame.height,"frames":frame_count,
+        "stopped":stopped,"limited":stopped != "no_movement","captured_at":capture.meta.captured_at,"target":target_json(&t)}))
+}
+
 // Recording ----------------------------------------------------------------
 
 struct Recording {
@@ -447,6 +539,8 @@ struct Recording {
 
 static RECORDING: Mutex<Option<Recording>> = Mutex::new(None);
 static LAST_RECORDING: Mutex<Option<Value>> = Mutex::new(None);
+static RECORDING_LIFECYCLE: Mutex<()> = Mutex::new(());
+static FINALIZING: AtomicBool = AtomicBool::new(false);
 
 fn new_id(prefix: &str) -> String {
     let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
@@ -469,18 +563,27 @@ fn recording_json(r: &Recording) -> Value {
         // Ended by itself (max_seconds or an error): `record.stop` collects it.
         "ended": r.worker.is_finished(),
         "error": c.error.lock().unwrap().clone(),
+        "audio_note": c.audio.lock().unwrap().clone(),
+        "options": {
+            "cursor": c.cursor.load(Ordering::Relaxed), "highlight": c.highlight.load(Ordering::Relaxed),
+            "clicks": c.clicks.load(Ordering::Relaxed), "webcam": c.webcam.load(Ordering::Relaxed),
+            "webcam_circle": c.webcam_circle.load(Ordering::Relaxed),
+            "webcam_corner": c.webcam_corner.lock().unwrap().clone(),
+            "system": c.system.load(Ordering::Relaxed), "microphone": c.microphone.load(Ordering::Relaxed),
+        },
     })
 }
 
 fn record_status() -> Value {
     match &*RECORDING.lock().unwrap() {
         Some(r) => recording_json(r),
-        None => json!({ "active": false, "last": *LAST_RECORDING.lock().unwrap() }),
+        None => json!({ "active": false, "finalizing": FINALIZING.load(Ordering::Acquire), "tray_recording": recorder::is_recording() && !FINALIZING.load(Ordering::Acquire), "last": *LAST_RECORDING.lock().unwrap() }),
     }
 }
 
 fn record_start(a: &Args) -> Reply {
-    a.only(&with(&[TARGET, &["out", "fps", "audio", "no_cursor", "clicks", "highlight", "max_seconds", "key"]]))?;
+    a.only(&with(&[TARGET, &["out", "fps", "audio", "no_cursor", "clicks", "highlight", "max_seconds", "key", "webcam", "webcam_corner", "webcam_circle", "webcam_size", "noise_gate"]]))?;
+    let _lifecycle = RECORDING_LIFECYCLE.lock().expect("recording lifecycle lock poisoned");
     let key = a.string("key")?;
     {
         let current = RECORDING.lock().unwrap();
@@ -494,21 +597,39 @@ fn record_start(a: &Args) -> Reply {
             return Err(Error::new(ErrorCode::Conflict, format!("recording {} is already running; stop it first", r.id)));
         }
     }
+    if recorder::is_recording() {
+        return Err(Error::new(ErrorCode::Conflict, "a tray recording is running; finish it before starting a CLI recording"));
+    }
     let audio = a.string("audio")?.unwrap_or_else(|| "none".into());
+    let audio = if audio == "mic" { "microphone".to_string() } else { audio };
     if !matches!(audio.as_str(), "none" | "system" | "microphone" | "both") {
         return Err(invalid("audio must be none, system, microphone or both"));
     }
     let fps = a.int("fps", 5, 60)?.unwrap_or(30) as u32;
-    let max = a.number("max_seconds")?.filter(|s| *s > 0.0).map(Duration::from_secs_f64);
+    let max = a.number("max_seconds")?.map(|s| {
+        if !s.is_finite() || !(0.001..=86_400.0).contains(&s) {
+            Err(invalid("max_seconds must be finite and between 0.001 and 86400"))
+        } else { Ok(Duration::from_secs_f64(s)) }
+    }).transpose()?;
     let path = match a.out("out", &["mp4"])? {
         Some(p) => p,
         None => Library::new(jiffshot_capture::config::library_root()).recording_path().map_err(internal)?,
     };
     let t = target(a, CaptureKind::Monitor)?;
+    if path.exists() { return Err(Error::new(ErrorCode::Conflict, "recording output already exists; choose a new path")); }
     let mut options = recorder::Options::audio_only(fps, &audio);
     options.cursor = !a.bool("no_cursor")?;
     options.click_rings = a.bool("clicks")?;
     options.cursor_highlight = a.bool("highlight")?;
+    let corner = a.string("webcam_corner")?.unwrap_or_else(|| "bottom-right".into());
+    validate_corner(&corner)?;
+    options.webcam_corner = corner.clone();
+    options.webcam = a.bool("webcam")?.then_some(corner);
+    options.webcam_circle = a.bool("webcam_circle")?;
+    let size = a.number("webcam_size")?.unwrap_or(0.25);
+    if !size.is_finite() || !(0.05..=0.75).contains(&size) { return Err(invalid("webcam_size must be 0.05..0.75 of the recording width")); }
+    options.webcam_size = size as f32;
+    options.noise_gate = a.bool("noise_gate")?;
     let control = Arc::new(recorder::Control::new(&options));
     let (c, p, rect) = (control.clone(), path.clone(), t.rect);
     let worker = std::thread::Builder::new()
@@ -560,25 +681,82 @@ fn record_pause(a: &Args, pause: bool) -> Reply {
     a.only(&["id"])?;
     let mut slot = RECORDING.lock().unwrap();
     let r = current_recording(&mut slot, a)?;
+    require_live_recording(r)?;
     r.control.paused.store(pause, Ordering::Release);
     Ok(recording_json(r))
+}
+
+fn require_live_recording(r: &Recording) -> Result<(), Error> {
+    if r.worker.is_finished() { Err(Error::new(ErrorCode::Conflict, "recording has ended; use record.stop to collect the finalized result")) }
+    else { Ok(()) }
+}
+
+fn validate_corner(corner: &str) -> Result<(), Error> {
+    if matches!(corner, "top-left" | "top-right" | "bottom-left" | "bottom-right") { Ok(()) }
+    else { Err(invalid("webcam_corner must be top-left, top-right, bottom-left or bottom-right")) }
+}
+
+fn record_options(a: &Args) -> Reply {
+    a.only(&["id", "cursor", "highlight", "clicks", "webcam", "webcam_circle", "webcam_corner", "system", "microphone"])?;
+    // Validate everything before changing any switch.
+    let switches = ["cursor", "highlight", "clicks", "webcam", "webcam_circle", "system", "microphone"]
+        .iter().map(|k| a.flag(k)).collect::<Result<Vec<_>, _>>()?;
+    let corner = a.string("webcam_corner")?;
+    if let Some(corner) = &corner { validate_corner(corner)?; }
+    let mut slot = RECORDING.lock().expect("recording lock poisoned");
+    let r = current_recording(&mut slot, a)?;
+    require_live_recording(r)?;
+    let c = &r.control;
+    for (flag, value) in [&c.cursor, &c.highlight, &c.clicks, &c.webcam, &c.webcam_circle, &c.system, &c.microphone].into_iter().zip(switches) {
+        if let Some(value) = value { flag.store(value, Ordering::Release); }
+    }
+    if let Some(corner) = corner { *c.webcam_corner.lock().expect("webcam corner lock poisoned") = corner; }
+    Ok(recording_json(r))
+}
+
+fn record_annotate(a: &Args) -> Reply {
+    a.only(&["id", "kind", "style", "duration_ms"])?;
+    let kind = document::kind(a.0.get("kind").ok_or_else(|| invalid("kind is required; use the same schema as doc.add"))?)?;
+    let style = document::style(a.0.get("style"), jiffshot_doc::object::Style::default())?;
+    let duration = a.millis("duration_ms", 0)?;
+    let mut slot = RECORDING.lock().expect("recording lock poisoned");
+    let r = current_recording(&mut slot, a)?;
+    require_live_recording(r)?;
+    let mark = recorder::add_annotation(&r.control, kind, style, duration).map_err(invalid)?;
+    Ok(json!({"id": r.id, "annotation_id": mark, "coordinates": "recording pixels", "duration_ms": duration.as_millis()}))
+}
+
+fn record_clear(a: &Args) -> Reply {
+    a.only(&["id"])?;
+    let mut slot = RECORDING.lock().expect("recording lock poisoned");
+    let r = current_recording(&mut slot, a)?;
+    require_live_recording(r)?;
+    recorder::clear_annotations(&r.control);
+    Ok(json!({"id": r.id, "cleared": true}))
 }
 
 /// Stops the recording and waits until the MP4 is finalized (or deleted).
 fn record_stop(a: &Args, cancel: bool) -> Reply {
     a.only(&["id"])?;
+    let _lifecycle = RECORDING_LIFECYCLE.lock().expect("recording lifecycle lock poisoned");
+    struct Finalizing;
+    impl Drop for Finalizing {
+        fn drop(&mut self) { FINALIZING.store(false, Ordering::Release); }
+    }
     let recording = {
         let mut slot = RECORDING.lock().unwrap();
         current_recording(&mut slot, a)?;
+        FINALIZING.store(true, Ordering::Release);
         slot.take().unwrap()
     };
+    let _finalizing = Finalizing;
     let Recording { id, key, path, target, fps, started_at, control, worker } = recording;
     control.paused.store(false, Ordering::Release);
     control.stop.store(true, Ordering::Release);
     let outcome = worker.join().unwrap_or_else(|_| Err("the recorder crashed".into()));
     let (frames, duration) = (control.frames.load(Ordering::Relaxed), control.millis.load(Ordering::Relaxed));
     if cancel {
-        let _ = std::fs::remove_file(&path);
+        if path.exists() { std::fs::remove_file(&path).map_err(internal)?; }
         return Ok(json!({ "id": id, "cancelled": true, "frames": frames, "duration_ms": duration }));
     }
     let spec = outcome.map_err(|e| internal(format!("the recording failed: {e}")))?;
@@ -592,7 +770,7 @@ fn record_stop(a: &Args, cancel: bool) -> Reply {
         "fps": fps,
         "frames": frames,
         "duration_ms": duration,
-        "size_bytes": std::fs::metadata(&path).map_or(0, |m| m.len()),
+        "size_bytes": std::fs::metadata(&path).map_err(internal)?.len(),
         "started_at": started_at,
         "audio_note": control.audio.lock().unwrap().clone(),
     });
@@ -1031,6 +1209,8 @@ mod tests {
         assert!(a.only(&["at", "n", "f", "p"]).is_err());
         assert!(a.only(&["at", "n", "f", "p", "o"]).is_ok());
         assert!(Args::new(json!([1])).is_err());
+        assert!(args(json!({"at":"NaN,1"})).point("at").is_err());
+        assert!(args(json!({"at":"1e300,1"})).point("at").is_err());
     }
 
     #[test]
@@ -1050,6 +1230,8 @@ mod tests {
         assert_eq!(dispatch("record.stop", &args(Value::Null)).unwrap_err().code, ErrorCode::NotFound);
         assert_eq!(dispatch("steps.finish", &args(Value::Null)).unwrap_err().code, ErrorCode::NotFound);
         assert_eq!(dispatch("key", &args(json!({ "keys": "ctrl+nosuchkey" }))).unwrap_err().code, ErrorCode::InvalidRequest);
+        assert_eq!(dispatch("capture.scroll", &args(json!({"timeout_ms":0}))).unwrap_err().code, ErrorCode::InvalidRequest);
+        assert_eq!(dispatch("capture.scroll", &args(json!({"max_frames":129}))).unwrap_err().code, ErrorCode::InvalidRequest);
     }
 
     #[test]
@@ -1058,5 +1240,84 @@ mod tests {
             let error = dispatch(command, &args(json!({ "__probe": 1 }))).err();
             assert!(error.is_none_or(|e| e.code != ErrorCode::Unsupported), "{command} is not dispatched");
         }
+    }
+
+    #[test]
+    #[ignore = "requires JIFFSHOT_CLI_E2E pointing to a built CLI and a free control pipe"]
+    fn cli_edits_artifacts_over_real_ipc_without_desktop_input() {
+        let cli = std::env::var_os("JIFFSHOT_CLI_E2E").expect("set JIFFSHOT_CLI_E2E to the built CLI");
+        jiffshot_control::serve(handle).expect("claim the test control pipe");
+        let dir = std::env::temp_dir().join(format!("jiffshot-cli-artifacts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("test artifact directory");
+        let script = dir.join("edit.json");
+        let jsd = dir.join("annotated.jsd");
+        let png = dir.join("annotated.png");
+        let source = dir.join("source.mp4");
+        let edited = dir.join("edited.mp4");
+        let still = dir.join("frame.png");
+        let gif = dir.join("demo.gif");
+        let joined = dir.join("joined.mp4");
+        struct FixtureFiles { files: Vec<PathBuf>, directory: PathBuf }
+        impl Drop for FixtureFiles {
+            fn drop(&mut self) {
+                for file in &self.files { let _ = std::fs::remove_file(file); }
+                let _ = std::fs::remove_dir(&self.directory);
+            }
+        }
+        let _fixtures = FixtureFiles { files: vec![script.clone(), jsd.clone(), png.clone(), source.clone(), edited.clone(), still.clone(), gif.clone(), joined.clone()], directory: dir.clone() };
+        let spec = VideoSpec::for_size(320, 200, 10);
+        let mut writer = jiffshot_capture::media::Writer::create(&source, spec, None).expect("synthetic video writer");
+        let pixels = vec![0u8; 320 * 200 * 4];
+        for index in 0..20 {
+            writer.write_frame(&pixels, index * 1_000_000, 1_000_000).expect("synthetic frame");
+        }
+        writer.finish().expect("finalize synthetic video");
+        std::fs::write(&script, serde_json::to_vec(&json!({
+            "version": 1,
+            "steps": [
+                {"command":"doc.new","args":{"width":320,"height":200},"save_as":"document"},
+                {"command":"doc.draw","args":{"id":{"$ref":"document.id"},"tool":"Arrow","from":"20,30","to":"180,80"}},
+                {"command":"doc.draw","args":{"id":{"$ref":"document.id"},"tool":"Text","from":"20,100","to":"280,180","text":"Agent demo"}},
+                {"command":"doc.crop","args":{"id":{"$ref":"document.id"},"x":10,"y":10,"width":300,"height":180}},
+                {"command":"doc.save","args":{"id":{"$ref":"document.id"},"out":jsd}},
+                {"command":"doc.export","args":{"id":{"$ref":"document.id"},"out":png}},
+                {"command":"doc.open","args":{"path":jsd},"save_as":"reopened"},
+                {"command":"doc.status","args":{"id":{"$ref":"reopened.id"}}},
+                {"command":"video.info","args":{"path":source}},
+                {"command":"video.export","args":{"path":source,"out":edited,"from":0.2,"to":1.2,"fps":10,"width":160,"height":100,"mute":true,
+                    "overlays":[{"path":jsd,"x":0,"y":0,"from":0,"to":0.5}]}},
+                {"command":"video.frame","args":{"path":edited,"at":0.2,"out":still}},
+                {"command":"video.join","args":{"segments":[{"path":edited,"from":0,"to":0.5},{"path":edited,"from":0.5,"to":1}],"out":joined,"fps":10,"mute":true}},
+                {"command":"video.export","args":{"path":joined,"out":gif,"fps":10}},
+                {"command":"video.info","args":{"path":edited}}
+            ],
+            "finally": [
+                {"command":"doc.close","args":{"id":{"$ref":"document.id"}}},
+                {"command":"doc.close","args":{"id":{"$ref":"reopened.id"}}}
+            ]
+        })).expect("encode test script")).expect("write test script");
+        let output = std::process::Command::new(cli).args(["run", script.to_str().expect("script path"), "--no-launch"]).output().expect("run real CLI");
+        assert!(output.status.success(), "CLI failed: {}", String::from_utf8_lossy(&output.stderr));
+        let report: Value = serde_json::from_slice(&output.stdout).expect("JSON stdout");
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["result"]["steps"][7]["result"]["width"], 300);
+        assert_eq!(report["result"]["steps"][7]["result"]["height"], 180);
+        assert_eq!(report["result"]["steps"][7]["result"]["objects"].as_array().expect("objects").len(), 2);
+        assert!(report["result"]["finally"].as_array().expect("cleanup").iter().all(|step| step["ok"] == true));
+        let doc = jiffshot_doc::io::open(&jsd).expect("saved editable artifact");
+        let exported = jiffshot_doc::io::load_image(&png).expect("exported PNG artifact");
+        assert_eq!(exported.data(), doc.flatten().data());
+        assert_eq!(report["result"]["steps"][13]["result"]["width"], 160);
+        assert_eq!(report["result"]["steps"][13]["result"]["height"], 100);
+        let frame = jiffshot_doc::io::load_image(&still).expect("extracted video frame");
+        assert_eq!((frame.width(), frame.height()), (160, 100));
+        assert!(frame.pixels().iter().any(|p| p.red() > 100), "overlay must be visible in the extracted encoded frame");
+        assert!(std::fs::metadata(&edited).expect("edited video").len() > 0);
+        assert!(std::fs::metadata(&gif).expect("animated GIF").len() > 0);
+        std::fs::remove_file(script).expect("remove script");
+        std::fs::remove_file(jsd).expect("remove document");
+        std::fs::remove_file(png).expect("remove export");
+        for file in [source, edited, still, gif, joined] { std::fs::remove_file(file).expect("remove media fixture"); }
+        std::fs::remove_dir(dir).expect("remove empty artifact directory");
     }
 }

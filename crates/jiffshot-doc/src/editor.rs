@@ -1155,8 +1155,18 @@ impl Editor {
     }
 
     pub fn pointer_down(&mut self, p: Pt, m: Modifiers, tolerance: f32) {
+        self.pointer_down_impl(p, m, tolerance, true);
+    }
+
+    /// Starts a new annotation without picking up objects underneath it.
+    /// Raster and selection tools keep their usual behavior.
+    pub fn pointer_down_new(&mut self, p: Pt, m: Modifiers) {
+        self.pointer_down_impl(p, m, 0.0, false);
+    }
+
+    fn pointer_down_impl(&mut self, p: Pt, m: Modifiers, tolerance: f32, pick_existing: bool) {
         self.drag = None;
-        if let Some((h, _)) = self.canvas_handles().into_iter().find(|(_, q)| q.dist(p) <= tolerance * 1.5) {
+        if let Some((h, _)) = self.canvas_handles().into_iter().find(|(_, q)| pick_existing && q.dist(p) <= tolerance * 1.5) {
             self.drag = Some(Drag::Canvas { handle: h });
             return;
         }
@@ -1217,7 +1227,7 @@ impl Editor {
             }
             _ => {}
         }
-        if let Some(o) = self.selected() {
+        if let Some(o) = self.selected().filter(|_| pick_existing) {
             let id = o.id;
             if let Some((h, _)) = o.handles().into_iter().find(|(_, q)| q.dist(p) <= tolerance * 1.5) {
                 self.checkpoint("Resize", None);
@@ -1226,7 +1236,7 @@ impl Editor {
             }
         }
         let picks_up = self.tool != Tool::Pen && !(self.tool == Tool::Highlight && self.variant(Tool::Highlight) == "Freehand");
-        if picks_up || self.tool == Tool::Select {
+        if (picks_up && pick_existing) || self.tool == Tool::Select {
             if let Some(id) = self.doc.hit(p, tolerance) {
                 if m.shift {
                     self.toggle_selected(id);

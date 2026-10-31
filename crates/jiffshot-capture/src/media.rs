@@ -18,6 +18,8 @@ use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED};
 
+pub mod post;
+
 pub type Result<T> = std::result::Result<T, String>;
 
 fn e(error: windows::core::Error) -> String {
@@ -229,6 +231,7 @@ pub struct Reader {
     pub duration: i64,
     pub fps: f64,
     pub audio: Option<AudioSpec>,
+    audio_error: Option<String>,
 }
 
 // SAFETY: as for `Writer`.
@@ -302,17 +305,29 @@ impl Reader {
             pcm.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(e)?;
             pcm.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM).map_err(e)?;
             pcm.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16).map_err(e)?;
-            let audio = reader.SetCurrentMediaType(AUDIO, None, &pcm).ok().and_then(|_| {
-                let t = reader.GetCurrentMediaType(AUDIO).ok()?;
-                Some(AudioSpec {
-                    sample_rate: t.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND).ok()?,
-                    channels: t.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS).ok()?,
+            let has_audio_stream = reader.GetNativeMediaType(AUDIO, 0).is_ok();
+            let decoded_audio: Result<AudioSpec> = (|| {
+                reader.SetCurrentMediaType(AUDIO, None, &pcm).map_err(e)?;
+                let t = reader.GetCurrentMediaType(AUDIO).map_err(e)?;
+                Ok(AudioSpec {
+                    sample_rate: t.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND).map_err(e)?,
+                    channels: t.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS).map_err(e)?,
                 })
-            });
-            let mut r = Reader { reader, width, height, stride, duration, fps, audio };
+            })();
+            let (audio, audio_error) = match decoded_audio {
+                Ok(audio) => (Some(audio), None),
+                Err(error) if has_audio_stream => (None, Some(error)),
+                Err(_) => (None, None),
+            };
+            let mut r = Reader { reader, width, height, stride, duration, fps, audio, audio_error };
             r.select_audio(false)?;
             Ok(r)
         }
+    }
+
+    /// Why a source audio stream could not be decoded; absent for silent sources.
+    pub fn audio_error(&self) -> Option<&str> {
+        self.audio_error.as_deref()
     }
 
     /// Whether audio samples are read too (off by default, for frame
