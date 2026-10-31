@@ -156,12 +156,13 @@ impl Switch {
     }
 }
 
+/// The dropdowns a tab shows. The selection is not one of them: Image and
+/// Video show it as mode tiles, and All-in-One asks after the area is
+/// selected.
 pub fn fields(tab: usize) -> &'static [Field] {
     match tab {
-        // All-in-One asks what to capture after the area is selected.
-        0 => &[Field::Share],
-        1 => &[Field::Selection, Field::Effects, Field::Share],
-        _ => &[Field::Selection, Field::Share],
+        0 | 2 => &[Field::Share],
+        _ => &[Field::Effects, Field::Share],
     }
 }
 
@@ -174,9 +175,9 @@ pub fn switches(tab: usize) -> &'static [Switch] {
             Switch::Delay,
         ],
         _ => &[
-            Switch::Webcam,
             Switch::Microphone,
             Switch::SystemAudio,
+            Switch::Webcam,
             Switch::RecordCursor,
             Switch::ScreenDraw,
             Switch::Preview,
@@ -184,9 +185,14 @@ pub fn switches(tab: usize) -> &'static [Switch] {
     }
 }
 
-fn has_gear(tab: usize, field: Field) -> bool {
-    matches!((tab, field), (1 | 2, Field::Selection))
+/// Whether an option changes how the capture is taken (true) or what
+/// happens to it afterwards (false).
+fn before(switch: Switch) -> bool {
+    !matches!(switch, Switch::Preview | Switch::Clipboard)
 }
+
+/// The Image tab's selections shown as tiles; the rest are under More.
+const TILES: usize = 5;
 
 /// The panel behind a switch's › button, if it has one.
 fn more_panel(switch: Switch) -> Option<&'static str> {
@@ -226,9 +232,9 @@ pub fn switch_label(s: &Settings, switch: Switch) -> String {
             ),
             _ => format!("Time Delay ({} s)", s.delay_seconds),
         },
-        Switch::Webcam => "Record Webcam".into(),
-        Switch::Microphone => "Record Microphone".into(),
-        Switch::SystemAudio => "Record System Audio".into(),
+        Switch::Webcam => "Webcam".into(),
+        Switch::Microphone => "Microphone".into(),
+        Switch::SystemAudio => "System Audio".into(),
         Switch::ScreenDraw => "Screen Draw".into(),
     }
 }
@@ -386,34 +392,41 @@ pub(crate) fn key_name(key: &str) -> String {
     crate::keys::display(key)
 }
 
-/// The Capture button's label and the line under it.
-pub fn capture_button(
-    s: &Settings,
-    tab: usize,
-    capture_key: &str,
-    timelapse_running: bool,
-) -> (&'static str, String) {
+/// The primary button: its verb, what it will do, and the shortcut that
+/// does the same.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Action {
+    pub verb: &'static str,
+    pub detail: String,
+    pub hint: String,
+}
+
+fn action(verb: &'static str, detail: String, hint: String) -> Action {
+    Action { verb, detail, hint }
+}
+
+/// What the Capture button says for the current tab and timer.
+pub fn capture_button(s: &Settings, tab: usize, capture_key: &str, timelapse_running: bool) -> Action {
     if tab == 2 {
-        return (
-            "Capture",
-            crate::recorder::key_names()
-                .1
-                .map_or("The toolbar stops it".into(), |k| format!("{k} stops")),
-        );
+        let stops = crate::recorder::key_names().1.map_or("Stop it from the toolbar".into(), |k| format!("{k} stops"));
+        return action("Record", field_text(s, 2, Field::Selection), stops);
     }
+    let what = if tab == 0 { "Select an area".to_owned() } else { field_text(s, 1, Field::Selection) };
+    let press = |key: &str| if key.is_empty() { "or press Enter".to_owned() } else { format!("or press {}", key_name(key)) };
     match timing(s) {
         "interval" if s.capture_window.timer => {
-            let every = format!("Every {} s", s.interval_seconds.max(3));
-            (if timelapse_running { "Stop" } else { "Start" }, every)
+            let every = format!("{what} · every {} s", s.interval_seconds.max(3));
+            action(if timelapse_running { "Stop" } else { "Start" }, every, press(""))
         }
         "schedule" if s.capture_window.timer => {
             let at = s.schedule_default.clone().unwrap_or_else(|| "09:00".into());
             match &s.schedule {
-                Some(on) => ("Cancel", format!("Daily at {on}")),
-                None => ("Schedule", format!("Daily at {at}")),
+                Some(on) => action("Cancel", format!("Daily at {on}"), press("")),
+                None => action("Schedule", format!("{what} · daily at {at}"), press("")),
             }
         }
-        _ => ("Capture", key_name(capture_key)),
+        _ if s.delay_seconds > 0 => action("Capture", format!("{what} · in {} s", s.delay_seconds), press(capture_key)),
+        _ => action("Capture", what, press(capture_key)),
     }
 }
 
@@ -424,8 +437,6 @@ pub struct FieldRow {
     pub id: &'static str,
     pub label: &'static str,
     pub text: String,
-    /// The gear button's panel, if there is one.
-    pub gear: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -437,42 +448,90 @@ pub struct SwitchRow {
     pub more: Option<&'static str>,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum GroupRow {
+    Field(FieldRow),
+    Switch(SwitchRow),
+}
+
+/// Options that apply at the same time: before (or while) capturing, or
+/// after.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Group {
+    pub title: &'static str,
+    pub rows: Vec<GroupRow>,
+}
+
+/// One of the tiles that choose what to capture.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct ModeTile {
+    /// The pick id it sends, unless it opens `menu`.
+    pub pick: String,
+    /// The selection it stands for ("more" for the More tile).
+    pub value: String,
+    pub label: String,
+    pub on: bool,
+    pub menu: Option<&'static str>,
+}
+
 /// What the window shows for the current tab.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct View {
     pub tab: usize,
-    pub fields: Vec<FieldRow>,
-    pub switches: Vec<SwitchRow>,
-    pub capture: &'static str,
-    pub hint: String,
+    /// What to capture; empty on All-in-One, which asks afterwards.
+    pub modes: Vec<ModeTile>,
+    /// The panel behind the gear next to the tiles.
+    pub mode_gear: Option<&'static str>,
+    pub groups: Vec<Group>,
+    pub capture: Action,
     pub widget: bool,
+}
+
+fn tile(prefix: &str, (label, value): (&str, &str), on: bool) -> ModeTile {
+    ModeTile { pick: format!("{prefix}:{value}"), value: value.into(), label: label.into(), on, menu: None }
+}
+
+/// The tiles for `tab`: Image's main selections and a More tile for the
+/// rest, or Video's three.
+pub fn modes(s: &Settings, tab: usize) -> Vec<ModeTile> {
+    match tab {
+        0 => Vec::new(),
+        1 => {
+            let current = if s.capture_window.selection == "fixed" { "image" } else { s.capture_window.selection.as_str() };
+            let mut tiles: Vec<ModeTile> = SELECTIONS[..TILES].iter().map(|&(l, v)| tile("sel", (l.trim_end_matches(" Window"), v), v == current)).collect();
+            let extra = SELECTIONS[TILES..].iter().chain(ADVANCED).find(|(_, v)| *v == current);
+            tiles.push(ModeTile {
+                pick: String::new(),
+                value: "more".into(),
+                label: extra.map_or("More", |(l, _)| l).into(),
+                on: extra.is_some(),
+                menu: Some("more"),
+            });
+            tiles
+        }
+        _ => VIDEO_SELECTIONS.iter().map(|&(l, v)| tile("vsel", (l, v), s.capture_window.video_selection == v)).collect(),
+    }
+}
+
+pub fn groups(s: &Settings, tab: usize) -> Vec<Group> {
+    let switch = |sw: Switch| GroupRow::Switch(SwitchRow { id: sw.id(), label: switch_label(s, sw), on: switch_on(s, sw), more: more_panel(sw) });
+    let field = |f: Field| GroupRow::Field(FieldRow { id: f.id(), label: field_label(f), text: field_text(s, tab, f) });
+    let (first, then) = if tab == 2 { ("While recording", "After recording") } else { ("Before capture", "After capture") };
+    let all = switches(tab);
+    let mut after: Vec<GroupRow> = fields(tab).iter().map(|&f| field(f)).collect();
+    after.extend(all.iter().filter(|&&sw| !before(sw)).map(|&sw| switch(sw)));
+    vec![Group { title: first, rows: all.iter().filter(|&&sw| before(sw)).map(|&sw| switch(sw)).collect() }, Group { title: then, rows: after }]
 }
 
 pub fn view(s: &Settings, capture_key: &str, timelapse_running: bool) -> View {
     let tab = s.capture_window.tab.min(2);
-    let (capture, hint) = capture_button(s, tab, capture_key, timelapse_running);
     View {
         tab,
-        fields: fields(tab)
-            .iter()
-            .map(|&f| FieldRow {
-                id: f.id(),
-                label: field_label(f),
-                text: field_text(s, tab, f),
-                gear: has_gear(tab, f).then_some("selection"),
-            })
-            .collect(),
-        switches: switches(tab)
-            .iter()
-            .map(|&sw| SwitchRow {
-                id: sw.id(),
-                label: switch_label(s, sw),
-                on: switch_on(s, sw),
-                more: more_panel(sw),
-            })
-            .collect(),
-        capture,
-        hint,
+        modes: modes(s, tab),
+        mode_gear: (tab != 0).then_some("selection"),
+        groups: groups(s, tab),
+        capture: capture_button(s, tab, capture_key, timelapse_running),
         widget: s.show_widget,
     }
 }
@@ -523,7 +582,8 @@ fn submenu(label: impl Into<String>, items: Vec<MenuItem>) -> MenuItem {
     }
 }
 
-/// A menu by name: a dropdown ("selection", "effects", "share"), the bottom
+/// A menu by name: a dropdown ("selection", "effects", "share"), the More
+/// tile ("more"), the bottom
 /// bar ("presets", "new-preset") or a title menu ("file", "edit", "view",
 /// "help").
 pub fn menu(s: &Settings, which: &str) -> Vec<MenuItem> {
@@ -559,6 +619,13 @@ pub fn menu(s: &Settings, which: &str) -> Vec<MenuItem> {
                 checked: in_advanced,
                 ..submenu("Advanced", advanced)
             });
+            items
+        }
+        "more" => {
+            let current = s.capture_window.selection.as_str();
+            let mut items: Vec<MenuItem> = SELECTIONS[TILES..].iter().map(|(l, v)| check(format!("sel:{v}"), *l, *v == current)).collect();
+            items.push(separator());
+            items.extend(ADVANCED.iter().map(|(l, v)| check(format!("sel:{v}"), *l, *v == current)));
             items
         }
         "share" => {
@@ -1680,40 +1747,57 @@ mod tests {
         s.delay_seconds = 0;
         flip(&mut s, Switch::Delay);
         assert_eq!(switch_label(&s, Switch::Delay), "Interval (10 s)");
-        assert_eq!(capture_button(&s, 1, "PrtScn", false).0, "Start");
-        assert_eq!(capture_button(&s, 1, "PrtScn", true).0, "Stop");
+        assert_eq!(capture_button(&s, 1, "PrtScn", false).verb, "Start");
+        assert_eq!(capture_button(&s, 1, "PrtScn", true).verb, "Stop");
         s.capture_window.timing = "schedule".into();
-        assert_eq!(
-            capture_button(&s, 1, "PrtScn", false),
-            ("Schedule", "Daily at 09:00".to_owned())
-        );
+        let b = capture_button(&s, 1, "PrtScn", false);
+        assert_eq!((b.verb, b.detail.as_str()), ("Schedule", "Region (800 × 600) · daily at 09:00"));
         s.capture_window.timer = false;
         assert_eq!(
             capture_button(&s, 1, "PrtScn", false),
-            ("Capture", crate::keys::display("PrtScn"))
+            action("Capture", "Region (800 × 600)".into(), format!("or press {}", crate::keys::display("PrtScn")))
         );
+        s.delay_seconds = 3;
+        assert_eq!(capture_button(&s, 0, "", false).detail, "Select an area · in 3 s");
+        assert_eq!(capture_button(&s, 0, "", false).hint, "or press Enter");
+        assert_eq!(capture_button(&s, 2, "PrtScn", false).verb, "Record");
     }
 
     #[test]
     fn the_view_lists_each_tabs_rows() {
         let mut s = settings();
         s.capture_window.tab = 0;
-        assert_eq!(
-            view(&s, "PrtScn", false)
-                .fields
-                .iter()
-                .map(|f| f.id)
-                .collect::<Vec<_>>(),
-            ["share"]
-        );
+        let v = view(&s, "PrtScn", false);
+        assert!(v.modes.is_empty() && v.mode_gear.is_none());
+        let titles: Vec<&str> = v.groups.iter().map(|g| g.title).collect();
+        assert_eq!(titles, ["Before capture", "After capture"]);
+        assert!(matches!(&v.groups[1].rows[0], GroupRow::Field(f) if f.id == "share"));
         s.capture_window.tab = 2;
         let v = view(&s, "PrtScn", false);
-        assert_eq!(v.switches.len(), 6);
-        assert_eq!(v.switches[0].more, Some("webcam"));
-        assert_eq!(v.fields[0].gear, Some("selection"));
-        assert!(serde_json::to_string(&v)
-            .unwrap()
-            .contains("\"capture\":\"Capture\""));
+        assert_eq!(v.groups[0].title, "While recording");
+        assert_eq!(v.groups.iter().map(|g| g.rows.len()).sum::<usize>(), 7);
+        assert!(matches!(&v.groups[0].rows[2], GroupRow::Switch(r) if r.more == Some("webcam")));
+        assert_eq!(v.mode_gear, Some("selection"));
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(json.contains("\"verb\":\"Record\"") && json.contains("\"kind\":\"switch\""), "{json}");
+    }
+
+    #[test]
+    fn mode_tiles_show_the_selection_and_more_holds_the_rest() {
+        let mut s = settings();
+        let tiles = modes(&s, 1);
+        let labels: Vec<&str> = tiles.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(labels, ["Region", "Window", "Fullscreen", "Scrolling", "Grab Text", "More"]);
+        assert!(tiles[0].on, "fixed is a Region");
+        assert_eq!(tiles[1].pick, "sel:window");
+        assert_eq!(pick(&mut s, "sel:panoramic"), Pick::Changed);
+        let more = modes(&s, 1).pop().unwrap();
+        assert_eq!((more.label.as_str(), more.on, more.menu), ("Panoramic", true, Some("more")));
+        let items = menu(&s, "more");
+        assert!(items.iter().any(|i| i.id == "sel:clipboard") && items.iter().any(|i| i.id == "sel:panoramic" && i.checked));
+        assert!(items.iter().all(|i| i.items.is_empty()), "no submenus under More");
+        let video = modes(&s, 2);
+        assert_eq!(video.iter().filter(|t| t.on).map(|t| t.pick.as_str()).collect::<Vec<_>>(), ["vsel:region"]);
     }
 
     #[test]

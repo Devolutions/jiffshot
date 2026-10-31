@@ -1,6 +1,6 @@
-//! The Capture window: the tabs on the left, the current tab's dropdowns
-//! and switches, the big Capture button, and menus in the title bar and
-//! the bottom bar.
+//! The Capture window: the tabs on the left, the current tab's mode tiles,
+//! its options grouped by when they apply, the Capture button that says
+//! what it will do, and menus in the title bar and the bottom bar.
 //!
 //! Rust decides what it shows (`crate::capture_window`, in
 //! `jiffshot_workflow::panel`'s JSON): the `view` signal lays out the tab,
@@ -34,6 +34,8 @@ struct Palette {
     text: Color,
     muted: Color,
     tab_on: Color,
+    /// The Capture button under the pointer.
+    accent_hover: Color,
 }
 
 const LIGHT: Palette = Palette {
@@ -44,6 +46,7 @@ const LIGHT: Palette = Palette {
     text: parts::rgb(0x1F1F1F),
     muted: parts::rgb(0x606060),
     tab_on: parts::rgb(0x1971C7),
+    accent_hover: parts::rgb(0x155FA8),
 };
 
 const DARK: Palette = Palette {
@@ -54,14 +57,38 @@ const DARK: Palette = Palette {
     text: parts::rgb(0xEDEEF0),
     muted: parts::rgb(0xA9ADB4),
     tab_on: parts::rgb(0x2F7FD6),
+    accent_hover: parts::rgb(0x2670C0),
 };
 
 const TITLE: &str = "Jiffshot Capture";
 
 const WHITE: Color = parts::rgb(0xFFFFFF);
-const CAPTURE_RED: Color = parts::rgb(0xDB3C30);
-const CAPTURE_RED_HOVER: Color = parts::rgb(0xC73126);
-const CAPTURE_RING: Color = parts::rgb(0xF5B0A8);
+/// Recording is red; taking a picture is the accent.
+const RECORD_RED: Color = parts::rgb(0xD13438);
+const RECORD_RED_HOVER: Color = parts::rgb(0xB82B2F);
+
+/// The mode tiles' glyphs, by selection value.
+fn mode_glyph(value: &str) -> &'static str {
+    match value {
+        "window" => "\u{E737}",
+        "fullscreen" => "\u{E740}",
+        "scrolling" => "\u{ECE7}",
+        "text" => "\u{F683}",
+        "more" => "\u{E712}",
+        _ => "\u{E7A8}",
+    }
+}
+
+/// The Capture button's glyph for its verb.
+fn action_glyph(verb: &str) -> &'static str {
+    match verb {
+        "Record" => "\u{E7C8}",
+        "Start" | "Stop" | "Schedule" | "Cancel" => "\u{E916}",
+        _ => "\u{E722}",
+    }
+}
+
+const ALL_IN_ONE: &str = "Select an area first, then choose to save it as an image, record it as a video or capture it scrolling.";
 
 /// The palette for the application's current theme.
 fn palette(dark: Signal<bool>) -> &'static Palette {
@@ -82,11 +109,52 @@ const TABS: [(&str, &str, &str); 3] = [
 struct View {
     tab: usize,
     #[serde(default)]
-    fields: Vec<FieldRow>,
+    modes: Vec<ModeTile>,
+    mode_gear: Option<String>,
     #[serde(default)]
-    switches: Vec<SwitchRow>,
+    groups: Vec<Group>,
     #[serde(default)]
-    capture: String,
+    capture: Action,
+}
+
+/// A tile choosing what to capture (`panel::ModeTile`).
+#[derive(Deserialize)]
+struct ModeTile {
+    #[serde(default)]
+    pick: String,
+    #[serde(default)]
+    value: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    on: bool,
+    /// The menu it opens instead of picking.
+    menu: Option<String>,
+}
+
+/// Options that apply at the same time (`panel::Group`).
+#[derive(Deserialize)]
+struct Group {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    rows: Vec<GroupRow>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum GroupRow {
+    Field(FieldRow),
+    Switch(SwitchRow),
+}
+
+/// The Capture button (`panel::Action`).
+#[derive(Deserialize, Default)]
+struct Action {
+    #[serde(default)]
+    verb: String,
+    #[serde(default)]
+    detail: String,
     #[serde(default)]
     hint: String,
 }
@@ -98,8 +166,6 @@ struct FieldRow {
     label: String,
     #[serde(default)]
     text: String,
-    /// The gear button's panel.
-    gear: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -160,10 +226,11 @@ struct Ui {
     window: NodeRef<Window>,
     dark: Signal<bool>,
     tab: Signal<usize>,
-    capture_label: Signal<String>,
-    hint: Signal<String>,
-    fields: NodeRef<StackPanel>,
-    switches: NodeRef<StackPanel>,
+    action: Signal<(String, String, String)>,
+    group_titles: Signal<(String, String)>,
+    modes: NodeRef<StackPanel>,
+    before: NodeRef<StackPanel>,
+    after: NodeRef<StackPanel>,
     /// The static controls' subscriptions, for the window's life.
     _controls: Subscriptions,
     /// The rows' subscriptions, ended when the rows are rebuilt.
@@ -211,9 +278,9 @@ fn popup_target() -> Option<(AppScope, Window, Control, Subscriptions)> {
 pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
     let dark = scope.signal(parts::dark_theme(scope));
     let tab = scope.signal(0_usize);
-    let capture_label = scope.signal(String::from("Capture"));
-    let hint = scope.signal(String::new());
-    let (window_ref, fields, switches) = (NodeRef::new(), NodeRef::new(), NodeRef::new());
+    let action = scope.signal((String::from("Capture"), String::new(), String::new()));
+    let group_titles = scope.signal((String::new(), String::new()));
+    let (window_ref, modes, before, after) = (NodeRef::new(), NodeRef::new(), NodeRef::new(), NodeRef::new());
     // The static controls' subscriptions last as long as the window.
     let subs = Subscriptions::default();
 
@@ -240,30 +307,50 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         .margin((4.0, 0.0, 4.0, 0.0))
         .children_iter(TABS.iter().enumerate().map(|(i, &(tip, glyph, label))| tab_button(dark, tab, &subs, i, tip, glyph, label)));
 
+    // A wide button that says what it will do: the verb, what it captures
+    // and when. Red only for recording.
     let capture_button = {
         let hover = scope.signal(false);
+        let video = move || tab.get() == 2;
         Border::el()
-            .width(104.0)
-            .height(104.0)
-            .corner_radius(52.0)
-            .border_thickness(3.0)
-            .border_brush(CAPTURE_RING)
-            .background(move || if hover.get() { CAPTURE_RED_HOVER } else { CAPTURE_RED })
+            .width(184.0)
+            .min_height(84.0)
+            .corner_radius(10.0)
+            .padding((14.0, 12.0))
+            .background(move || match (video(), hover.get()) {
+                (true, false) => RECORD_RED,
+                (true, true) => RECORD_RED_HOVER,
+                (false, false) => palette(dark).tab_on,
+                (false, true) => palette(dark).accent_hover,
+            })
             .on_pointer_entered(move |_| hover.set(true))
             .on_pointer_exited(move |_| hover.set(false))
             .on_tapped(|_| run("capture".into()))
             .child(
-                TextBlock::el()
-                    .text(capture_label)
-                    .font_size(17.0)
-                    .font_weight(FontWeight::DemiBold)
-                    .foreground(WHITE)
-                    .horizontal_alignment(HorizontalAlignment::Center)
-                    .vertical_alignment(VerticalAlignment::Center),
+                StackPanel::el()
+                    .spacing(4.0)
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .child(
+                        StackPanel::el()
+                            .orientation(Orientation::Horizontal)
+                            .spacing(9.0)
+                            .horizontal_alignment(HorizontalAlignment::Center)
+                            .child(glyph("", 20.0).text(move || action_glyph(&action.get().0).to_owned()).foreground(WHITE))
+                            .child(TextBlock::el().text(move || action.get().0).font_size(18.0).font_weight(FontWeight::DemiBold).foreground(WHITE)),
+                    )
+                    .child(
+                        TextBlock::el()
+                            .text(move || action.get().1)
+                            .font_size(12.0)
+                            .foreground(WHITE)
+                            .text_trimming("CharacterEllipsis")
+                            .horizontal_alignment(HorizontalAlignment::Center),
+                    ),
             )
     };
     let reset = on_click(
         flat(dark)
+            .grid_column(1)
             .horizontal_alignment(HorizontalAlignment::Right)
             .vertical_alignment(VerticalAlignment::Top)
             .margin((0.0, 4.0, 4.0, 0.0))
@@ -272,6 +359,23 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         &subs,
         |_| run("pick:reset".into()),
     );
+    let caption = move |second: bool| {
+        TextBlock::el()
+            .text(move || {
+                let (a, b) = group_titles.get();
+                if second { b } else { a }
+            })
+            .font_size(11.5)
+            .font_weight(FontWeight::DemiBold)
+            .foreground(move || palette(dark).muted)
+            .margin((0.0, 0.0, 0.0, 4.0))
+    };
+    let options = Grid::el()
+        .grid_row(2)
+        .column_definitions("*,*")
+        .margin((18.0, 10.0, 0.0, 10.0))
+        .child(StackPanel::el().child(caption(false)).child(StackPanel::el().spacing(2.0).node_ref(before)))
+        .child(StackPanel::el().grid_column(1).margin((26.0, 0.0, 0.0, 0.0)).child(caption(true)).child(StackPanel::el().spacing(2.0).node_ref(after)));
     let card = Border::el()
         .grid_column(1)
         .background(move || palette(dark).card)
@@ -280,19 +384,29 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         .corner_radius(8.0)
         .child(
             Grid::el()
-                .column_definitions("340,*,170")
-                .child(StackPanel::el().spacing(14.0).margin((10.0, 16.0, 0.0, 0.0)).node_ref(fields))
-                .child(StackPanel::el().grid_column(1).margin((26.0, 10.0, 6.0, 0.0)).node_ref(switches))
+                .column_definitions("*,220")
                 .child(
-                    Grid::el().grid_column(2).child(reset).child(
-                        StackPanel::el()
-                            .vertical_alignment(VerticalAlignment::Center)
-                            .horizontal_alignment(HorizontalAlignment::Center)
-                            .spacing(9.0)
-                            .margin((0.0, 8.0, 0.0, 0.0))
-                            .child(capture_button)
-                            .child(TextBlock::el().text(hint).horizontal_alignment(HorizontalAlignment::Center).font_size(12.5)),
-                    ),
+                    Grid::el()
+                        .row_definitions("Auto,Auto,*")
+                        .child(StackPanel::el().orientation(Orientation::Horizontal).spacing(6.0).height(58.0).margin((18.0, 14.0, 0.0, 0.0)).node_ref(modes))
+                        .child(Border::el().grid_row(1).height(1.0).margin((18.0, 12.0, 0.0, 0.0)).background(move || palette(dark).edge))
+                        .child(options),
+                )
+                .child(reset)
+                .child(
+                    StackPanel::el()
+                        .grid_column(1)
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .horizontal_alignment(HorizontalAlignment::Center)
+                        .spacing(8.0)
+                        .child(capture_button)
+                        .child(
+                            TextBlock::el()
+                                .text(move || action.get().2)
+                                .horizontal_alignment(HorizontalAlignment::Center)
+                                .font_size(12.0)
+                                .foreground(move || palette(dark).muted),
+                        ),
                 ),
         );
 
@@ -345,7 +459,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         })
         .icon(super::icon_file())
         .width(890.0)
-        .height(290.0)
+        .height(372.0)
         .can_resize(false)
         .can_maximize(false)
         .window_startup_location(WindowStartupLocation::CenterScreen)
@@ -382,10 +496,11 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
             window: window_ref,
             dark,
             tab,
-            capture_label,
-            hint,
-            fields,
-            switches,
+            action,
+            group_titles,
+            modes,
+            before,
+            after,
             _controls: subs,
             rows: Subscriptions::default(),
             popup: Subscriptions::default(),
@@ -500,37 +615,94 @@ fn tab_button(dark: Signal<bool>, tab: Signal<usize>, subs: &Subscriptions, i: u
 
 fn apply_view(json: &str) -> Result<()> {
     let Ok(view) = serde_json::from_str::<View>(json) else { return Ok(()) };
-    let Some((scope, dark, fields, switches, rows, (tab, capture_label, hint))) =
-        with_ui(|ui| Some((ui.scope.clone(), ui.dark, ui.fields.get()?, ui.switches.get()?, ui.rows.clone(), (ui.tab, ui.capture_label, ui.hint)))).flatten()
-    else {
+    let Some((scope, dark, (modes, before, after), rows, (tab, action, group_titles))) = with_ui(|ui| {
+        Some((ui.scope.clone(), ui.dark, (ui.modes.get()?, ui.before.get()?, ui.after.get()?), ui.rows.clone(), (ui.tab, ui.action, ui.group_titles)))
+    })
+    .flatten() else {
         return Ok(());
     };
     tab.set_if_changed(view.tab);
-    capture_label.set_if_changed(view.capture.clone());
-    hint.set_if_changed(view.hint.clone());
+    let Action { verb, detail, hint } = view.capture;
+    action.set_if_changed((verb, detail, hint));
+    let title = |i: usize| view.groups.get(i).map(|g| g.title.clone()).unwrap_or_default();
+    group_titles.set_if_changed((title(0), title(1)));
     rows.clear();
 
-    let list = fields.children()?;
+    let list = modes.children()?;
     list.clear()?;
-    for field in &view.fields {
-        list.add(field_row(dark, &rows, field).build(&scope)?)?;
+    if view.modes.is_empty() {
+        list.add(
+            TextBlock::el()
+                .text(ALL_IN_ONE)
+                .text_wrapping(TextWrapping::Wrap)
+                .width(420.0)
+                .font_size(13.0)
+                .foreground(move || palette(dark).muted)
+                .vertical_alignment(VerticalAlignment::Center)
+                .build(&scope)?,
+        )?;
     }
-    let list = switches.children()?;
-    list.clear()?;
-    let height = if view.switches.len() > 4 { 31.0 } else { 45.0 };
-    for row in &view.switches {
-        list.add(switch_row(dark, &rows, row, height).build(&scope)?)?;
+    for mode in &view.modes {
+        list.add(mode_tile(dark, &rows, mode).build(&scope)?)?;
+    }
+    if let Some(panel) = view.mode_gear {
+        let tip = if view.tab == 2 { "Recording options" } else { "Selection options" };
+        let gear = flat(dark).vertical_alignment(VerticalAlignment::Center).padding((7.0, 6.0)).tool_tip_tip(tip).content(glyph("\u{E713}", 15.0));
+        list.add(on_click(gear, &rows, move |button: &Button| request("panel", &panel, button.upcast())).build(&scope)?)?;
+    }
+
+    for (group, target) in view.groups.iter().zip([before, after]) {
+        let list = target.children()?;
+        list.clear()?;
+        for row in &group.rows {
+            let el: AnyEl = match row {
+                GroupRow::Field(field) => field_row(dark, &rows, field).into(),
+                GroupRow::Switch(switch) => switch_row(dark, &rows, switch).into(),
+            };
+            list.add(el.build(&scope)?)?;
+        }
     }
     Ok(())
 }
 
-/// A dropdown row: label, the dropdown (a menu) and maybe a gear (a panel).
+/// A tile choosing what to capture; the current one is on the accent. The
+/// More tile opens a menu and takes the name of a mode picked from it.
+fn mode_tile(dark: Signal<bool>, subs: &Subscriptions, mode: &ModeTile) -> El<Button> {
+    let on = mode.on;
+    let tip = if mode.menu.is_some() && !on { "More ways to capture".to_owned() } else { mode.label.clone() };
+    let content = StackPanel::el()
+        .spacing(4.0)
+        .child(glyph(mode_glyph(&mode.value), 19.0))
+        .child(TextBlock::el().text(mode.label.clone()).font_size(11.5).text_trimming("CharacterEllipsis").horizontal_alignment(HorizontalAlignment::Center));
+    let button = Button::el()
+        .width(78.0)
+        .height(58.0)
+        .padding((4.0, 6.0))
+        .corner_radius(6.0)
+        .border_thickness(1.0)
+        .border_brush(move || if on { palette(dark).tab_on } else { palette(dark).edge })
+        .background(move || if on { palette(dark).tab_on } else { parts::TRANSPARENT })
+        .foreground(move || if on { WHITE } else { palette(dark).text })
+        .horizontal_content_alignment(HorizontalAlignment::Center)
+        .vertical_content_alignment(VerticalAlignment::Center)
+        .tool_tip_tip(tip)
+        .content(content);
+    match mode.menu.clone() {
+        Some(menu) => on_click(button, subs, move |button: &Button| request("menu", &menu, button.upcast())),
+        None => {
+            let pick = mode.pick.clone();
+            on_click(button, subs, move |_| run(format!("pick:{pick}")))
+        }
+    }
+}
+
+/// A dropdown row: label and the dropdown (a menu).
 fn field_row(dark: Signal<bool>, subs: &Subscriptions, field: &FieldRow) -> El<Grid> {
     let id = field.id.clone();
     let drop = Button::el()
         .grid_column(1)
-        .width(200.0)
-        .height(30.0)
+        .height(28.0)
+        .horizontal_alignment(HorizontalAlignment::Stretch)
         .background(move || palette(dark).card)
         .border_brush(move || palette(dark).frame)
         .border_thickness(1.0)
@@ -544,23 +716,15 @@ fn field_row(dark: Signal<bool>, subs: &Subscriptions, field: &FieldRow) -> El<G
                 .child(glyph("\u{E70D}", 10.0).dock_panel_dock(Dock::Right).margin((6.0, 0.0, 0.0, 0.0)))
                 .child(TextBlock::el().text(field.text.clone()).text_trimming("CharacterEllipsis").vertical_alignment(VerticalAlignment::Center).font_size(13.0)),
         );
-    let grid = Grid::el()
-        .column_definitions("100,*,Auto")
-        .height(30.0)
+    Grid::el()
+        .column_definitions("64,*,26")
+        .height(32.0)
         .child(TextBlock::el().text(field.label.clone()).vertical_alignment(VerticalAlignment::Center).font_size(13.5))
-        .child(on_click(drop, subs, move |button: &Button| request("menu", &id, button.upcast())));
-    match field.gear.clone() {
-        Some(panel) => grid.child(on_click(
-            flat(dark).grid_column(2).padding((6.0, 4.0)).margin((4.0, 0.0, 0.0, 0.0)).tool_tip_tip("Options").content(glyph("\u{E713}", 14.0)),
-            subs,
-            move |button: &Button| request("panel", &panel, button.upcast()),
-        )),
-        None => grid,
-    }
+        .child(on_click(drop, subs, move |button: &Button| request("menu", &id, button.upcast())))
 }
 
 /// A switch row: label, the switch, and maybe a › button (a panel).
-fn switch_row(dark: Signal<bool>, subs: &Subscriptions, row: &SwitchRow, height: f64) -> El<Grid> {
+fn switch_row(dark: Signal<bool>, subs: &Subscriptions, row: &SwitchRow) -> El<Grid> {
     let id = row.id.clone();
     let toggle = ToggleSwitch::el()
         .grid_column(1)
@@ -571,7 +735,7 @@ fn switch_row(dark: Signal<bool>, subs: &Subscriptions, row: &SwitchRow, height:
         .margin((8.0, 0.0, 0.0, 0.0));
     let grid = Grid::el()
         .column_definitions("*,Auto,26")
-        .height(height)
+        .height(32.0)
         .child(TextBlock::el().text(row.label.clone()).vertical_alignment(VerticalAlignment::Center).font_size(13.5))
         .child(on_click(toggle, subs, move |_| run(format!("switch:{id}"))));
     match row.more.clone() {
