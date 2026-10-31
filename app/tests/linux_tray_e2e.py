@@ -18,7 +18,7 @@ from dbus_next.aio import MessageBus
 from linux_load_e2e import window_info
 from linux_schedule_e2e import safe_current_minute
 from linux_shortcuts_e2e import MockPortal, X11Driver, stop, wait_for
-from linux_webcam_e2e import scroll, trace_window
+from linux_webcam_e2e import TextReader, trace_window
 
 
 WATCHER = "org.kde.StatusNotifierWatcher"
@@ -173,7 +173,7 @@ async def main(binary, runtime):
     notifications = MockNotifications()
     await notifications.start()
     watcher = None
-    app = server = driver = None
+    app = server = driver = text = None
     read_fd = write_fd = None
     with tempfile.TemporaryDirectory(prefix="jiffshot-tray-ui-") as directory:
         work = Path(directory)
@@ -219,6 +219,7 @@ async def main(binary, runtime):
                     ),
                 }
                 env.pop("WAYLAND_DISPLAY", None)
+                text = TextReader()
 
                 def start_app():
                     return subprocess.Popen(
@@ -230,6 +231,9 @@ async def main(binary, runtime):
                     await wait_for(lambda: window_info(env), "the editor", 12)
                     window, origin = window_info(env)
                     return X11Driver(display, window, origin)
+
+                async def click_label(label):
+                    driver.click(*await text.find_scrolling_label(driver, label))
 
                 app = start_app()
                 driver = await attach()
@@ -260,9 +264,7 @@ async def main(binary, runtime):
                 app = start_app()
                 driver = await attach()
                 await asyncio.sleep(0.5)
-                scroll(driver, "down")
-                await asyncio.sleep(0.5)
-                driver.click(50, 48)
+                await click_label("Enable tray")
                 await wait_for(
                     lambda: len(watcher.items) > previous_items
                     and watcher.host_queries > previous_queries,
@@ -283,9 +285,7 @@ async def main(binary, runtime):
                 app = start_app()
                 driver = await attach()
                 await asyncio.sleep(0.5)
-                scroll(driver, "down")
-                await asyncio.sleep(0.5)
-                driver.click(50, 48)
+                await click_label("Enable tray")
                 await wait_for(
                     lambda: len(watcher.items) > previous_items
                     and watcher.host_queries >= previous_queries + 2
@@ -297,9 +297,7 @@ async def main(binary, runtime):
                 await wait_for(lambda: not window_info(env), "manual close to the tray")
                 await watcher.activate(item)
                 await wait_for(lambda: window_info(env), "manual tray restoration")
-                scroll(driver, "down")
-                await asyncio.sleep(0.4)
-                driver.click(150, 48)
+                await click_label("Disable tray")
                 await wait_for(
                     lambda: json.loads(settings.read_text()).get("linux_tray_enabled") is False,
                     "manually disabling and persisting the tray",
@@ -337,7 +335,7 @@ async def main(binary, runtime):
                 assert set(menu) == {
                     "Open Jiffshot", "Capture screen or window", "Quit Jiffshot",
                 }, menu
-                driver.click(460, 80)
+                await click_label("Enable global capture shortcut")
                 await wait_for(lambda: portal.bindings, "the capture shortcut to bind")
                 shortcut = portal.bindings[-1][0]
                 await asyncio.sleep(0.4)
@@ -521,6 +519,8 @@ async def main(binary, runtime):
         finally:
             if driver is not None:
                 driver.close()
+            if text is not None:
+                text.close()
             stop(app)
             stop(server)
             if read_fd is not None:

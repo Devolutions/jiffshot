@@ -150,6 +150,22 @@ class TextReader:
                         break
         return None
 
+    async def find_scrolling_label(self, driver, label):
+        position = self.find_label(driver, label)
+        if position is not None:
+            return position
+        scroll(driver, "up")
+        await asyncio.sleep(0.2)
+        for _ in range(25):
+            position = self.find_label(driver, label)
+            if position is not None:
+                return position
+            scroll(driver, "down", 2)
+            await asyncio.sleep(0.12)
+        trace_window(driver, "label-not-found")
+        observed = self._recognize(driver, 0, 0, 800, 270, 6)
+        raise AssertionError(f"could not find {label!r}; OCR saw {observed!r}")
+
     def close(self):
         if self.instance:
             self.api.TessBaseAPIDelete(self.instance)
@@ -198,12 +214,12 @@ def replace(driver, x, y, text):
         press(driver, key)
 
 
-def scroll(driver, direction):
+def scroll(driver, direction, count=25):
     driver.xtst.XTestFakeMotionEvent(
         driver.display, driver.screen, 750 + driver.origin[0], 150 + driver.origin[1], 0
     )
     button = 5 if direction == "down" else 4
-    for _ in range(25):
+    for _ in range(count):
         driver.xtst.XTestFakeButtonEvent(driver.display, button, 1, 0)
         driver.xtst.XTestFakeButtonEvent(driver.display, button, 0, 0)
     driver.x11.XSync(driver.display, 0)

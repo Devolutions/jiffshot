@@ -20,7 +20,7 @@ from gi.repository import Gio
 from linux_load_e2e import window_info
 from linux_shortcuts_e2e import MockPortal, X11Driver, stop, wait_for
 from linux_tray_e2e import MockWatcher, request_window_close
-from linux_webcam_e2e import scroll, trace_window
+from linux_webcam_e2e import TextReader, trace_window
 
 
 def running(pid):
@@ -34,7 +34,7 @@ async def main(binary, runtime):
     portal = MockPortal()
     await portal.start()
     watcher = None
-    app = server = driver = None
+    app = server = driver = text = None
     launched_pid = None
     read_fd = write_fd = None
     with tempfile.TemporaryDirectory(prefix="jiffshot-autostart-ui-") as directory:
@@ -85,6 +85,7 @@ async def main(binary, runtime):
                     ),
                 }
                 env.pop("WAYLAND_DISPLAY", None)
+                text = TextReader()
 
                 def start_app():
                     return subprocess.Popen(
@@ -96,6 +97,9 @@ async def main(binary, runtime):
                     await wait_for(lambda: window_info(env), "the editor", 12)
                     window, origin = window_info(env)
                     return X11Driver(display, window, origin)
+
+                async def click_label(label):
+                    driver.click(*await text.find_scrolling_label(driver, label))
 
                 async def launch_entry():
                     marker.unlink(missing_ok=True)
@@ -120,9 +124,7 @@ async def main(binary, runtime):
                 app = start_app()
                 driver = await attach()
                 await asyncio.sleep(0.5)
-                scroll(driver, "down")
-                await asyncio.sleep(0.5)
-                driver.click(280, 48)
+                await click_label("Enable login startup")
                 await wait_for(entry.exists, "the enabled startup entry")
                 subprocess.run(["desktop-file-validate", str(entry)], check=True)
                 assert "X-Jiffshot-Autostart=true\n" in entry.read_text()
@@ -201,15 +203,13 @@ async def main(binary, runtime):
                     lambda: len(watcher.items) > previous_items, "the normal launch tray item"
                 )
                 await asyncio.sleep(0.5)
-                scroll(driver, "down")
-                await asyncio.sleep(0.5)
-                driver.click(440, 48)
+                await click_label("Disable login startup")
                 await wait_for(lambda: "Hidden=true\n" in entry.read_text(), "startup to be disabled")
                 subprocess.run(["desktop-file-validate", str(entry)], check=True)
                 desktop = Gio.DesktopAppInfo.new_from_filename(str(entry))
                 assert desktop is not None and desktop.get_is_hidden()
                 entry.write_text("unmanaged startup configuration\n")
-                driver.click(280, 48)
+                await click_label("Enable login startup")
                 await asyncio.sleep(0.5)
                 assert entry.read_text() == "unmanaged startup configuration\n"
                 menu = await watcher.menu(watcher.items[-1])
@@ -228,6 +228,8 @@ async def main(binary, runtime):
         finally:
             if driver is not None:
                 driver.close()
+            if text is not None:
+                text.close()
             stop(app)
             if launched_pid is not None and running(launched_pid):
                 os.kill(launched_pid, signal.SIGTERM)

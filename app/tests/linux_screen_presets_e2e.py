@@ -15,12 +15,11 @@ import sys
 import tempfile
 import time
 
-from linux_interactive_effects_e2e import wheel
 from linux_interval_e2e import saved_images, verify_image
 from linux_load_e2e import window_info
 from linux_shortcuts_e2e import X11Driver, stop, wait_for
 from linux_timed_capture_e2e import TimedPortal
-from linux_webcam_e2e import TextReader, press, scroll, trace_window
+from linux_webcam_e2e import TextReader, press, trace_window
 
 
 PRESETS = "linux_screen_capture_presets"
@@ -75,20 +74,7 @@ class Fixture:
         await asyncio.sleep(0.4)
 
     async def label(self, label):
-        position = self.text.find_label(self.driver, label)
-        if position is not None:
-            return position
-        scroll(self.driver, "up")
-        await asyncio.sleep(0.2)
-        for _ in range(25):
-            position = self.text.find_label(self.driver, label)
-            if position is not None:
-                return position
-            wheel(self.driver, "down", 2)
-            await asyncio.sleep(0.12)
-        trace_window(self.driver, "screen-presets-label-not-found")
-        observed = self.text._recognize(self.driver, 0, 0, 800, 270, 6)
-        raise AssertionError(f"could not find {label!r}; OCR saw {observed!r}")
+        return await self.text.find_scrolling_label(self.driver, label)
 
     async def click_label(self, label):
         self.driver.click(*await self.label(label))

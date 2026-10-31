@@ -15,7 +15,7 @@ from dbus_next import Message, MessageType, Variant
 from dbus_next.aio import MessageBus
 from linux_load_e2e import window_info
 from linux_shortcuts_e2e import SCREENCAST, MockPortal, X11Driver, stop, wait_for
-from linux_webcam_e2e import pixels, replace, scroll, trace_window
+from linux_webcam_e2e import TextReader, pixels, replace, trace_window
 
 
 class TimedPortal(MockPortal):
@@ -59,7 +59,7 @@ class TimedPortal(MockPortal):
 async def main(binary, runtime):
     portal = TimedPortal()
     await portal.start()
-    app = server = driver = None
+    app = server = driver = text = None
     read_fd = write_fd = None
     with tempfile.TemporaryDirectory(prefix="jiffshot-timed-ui-") as directory:
         work = Path(directory)
@@ -114,47 +114,54 @@ async def main(binary, runtime):
                 await wait_for(lambda: window_info(env), "the editor", 12)
                 window, origin = window_info(env)
                 driver = X11Driver(display_name, window, origin)
-                await asyncio.sleep(0.5)
-                scroll(driver, "down")
+                text = TextReader()
                 await asyncio.sleep(0.5)
 
+                async def click_label(label):
+                    driver.click(*await text.find_scrolling_label(driver, label))
+
+                async def replace_delay(value):
+                    x, y = await text.find_scrolling_label(driver, "Save capture delay")
+                    # The 60-pixel delay textbox is immediately before the save button.
+                    replace(driver, x - 110, y, value)
+
                 previous = settings.stat().st_ino
-                driver.click(525, 84)
+                await click_label("Save cursor preferences")
                 await wait_for(lambda: settings.stat().st_ino != previous, "saving loaded cursors")
                 assert json.loads(settings.read_text()) == original, (
                     "the cursor controls must load their separate saved values"
                 )
-                driver.click(10, 84)
-                driver.click(220, 84)
+                await click_label("Include cursor in captures")
+                await click_label("Include cursor in recordings")
                 previous = settings.stat().st_ino
-                driver.click(525, 84)
+                await click_label("Save cursor preferences")
                 await wait_for(lambda: settings.stat().st_ino != previous, "saving cursor changes")
                 assert json.loads(settings.read_text()) == {
                     **original, "capture_cursor": True, "recording_cursor": False,
                 }, "capture and recording cursors must change independently"
-                driver.click(10, 84)
-                driver.click(220, 84)
+                await click_label("Include cursor in captures")
+                await click_label("Include cursor in recordings")
                 previous = settings.stat().st_ino
-                driver.click(525, 84)
+                await click_label("Save cursor preferences")
                 await wait_for(lambda: settings.stat().st_ino != previous, "restoring cursors")
                 assert json.loads(settings.read_text()) == original
 
                 previous = settings.stat().st_ino
-                driver.click(365, 115)
+                await click_label("Save capture delay")
                 await wait_for(lambda: settings.stat().st_ino != previous, "saving the loaded delay")
                 assert json.loads(settings.read_text()) == original, (
                     "saving must retain the loaded delay and other preferences"
                 )
-                replace(driver, 255, 115, "5")
+                await replace_delay("5")
                 previous = settings.stat().st_ino
-                driver.click(365, 115)
+                await click_label("Save capture delay")
                 await wait_for(lambda: settings.stat().st_ino != previous, "saving a new delay")
                 saved = {**original, "capture_delay_seconds": 5}
                 assert json.loads(settings.read_text()) == saved
 
                 before_status = pixels(driver, 0, 480, 800, 20)[1]
-                replace(driver, 255, 115, "61")
-                driver.click(365, 115)
+                await replace_delay("61")
+                await click_label("Save capture delay")
                 await wait_for(
                     lambda: pixels(driver, 0, 480, 800, 20)[1] != before_status,
                     "the invalid-delay error",
@@ -164,9 +171,7 @@ async def main(binary, runtime):
                 )
 
                 settings.write_text(json.dumps({**saved, "capture_delay_seconds": -1}))
-                scroll(driver, "up")
-                await asyncio.sleep(0.5)
-                driver.click(100, 15)
+                await click_label("Capture screen or window")
                 await asyncio.sleep(0.5)
                 assert portal.capture_requests == 0, (
                     "an invalid delay must prevent the screen capture portal request"
@@ -174,12 +179,10 @@ async def main(binary, runtime):
 
                 settings.write_text(json.dumps(saved))
                 portal.hold_start = True
-                driver.click(100, 15)
+                await click_label("Capture screen or window")
                 await wait_for(lambda: len(portal.screen_starts) == 1, "the held source chooser")
                 session, request = portal.screen_starts[-1]
-                scroll(driver, "down")
-                await asyncio.sleep(0.4)
-                driver.click(535, 115)
+                await click_label("Cancel delayed capture")
                 portal.release_start(request)
                 await wait_for(lambda: portal.remote_opens == 1, "the selected source")
                 assert portal.screen_selection_options[-1]["cursor_mode"].value == 1, (
@@ -192,31 +195,25 @@ async def main(binary, runtime):
                 )
                 assert not list(captures.iterdir()), "cancellation must not save a capture"
                 portal.hold_start = False
-                scroll(driver, "up")
-                await asyncio.sleep(0.4)
                 for expected in (2, 3):
-                    driver.click(100, 15)
+                    await click_label("Capture screen or window")
                     await wait_for(
                         lambda: portal.remote_opens == expected,
                         "the selected screen's PipeWire remote",
                     )
                     session = portal.screen_sessions[-1]
-                    driver.click(100, 15)
+                    await click_label("Capture screen or window")
                     await asyncio.sleep(0.3)
                     assert portal.capture_requests == expected, (
                         "another delayed capture must not start during the countdown"
                     )
-                    scroll(driver, "down")
-                    await asyncio.sleep(0.4)
-                    driver.click(535, 115)
+                    await click_label("Cancel delayed capture")
                     await wait_for(
                         lambda: session in portal.closes,
                         "closing the cancelled delayed capture",
                         3,
                     )
                     assert not list(captures.iterdir()), "cancellation must not save a capture"
-                    scroll(driver, "up")
-                    await asyncio.sleep(0.4)
                 print("GUI persisted and validated the capture delay and cancelled active countdowns")
         except BaseException:
             if driver is not None:
@@ -227,6 +224,8 @@ async def main(binary, runtime):
         finally:
             if driver is not None:
                 driver.close()
+            if text is not None:
+                text.close()
             stop(app)
             stop(server)
             if read_fd is not None:

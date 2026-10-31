@@ -14,7 +14,7 @@ import tempfile
 from dbus_next import Variant
 from linux_load_e2e import draw_arrow, solid_png, window_info
 from linux_shortcuts_e2e import MockPortal, X11Driver, stop, wait_for
-from linux_webcam_e2e import pixels, scroll, trace_window
+from linux_webcam_e2e import TextReader, pixels, trace_window
 
 
 def clipboard_text(env):
@@ -41,7 +41,7 @@ async def main(binary, runtime, fixture):
     portal = MockPortal()
     portal.screenshot_mode = "hold"
     await portal.start()
-    app = server = driver = None
+    app = server = driver = text = None
     read_fd = write_fd = None
     with tempfile.TemporaryDirectory(prefix="jiffshot-grab-text-ui-") as directory:
         work = Path(directory)
@@ -151,12 +151,12 @@ async def main(binary, runtime, fixture):
                 window, origin = window_info(env)
                 driver = X11Driver(display, window, origin)
                 await asyncio.sleep(0.5)
-                scroll(driver, "down")
-                await asyncio.sleep(0.5)
+                text = TextReader()
+                position = await text.find_scrolling_label(driver, "Grab text")
                 trace_window(driver, "grab-text-control")
                 set_clipboard(env, "from-gui-before")
                 expected_requests = len(portal.screenshot_requests) + 1
-                driver.click(700, 16)
+                driver.click(*position)
                 await wait_for(
                     lambda: len(portal.screenshot_requests) == expected_requests,
                     "the Grab text control's screenshot chooser",
@@ -183,6 +183,8 @@ async def main(binary, runtime, fixture):
         finally:
             if driver is not None:
                 driver.close()
+            if text is not None:
+                text.close()
             stop(app)
             stop(server)
             if read_fd is not None:
