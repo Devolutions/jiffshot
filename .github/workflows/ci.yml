@@ -411,8 +411,9 @@ jobs:
 
       - name: Verify Fedora media and OCR dependency providers
         run: |
-          # Fedora 43 provides fdkaacenc, not voaacenc. These are provider checks,
-          # not an encoder alias: the unchanged workspace tests still check app compatibility.
+          # Fedora 43 supplies fdkaacenc; the shared app selector keeps voaacenc
+          # first on Ubuntu. Require the real Fedora provider, never an encoder alias.
+          # Workspace media tests also encode, parse and decode the selected AAC.
           for element in jpegenc pngenc mp4mux x264enc h264parse aacparse \
             fdkaacenc avdec_h264 avdec_aac pipewiresrc pulsesrc audiomixer; do
             gst-inspect-1.0 --exists "$element"

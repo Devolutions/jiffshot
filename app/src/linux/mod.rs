@@ -1,3 +1,4 @@
+mod aac;
 mod autostart;
 mod capture;
 mod clipboard;

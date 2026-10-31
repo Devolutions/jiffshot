@@ -564,12 +564,14 @@ fn export_audio_ranges(
          demux.video_0 ! queue ! h264parse ! queue ! mux. \
          appsrc name=audio format=time is-live=false block=false \
            ! audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved \
-           ! voaacenc ! aacparse ! queue ! mux. \
+           ! identity name=audio-encoder-input \
+         aacparse name=audio-parser ! queue ! mux. \
          mp4mux name=mux ! filesink name=output",
     )
     .map_err(|error| format!("could not build audio export pipeline: {error}"))?
     .downcast::<gst::Pipeline>()
     .map_err(|_| "could not initialize audio export pipeline".to_owned())?;
+    super::aac::add_to_pipeline(&pipeline, "audio-encoder-input", "audio-parser")?;
     pipeline
         .by_name("video")
         .ok_or_else(|| "audio export pipeline has no video source".to_owned())?
@@ -2663,7 +2665,8 @@ mod tests {
             "mp4mux name=mux ! filesink name=output \
              videotestsrc num-buffers=90 ! video/x-raw,width=64,height=48,framerate=30/1 \
                ! videoconvert ! x264enc tune=zerolatency ! h264parse ! queue ! mux. \
-             concat name=audio ! audioconvert ! voaacenc ! aacparse ! queue ! mux. \
+             concat name=audio ! audioconvert ! audioresample ! identity name=audio-encoder-input \
+             aacparse name=audio-parser ! queue ! mux. \
              audiotestsrc freq=440 num-buffers=100 samplesperbuffer=480 \
                ! audio/x-raw,rate=48000,channels=2 ! audio. \
              audiotestsrc freq=880 num-buffers=100 samplesperbuffer=480 \
@@ -2674,6 +2677,8 @@ mod tests {
         .expect("audio/video fixture pipeline should parse")
         .downcast::<gst::Pipeline>()
         .expect("audio/video fixture should be a pipeline");
+        super::super::aac::add_to_pipeline(&pipeline, "audio-encoder-input", "audio-parser")
+            .expect("audio/video fixture should use a supported real AAC encoder");
         pipeline
             .by_name("output")
             .expect("fixture should have a file sink")

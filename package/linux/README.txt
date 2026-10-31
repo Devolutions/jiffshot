@@ -40,14 +40,16 @@ Fedora:
   Enable RPM Fusion Free for Fedora 43 and Fedora's Cisco OpenH264 repository,
   install gstreamer1-plugins-ugly and gstreamer1-plugins-bad-freeworld, and use
   gstreamer1-plugin-libav with RPM Fusion's full FFmpeg build (see below).
-  The required GStreamer elements are x264enc, h264parse, mp4mux, voaacenc,
-  aacparse, audiomixer, pipewiresrc, and pulsesrc. Missing elements are reported
-  in the UI.
+  The required GStreamer elements are x264enc, h264parse, mp4mux, aacparse,
+  audiomixer, pipewiresrc, pulsesrc, and either voaacenc or fdkaacenc.
+  Missing elements and AAC encoder creation errors are reported in the UI.
   Fedora 43's GStreamer 1.26 release/update packages do not supply voaacenc;
-  they supply fdkaacenc in gstreamer1-plugins-bad-free instead. The application
-  must support the available AAC encoder before audio recording/export and all
-  native Fedora workspace tests can pass. Installing RPM Fusion alone does
-  not create a voaacenc factory. No encoder alias or test skip is provided.
+  they supply fdkaacenc in gstreamer1-plugins-bad-free instead. Recording, video
+  editing and media fixtures share capability selection: voaacenc is preferred
+  when present, otherwise fdkaacenc is used. A present encoder that fails to
+  create is reported, not silently replaced. Both use 128 kbit/s AAC-LC with raw
+  framing through aacparse into MP4; upstream conversion/resampling negotiates
+  interleaved S16LE audio. No encoder alias or test skip is provided.
 
 Run "jiffshot --capture", "--capture-interactive", "--grab-text", "--scrolling",
 "--scrolling-horizontal", "--panoramic", "--interval", or "--record" to start an action
@@ -300,9 +302,10 @@ aarch64 (OCR data/fonts are noarch). Repository setup follows
 https://rpmfusion.org/Configuration and https://rpmfusion.org/Howto/Multimedia .
 The correct Fedora libav plugin package is gstreamer1-plugin-libav, not
 gstreamer1-libav. Full FFmpeg requires Fedora's Cisco OpenH264 repository.
-Provider checks fail if codecs, English data or the expected font are missing;
-they do not replace native application tests or resolve the voaacenc compatibility
-limitation above.
+Provider checks require the real fdkaacenc factory on Fedora and fail if codecs,
+English data or the expected font are missing. They do not replace native media
+tests, which encode and decode audio using the selected AAC encoder and verify
+tone content, timing, mixing and edits on each native architecture.
 
 Override the release directory (including CARGO_TARGET_DIR builds):
   python3 package/linux/build.py --build-dir /tmp/jiffshot-linux-target/release

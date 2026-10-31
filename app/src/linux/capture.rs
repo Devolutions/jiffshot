@@ -1332,9 +1332,7 @@ fn recording_pipeline_with_layout(
         let audio_resample = gst::ElementFactory::make("audioresample")
             .build()
             .map_err(|error| format!("could not create recording audio resampler: {error}"))?;
-        let audio_encoder = gst::ElementFactory::make("voaacenc")
-            .build()
-            .map_err(|error| format!("could not create AAC audio encoder: {error}"))?;
+        let audio_encoder = super::aac::encoder()?;
         let audio_parser = gst::ElementFactory::make("aacparse")
             .build()
             .map_err(|error| format!("could not create AAC parser: {error}"))?;
@@ -3163,22 +3161,16 @@ mod tests {
     #[test]
     fn recording_pipeline_muxes_microphone_audio_into_mp4() {
         gst::init().expect("GStreamer should initialize");
-        let missing_plugins = ["x264enc", "h264parse", "mp4mux", "voaacenc", "aacparse"]
+        let missing_plugins = ["x264enc", "h264parse", "mp4mux", "aacparse"]
             .into_iter()
             .filter(|plugin| gst::ElementFactory::find(plugin).is_none())
             .collect::<Vec<_>>();
-        if !missing_plugins.is_empty() {
-            assert!(
-                std::env::var_os("CI").is_none(),
-                "CI must install GStreamer audio/video plugins to test microphone muxing; missing: {}",
-                missing_plugins.join(", ")
-            );
-            eprintln!(
-                "Skipping microphone recording test because GStreamer plugins are unavailable: {}",
-                missing_plugins.join(", ")
-            );
-            return;
-        }
+        assert!(
+            missing_plugins.is_empty(),
+            "GStreamer audio/video plugins must be installed to test microphone muxing; missing: {}",
+            missing_plugins.join(", ")
+        );
+        super::super::aac::select_factory().expect("a supported AAC encoder must be installed");
 
         let directory = tempfile::tempdir().expect("temporary directory should be available");
         let path = directory.path().join("recording-with-microphone.mp4");

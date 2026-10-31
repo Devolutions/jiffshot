@@ -499,6 +499,11 @@ class ArchitectureWorkflowTests(unittest.TestCase):
         self.assertIn("family=$(fc-match -f '%{family}\\n' 'DejaVu Sans')", script)
         self.assertIn("printf '%s\\n' \"$family\" | grep -Fx 'DejaVu Sans'", script)
         self.assertNotIn("voaacenc", tokens, "do not silently alias the unavailable AAC factory")
+        docs = (build.ASSETS / "README.txt").read_text()
+        self.assertIn("either voaacenc or fdkaacenc", docs)
+        self.assertIn("voaacenc is preferred", docs)
+        self.assertIn("128 kbit/s AAC-LC", docs)
+        self.assertNotIn("resolve the voaacenc compatibility", docs)
         self.assertLess(job.index("Verify Fedora media and OCR dependency providers"),
                         job.index("Test against native Fedora runtime libraries"))
 
