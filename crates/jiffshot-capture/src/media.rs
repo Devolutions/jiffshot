@@ -11,12 +11,15 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use windows::core::{GUID, HSTRING};
 use windows::Win32::Media::Audio::{
-    eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT,
-    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
+    eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
+    MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+    AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
 };
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED,
+};
 
 pub mod post;
 
@@ -40,7 +43,9 @@ pub fn startup() -> Result<()> {
     }
     static STARTED: OnceLock<std::result::Result<(), String>> = OnceLock::new();
     // SAFETY: MFStartup once per process; never shut down while running.
-    STARTED.get_or_init(|| unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL).map_err(e) }).clone()
+    STARTED
+        .get_or_init(|| unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL).map_err(e) })
+        .clone()
 }
 
 fn pack(hi: u32, lo: u32) -> u64 {
@@ -66,7 +71,12 @@ impl VideoSpec {
     pub fn for_size(width: u32, height: u32, fps: u32) -> VideoSpec {
         let (w, h) = (width & !1, height & !1);
         let bitrate = ((w as u64 * h as u64 * fps as u64) / 6).clamp(1_500_000, 40_000_000) as u32;
-        VideoSpec { width: w, height: h, fps, bitrate }
+        VideoSpec {
+            width: w,
+            height: h,
+            fps,
+            bitrate,
+        }
     }
 }
 
@@ -102,62 +112,120 @@ impl Writer {
             let mut attrs: Option<IMFAttributes> = None;
             MFCreateAttributes(&mut attrs, 2).map_err(e)?;
             let attrs = attrs.unwrap();
-            attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, std::env::var_os("JIFFSHOT_HW_ENCODE").is_some() as u32).map_err(e)?;
-            attrs.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1).map_err(e)?;
-            let writer = MFCreateSinkWriterFromURL(&HSTRING::from(path.as_os_str()), None, &attrs).map_err(e)?;
+            attrs
+                .SetUINT32(
+                    &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+                    std::env::var_os("JIFFSHOT_HW_ENCODE").is_some() as u32,
+                )
+                .map_err(e)?;
+            attrs
+                .SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)
+                .map_err(e)?;
+            let writer = MFCreateSinkWriterFromURL(&HSTRING::from(path.as_os_str()), None, &attrs)
+                .map_err(e)?;
 
             let out = media_type()?;
-            out.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(e)?;
-            out.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264).map_err(e)?;
+            out.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                .map_err(e)?;
+            out.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)
+                .map_err(e)?;
             out.SetUINT32(&MF_MT_AVG_BITRATE, spec.bitrate).map_err(e)?;
-            out.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32).map_err(e)?;
-            out.SetUINT64(&MF_MT_FRAME_SIZE, pack(spec.width, spec.height)).map_err(e)?;
-            out.SetUINT64(&MF_MT_FRAME_RATE, pack(spec.fps, 1)).map_err(e)?;
-            out.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack(1, 1)).map_err(e)?;
+            out.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+                .map_err(e)?;
+            out.SetUINT64(&MF_MT_FRAME_SIZE, pack(spec.width, spec.height))
+                .map_err(e)?;
+            out.SetUINT64(&MF_MT_FRAME_RATE, pack(spec.fps, 1))
+                .map_err(e)?;
+            out.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack(1, 1))
+                .map_err(e)?;
             let video = writer.AddStream(&out).map_err(e)?;
 
             let input = media_type()?;
-            input.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(e)?;
-            input.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32).map_err(e)?;
-            input.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32).map_err(e)?;
-            input.SetUINT64(&MF_MT_FRAME_SIZE, pack(spec.width, spec.height)).map_err(e)?;
-            input.SetUINT64(&MF_MT_FRAME_RATE, pack(spec.fps, 1)).map_err(e)?;
-            input.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack(1, 1)).map_err(e)?;
+            input
+                .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                .map_err(e)?;
+            input
+                .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)
+                .map_err(e)?;
+            input
+                .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+                .map_err(e)?;
+            input
+                .SetUINT64(&MF_MT_FRAME_SIZE, pack(spec.width, spec.height))
+                .map_err(e)?;
+            input
+                .SetUINT64(&MF_MT_FRAME_RATE, pack(spec.fps, 1))
+                .map_err(e)?;
+            input
+                .SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack(1, 1))
+                .map_err(e)?;
             // A positive stride says the rows are top-down.
-            input.SetUINT32(&MF_MT_DEFAULT_STRIDE, spec.width * 4).map_err(e)?;
+            input
+                .SetUINT32(&MF_MT_DEFAULT_STRIDE, spec.width * 4)
+                .map_err(e)?;
             // A keyframe every two seconds, so the editor can seek quickly
             // (hardware encoders otherwise may write just one).
             let mut params: Option<IMFAttributes> = None;
             MFCreateAttributes(&mut params, 1).map_err(e)?;
             let params = params.unwrap();
-            params.SetUINT32(&CODECAPI_AVENC_MPV_GOP_SIZE, spec.fps * 2).map_err(e)?;
-            writer.SetInputMediaType(video, &input, &params).map_err(e)?;
+            params
+                .SetUINT32(&CODECAPI_AVENC_MPV_GOP_SIZE, spec.fps * 2)
+                .map_err(e)?;
+            writer
+                .SetInputMediaType(video, &input, &params)
+                .map_err(e)?;
 
             let audio = match audio {
                 Some(a) => {
                     let out = media_type()?;
-                    out.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(e)?;
+                    out.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
+                        .map_err(e)?;
                     out.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC).map_err(e)?;
                     out.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16).map_err(e)?;
-                    out.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, a.sample_rate).map_err(e)?;
-                    out.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, a.channels).map_err(e)?;
-                    out.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 24_000).map_err(e)?;
+                    out.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, a.sample_rate)
+                        .map_err(e)?;
+                    out.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, a.channels)
+                        .map_err(e)?;
+                    out.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 24_000)
+                        .map_err(e)?;
                     let index = writer.AddStream(&out).map_err(e)?;
                     let input = media_type()?;
-                    input.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(e)?;
-                    input.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM).map_err(e)?;
-                    input.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16).map_err(e)?;
-                    input.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, a.sample_rate).map_err(e)?;
-                    input.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, a.channels).map_err(e)?;
-                    input.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, a.channels * 2).map_err(e)?;
-                    input.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, a.sample_rate * a.channels * 2).map_err(e)?;
+                    input
+                        .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
+                        .map_err(e)?;
+                    input
+                        .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)
+                        .map_err(e)?;
+                    input
+                        .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
+                        .map_err(e)?;
+                    input
+                        .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, a.sample_rate)
+                        .map_err(e)?;
+                    input
+                        .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, a.channels)
+                        .map_err(e)?;
+                    input
+                        .SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, a.channels * 2)
+                        .map_err(e)?;
+                    input
+                        .SetUINT32(
+                            &MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+                            a.sample_rate * a.channels * 2,
+                        )
+                        .map_err(e)?;
                     writer.SetInputMediaType(index, &input, None).map_err(e)?;
                     Some(index)
                 }
                 None => None,
             };
             writer.BeginWriting().map_err(e)?;
-            Ok(Writer { writer, video, audio, spec })
+            Ok(Writer {
+                writer,
+                video,
+                audio,
+                spec,
+            })
         }
     }
 
@@ -194,7 +262,9 @@ impl Writer {
 
     /// Writes interleaved 16-bit samples.
     pub fn write_audio(&mut self, pcm: &[i16], time: i64, duration: i64) -> Result<()> {
-        let Some(stream) = self.audio else { return Ok(()) };
+        let Some(stream) = self.audio else {
+            return Ok(());
+        };
         if pcm.is_empty() {
             return Ok(());
         }
@@ -248,8 +318,11 @@ impl Reader {
             let mut attrs: Option<IMFAttributes> = None;
             MFCreateAttributes(&mut attrs, 1).map_err(e)?;
             let attrs = attrs.unwrap();
-            attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1).map_err(e)?;
-            let reader = MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), &attrs).map_err(e)?;
+            attrs
+                .SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
+                .map_err(e)?;
+            let reader =
+                MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), &attrs).map_err(e)?;
             Self::with_reader(reader)
         }
     }
@@ -264,7 +337,12 @@ impl Reader {
             let mut attrs: Option<IMFAttributes> = None;
             MFCreateAttributes(&mut attrs, 1).map_err(e)?;
             let attrs = attrs.unwrap();
-            attrs.SetGUID(&MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID).map_err(e)?;
+            attrs
+                .SetGUID(
+                    &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+                    &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+                )
+                .map_err(e)?;
             let mut devices: *mut Option<IMFActivate> = std::ptr::null_mut();
             let mut count = 0u32;
             MFEnumDeviceSources(&attrs, &mut devices, &mut count).map_err(e)?;
@@ -279,7 +357,9 @@ impl Reader {
             let mut rattrs: Option<IMFAttributes> = None;
             MFCreateAttributes(&mut rattrs, 1).map_err(e)?;
             let rattrs = rattrs.unwrap();
-            rattrs.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1).map_err(e)?;
+            rattrs
+                .SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
+                .map_err(e)?;
             let reader = MFCreateSourceReaderFromMediaSource(&source, &rattrs).map_err(e)?;
             Self::with_reader(reader)
         }
@@ -289,20 +369,30 @@ impl Reader {
         // SAFETY: Media Foundation calls on a live source reader.
         unsafe {
             let want = media_type()?;
-            want.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(e)?;
-            want.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32).map_err(e)?;
+            want.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                .map_err(e)?;
+            want.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)
+                .map_err(e)?;
             reader.SetCurrentMediaType(VIDEO, None, &want).map_err(e)?;
             let current = reader.GetCurrentMediaType(VIDEO).map_err(e)?;
             let (width, height) = unpack(current.GetUINT64(&MF_MT_FRAME_SIZE).map_err(e)?);
-            let stride = current.GetUINT32(&MF_MT_DEFAULT_STRIDE).map(|s| s as i32).unwrap_or(width as i32 * 4);
-            let fps = current.GetUINT64(&MF_MT_FRAME_RATE).map(unpack).map(|(n, d)| n as f64 / d.max(1) as f64).unwrap_or(30.0);
+            let stride = current
+                .GetUINT32(&MF_MT_DEFAULT_STRIDE)
+                .map(|s| s as i32)
+                .unwrap_or(width as i32 * 4);
+            let fps = current
+                .GetUINT64(&MF_MT_FRAME_RATE)
+                .map(unpack)
+                .map(|(n, d)| n as f64 / d.max(1) as f64)
+                .unwrap_or(30.0);
             let duration = reader
                 .GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
                 .ok()
                 .and_then(|v| u64::try_from(&v).ok())
                 .unwrap_or(0) as i64;
             let pcm = media_type()?;
-            pcm.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(e)?;
+            pcm.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
+                .map_err(e)?;
             pcm.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM).map_err(e)?;
             pcm.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16).map_err(e)?;
             let has_audio_stream = reader.GetNativeMediaType(AUDIO, 0).is_ok();
@@ -319,7 +409,16 @@ impl Reader {
                 Err(error) if has_audio_stream => (None, Some(error)),
                 Err(_) => (None, None),
             };
-            let mut r = Reader { reader, width, height, stride, duration, fps, audio, audio_error };
+            let mut r = Reader {
+                reader,
+                width,
+                height,
+                stride,
+                duration,
+                fps,
+                audio,
+                audio_error,
+            };
             r.select_audio(false)?;
             Ok(r)
         }
@@ -349,7 +448,11 @@ impl Reader {
     pub fn seek(&mut self, time: i64) -> Result<()> {
         let position = PROPVARIANT::from(time.max(0));
         // SAFETY: a PROPVARIANT holding a VT_I8 position, as required.
-        unsafe { self.reader.SetCurrentPosition(&GUID::zeroed(), &position).map_err(e) }
+        unsafe {
+            self.reader
+                .SetCurrentPosition(&GUID::zeroed(), &position)
+                .map_err(e)
+        }
     }
 
     fn read(&mut self, stream: u32) -> Result<Option<(i64, IMFSample)>> {
@@ -357,7 +460,18 @@ impl Reader {
             let (mut flags, mut time) = (0u32, 0i64);
             let mut sample: Option<IMFSample> = None;
             // SAFETY: out-parameters only.
-            unsafe { self.reader.ReadSample(stream, 0, None, Some(&mut flags), Some(&mut time), Some(&mut sample)).map_err(e)? };
+            unsafe {
+                self.reader
+                    .ReadSample(
+                        stream,
+                        0,
+                        None,
+                        Some(&mut flags),
+                        Some(&mut time),
+                        Some(&mut sample),
+                    )
+                    .map_err(e)?
+            };
             if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
                 return Ok(None);
             }
@@ -366,8 +480,13 @@ impl Reader {
                 // here; the picture stays at its original size, top left.
                 // SAFETY: reads the reader's current output type.
                 if let Ok(t) = unsafe { self.reader.GetCurrentMediaType(VIDEO) } {
-                    let coded = unsafe { t.GetUINT64(&MF_MT_FRAME_SIZE) }.map(unpack).map(|(w, _)| w).unwrap_or(self.width);
-                    self.stride = unsafe { t.GetUINT32(&MF_MT_DEFAULT_STRIDE) }.map(|s| s as i32).unwrap_or(coded as i32 * 4);
+                    let coded = unsafe { t.GetUINT64(&MF_MT_FRAME_SIZE) }
+                        .map(unpack)
+                        .map(|(w, _)| w)
+                        .unwrap_or(self.width);
+                    self.stride = unsafe { t.GetUINT32(&MF_MT_DEFAULT_STRIDE) }
+                        .map(|s| s as i32)
+                        .unwrap_or(coded as i32 * 4);
                 }
             }
             if let Some(sample) = sample {
@@ -390,7 +509,9 @@ impl Reader {
 
     /// The next frame in decode order.
     pub fn next_video(&mut self) -> Result<Option<VideoFrame>> {
-        let Some((time, sample)) = self.read(VIDEO)? else { return Ok(None) };
+        let Some((time, sample)) = self.read(VIDEO)? else {
+            return Ok(None);
+        };
         let (w, h) = (self.width as usize, self.height as usize);
         let row = w * 4;
         let mut bgra = vec![0u8; row * h];
@@ -404,14 +525,26 @@ impl Reader {
                 bgra[y * row..(y + 1) * row].copy_from_slice(&raw[start..start + row]);
             }
         }
-        Ok(Some(VideoFrame { time, width: self.width, height: self.height, bgra }))
+        Ok(Some(VideoFrame {
+            time,
+            width: self.width,
+            height: self.height,
+            bgra,
+        }))
     }
 
     /// The next block of interleaved 16-bit audio.
     pub fn next_audio(&mut self) -> Result<Option<(i64, Vec<i16>)>> {
-        let Some((time, sample)) = self.read(AUDIO)? else { return Ok(None) };
+        let Some((time, sample)) = self.read(AUDIO)? else {
+            return Ok(None);
+        };
         let raw = Self::bytes(&sample)?;
-        Ok(Some((time, raw.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect())))
+        Ok(Some((
+            time,
+            raw.chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                .collect(),
+        )))
     }
 
     /// The frame showing at `time`.
@@ -466,29 +599,50 @@ pub fn capture_audio(microphone: bool) -> Result<AudioCapture> {
             // format is freed with CoTaskMemFree as documented.
             let run = || unsafe {
                 CoInitializeEx(None, COINIT_MULTITHREADED).ok().map_err(e)?;
-                let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(e)?;
-                let device = devices.GetDefaultAudioEndpoint(if microphone { eCapture } else { eRender }, eConsole).map_err(e)?;
+                let devices: IMMDeviceEnumerator =
+                    CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(e)?;
+                let device = devices
+                    .GetDefaultAudioEndpoint(if microphone { eCapture } else { eRender }, eConsole)
+                    .map_err(e)?;
                 let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(e)?;
                 let format = client.GetMixFormat().map_err(e)?;
                 let f: WAVEFORMATEX = *format;
                 let float = f.wFormatTag == WAVE_FORMAT_IEEE_FLOAT
-                    || (f.wFormatTag == WAVE_FORMAT_EXTENSIBLE && { (*(format as *const WAVEFORMATEXTENSIBLE)).SubFormat } == SUBTYPE_IEEE_FLOAT);
-                let (channels, bits, rate) = (f.nChannels as usize, f.wBitsPerSample, f.nSamplesPerSec);
-                let flags = if microphone { 0 } else { AUDCLNT_STREAMFLAGS_LOOPBACK };
-                let init = client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 2_000_000, 0, format, None);
+                    || (f.wFormatTag == WAVE_FORMAT_EXTENSIBLE && {
+                        (*(format as *const WAVEFORMATEXTENSIBLE)).SubFormat
+                    } == SUBTYPE_IEEE_FLOAT);
+                let (channels, bits, rate) =
+                    (f.nChannels as usize, f.wBitsPerSample, f.nSamplesPerSec);
+                let flags = if microphone {
+                    0
+                } else {
+                    AUDCLNT_STREAMFLAGS_LOOPBACK
+                };
+                let init =
+                    client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 2_000_000, 0, format, None);
                 CoTaskMemFree(Some(format as *const _));
                 init.map_err(e)?;
-                if !(rate == 44_100 || rate == 48_000) || !(float && bits == 32 || !float && bits == 16) {
-                    return Err(format!("unsupported audio format: {rate} Hz, {bits} bit{}", if float { " float" } else { "" }));
+                if !(rate == 44_100 || rate == 48_000)
+                    || !(float && bits == 32 || !float && bits == 16)
+                {
+                    return Err(format!(
+                        "unsupported audio format: {rate} Hz, {bits} bit{}",
+                        if float { " float" } else { "" }
+                    ));
                 }
                 let capture: IAudioCaptureClient = client.GetService().map_err(e)?;
                 client.Start().map_err(e)?;
-                let _ = ready_tx.send(Ok(AudioSpec { sample_rate: rate, channels: 2 }));
+                let _ = ready_tx.send(Ok(AudioSpec {
+                    sample_rate: rate,
+                    channels: 2,
+                }));
                 while !flag.load(Ordering::Acquire) {
                     std::thread::sleep(Duration::from_millis(10));
                     while capture.GetNextPacketSize().map_err(e)? > 0 {
                         let (mut data, mut frames, mut bflags) = (std::ptr::null_mut(), 0u32, 0u32);
-                        capture.GetBuffer(&mut data, &mut frames, &mut bflags, None, None).map_err(e)?;
+                        capture
+                            .GetBuffer(&mut data, &mut frames, &mut bflags, None, None)
+                            .map_err(e)?;
                         let n = frames as usize;
                         let mut out = vec![0i16; n * 2];
                         if bflags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 == 0 {
@@ -518,8 +672,15 @@ pub fn capture_audio(microphone: bool) -> Result<AudioCapture> {
             }
         })
         .map_err(|e| e.to_string())?;
-    let spec = ready_rx.recv_timeout(Duration::from_secs(5)).map_err(|_| "audio device did not start".to_owned())??;
-    Ok(AudioCapture { spec, samples: rx, stop, thread: Some(thread) })
+    let spec = ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "audio device did not start".to_owned())??;
+    Ok(AudioCapture {
+        spec,
+        samples: rx,
+        stop,
+        thread: Some(thread),
+    })
 }
 
 /// Silence for `frames` stereo frames.
@@ -537,7 +698,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.mp4");
         let spec = VideoSpec::for_size(320, 240, 10);
-        let audio = AudioSpec { sample_rate: 48_000, channels: 2 };
+        let audio = AudioSpec {
+            sample_rate: 48_000,
+            channels: 2,
+        };
         let mut w = Writer::create(&path, spec, Some(audio)).unwrap();
         let step = HNS_PER_SECOND / 10;
         for i in 0..20i64 {
@@ -547,30 +711,55 @@ mod tests {
                 for x in 0..320usize {
                     let p = &mut frame[(y * 320 + x) * 4..(y * 320 + x) * 4 + 4];
                     let bar = (x as i64 / 16) == i;
-                    let c = if bar { [255, 255, 255, 0] } else if y < 120 { [40, 40, 220, 0] } else { [220, 60, 40, 0] };
+                    let c = if bar {
+                        [255, 255, 255, 0]
+                    } else if y < 120 {
+                        [40, 40, 220, 0]
+                    } else {
+                        [220, 60, 40, 0]
+                    };
                     p.copy_from_slice(&c);
                 }
             }
             w.write_frame(&frame, i * step, step).unwrap();
-            let tone: Vec<i16> = (0..4800).flat_map(|n| {
-                let v = ((n as f32 / 48_000.0 * 440.0 * std::f32::consts::TAU).sin() * 8000.0) as i16;
-                [v, v]
-            }).collect();
+            let tone: Vec<i16> = (0..4800)
+                .flat_map(|n| {
+                    let v = ((n as f32 / 48_000.0 * 440.0 * std::f32::consts::TAU).sin() * 8000.0)
+                        as i16;
+                    [v, v]
+                })
+                .collect();
             w.write_audio(&tone, i * step, step).unwrap();
         }
         w.finish().unwrap();
 
         let mut r = Reader::open(&path).unwrap();
         assert_eq!((r.width, r.height), (320, 240));
-        assert!((r.duration - 2 * HNS_PER_SECOND).abs() < HNS_PER_SECOND / 5, "duration {}", r.duration);
+        assert!(
+            (r.duration - 2 * HNS_PER_SECOND).abs() < HNS_PER_SECOND / 5,
+            "duration {}",
+            r.duration
+        );
         assert_eq!(r.audio, Some(audio));
         let f = r.frame_at(HNS_PER_SECOND).unwrap().unwrap();
         // Orientation and colors survive: red on top, blue at the bottom
         // (BGRA), and the bar of frame 10 at x = 160..176.
         let px = |x: usize, y: usize| &f.bgra[(y * 320 + x) * 4..(y * 320 + x) * 4 + 3];
-        assert!(px(40, 30)[2] > 150 && px(40, 30)[0] < 100, "top is red: {:?}", px(40, 30));
-        assert!(px(40, 200)[0] > 150 && px(40, 200)[2] < 100, "bottom is blue: {:?}", px(40, 200));
-        assert!(px(168, 60).iter().all(|c| *c > 200), "bar at frame 10: {:?}", px(168, 60));
+        assert!(
+            px(40, 30)[2] > 150 && px(40, 30)[0] < 100,
+            "top is red: {:?}",
+            px(40, 30)
+        );
+        assert!(
+            px(40, 200)[0] > 150 && px(40, 200)[2] < 100,
+            "bottom is blue: {:?}",
+            px(40, 200)
+        );
+        assert!(
+            px(168, 60).iter().all(|c| *c > 200),
+            "bar at frame 10: {:?}",
+            px(168, 60)
+        );
         r.select_audio(true).unwrap();
         r.seek(0).unwrap();
         let (_, pcm) = r.next_audio().unwrap().unwrap();
@@ -589,7 +778,15 @@ mod tests {
         let (w, h) = (spec.width as usize, spec.height as usize);
         let mut writer = Writer::create(&path, spec, None).unwrap();
         // A white column at x = 700..740 on dark gray, every row.
-        let frame: Vec<u8> = (0..w * h).flat_map(|i| if (700..740).contains(&(i % w)) { [255u8; 4] } else { [40, 40, 40, 0] }).collect();
+        let frame: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                if (700..740).contains(&(i % w)) {
+                    [255u8; 4]
+                } else {
+                    [40, 40, 40, 0]
+                }
+            })
+            .collect();
         let step = HNS_PER_SECOND / 10;
         for i in 0..10i64 {
             writer.write_frame(&frame, i * step, step).unwrap();
@@ -601,7 +798,13 @@ mod tests {
         let f = r.frame_at(HNS_PER_SECOND / 2).unwrap().unwrap();
         for y in [5, h / 2, h - 5] {
             let px = |x: usize| f.bgra[(y * w + x) * 4];
-            assert!(px(720) > 200 && px(650) < 90 && px(790) < 90, "column at row {y}: {} {} {}", px(650), px(720), px(790));
+            assert!(
+                px(720) > 200 && px(650) < 90 && px(790) < 90,
+                "column at row {y}: {} {} {}",
+                px(650),
+                px(720),
+                px(790)
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -615,7 +818,14 @@ mod probe {
     fn probe_file() {
         let path = std::env::var("JIFFSHOT_PROBE").unwrap();
         let mut r = super::Reader::open(std::path::Path::new(&path)).unwrap();
-        println!("{}x{} {:.2}s fps {} audio {:?}", r.width, r.height, r.duration as f64 / 1e7, r.fps, r.audio);
+        println!(
+            "{}x{} {:.2}s fps {} audio {:?}",
+            r.width,
+            r.height,
+            r.duration as f64 / 1e7,
+            r.fps,
+            r.audio
+        );
         let mut n = 0;
         loop {
             match r.next_video() {

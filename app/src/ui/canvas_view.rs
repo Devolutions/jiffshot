@@ -10,13 +10,23 @@
 //! [`crate::canvas`]); the middle or right button, or Alt with the left one,
 //! pans instead, and the wheel zooms around the pointer.
 
+#[cfg(target_os = "linux")]
+#[path = "canvas_view/canvas_overlay.rs"]
+mod canvas_overlay;
+#[cfg(not(target_os = "linux"))]
 mod canvas_overlay;
 
 use super::UiOnly;
+use crate::canvas::{
+    self, Damage, Overlay, MOD_ALT, MOD_CTRL, MOD_SHIFT, POINTER_MOVED, POINTER_PRESSED,
+    POINTER_RELEASED,
+};
 use canvas_overlay::{OverlayLayer, Scene};
-use crate::canvas::{self, Damage, Overlay, MOD_ALT, MOD_CTRL, MOD_SHIFT, POINTER_MOVED, POINTER_PRESSED, POINTER_RELEASED};
 use jiffshot_doc::IRect;
-use rustolonia::pixel_surface::{Cursor, Interpolation, Modifiers, MouseButton, PixelFormat, Placement, PointerInput, PointerKind, SurfaceInput, SurfaceMetrics};
+use rustolonia::pixel_surface::{
+    Cursor, Interpolation, Modifiers, MouseButton, PixelFormat, Placement, PointerInput,
+    PointerKind, SurfaceInput, SurfaceMetrics,
+};
 use rustolonia::{AppScope, Control, Effect, Key, PixelSurface, Result, Signal, ThemeVariant};
 use std::cell::{RefCell, RefMut};
 use std::rc::Rc;
@@ -62,20 +72,28 @@ struct Inner {
 
 #[derive(Default)]
 struct Handlers {
-    changed: RefCell<Option<Rc<dyn Fn(i32)>>>,
+    changed: RefCell<Option<ChangedHandler>>,
     edit_requested: RefCell<Option<Rc<dyn Fn()>>>,
-    zoom_changed: RefCell<Option<Rc<dyn Fn(f64)>>>,
+    zoom_changed: RefCell<Option<ZoomChangedHandler>>,
     cancel_requested: RefCell<Option<Rc<dyn Fn()>>>,
 }
+
+type ChangedHandler = Rc<dyn Fn(i32)>;
+type ZoomChangedHandler = Rc<dyn Fn(f64)>;
 
 /// What a pointer drag is doing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Gesture {
     Idle,
     /// Moving the view; `anchor` is the last pointer position (DIPs).
-    Pan { anchor: (f64, f64) },
+    Pan {
+        anchor: (f64, f64),
+    },
     /// Feeding the editor; `last` is the last document point sent.
-    Draw { last: (f64, f64), mods: i32 },
+    Draw {
+        last: (f64, f64),
+        mods: i32,
+    },
 }
 
 /// What to tell the handlers once the state is released.
@@ -89,7 +107,10 @@ struct Notice {
 
 impl Notice {
     fn or(self, other: Notice) -> Notice {
-        Notice { changed: self.changed | other.changed, zoom: self.zoom || other.zoom }
+        Notice {
+            changed: self.changed | other.changed,
+            zoom: self.zoom || other.zoom,
+        }
     }
 }
 
@@ -116,7 +137,10 @@ struct State {
 
 impl State {
     fn to_document(&self, x: f64, y: f64) -> (f64, f64) {
-        ((x - self.offset.0) / self.zoom, (y - self.offset.1) / self.zoom)
+        (
+            (x - self.offset.0) / self.zoom,
+            (y - self.offset.1) / self.zoom,
+        )
     }
 
     fn tolerance(&self) -> f64 {
@@ -130,8 +154,15 @@ impl State {
     /// Zooms to `zoom` keeping the document point under `anchor` (DIPs).
     fn zoom_around(&mut self, anchor: (f64, f64), zoom: f64) {
         let document = self.to_document(anchor.0, anchor.1);
-        self.zoom = if zoom.is_finite() { zoom.clamp(MIN_ZOOM, MAX_ZOOM) } else { self.zoom };
-        self.offset = (anchor.0 - document.0 * self.zoom, anchor.1 - document.1 * self.zoom);
+        self.zoom = if zoom.is_finite() {
+            zoom.clamp(MIN_ZOOM, MAX_ZOOM)
+        } else {
+            self.zoom
+        };
+        self.offset = (
+            anchor.0 - document.0 * self.zoom,
+            anchor.1 - document.1 * self.zoom,
+        );
         self.fit_pending = false;
     }
 
@@ -147,9 +178,14 @@ impl State {
             return false;
         }
         let (w, h) = (self.image.0 as f64, self.image.1 as f64);
-        let zoom = ((width - FIT_MARGIN) / w).min((height - FIT_MARGIN) / h).min(1.0);
+        let zoom = ((width - FIT_MARGIN) / w)
+            .min((height - FIT_MARGIN) / h)
+            .min(1.0);
         self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-        self.offset = (((width - w * self.zoom) / 2.0).round(), ((height - h * self.zoom) / 2.0).round());
+        self.offset = (
+            ((width - w * self.zoom) / 2.0).round(),
+            ((height - h * self.zoom) / 2.0).round(),
+        );
         self.fit_pending = false;
         true
     }
@@ -169,7 +205,9 @@ impl State {
 
 /// The editor's modifier bits for a surface event.
 fn modifier_bits(m: Modifiers) -> i32 {
-    (if m.shift() { MOD_SHIFT } else { 0 }) | (if m.control() { MOD_CTRL } else { 0 }) | (if m.alt() { MOD_ALT } else { 0 })
+    (if m.shift() { MOD_SHIFT } else { 0 })
+        | (if m.control() { MOD_CTRL } else { 0 })
+        | (if m.alt() { MOD_ALT } else { 0 })
 }
 
 /// The pointer shape for an editor cursor code.
@@ -265,7 +303,11 @@ impl CanvasView {
                 "out" => st.zoom_around(center, st.zoom / ZOOM_STEP),
                 _ => return Ok(Notice::default()),
             }
-            Ok(Notice { zoom: true, ..Notice::default() }.or(inner.update_view(st)?))
+            Ok(Notice {
+                zoom: true,
+                ..Notice::default()
+            }
+            .or(inner.update_view(st)?))
         });
         self.inner.notify(notice);
     }
@@ -275,7 +317,11 @@ impl CanvasView {
         let notice = self.inner.with_state("set zoom", |inner, st| {
             let center = st.center();
             st.zoom_around(center, zoom);
-            Ok(Notice { zoom: true, ..Notice::default() }.or(inner.update_view(st)?))
+            Ok(Notice {
+                zoom: true,
+                ..Notice::default()
+            }
+            .or(inner.update_view(st)?))
         });
         self.inner.notify(notice);
     }
@@ -321,9 +367,14 @@ impl CanvasView {
             let light = match theme.with(|t| t.clone()).as_str() {
                 "Light" => true,
                 "Dark" => false,
-                _ => inner.scope.actual_theme_variant().is_ok_and(|v| v == ThemeVariant::Light),
+                _ => inner
+                    .scope
+                    .actual_theme_variant()
+                    .is_ok_and(|v| v == ThemeVariant::Light),
             };
-            inner.surface.set_background(Some(if light { BACKDROP_LIGHT } else { BACKDROP_DARK }))
+            inner
+                .surface
+                .set_background(Some(if light { BACKDROP_LIGHT } else { BACKDROP_DARK }))
         })?;
         Ok(())
     }
@@ -354,7 +405,11 @@ impl Inner {
     /// Runs `f` with the state borrowed; reports a failure or a reentrant
     /// call (a handler calling back into the canvas mid-update) instead of
     /// panicking.
-    fn with_state(&self, what: &str, f: impl FnOnce(&Self, &mut State) -> Result<Notice>) -> Notice {
+    fn with_state(
+        &self,
+        what: &str,
+        f: impl FnOnce(&Self, &mut State) -> Result<Notice>,
+    ) -> Notice {
         let Ok(mut st) = self.state.try_borrow_mut() else {
             crate::trace::line(&format!("canvas: {what}: skipped (reentrant call)"));
             return Notice::default();
@@ -433,11 +488,23 @@ impl Inner {
                 full = true;
             }
             let bounds = IRect::of_size(width, height);
-            let area = if full { Some(bounds) } else { damage.rect.intersect(&bounds) };
+            let area = if full {
+                Some(bounds)
+            } else {
+                damage.rect.intersect(&bounds)
+            };
             if let Some(r) = area {
                 let stride = width as usize * 4;
                 let start = r.y as usize * stride + r.x as usize * 4;
-                surface.write_layer(DOCUMENT_LAYER, r.x, r.y, r.w as u32, r.h as u32, &display.data()[start..], stride)?;
+                surface.write_layer(
+                    DOCUMENT_LAYER,
+                    r.x,
+                    r.y,
+                    r.w as u32,
+                    r.h as u32,
+                    &display.data()[start..],
+                    stride,
+                )?;
             }
             Ok(())
         });
@@ -446,7 +513,10 @@ impl Inner {
         }
         st.overlay = canvas::overlay();
         let notice = self.update_view(st)?;
-        Ok(Notice { changed: damage.flags, ..notice })
+        Ok(Notice {
+            changed: damage.flags,
+            ..notice
+        })
     }
 
     /// Fits if pending, places the document layer and redraws the overlay.
@@ -454,17 +524,30 @@ impl Inner {
         let zoom = st.fit_pending && st.fit();
         if st.has_image() {
             let (w, h) = (st.image.0 as f64, st.image.1 as f64);
-            let placement = Placement::Rect { x: st.offset.0, y: st.offset.1, width: w * st.zoom, height: h * st.zoom };
+            let placement = Placement::Rect {
+                x: st.offset.0,
+                y: st.offset.1,
+                width: w * st.zoom,
+                height: h * st.zoom,
+            };
             // Nearest neighbor when zoomed in, so pixels stay crisp.
-            let interpolation = if st.zoom >= NEAREST_ZOOM { Interpolation::None } else { Interpolation::Medium };
+            let interpolation = if st.zoom >= NEAREST_ZOOM {
+                Interpolation::None
+            } else {
+                Interpolation::Medium
+            };
             if st.placed != Some((placement, interpolation)) {
-                self.surface.place_layer(DOCUMENT_LAYER, placement, interpolation, 1.0)?;
+                self.surface
+                    .place_layer(DOCUMENT_LAYER, placement, interpolation, 1.0)?;
                 st.placed = Some((placement, interpolation));
             }
         }
         let scene = st.scene();
         st.layer.present(&scene, &self.surface, OVERLAY_LAYER)?;
-        Ok(Notice { zoom, ..Notice::default() })
+        Ok(Notice {
+            zoom,
+            ..Notice::default()
+        })
     }
 
     /// Shows the drag damage collected since the last pointer event batch.
@@ -482,7 +565,11 @@ impl Inner {
     fn on_input(self: &Rc<Self>, input: &SurfaceInput) -> Result<bool> {
         match input {
             SurfaceInput::Pointer(p) => self.on_pointer(p),
-            SurfaceInput::Key { down: true, key: Some(key), modifiers } => Ok(self.on_key(*key, *modifiers)),
+            SurfaceInput::Key {
+                down: true,
+                key: Some(key),
+                modifiers,
+            } => Ok(self.on_key(*key, *modifiers)),
             SurfaceInput::Resize(metrics) => {
                 let notice = self.with_state("resize", |inner, st| {
                     st.metrics = *metrics;
@@ -521,13 +608,16 @@ impl Inner {
     }
 
     fn on_pointer(self: &Rc<Self>, p: &PointerInput) -> Result<bool> {
-        let Some(mut st) = self.state() else { return Ok(false) };
+        let Some(mut st) = self.state() else {
+            return Ok(false);
+        };
         let mut notice = Notice::default();
         let mut edit_requested = false;
         let handled = match (p.kind, st.gesture) {
             // One drag at a time: other buttons are ignored until it ends.
             (PointerKind::Pressed, Gesture::Idle) => {
-                let pan = matches!(p.button, MouseButton::Middle | MouseButton::Right) || (p.button == MouseButton::Left && p.modifiers.alt());
+                let pan = matches!(p.button, MouseButton::Middle | MouseButton::Right)
+                    || (p.button == MouseButton::Left && p.modifiers.alt());
                 if pan {
                     st.gesture = Gesture::Pan { anchor: (p.x, p.y) };
                     self.set_cursor(&mut st, Cursor::SizeAll)?;
@@ -588,14 +678,24 @@ impl Inner {
             (PointerKind::Released, Gesture::Pan { .. }) => {
                 st.gesture = Gesture::Idle;
                 let (x, y) = st.to_document(p.x, p.y);
-                let code = if st.has_image() { canvas::hover(x, y, st.tolerance()) } else { 0 };
+                let code = if st.has_image() {
+                    canvas::hover(x, y, st.tolerance())
+                } else {
+                    0
+                };
                 self.set_cursor(&mut st, cursor_of(code))?;
                 true
             }
             (PointerKind::Released, Gesture::Draw { .. }) if p.button == MouseButton::Left => {
                 st.gesture = Gesture::Idle;
                 let (x, y) = st.to_document(p.x, p.y);
-                let damage = canvas::pointer(POINTER_RELEASED, x, y, modifier_bits(p.modifiers), st.tolerance());
+                let damage = canvas::pointer(
+                    POINTER_RELEASED,
+                    x,
+                    y,
+                    modifier_bits(p.modifiers),
+                    st.tolerance(),
+                );
                 let damage = self.take_pending(&mut st, damage);
                 self.set_cursor(&mut st, cursor_of(damage.cursor))?;
                 notice = self.present(&mut st, damage, false)?;
@@ -610,7 +710,8 @@ impl Inner {
             // drag where it was rather than leave the editor mid-gesture.
             (PointerKind::CaptureLost, Gesture::Draw { last, mods }) => {
                 st.gesture = Gesture::Idle;
-                let damage = canvas::pointer(POINTER_RELEASED, last.0, last.1, mods, st.tolerance());
+                let damage =
+                    canvas::pointer(POINTER_RELEASED, last.0, last.1, mods, st.tolerance());
                 let damage = self.take_pending(&mut st, damage);
                 notice = self.present(&mut st, damage, false)?;
                 false
@@ -618,7 +719,11 @@ impl Inner {
             (PointerKind::Wheel, _) => {
                 let zoom = st.zoom * WHEEL_STEP.powf(p.delta_y);
                 st.zoom_around((p.x, p.y), zoom);
-                notice = Notice { zoom: true, ..Notice::default() }.or(self.update_view(&mut st)?);
+                notice = Notice {
+                    zoom: true,
+                    ..Notice::default()
+                }
+                .or(self.update_view(&mut st)?);
                 true
             }
             _ => false,
@@ -641,7 +746,11 @@ mod tests {
 
     fn state(view: (f64, f64), image: (u32, u32)) -> State {
         State {
-            metrics: SurfaceMetrics { width: view.0, height: view.1, scaling: 1.0 },
+            metrics: SurfaceMetrics {
+                width: view.0,
+                height: view.1,
+                scaling: 1.0,
+            },
             image,
             zoom: 1.0,
             offset: (0.0, 0.0),

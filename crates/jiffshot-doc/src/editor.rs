@@ -96,7 +96,10 @@ impl Tool {
 
     pub fn from_name(name: &str) -> Option<Tool> {
         let key: String = name.chars().filter(|c| !c.is_whitespace()).collect();
-        TOOLS.iter().copied().find(|t| t.name().replace(' ', "").eq_ignore_ascii_case(&key))
+        TOOLS
+            .iter()
+            .copied()
+            .find(|t| t.name().replace(' ', "").eq_ignore_ascii_case(&key))
     }
 
     /// Choices for the tool's variant, first is the default.
@@ -107,15 +110,47 @@ impl Tool {
             Tool::Highlight => &["Rectangle", "Rounded", "Ellipse", "Freehand"],
             Tool::Pen => &["Pen", "Marker"],
             Tool::Blur => &["Blur", "Pixelate", "Redact"],
-            Tool::Magnify => &["Circle", "Rectangle", "Circle with view", "Rectangle with view"],
+            Tool::Magnify => &[
+                "Circle",
+                "Rectangle",
+                "Circle with view",
+                "Rectangle with view",
+            ],
             Tool::Spotlight => &["Rectangle", "Rounded", "Ellipse"],
-            Tool::Stamp => &["Check", "Cross", "Star", "Heart", "Warning", "Info", "Question", "Exclamation", "Plus", "Minus", "Pointer", "Thumbs up"],
-            Tool::CutOut => &["Horizontal", "Vertical", "Horizontal sawtooth", "Vertical sawtooth", "Horizontal wave", "Vertical wave"],
+            Tool::Stamp => &[
+                "Check",
+                "Cross",
+                "Star",
+                "Heart",
+                "Warning",
+                "Info",
+                "Question",
+                "Exclamation",
+                "Plus",
+                "Minus",
+                "Pointer",
+                "Thumbs up",
+            ],
+            Tool::CutOut => &[
+                "Horizontal",
+                "Vertical",
+                "Horizontal sawtooth",
+                "Vertical sawtooth",
+                "Horizontal wave",
+                "Vertical wave",
+            ],
             Tool::Fill => &["Area", "Global"],
             Tool::MagicWand => &["Area", "Global"],
             Tool::Selection => &["Rectangle", "Ellipse", "Freehand"],
             Tool::Eraser => &["Round", "Square"],
-            Tool::Step => &["Numbers", "Letters", "Lowercase", "Roman", "Numbers square", "Letters square"],
+            Tool::Step => &[
+                "Numbers",
+                "Letters",
+                "Lowercase",
+                "Roman",
+                "Numbers square",
+                "Letters square",
+            ],
             _ => &[],
         }
     }
@@ -139,7 +174,10 @@ impl Tool {
     }
 
     fn uses_marquee(self) -> bool {
-        matches!(self, Tool::Crop | Tool::CutOut | Tool::Selection | Tool::SmartMove)
+        matches!(
+            self,
+            Tool::Crop | Tool::CutOut | Tool::Selection | Tool::SmartMove
+        )
     }
 
     /// Tools that lift part of the image and so use a background fill.
@@ -151,10 +189,20 @@ impl Tool {
 pub fn default_style(tool: Tool) -> Style {
     let base = Style::default();
     match tool {
-        Tool::Arrow => Style { end_cap: Cap::Arrow, width: 8.0, ..base },
+        Tool::Arrow => Style {
+            end_cap: Cap::Arrow,
+            width: 8.0,
+            ..base
+        },
         Tool::Line => Style { width: 6.0, ..base },
         Tool::Shape => Style { width: 6.0, ..base },
-        Tool::Text => Style { width: 0.0, text_color: Rgba::RED, font_size: 32.0, bold: true, ..base },
+        Tool::Text => Style {
+            width: 0.0,
+            text_color: Rgba::RED,
+            font_size: 32.0,
+            bold: true,
+            ..base
+        },
         Tool::Callout => Style {
             width: 3.0,
             stroke: Rgba::rgb(0x1E, 0x6F, 0xD9),
@@ -165,15 +213,45 @@ pub fn default_style(tool: Tool) -> Style {
             align: Align::Center,
             ..base
         },
-        Tool::Step => Style { width: 0.0, fill: Rgba::RED, text_color: Rgba::WHITE, font_size: 22.0, ..base },
+        Tool::Step => Style {
+            width: 0.0,
+            fill: Rgba::RED,
+            text_color: Rgba::WHITE,
+            font_size: 22.0,
+            ..base
+        },
         Tool::Pen => Style { width: 5.0, ..base },
-        Tool::Highlight => Style { fill: Rgba::YELLOW.with_alpha(180), stroke: Rgba::YELLOW.with_alpha(180), width: 24.0, multiply: true, ..base },
-        Tool::Blur => Style { fill: Rgba::BLACK, width: 0.0, ..base },
-        Tool::Magnify => Style { width: 4.0, stroke: Rgba::rgb(0x30, 0x30, 0x30), shadow: true, ..base },
+        Tool::Highlight => Style {
+            fill: Rgba::YELLOW.with_alpha(180),
+            stroke: Rgba::YELLOW.with_alpha(180),
+            width: 24.0,
+            multiply: true,
+            ..base
+        },
+        Tool::Blur => Style {
+            fill: Rgba::BLACK,
+            width: 0.0,
+            ..base
+        },
+        Tool::Magnify => Style {
+            width: 4.0,
+            stroke: Rgba::rgb(0x30, 0x30, 0x30),
+            shadow: true,
+            ..base
+        },
         Tool::Spotlight => Style { width: 0.0, ..base },
-        Tool::Fill => Style { fill: Rgba::YELLOW, ..base },
-        Tool::Eraser => Style { width: 24.0, ..base },
-        Tool::Selection | Tool::MagicWand | Tool::SmartMove => Style { fill: Rgba::WHITE, ..base },
+        Tool::Fill => Style {
+            fill: Rgba::YELLOW,
+            ..base
+        },
+        Tool::Eraser => Style {
+            width: 24.0,
+            ..base
+        },
+        Tool::Selection | Tool::MagicWand | Tool::SmartMove => Style {
+            fill: Rgba::WHITE,
+            ..base
+        },
         _ => base,
     }
 }
@@ -210,21 +288,49 @@ pub enum Cursor {
 
 #[derive(Clone, Debug)]
 enum Drag {
-    Create { id: u64, start: Pt },
-    Move { id: u64, last: Pt, moved: bool },
+    Create {
+        id: u64,
+        start: Pt,
+    },
+    Move {
+        id: u64,
+        last: Pt,
+        moved: bool,
+    },
     /// Moving every selected object together.
-    MoveMany { last: Pt, moved: bool },
+    MoveMany {
+        last: Pt,
+        moved: bool,
+    },
     /// Drawing a box to select the objects it touches.
-    Select { start: Pt, add: bool },
-    Handle { id: u64, handle: Handle },
-    Marquee { start: Pt },
+    Select {
+        start: Pt,
+        add: bool,
+    },
+    Handle {
+        id: u64,
+        handle: Handle,
+    },
+    Marquee {
+        start: Pt,
+    },
     /// A freehand selection outline.
-    Lasso { points: Vec<Pt> },
-    Erase { last: Pt },
+    Lasso {
+        points: Vec<Pt>,
+    },
+    Erase {
+        last: Pt,
+    },
     /// Dragging the canvas's right, bottom or corner edge.
-    Canvas { handle: Handle },
+    Canvas {
+        handle: Handle,
+    },
     /// Moving the image inside a selected drop zone.
-    Pan { id: u64, last: Pt, moved: bool },
+    Pan {
+        id: u64,
+        last: Pt,
+        moved: bool,
+    },
 }
 
 /// What fills the hole an object leaves when it is lifted off the image.
@@ -379,7 +485,10 @@ impl Editor {
     }
 
     pub fn tool_style(&self, tool: Tool) -> Style {
-        self.styles.get(&tool).cloned().unwrap_or_else(|| default_style(tool))
+        self.styles
+            .get(&tool)
+            .cloned()
+            .unwrap_or_else(|| default_style(tool))
     }
 
     pub fn set_tool_style(&mut self, tool: Tool, style: Style) {
@@ -396,7 +505,10 @@ impl Editor {
     }
 
     pub fn variant(&self, tool: Tool) -> String {
-        self.variants.get(&tool).cloned().unwrap_or_else(|| tool.variants().first().unwrap_or(&"").to_string())
+        self.variants
+            .get(&tool)
+            .cloned()
+            .unwrap_or_else(|| tool.variants().first().unwrap_or(&"").to_string())
     }
 
     /// Sets the current tool's variant, and the selected object's when it
@@ -406,7 +518,9 @@ impl Editor {
         self.variants.insert(tool, value.to_owned());
         if let Some(id) = self.selection {
             let v = value.to_owned();
-            self.edit(id, "Change type", Some(format!("variant{id}")), move |o| apply_variant(o, &v));
+            self.edit(id, "Change type", Some(format!("variant{id}")), move |o| {
+                apply_variant(o, &v)
+            });
         }
         let variant = self.variant(tool);
         if tool == Tool::Pen || tool == Tool::Highlight {
@@ -427,7 +541,13 @@ impl Editor {
     /// of `tool` get.
     pub fn tool_amount(&self, tool: Tool) -> f32 {
         let default = match tool {
-            Tool::Blur => if self.variant(Tool::Blur) == "Pixelate" { 12.0 } else { 10.0 },
+            Tool::Blur => {
+                if self.variant(Tool::Blur) == "Pixelate" {
+                    12.0
+                } else {
+                    10.0
+                }
+            }
             Tool::Magnify => 2.0,
             Tool::Spotlight => 0.6,
             Tool::MagicWand => 25.0,
@@ -444,7 +564,9 @@ impl Editor {
 
     /// Style shown in the properties panel: the selection's, or the tool's.
     pub fn current_style(&self) -> Style {
-        self.selected().map(|o| o.style.clone()).unwrap_or_else(|| self.tool_style(self.tool))
+        self.selected()
+            .map(|o| o.style.clone())
+            .unwrap_or_else(|| self.tool_style(self.tool))
     }
 
     /// Edits the selection's style (undoably, coalescing edits of the same
@@ -482,7 +604,10 @@ impl Editor {
 
     /// Every selected object, the panel's one first.
     pub fn selected_ids(&self) -> Vec<u64> {
-        self.selection.into_iter().chain(self.others.iter().copied()).collect()
+        self.selection
+            .into_iter()
+            .chain(self.others.iter().copied())
+            .collect()
     }
 
     /// Adds `id` to the selection, or takes it out (Shift-click).
@@ -498,9 +623,16 @@ impl Editor {
 
     /// Replaces the selection; the first id is the panel's.
     pub fn set_selection(&mut self, ids: Vec<u64>) {
-        let mut ids: Vec<u64> = ids.into_iter().filter(|id| self.doc.get(*id).is_some()).collect();
+        let mut ids: Vec<u64> = ids
+            .into_iter()
+            .filter(|id| self.doc.get(*id).is_some())
+            .collect();
         ids.dedup();
-        let first = if ids.is_empty() { None } else { Some(ids.remove(0)) };
+        let first = if ids.is_empty() {
+            None
+        } else {
+            Some(ids.remove(0))
+        };
         self.select(first);
         self.others = ids;
         self.events |= EVENT_SELECTION;
@@ -513,13 +645,24 @@ impl Editor {
 
     pub fn invert_selection(&mut self) {
         let chosen = self.selected_ids();
-        let ids = self.doc.objects.iter().rev().map(|o| o.id).filter(|id| !chosen.contains(id)).collect();
+        let ids = self
+            .doc
+            .objects
+            .iter()
+            .rev()
+            .map(|o| o.id)
+            .filter(|id| !chosen.contains(id))
+            .collect();
         self.set_selection(ids);
     }
 
     /// Boxes of the selected objects other than the panel's one.
     pub fn other_boxes(&self) -> Vec<Box2> {
-        self.others.iter().filter_map(|id| self.doc.get(*id)).filter_map(|o| o.rect()).collect()
+        self.others
+            .iter()
+            .filter_map(|id| self.doc.get(*id))
+            .filter_map(|o| o.rect())
+            .collect()
     }
 
     /// Joins the selected objects into one group (keeping their order).
@@ -532,7 +675,10 @@ impl Editor {
         let at = ids.iter().filter_map(|id| self.doc.index_of(*id)).max()?;
         let mut members: Vec<Object> = Vec::new();
         let mut kept = Vec::new();
-        for (i, o) in std::mem::take(&mut self.doc.objects).into_iter().enumerate() {
+        for (i, o) in std::mem::take(&mut self.doc.objects)
+            .into_iter()
+            .enumerate()
+        {
             if ids.contains(&o.id) {
                 members.push(o);
             } else {
@@ -542,7 +688,14 @@ impl Editor {
         let insert_at = kept.iter().filter(|(i, _)| *i < at).count();
         self.doc.objects = kept.into_iter().map(|(_, o)| o).collect();
         let id = self.doc.allocate_id();
-        let group = Object::new(id, Kind::Group { objects: members }, Style { width: 0.0, ..Style::default() });
+        let group = Object::new(
+            id,
+            Kind::Group { objects: members },
+            Style {
+                width: 0.0,
+                ..Style::default()
+            },
+        );
         let b = group.bounds();
         self.doc.objects.insert(insert_at, group);
         self.invalidate_box(b);
@@ -554,14 +707,20 @@ impl Editor {
 
     /// Splits selected groups back into their objects.
     pub fn ungroup_selected(&mut self) -> bool {
-        let groups: Vec<u64> = self.selected_ids().into_iter().filter(|id| matches!(self.doc.get(*id).map(|o| &o.kind), Some(Kind::Group { .. }))).collect();
+        let groups: Vec<u64> = self
+            .selected_ids()
+            .into_iter()
+            .filter(|id| matches!(self.doc.get(*id).map(|o| &o.kind), Some(Kind::Group { .. })))
+            .collect();
         if groups.is_empty() {
             return false;
         }
         self.checkpoint("Ungroup", None);
         let mut freed = Vec::new();
         for id in groups {
-            let Some(i) = self.doc.index_of(id) else { continue };
+            let Some(i) = self.doc.index_of(id) else {
+                continue;
+            };
             let group = self.doc.objects.remove(i);
             if let Kind::Group { objects } = group.kind {
                 for (k, mut o) in objects.into_iter().enumerate() {
@@ -605,11 +764,18 @@ impl Editor {
     /// left, center, right, top, middle, bottom.
     pub fn align_selected(&mut self, how: &str) {
         let ids = self.selected_ids();
-        let boxes: Vec<(u64, Box2)> = ids.iter().filter_map(|id| Some((*id, self.doc.get(*id)?.rect()?))).collect();
+        let boxes: Vec<(u64, Box2)> = ids
+            .iter()
+            .filter_map(|id| Some((*id, self.doc.get(*id)?.rect()?)))
+            .collect();
         if boxes.len() < 2 {
             return;
         }
-        let all = boxes.iter().map(|(_, b)| *b).reduce(|a, b| a.union(&b)).unwrap();
+        let all = boxes
+            .iter()
+            .map(|(_, b)| *b)
+            .reduce(|a, b| a.union(&b))
+            .unwrap();
         self.checkpoint("Align", None);
         for (id, b) in boxes {
             let (dx, dy) = match how {
@@ -640,7 +806,11 @@ impl Editor {
         }
         if let Some(prev) = self.selection {
             // Text boxes left empty disappear, as nothing would show them.
-            if self.doc.get(prev).and_then(|o| o.text()).is_some_and(|t| t.trim().is_empty())
+            if self
+                .doc
+                .get(prev)
+                .and_then(|o| o.text())
+                .is_some_and(|t| t.trim().is_empty())
                 && !matches!(self.doc.get(prev).map(|o| &o.kind), Some(Kind::Step { .. }))
             {
                 if let Some(o) = self.doc.remove(prev) {
@@ -691,7 +861,11 @@ impl Editor {
         if key.is_some() && self.undo.last().is_some_and(|s| s.key == key) {
             return;
         }
-        self.undo.push(Snapshot { doc: self.doc.clone(), label: label.to_owned(), key });
+        self.undo.push(Snapshot {
+            doc: self.doc.clone(),
+            label: label.to_owned(),
+            key,
+        });
         if self.undo.len() > HISTORY_LIMIT {
             self.undo.remove(0);
         }
@@ -714,17 +888,29 @@ impl Editor {
     }
 
     pub fn undo(&mut self) -> bool {
-        let Some(s) = self.undo.pop() else { return false };
+        let Some(s) = self.undo.pop() else {
+            return false;
+        };
         let current = std::mem::replace(&mut self.doc, s.doc);
-        self.redo.push(Snapshot { doc: current, label: s.label, key: None });
+        self.redo.push(Snapshot {
+            doc: current,
+            label: s.label,
+            key: None,
+        });
         self.after_history();
         true
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some(s) = self.redo.pop() else { return false };
+        let Some(s) = self.redo.pop() else {
+            return false;
+        };
         let current = std::mem::replace(&mut self.doc, s.doc);
-        self.undo.push(Snapshot { doc: current, label: s.label, key: None });
+        self.undo.push(Snapshot {
+            doc: current,
+            label: s.label,
+            key: None,
+        });
         self.after_history();
         true
     }
@@ -753,7 +939,8 @@ impl Editor {
     /// changed.
     pub fn refresh_all(&mut self) {
         if (self.display.width(), self.display.height()) != self.doc.size() {
-            self.display = Pixmap::new(self.doc.width(), self.doc.height()).expect("non-zero document");
+            self.display =
+                Pixmap::new(self.doc.width(), self.doc.height()).expect("non-zero document");
             self.events |= EVENT_RESIZED;
         }
         self.invalidate(self.doc.bounds());
@@ -767,8 +954,16 @@ impl Editor {
 
     /// Runs `change` on object `id` with an undo step, invalidating its old
     /// and new extent.
-    pub fn edit(&mut self, id: u64, label: &str, key: Option<String>, change: impl FnOnce(&mut Object)) {
-        let Some(before) = self.doc.get(id).map(|o| o.bounds()) else { return };
+    pub fn edit(
+        &mut self,
+        id: u64,
+        label: &str,
+        key: Option<String>,
+        change: impl FnOnce(&mut Object),
+    ) {
+        let Some(before) = self.doc.get(id).map(|o| o.bounds()) else {
+            return;
+        };
         self.checkpoint(label, key);
         let o = self.doc.get_mut(id).unwrap();
         change(o);
@@ -777,12 +972,20 @@ impl Editor {
     }
 
     /// Changes the document as a whole (one undo step, full redraw).
-    pub fn edit_document(&mut self, label: &str, change: impl FnOnce(&mut Document) -> bool) -> bool {
+    pub fn edit_document(
+        &mut self,
+        label: &str,
+        change: impl FnOnce(&mut Document) -> bool,
+    ) -> bool {
         let saved = self.doc.clone();
         if !change(&mut self.doc) {
             return false;
         }
-        self.undo.push(Snapshot { doc: saved, label: label.to_owned(), key: None });
+        self.undo.push(Snapshot {
+            doc: saved,
+            label: label.to_owned(),
+            key: None,
+        });
         if self.undo.len() > HISTORY_LIMIT {
             self.undo.remove(0);
         }
@@ -826,7 +1029,11 @@ impl Editor {
 
     pub fn duplicate_selected(&mut self) -> Option<u64> {
         if !self.others.is_empty() {
-            let copies: Vec<Object> = self.selected_ids().iter().filter_map(|id| self.doc.get(*id).cloned()).collect();
+            let copies: Vec<Object> = self
+                .selected_ids()
+                .iter()
+                .filter_map(|id| self.doc.get(*id).cloned())
+                .collect();
             self.checkpoint("Duplicate", None);
             let mut ids = Vec::new();
             for mut c in copies {
@@ -869,12 +1076,19 @@ impl Editor {
     /// editable.
     pub fn spotlight_magnify(&mut self, zoom: f32) {
         let (w, h) = (self.doc.width() as f32, self.doc.height() as f32);
-        let picked = self.selected().map(|o| (o.id, o.rect().unwrap_or_else(|| o.bounds())));
+        let picked = self
+            .selected()
+            .map(|o| (o.id, o.rect().unwrap_or_else(|| o.bounds())));
         let area = match picked {
             Some((_, r)) => r,
             None => Box2::around(Pt::new(w / 2.0, h / 2.0), w / 6.0, h / 6.0),
         };
-        let area = Box2::new(area.x0.max(0.0), area.y0.max(0.0), area.x1.min(w), area.y1.min(h));
+        let area = Box2::new(
+            area.x0.max(0.0),
+            area.y0.max(0.0),
+            area.x1.min(w),
+            area.y1.min(h),
+        );
         if area.is_degenerate(4.0) {
             return;
         }
@@ -884,14 +1098,49 @@ impl Editor {
             self.doc.remove(id);
         }
         let flat = self.doc.flatten();
-        let Some(piece) = raster::extract(&flat, area.to_irect()) else { return };
+        let Some(piece) = raster::extract(&flat, area.to_irect()) else {
+            return;
+        };
         let c = area.center();
-        let (bw, bh) = ((area.width() * zoom).min(w * 0.9), (area.height() * zoom).min(h * 0.9));
-        let big = Box2::around(Pt::new(c.x.clamp(bw / 2.0, w - bw / 2.0), c.y.clamp(bh / 2.0, h - bh / 2.0)), bw / 2.0, bh / 2.0);
-        let dim = Style { width: 0.0, ..Style::default() };
-        self.doc.add(Kind::Spotlight { rect: big, ellipse: false, dim: 0.55, blur: 4.0, rounded: false }, dim);
-        let frame = Style { width: 4.0, stroke: Rgba::WHITE, shadow: true, ..Style::default() };
-        let id = self.doc.add(Kind::Image { rect: big, image: ImageRef::new(crate::object::fresh_key("magnified"), piece) }, frame);
+        let (bw, bh) = (
+            (area.width() * zoom).min(w * 0.9),
+            (area.height() * zoom).min(h * 0.9),
+        );
+        let big = Box2::around(
+            Pt::new(
+                c.x.clamp(bw / 2.0, w - bw / 2.0),
+                c.y.clamp(bh / 2.0, h - bh / 2.0),
+            ),
+            bw / 2.0,
+            bh / 2.0,
+        );
+        let dim = Style {
+            width: 0.0,
+            ..Style::default()
+        };
+        self.doc.add(
+            Kind::Spotlight {
+                rect: big,
+                ellipse: false,
+                dim: 0.55,
+                blur: 4.0,
+                rounded: false,
+            },
+            dim,
+        );
+        let frame = Style {
+            width: 4.0,
+            stroke: Rgba::WHITE,
+            shadow: true,
+            ..Style::default()
+        };
+        let id = self.doc.add(
+            Kind::Image {
+                rect: big,
+                image: ImageRef::new(crate::object::fresh_key("magnified"), piece),
+            },
+            frame,
+        );
         self.invalidate(IRect::of_size(self.doc.width(), self.doc.height()));
         self.seal();
         self.select(Some(id));
@@ -900,10 +1149,22 @@ impl Editor {
     /// Adds a tail to the selected callout (pointing beside the first),
     /// or removes its last extra one.
     pub fn callout_tail(&mut self, add: bool) -> bool {
-        let Some(id) = self.selection.filter(|id| self.doc.get(*id).is_some_and(|o| matches!(o.kind, Kind::Callout { .. }))) else { return false };
+        let Some(id) = self.selection.filter(|id| {
+            self.doc
+                .get(*id)
+                .is_some_and(|o| matches!(o.kind, Kind::Callout { .. }))
+        }) else {
+            return false;
+        };
         let label = if add { "Add tail" } else { "Remove tail" };
         self.edit(id, label, None, move |o| {
-            if let Kind::Callout { rect, tail, more_tails, .. } = &mut o.kind {
+            if let Kind::Callout {
+                rect,
+                tail,
+                more_tails,
+                ..
+            } = &mut o.kind
+            {
                 if add && more_tails.len() < 6 {
                     let c = rect.center();
                     let n = more_tails.len() as f32 + 1.0;
@@ -911,7 +1172,10 @@ impl Editor {
                     let angle = 0.6 * n * if more_tails.len() % 2 == 0 { 1.0 } else { -1.0 };
                     let d = tail.sub(c);
                     let (sin, cos) = angle.sin_cos();
-                    more_tails.push(Pt::new(c.x + d.x * cos - d.y * sin, c.y + d.x * sin + d.y * cos));
+                    more_tails.push(Pt::new(
+                        c.x + d.x * cos - d.y * sin,
+                        c.y + d.x * sin + d.y * cos,
+                    ));
                 } else if !add {
                     more_tails.pop();
                 }
@@ -922,7 +1186,12 @@ impl Editor {
 
     /// The drop zone at `p`, if any (topmost first).
     pub fn zone_at(&self, p: Pt) -> Option<u64> {
-        self.doc.objects.iter().rev().find(|o| o.zone.is_some() && o.bounds().contains(p)).map(|o| o.id)
+        self.doc
+            .objects
+            .iter()
+            .rev()
+            .find(|o| o.zone.is_some() && o.bounds().contains(p))
+            .map(|o| o.id)
     }
 
     /// Puts `image` into drop zone `id`, centered.
@@ -950,14 +1219,27 @@ impl Editor {
         let (w, h) = (image.width() as f32, image.height() as f32);
         let scale = (dw * 0.6 / w).min(dh * 0.6 / h).min(1.0);
         let rect = Box2::around(p, w * scale / 2.0, h * scale / 2.0);
-        let style = Style { width: 0.0, ..Style::default() };
-        self.add_object("Drop image", Kind::Image { rect, image: ImageRef::new(crate::object::fresh_key("image"), image) }, style)
+        let style = Style {
+            width: 0.0,
+            ..Style::default()
+        };
+        self.add_object(
+            "Drop image",
+            Kind::Image {
+                rect,
+                image: ImageRef::new(crate::object::fresh_key("image"), image),
+            },
+            style,
+        )
     }
 
     /// Exchanges the pictures of the two selected drop zones.
     pub fn swap_zones(&mut self) -> bool {
         let ids = self.selected_ids();
-        let zones: Vec<u64> = ids.into_iter().filter(|id| self.doc.get(*id).is_some_and(|o| o.zone.is_some())).collect();
+        let zones: Vec<u64> = ids
+            .into_iter()
+            .filter(|id| self.doc.get(*id).is_some_and(|o| o.zone.is_some()))
+            .collect();
         let [a, b] = zones[..] else { return false };
         let take = |d: &Document, id| match &d.get(id).unwrap().kind {
             Kind::Image { image, .. } => image.clone(),
@@ -996,32 +1278,59 @@ impl Editor {
 
     /// Takes the picture out of the selected drop zone.
     pub fn empty_zone(&mut self) {
-        let Some(id) = self.selection.filter(|id| self.doc.get(*id).is_some_and(|o| o.zone.is_some())) else { return };
+        let Some(id) = self
+            .selection
+            .filter(|id| self.doc.get(*id).is_some_and(|o| o.zone.is_some()))
+        else {
+            return;
+        };
         self.edit(id, "Empty drop zone", None, |o| {
             if let Kind::Image { image, .. } = &mut o.kind {
-                *image = ImageRef { key: String::new(), pixmap: None };
+                *image = ImageRef {
+                    key: String::new(),
+                    pixmap: None,
+                };
             }
         });
     }
 
     /// Inserts a raster as an image object, centered and scaled to fit.
     pub fn paste_image(&mut self, image: Pixmap) -> u64 {
-        if let Some(id) = self.selection.filter(|id| self.doc.get(*id).is_some_and(|o| o.zone.is_some())) {
+        if let Some(id) = self
+            .selection
+            .filter(|id| self.doc.get(*id).is_some_and(|o| o.zone.is_some()))
+        {
             self.fill_zone(id, image);
             return id;
         }
         let (dw, dh) = (self.doc.width() as f32, self.doc.height() as f32);
         let (w, h) = (image.width() as f32, image.height() as f32);
         let scale = (dw * 0.9 / w).min(dh * 0.9 / h).min(1.0);
-        let rect = Box2::around(Pt::new(dw / 2.0, dh / 2.0), w * scale / 2.0, h * scale / 2.0);
+        let rect = Box2::around(
+            Pt::new(dw / 2.0, dh / 2.0),
+            w * scale / 2.0,
+            h * scale / 2.0,
+        );
         let key = crate::object::fresh_key("image");
-        let style = Style { width: 0.0, ..Style::default() };
-        self.add_object("Paste image", Kind::Image { rect, image: ImageRef::new(key, image) }, style)
+        let style = Style {
+            width: 0.0,
+            ..Style::default()
+        };
+        self.add_object(
+            "Paste image",
+            Kind::Image {
+                rect,
+                image: ImageRef::new(key, image),
+            },
+            style,
+        )
     }
 
     pub fn nudge(&mut self, dx: f32, dy: f32) {
         for id in self.selected_ids() {
-            self.edit(id, "Move", Some("nudge".to_owned()), |o| o.translate(dx, dy));
+            self.edit(id, "Move", Some("nudge".to_owned()), |o| {
+                o.translate(dx, dy)
+            });
         }
     }
 
@@ -1029,7 +1338,9 @@ impl Editor {
     /// top/bottom.
     pub fn arrange(&mut self, how: i32) {
         let Some(id) = self.selection else { return };
-        let Some(i) = self.doc.index_of(id) else { return };
+        let Some(i) = self.doc.index_of(id) else {
+            return;
+        };
         let n = self.doc.objects.len();
         let j = match how {
             2 => n - 1,
@@ -1053,18 +1364,25 @@ impl Editor {
             return;
         }
         let owned = text.to_owned();
-        self.edit(id, "Edit text", Some(format!("text{id}")), move |o| o.set_text(&owned));
+        self.edit(id, "Edit text", Some(format!("text{id}")), move |o| {
+            o.set_text(&owned)
+        });
     }
 
     /// Sets a numeric parameter of the selection (blur amount, zoom, dim).
     pub fn set_selected_amount(&mut self, value: f32) {
         let Some(id) = self.selection else { return };
-        self.edit(id, "Change amount", Some(format!("amount{id}")), |o| match &mut o.kind {
-            Kind::Blur { amount, .. } => *amount = value.clamp(1.0, 100.0),
-            Kind::Magnify { zoom, .. } => *zoom = value.clamp(1.0, 8.0),
-            Kind::Spotlight { dim, .. } => *dim = value.clamp(0.0, 1.0),
-            _ => {}
-        });
+        self.edit(
+            id,
+            "Change amount",
+            Some(format!("amount{id}")),
+            |o| match &mut o.kind {
+                Kind::Blur { amount, .. } => *amount = value.clamp(1.0, 100.0),
+                Kind::Magnify { zoom, .. } => *zoom = value.clamp(1.0, 8.0),
+                Kind::Spotlight { dim, .. } => *dim = value.clamp(0.0, 1.0),
+                _ => {}
+            },
+        );
     }
 
     pub fn set_selected_rotation(&mut self, degrees: f32) {
@@ -1072,7 +1390,9 @@ impl Editor {
         if !self.selected().is_some_and(|o| o.rotatable()) {
             return;
         }
-        self.edit(id, "Rotate", Some(format!("rotate{id}")), |o| o.rotation = degrees.rem_euclid(360.0));
+        self.edit(id, "Rotate", Some(format!("rotate{id}")), |o| {
+            o.rotation = degrees.rem_euclid(360.0)
+        });
     }
 
     /// Font size edits also size a selected step badge.
@@ -1105,16 +1425,33 @@ impl Editor {
     /// Handles at the canvas's right, bottom and bottom-right edges, shown
     /// when nothing is selected.
     pub fn canvas_handles(&self) -> Vec<(Handle, Pt)> {
-        if self.selection.is_some() || !matches!(self.tool, Tool::Select | Tool::Arrow | Tool::Shape | Tool::Line) {
+        if self.selection.is_some()
+            || !matches!(
+                self.tool,
+                Tool::Select | Tool::Arrow | Tool::Shape | Tool::Line
+            )
+        {
             return Vec::new();
         }
         let (w, h) = (self.doc.width() as f32, self.doc.height() as f32);
-        vec![(H_R, Pt::new(w, h / 2.0)), (H_B, Pt::new(w / 2.0, h)), (H_BR, Pt::new(w, h))]
+        vec![
+            (H_R, Pt::new(w, h / 2.0)),
+            (H_B, Pt::new(w / 2.0, h)),
+            (H_BR, Pt::new(w, h)),
+        ]
     }
 
     /// Grows the canvas to include every object (in the canvas color).
     pub fn expand_to_fit(&mut self) -> bool {
-        let Some(all) = self.doc.objects.iter().map(|o| o.bounds()).reduce(|a, b| a.union(&b)) else { return false };
+        let Some(all) = self
+            .doc
+            .objects
+            .iter()
+            .map(|o| o.bounds())
+            .reduce(|a, b| a.union(&b))
+        else {
+            return false;
+        };
         let canvas = self.doc.bounds().to_box();
         let b = all.inflate(-2.0).union(&canvas);
         if b == canvas {
@@ -1134,7 +1471,12 @@ impl Editor {
                 return handle_cursor(h);
             }
         }
-        if self.tool.uses_marquee() || matches!(self.tool, Tool::Fill | Tool::Eyedropper | Tool::TextReplace | Tool::MagicWand | Tool::Eraser) {
+        if self.tool.uses_marquee()
+            || matches!(
+                self.tool,
+                Tool::Fill | Tool::Eyedropper | Tool::TextReplace | Tool::MagicWand | Tool::Eraser
+            )
+        {
             return Cursor::Cross;
         }
         if let Some(o) = self.selected() {
@@ -1166,7 +1508,11 @@ impl Editor {
 
     fn pointer_down_impl(&mut self, p: Pt, m: Modifiers, tolerance: f32, pick_existing: bool) {
         self.drag = None;
-        if let Some((h, _)) = self.canvas_handles().into_iter().find(|(_, q)| pick_existing && q.dist(p) <= tolerance * 1.5) {
+        if let Some((h, _)) = self
+            .canvas_handles()
+            .into_iter()
+            .find(|(_, q)| pick_existing && q.dist(p) <= tolerance * 1.5)
+        {
             self.drag = Some(Drag::Canvas { handle: h });
             return;
         }
@@ -1229,28 +1575,53 @@ impl Editor {
         }
         if let Some(o) = self.selected().filter(|_| pick_existing) {
             let id = o.id;
-            if let Some((h, _)) = o.handles().into_iter().find(|(_, q)| q.dist(p) <= tolerance * 1.5) {
+            if let Some((h, _)) = o
+                .handles()
+                .into_iter()
+                .find(|(_, q)| q.dist(p) <= tolerance * 1.5)
+            {
                 self.checkpoint("Resize", None);
                 self.drag = Some(Drag::Handle { id, handle: h });
                 return;
             }
         }
-        let picks_up = self.tool != Tool::Pen && !(self.tool == Tool::Highlight && self.variant(Tool::Highlight) == "Freehand");
+        let picks_up = self.tool != Tool::Pen
+            && !(self.tool == Tool::Highlight && self.variant(Tool::Highlight) == "Freehand");
         if (picks_up && pick_existing) || self.tool == Tool::Select {
             if let Some(id) = self.doc.hit(p, tolerance) {
                 if m.shift {
                     self.toggle_selected(id);
                     return;
                 }
-                if self.others.contains(&id) || (!self.others.is_empty() && self.selection == Some(id)) {
-                    self.drag = Some(Drag::MoveMany { last: p, moved: false });
+                if self.others.contains(&id)
+                    || (!self.others.is_empty() && self.selection == Some(id))
+                {
+                    self.drag = Some(Drag::MoveMany {
+                        last: p,
+                        moved: false,
+                    });
                     return;
                 }
                 // A drag inside a selected, filled drop zone moves its picture.
-                let pans = self.selection == Some(id) && self.doc.get(id).is_some_and(|o| o.zone.is_some() && matches!(&o.kind, Kind::Image { image, .. } if image.pixmap.is_some()));
+                let pans = self.selection == Some(id) && self.doc.get(id).is_some_and(|o| {
+                    o.zone.is_some()
+                        && matches!(&o.kind, Kind::Image { image, .. } if image.pixmap.is_some())
+                });
                 self.select(Some(id));
                 self.others.clear();
-                self.drag = Some(if pans { Drag::Pan { id, last: p, moved: false } } else { Drag::Move { id, last: p, moved: false } });
+                self.drag = Some(if pans {
+                    Drag::Pan {
+                        id,
+                        last: p,
+                        moved: false,
+                    }
+                } else {
+                    Drag::Move {
+                        id,
+                        last: p,
+                        moved: false,
+                    }
+                });
                 return;
             }
         }
@@ -1258,7 +1629,10 @@ impl Editor {
             if !m.shift {
                 self.set_selection(Vec::new());
             }
-            self.drag = Some(Drag::Select { start: p, add: m.shift });
+            self.drag = Some(Drag::Select {
+                start: p,
+                add: m.shift,
+            });
             self.set_marquee(Some(Box2::from_points(p, p)));
             return;
         }
@@ -1278,13 +1652,23 @@ impl Editor {
             self.drag = None;
             return;
         }
-        self.drag = Some(if step { Drag::Move { id, last: p, moved: true } } else { Drag::Create { id, start: p } });
+        self.drag = Some(if step {
+            Drag::Move {
+                id,
+                last: p,
+                moved: true,
+            }
+        } else {
+            Drag::Create { id, start: p }
+        });
     }
 
     /// Closes the polygon being built (double-click, Enter, or a click on
     /// its first corner).
     pub fn finish_polygon(&mut self) {
-        let Some(id) = self.building.take() else { return };
+        let Some(id) = self.building.take() else {
+            return;
+        };
         let too_small = match self.doc.get_mut(id).map(|o| &mut o.kind) {
             Some(Kind::Polygon { points }) => {
                 // Drop the floating corner that follows the pointer.
@@ -1322,7 +1706,9 @@ impl Editor {
             }
             return;
         }
-        let Some(drag) = self.drag.clone() else { return };
+        let Some(drag) = self.drag.clone() else {
+            return;
+        };
         match drag {
             Drag::Create { id, start } => {
                 let Some(o) = self.doc.get(id) else { return };
@@ -1336,7 +1722,9 @@ impl Editor {
                     }
                     let tail: Vec<Pt> = points.iter().rev().take(2).copied().chain([p]).collect();
                     points.push(p);
-                    Box2::bounding(tail).unwrap().inflate(o.style.width / 2.0 + 3.0)
+                    Box2::bounding(tail)
+                        .unwrap()
+                        .inflate(o.style.width / 2.0 + 3.0)
                 } else {
                     shape_drag(o, start, p, m.shift);
                     before.union(&o.bounds())
@@ -1352,12 +1740,18 @@ impl Editor {
                     self.checkpoint("Move", None);
                 }
                 let (dx, dy) = (p.x - last.x, p.y - last.y);
-                let Some(o) = self.doc.get_mut(id) else { return };
+                let Some(o) = self.doc.get_mut(id) else {
+                    return;
+                };
                 let before = o.bounds();
                 o.translate(dx, dy);
                 let after = o.bounds();
                 self.invalidate_box(before.union(&after));
-                self.drag = Some(Drag::Move { id, last: p, moved: true });
+                self.drag = Some(Drag::Move {
+                    id,
+                    last: p,
+                    moved: true,
+                });
             }
             Drag::Pan { id, last, moved } => {
                 if !moved && last.dist(p) < 1.0 {
@@ -1366,7 +1760,9 @@ impl Editor {
                 if !moved {
                     self.checkpoint("Pan image", None);
                 }
-                let Some(o) = self.doc.get_mut(id) else { return };
+                let Some(o) = self.doc.get_mut(id) else {
+                    return;
+                };
                 if let (Some(z), Kind::Image { rect, image }) = (o.zone.as_mut(), &o.kind) {
                     if let Some(src) = &image.pixmap {
                         z.pan = Pt::new(z.pan.x + p.x - last.x, z.pan.y + p.y - last.y);
@@ -1376,10 +1772,16 @@ impl Editor {
                 }
                 let b = o.bounds();
                 self.invalidate_box(b);
-                self.drag = Some(Drag::Pan { id, last: p, moved: true });
+                self.drag = Some(Drag::Pan {
+                    id,
+                    last: p,
+                    moved: true,
+                });
             }
             Drag::Handle { id, handle } => {
-                let Some(o) = self.doc.get_mut(id) else { return };
+                let Some(o) = self.doc.get_mut(id) else {
+                    return;
+                };
                 let before = o.bounds();
                 o.move_handle(handle, p, m.shift);
                 let after = o.bounds();
@@ -1427,7 +1829,10 @@ impl Editor {
                         self.invalidate_box(before.union(&after));
                     }
                 }
-                self.drag = Some(Drag::MoveMany { last: p, moved: true });
+                self.drag = Some(Drag::MoveMany {
+                    last: p,
+                    moved: true,
+                });
                 self.events |= EVENT_SELECTION;
             }
         }
@@ -1476,7 +1881,9 @@ impl Editor {
                 }
                 if self.tool == Tool::Magnify && self.variant(Tool::Magnify).ends_with("view") {
                     let v = self.variant(Tool::Magnify);
-                    self.edit(id, "Add Magnify", Some(format!("view{id}")), move |o| apply_variant(o, &v));
+                    self.edit(id, "Add Magnify", Some(format!("view{id}")), move |o| {
+                        apply_variant(o, &v)
+                    });
                 }
                 self.events |= EVENT_SELECTION;
             }
@@ -1504,7 +1911,14 @@ impl Editor {
                 let b = Box2::from_points(start, p);
                 self.set_marquee(None);
                 let mut ids: Vec<u64> = if add { self.selected_ids() } else { Vec::new() };
-                ids.extend(self.doc.objects.iter().rev().filter(|o| o.rect().is_some_and(|r| r.intersects(&b))).map(|o| o.id));
+                ids.extend(
+                    self.doc
+                        .objects
+                        .iter()
+                        .rev()
+                        .filter(|o| o.rect().is_some_and(|r| r.intersects(&b)))
+                        .map(|o| o.id),
+                );
                 if !b.is_degenerate(MIN_DRAG) {
                     self.set_selection(ids);
                 }
@@ -1531,9 +1945,13 @@ impl Editor {
                         } else {
                             crate::effects::Edge::Straight
                         };
-                        self.edit_document("Cut out", |d| crate::effects::cut_out_with(d, r, vertical, edge));
+                        self.edit_document("Cut out", |d| {
+                            crate::effects::cut_out_with(d, r, vertical, edge)
+                        });
                     }
-                    Tool::Selection if self.variant(Tool::Selection) == "Ellipse" => self.lift_ellipse(r),
+                    Tool::Selection if self.variant(Tool::Selection) == "Ellipse" => {
+                        self.lift_ellipse(r)
+                    }
                     Tool::Selection => self.lift_selection(r, false),
                     Tool::SmartMove => self.lift_selection(r, true),
                     Tool::TextReplace => self.replace_text_in(r),
@@ -1549,11 +1967,21 @@ impl Editor {
         let p = Pt::new(p.x.clamp(0.0, w), p.y.clamp(0.0, h));
         let b = Box2::from_points(start, p);
         if self.tool == Tool::CutOut {
-            return if self.variant(Tool::CutOut).starts_with("Vertical") { Box2::new(b.x0, 0.0, b.x1, h) } else { Box2::new(0.0, b.y0, w, b.y1) };
+            return if self.variant(Tool::CutOut).starts_with("Vertical") {
+                Box2::new(b.x0, 0.0, b.x1, h)
+            } else {
+                Box2::new(0.0, b.y0, w, b.y1)
+            };
         }
         if square {
             let s = b.width().max(b.height());
-            return Box2::from_points(start, Pt::new(start.x + s * (p.x - start.x).signum(), start.y + s * (p.y - start.y).signum()));
+            return Box2::from_points(
+                start,
+                Pt::new(
+                    start.x + s * (p.x - start.x).signum(),
+                    start.y + s * (p.y - start.y).signum(),
+                ),
+            );
         }
         b
     }
@@ -1564,22 +1992,51 @@ impl Editor {
         let variant = self.variant(tool);
         let at = Box2::from_points(p, p);
         let kind = match tool {
-            Tool::Arrow | Tool::Line => Kind::Line { a: p, b: p, control: None },
+            Tool::Arrow | Tool::Line => Kind::Line {
+                a: p,
+                b: p,
+                control: None,
+            },
             Tool::Shape if variant == "Polygon" => Kind::Polygon { points: vec![p, p] },
-            Tool::Shape => Kind::Shape { rect: at, shape: shape_of(&variant) },
-            Tool::Text => Kind::Text { rect: at, text: String::new() },
-            Tool::Callout => Kind::Callout { rect: at, tail: p, text: String::new(), shape: shape_of(&variant), arrow: variant == "Arrow", more_tails: Vec::new() },
+            Tool::Shape => Kind::Shape {
+                rect: at,
+                shape: shape_of(&variant),
+            },
+            Tool::Text => Kind::Text {
+                rect: at,
+                text: String::new(),
+            },
+            Tool::Callout => Kind::Callout {
+                rect: at,
+                tail: p,
+                text: String::new(),
+                shape: shape_of(&variant),
+                arrow: variant == "Arrow",
+                more_tails: Vec::new(),
+            },
             Tool::Step => {
                 let format = variant.split(' ').next().unwrap_or("Numbers");
-                let shape = if variant.ends_with("square") { ShapeKind::Rounded } else { ShapeKind::Ellipse };
-                Kind::Step { center: p, radius: style.font_size * 0.85, label: self.doc.next_step_label_as(format), shape }
+                let shape = if variant.ends_with("square") {
+                    ShapeKind::Rounded
+                } else {
+                    ShapeKind::Ellipse
+                };
+                Kind::Step {
+                    center: p,
+                    radius: style.font_size * 0.85,
+                    label: self.doc.next_step_label_as(format),
+                    shape,
+                }
             }
             Tool::Pen => Kind::Pen { points: vec![p] },
             Tool::Highlight if variant == "Freehand" => {
                 style.stroke = style.fill;
                 Kind::Pen { points: vec![p] }
             }
-            Tool::Highlight => Kind::Highlight { rect: at, shape: shape_of(&variant) },
+            Tool::Highlight => Kind::Highlight {
+                rect: at,
+                shape: shape_of(&variant),
+            },
             Tool::Blur => Kind::Blur {
                 rect: at,
                 mode: match variant.as_str() {
@@ -1589,20 +2046,47 @@ impl Editor {
                 },
                 amount: self.tool_amount(Tool::Blur),
             },
-            Tool::Magnify => Kind::Magnify { rect: at, zoom: self.tool_amount(Tool::Magnify), ellipse: !variant.starts_with("Rectangle"), offset: Pt::default() },
-            Tool::Spotlight => Kind::Spotlight { rect: at, ellipse: variant == "Ellipse", dim: self.tool_amount(Tool::Spotlight), blur: 0.0, rounded: variant == "Rounded" },
+            Tool::Magnify => Kind::Magnify {
+                rect: at,
+                zoom: self.tool_amount(Tool::Magnify),
+                ellipse: !variant.starts_with("Rectangle"),
+                offset: Pt::default(),
+            },
+            Tool::Spotlight => Kind::Spotlight {
+                rect: at,
+                ellipse: variant == "Ellipse",
+                dim: self.tool_amount(Tool::Spotlight),
+                blur: 0.0,
+                rounded: variant == "Rounded",
+            },
             Tool::Stamp if self.custom_stamps.iter().any(|(n, _)| *n == variant) => {
-                let (name, image) = self.custom_stamps.iter().find(|(n, _)| *n == variant).unwrap();
+                let (name, image) = self
+                    .custom_stamps
+                    .iter()
+                    .find(|(n, _)| *n == variant)
+                    .unwrap();
                 let scale = (96.0 / image.width().max(image.height()) as f32).min(1.0);
                 let (w, h) = (image.width() as f32 * scale, image.height() as f32 * scale);
                 style.width = 0.0;
-                Kind::Image { rect: Box2::around(p, w / 2.0, h / 2.0), image: ImageRef { key: format!("stamp-{name}"), pixmap: Some(image.clone()) } }
+                Kind::Image {
+                    rect: Box2::around(p, w / 2.0, h / 2.0),
+                    image: ImageRef {
+                        key: format!("stamp-{name}"),
+                        pixmap: Some(image.clone()),
+                    },
+                }
             }
             Tool::Stamp => {
                 let size = 72.0;
-                Kind::Stamp { rect: Box2::around(p, size / 2.0, size / 2.0), stamp: Stamp::from_name(&variant).unwrap_or_default() }
+                Kind::Stamp {
+                    rect: Box2::around(p, size / 2.0, size / 2.0),
+                    stamp: Stamp::from_name(&variant).unwrap_or_default(),
+                }
             }
-            _ => Kind::Shape { rect: at, shape: ShapeKind::Rectangle },
+            _ => Kind::Shape {
+                rect: at,
+                shape: ShapeKind::Rectangle,
+            },
         };
         (kind, style)
     }
@@ -1615,7 +2099,8 @@ impl Editor {
             if global {
                 raster::replace_color(d.background_mut(), p.x as i32, p.y as i32, color, tolerance)
             } else {
-                raster::flood_fill(d.background_mut(), p.x as i32, p.y as i32, color, tolerance).is_some()
+                raster::flood_fill(d.background_mut(), p.x as i32, p.y as i32, color, tolerance)
+                    .is_some()
             }
         });
     }
@@ -1625,24 +2110,54 @@ impl Editor {
     /// surroundings; plain Selection lifts the rectangle and leaves the
     /// canvas color behind.
     fn lift_selection(&mut self, r: IRect, smart: bool) {
-        let Some(r) = r.intersect(&self.doc.bounds()) else { return };
-        let lifted = if smart { crate::smart::lift_mask(self.doc.background(), r) } else { None };
+        let Some(r) = r.intersect(&self.doc.bounds()) else {
+            return;
+        };
+        let lifted = if smart {
+            crate::smart::lift_mask(self.doc.background(), r)
+        } else {
+            None
+        };
         let (area, mask) = lifted.unwrap_or_else(|| (r, vec![true; (r.w * r.h) as usize]));
-        self.lift_mask(area, &mask, if smart { "Smart Move" } else { "Move selection" });
+        self.lift_mask(
+            area,
+            &mask,
+            if smart {
+                "Smart Move"
+            } else {
+                "Move selection"
+            },
+        );
     }
 
     fn lift_ellipse(&mut self, r: IRect) {
-        let Some(r) = r.intersect(&self.doc.bounds()) else { return };
-        let (cx, cy, rx, ry) = (r.w as f32 / 2.0, r.h as f32 / 2.0, r.w as f32 / 2.0, r.h as f32 / 2.0);
+        let Some(r) = r.intersect(&self.doc.bounds()) else {
+            return;
+        };
+        let (cx, cy, rx, ry) = (
+            r.w as f32 / 2.0,
+            r.h as f32 / 2.0,
+            r.w as f32 / 2.0,
+            r.h as f32 / 2.0,
+        );
         let mask = (0..r.h)
-            .flat_map(|y| (0..r.w).map(move |x| ((x as f32 + 0.5 - cx) / rx).powi(2) + ((y as f32 + 0.5 - cy) / ry).powi(2) <= 1.0))
+            .flat_map(|y| {
+                (0..r.w).map(move |x| {
+                    ((x as f32 + 0.5 - cx) / rx).powi(2) + ((y as f32 + 0.5 - cy) / ry).powi(2)
+                        <= 1.0
+                })
+            })
             .collect::<Vec<_>>();
         self.lift_mask(r, &mask, "Move selection");
     }
 
     fn lift_polygon(&mut self, points: &[Pt]) {
-        let Some(b) = Box2::bounding(points.iter().copied()) else { return };
-        let Some(r) = b.to_irect().intersect(&self.doc.bounds()) else { return };
+        let Some(b) = Box2::bounding(points.iter().copied()) else {
+            return;
+        };
+        let Some(r) = b.to_irect().intersect(&self.doc.bounds()) else {
+            return;
+        };
         // Even-odd point-in-polygon per pixel center.
         let inside = |x: f32, y: f32| {
             let mut c = false;
@@ -1655,7 +2170,10 @@ impl Editor {
             }
             c
         };
-        let mask: Vec<bool> = (0..r.h).flat_map(|y| (0..r.w).map(move |x| (x, y))).map(|(x, y)| inside((r.x + x) as f32 + 0.5, (r.y + y) as f32 + 0.5)).collect();
+        let mask: Vec<bool> = (0..r.h)
+            .flat_map(|y| (0..r.w).map(move |x| (x, y)))
+            .map(|(x, y)| inside((r.x + x) as f32 + 0.5, (r.y + y) as f32 + 0.5))
+            .collect();
         self.lift_mask(r, &mask, "Move selection");
     }
 
@@ -1683,9 +2201,23 @@ impl Editor {
         let mut paint = tiny_skia::Paint::default();
         paint.anti_alias = true;
         paint.blend_mode = tiny_skia::BlendMode::Clear;
-        let cap = if square { tiny_skia::LineCap::Square } else { tiny_skia::LineCap::Round };
-        let stroke = tiny_skia::Stroke { width: w, line_cap: cap, ..Default::default() };
-        self.doc.background_mut().stroke_path(&path, &paint, &stroke, tiny_skia::Transform::identity(), None);
+        let cap = if square {
+            tiny_skia::LineCap::Square
+        } else {
+            tiny_skia::LineCap::Round
+        };
+        let stroke = tiny_skia::Stroke {
+            width: w,
+            line_cap: cap,
+            ..Default::default()
+        };
+        self.doc.background_mut().stroke_path(
+            &path,
+            &paint,
+            &stroke,
+            tiny_skia::Transform::identity(),
+            None,
+        );
         self.invalidate_box(Box2::from_points(a, b).inflate(w));
     }
 
@@ -1705,8 +2237,15 @@ impl Editor {
         if x1 < x0 {
             return;
         }
-        let at = IRect::new(area.x + x0 as i32, area.y + y0 as i32, (x1 - x0 + 1) as i32, (y1 - y0 + 1) as i32);
-        let Some(mut piece) = tiny_skia::Pixmap::new(at.w as u32, at.h as u32) else { return };
+        let at = IRect::new(
+            area.x + x0 as i32,
+            area.y + y0 as i32,
+            (x1 - x0 + 1) as i32,
+            (y1 - y0 + 1) as i32,
+        );
+        let Some(mut piece) = tiny_skia::Pixmap::new(at.w as u32, at.h as u32) else {
+            return;
+        };
         for y in 0..at.h {
             for x in 0..at.w {
                 if mask[(y as usize + y0) * aw + x as usize + x0] {
@@ -1718,7 +2257,10 @@ impl Editor {
         match self.background_fill {
             BackgroundFill::Auto => {
                 // Pad the mask with a ring of known pixels to fill from.
-                let padded = area.inflate(2).intersect(&self.doc.bounds()).unwrap_or(area);
+                let padded = area
+                    .inflate(2)
+                    .intersect(&self.doc.bounds())
+                    .unwrap_or(area);
                 let (pw, ph) = (padded.w as usize, padded.h as usize);
                 let mut ring = vec![false; pw * ph];
                 for y in 0..ah {
@@ -1732,22 +2274,44 @@ impl Editor {
                 crate::smart::fill_mask(&mut filled, padded, &ring)
             }
             BackgroundFill::Transparent | BackgroundFill::Color => {
-                let color = if self.background_fill == BackgroundFill::Color { self.tool_style(self.tool).fill } else { Rgba::TRANSPARENT };
+                let color = if self.background_fill == BackgroundFill::Color {
+                    self.tool_style(self.tool).fill
+                } else {
+                    Rgba::TRANSPARENT
+                };
                 for y in 0..ah {
                     for x in 0..aw {
                         if mask[y * aw + x] {
-                            raster::set_pixel(&mut filled, area.x + x as i32, area.y + y as i32, color);
+                            raster::set_pixel(
+                                &mut filled,
+                                area.x + x as i32,
+                                area.y + y as i32,
+                                color,
+                            );
                         }
                     }
                 }
             }
         }
         let rect = at.to_box();
-        let key = format!("lift-{}-{}", self.doc.objects.len() + 1, at.x ^ (at.y << 12));
+        let key = format!(
+            "lift-{}-{}",
+            self.doc.objects.len() + 1,
+            at.x ^ (at.y << 12)
+        );
         let mut new_id = 0;
         self.edit_document(label, |d| {
             d.set_background(filled);
-            new_id = d.add(Kind::Image { rect, image: ImageRef::new(key, piece) }, Style { width: 0.0, ..Style::default() });
+            new_id = d.add(
+                Kind::Image {
+                    rect,
+                    image: ImageRef::new(key, piece),
+                },
+                Style {
+                    width: 0.0,
+                    ..Style::default()
+                },
+            );
             true
         });
         self.selection = Some(new_id);
@@ -1798,7 +2362,9 @@ fn shape_of(variant: &str) -> ShapeKind {
 /// The tool that makes objects like `o`.
 pub fn tool_for(o: &Object) -> Tool {
     match &o.kind {
-        Kind::Line { .. } if o.style.end_cap == Cap::Arrow || o.style.start_cap == Cap::Arrow => Tool::Arrow,
+        Kind::Line { .. } if o.style.end_cap == Cap::Arrow || o.style.start_cap == Cap::Arrow => {
+            Tool::Arrow
+        }
         Kind::Line { .. } => Tool::Line,
         Kind::Shape { .. } => Tool::Shape,
         Kind::Text { .. } => Tool::Text,
@@ -1830,13 +2396,17 @@ pub fn variant_of(o: &Object) -> Option<String> {
             BlurMode::Pixelate => "Pixelate",
             BlurMode::Redact => "Redact",
         },
-        Kind::Magnify { ellipse, offset, .. } => match (*ellipse, offset.len() > 0.5) {
+        Kind::Magnify {
+            ellipse, offset, ..
+        } => match (*ellipse, offset.len() > 0.5) {
             (true, false) => "Circle",
             (false, false) => "Rectangle",
             (true, true) => "Circle with view",
             (false, true) => "Rectangle with view",
         },
-        Kind::Spotlight { ellipse, rounded, .. } => {
+        Kind::Spotlight {
+            ellipse, rounded, ..
+        } => {
             if *ellipse {
                 "Ellipse"
             } else if *rounded {
@@ -1852,7 +2422,13 @@ pub fn variant_of(o: &Object) -> Option<String> {
         },
         Kind::Polygon { .. } => "Polygon",
         Kind::Stamp { stamp, .. } => stamp.name(),
-        Kind::Pen { .. } => if o.style.multiply { "Marker" } else { "Pen" },
+        Kind::Pen { .. } => {
+            if o.style.multiply {
+                "Marker"
+            } else {
+                "Pen"
+            }
+        }
         _ => return None,
     };
     Some(name.to_owned())
@@ -1872,7 +2448,12 @@ fn apply_variant(o: &mut Object, v: &str) {
                 _ => BlurMode::Blur,
             }
         }
-        Kind::Magnify { rect, ellipse, offset, .. } => {
+        Kind::Magnify {
+            rect,
+            ellipse,
+            offset,
+            ..
+        } => {
             *ellipse = !v.starts_with("Rectangle");
             if v.ends_with("view") && offset.len() < 0.5 {
                 *offset = Pt::new(rect.width() * 1.3, -rect.height() * 0.4);
@@ -1880,12 +2461,20 @@ fn apply_variant(o: &mut Object, v: &str) {
                 *offset = Pt::default();
             }
         }
-        Kind::Spotlight { ellipse, rounded, .. } => {
+        Kind::Spotlight {
+            ellipse, rounded, ..
+        } => {
             *ellipse = v == "Ellipse";
             *rounded = v == "Rounded";
         }
         Kind::Highlight { shape, .. } => *shape = shape_of(v),
-        Kind::Step { shape, .. } => *shape = if v.ends_with("square") { ShapeKind::Rounded } else { ShapeKind::Ellipse },
+        Kind::Step { shape, .. } => {
+            *shape = if v.ends_with("square") {
+                ShapeKind::Rounded
+            } else {
+                ShapeKind::Ellipse
+            }
+        }
         Kind::Stamp { stamp, .. } => *stamp = Stamp::from_name(v).unwrap_or(*stamp),
         Kind::Pen { .. } => o.style.multiply = v == "Marker",
         _ => {}
@@ -1896,7 +2485,13 @@ fn apply_variant(o: &mut Object, v: &str) {
 fn shape_drag(o: &mut Object, start: Pt, p: Pt, shift: bool) {
     let b = if shift {
         let s = (p.x - start.x).abs().max((p.y - start.y).abs());
-        Box2::from_points(start, Pt::new(start.x + s * (p.x - start.x).signum(), start.y + s * (p.y - start.y).signum()))
+        Box2::from_points(
+            start,
+            Pt::new(
+                start.x + s * (p.x - start.x).signum(),
+                start.y + s * (p.y - start.y).signum(),
+            ),
+        )
     } else {
         Box2::from_points(start, p)
     };
@@ -1935,7 +2530,9 @@ fn rect_mut_any(o: &mut Object) -> Option<&mut Box2> {
 fn default_size(o: &mut Object, at: Pt) {
     let fs = o.style.font_size;
     match &mut o.kind {
-        Kind::Text { rect, .. } => *rect = Box2::from_xywh(at.x, at.y, (fs * 10.0).max(160.0), fs * 1.8),
+        Kind::Text { rect, .. } => {
+            *rect = Box2::from_xywh(at.x, at.y, (fs * 10.0).max(160.0), fs * 1.8)
+        }
         Kind::Callout { rect, tail, .. } => {
             *rect = Box2::from_xywh(at.x, at.y, (fs * 9.0).max(180.0), fs * 3.4);
             *tail = Pt::new(at.x + rect.width() * 0.25, rect.y1 + fs * 2.0);
@@ -1955,7 +2552,11 @@ mod tests {
         e
     }
 
-    const NONE: Modifiers = Modifiers { shift: false, ctrl: false, alt: false };
+    const NONE: Modifiers = Modifiers {
+        shift: false,
+        ctrl: false,
+        alt: false,
+    };
 
     fn drag(e: &mut Editor, a: (f32, f32), b: (f32, f32)) {
         e.pointer_down(Pt::new(a.0, a.1), NONE, 4.0);
@@ -1971,14 +2572,21 @@ mod tests {
         assert_eq!(e.document().objects.len(), 1);
         let id = e.selection().unwrap();
         let damage = e.take_damage().unwrap();
-        assert!(damage.w < 220 && damage.h < 80, "only the arrow was redrawn: {damage:?}");
+        assert!(
+            damage.w < 220 && damage.h < 80,
+            "only the arrow was redrawn: {damage:?}"
+        );
         // Click on the arrow with the same tool picks it up and moves it.
         drag(&mut e, (90.0, 50.0), (90.0, 150.0));
         assert_eq!(e.document().objects.len(), 1);
-        let Kind::Line { a, .. } = e.document().get(id).unwrap().kind else { panic!() };
+        let Kind::Line { a, .. } = e.document().get(id).unwrap().kind else {
+            panic!()
+        };
         assert_eq!(a, Pt::new(50.0, 150.0));
         assert!(e.undo());
-        let Kind::Line { a, .. } = e.document().get(id).unwrap().kind else { panic!() };
+        let Kind::Line { a, .. } = e.document().get(id).unwrap().kind else {
+            panic!()
+        };
         assert_eq!(a, Pt::new(50.0, 50.0));
         assert!(e.undo());
         assert!(e.document().objects.is_empty());
@@ -2020,7 +2628,12 @@ mod tests {
             e.pointer_down(Pt::new(x, 250.0), NONE, 4.0);
             e.pointer_up(Pt::new(x, 250.0), NONE);
         }
-        let labels: Vec<_> = e.document().objects.iter().filter_map(|o| o.text().filter(|_| matches!(o.kind, Kind::Step { .. }))).collect();
+        let labels: Vec<_> = e
+            .document()
+            .objects
+            .iter()
+            .filter_map(|o| o.text().filter(|_| matches!(o.kind, Kind::Step { .. })))
+            .collect();
         assert_eq!(labels, ["1", "2", "3"]);
 
         e.set_tool(Tool::Crop);
@@ -2038,11 +2651,17 @@ mod tests {
         drag(&mut e, (10.0, 10.0), (110.0, 60.0));
         let id = e.selection().unwrap();
         drag(&mut e, (110.0, 60.0), (210.0, 110.0));
-        assert_eq!(e.document().get(id).unwrap().rect(), Some(Box2::new(10.0, 10.0, 210.0, 110.0)));
+        assert_eq!(
+            e.document().get(id).unwrap().rect(),
+            Some(Box2::new(10.0, 10.0, 210.0, 110.0))
+        );
         e.set_tool(Tool::Fill);
         e.pointer_down(Pt::new(300.0, 250.0), NONE, 4.0);
         e.pointer_up(Pt::new(300.0, 250.0), NONE);
-        assert_eq!(raster::pixel(e.document().background(), 399, 299), Rgba::YELLOW);
+        assert_eq!(
+            raster::pixel(e.document().background(), 399, 299),
+            Rgba::YELLOW
+        );
     }
 }
 
@@ -2056,7 +2675,10 @@ pub fn smooth_stroke(points: &[Pt], strength: f32) -> Vec<Pt> {
         let mut next = cur.clone();
         for i in 1..cur.len() - 1 {
             let (a, b, c) = (cur[i - 1], cur[i], cur[i + 1]);
-            next[i] = Pt::new(a.x * 0.25 + b.x * 0.5 + c.x * 0.25, a.y * 0.25 + b.y * 0.5 + c.y * 0.25);
+            next[i] = Pt::new(
+                a.x * 0.25 + b.x * 0.5 + c.x * 0.25,
+                a.y * 0.25 + b.y * 0.5 + c.y * 0.25,
+            );
         }
         cur = next;
     }

@@ -33,7 +33,9 @@ pub fn recognize(width: u32, height: u32, bgra: &[u8]) -> Result<Vec<Line>, Stri
         return Ok(Vec::new());
     }
     let pixels = bgra.to_vec();
-    std::thread::spawn(move || run(width, height, pixels)).join().map_err(|_| "text recognition crashed".to_owned())?
+    std::thread::spawn(move || run(width, height, pixels))
+        .join()
+        .map_err(|_| "text recognition crashed".to_owned())?
 }
 
 fn upscale(width: u32, height: u32, bgra: &[u8], k: u32) -> Vec<u8> {
@@ -57,10 +59,20 @@ fn run(width: u32, height: u32, bgra: Vec<u8>) -> Result<Vec<Line>, String> {
     unsafe {
         let _ = RoInitialize(RO_INIT_MULTITHREADED);
     }
-    let engine = OcrEngine::TryCreateFromUserProfileLanguages().map_err(|_| "no OCR language is installed (Settings › Time & language › Language)".to_owned())?;
+    let engine = OcrEngine::TryCreateFromUserProfileLanguages().map_err(|_| {
+        "no OCR language is installed (Settings › Time & language › Language)".to_owned()
+    })?;
     let max = OcrEngine::MaxImageDimension().map_err(e)?;
-    let k = if width.max(height) < UPSCALE_BELOW && width.max(height) * 2 <= max { 2 } else { 1 };
-    let (w, h, pixels) = if k > 1 { (width * k, height * k, upscale(width, height, &bgra, k)) } else { (width, height, bgra) };
+    let k = if width.max(height) < UPSCALE_BELOW && width.max(height) * 2 <= max {
+        2
+    } else {
+        1
+    };
+    let (w, h, pixels) = if k > 1 {
+        (width * k, height * k, upscale(width, height, &bgra, k))
+    } else {
+        (width, height, bgra)
+    };
     // Tile tall or wide images (scrolling captures) to the engine's limit.
     let mut lines = Vec::new();
     let tile_h = h.min(max);
@@ -79,8 +91,18 @@ fn run(width: u32, height: u32, bgra: Vec<u8>) -> Result<Vec<Line>, String> {
             let writer = DataWriter::new().map_err(e)?;
             writer.WriteBytes(&tile).map_err(e)?;
             let buffer = writer.DetachBuffer().map_err(e)?;
-            let bitmap = SoftwareBitmap::CreateCopyFromBuffer(&buffer, BitmapPixelFormat::Bgra8, tw as i32, th as i32).map_err(e)?;
-            let result = engine.RecognizeAsync(&bitmap).map_err(e)?.join().map_err(e)?;
+            let bitmap = SoftwareBitmap::CreateCopyFromBuffer(
+                &buffer,
+                BitmapPixelFormat::Bgra8,
+                tw as i32,
+                th as i32,
+            )
+            .map_err(e)?;
+            let result = engine
+                .RecognizeAsync(&bitmap)
+                .map_err(e)?
+                .join()
+                .map_err(e)?;
             let map = |r: WinRect| {
                 let x0 = ((r.X + tx as f32) / k as f32).floor() as i32;
                 let y0 = ((r.Y + ty as f32) / k as f32).floor() as i32;
@@ -91,11 +113,21 @@ fn run(width: u32, height: u32, bgra: Vec<u8>) -> Result<Vec<Line>, String> {
             for line in result.Lines().map_err(e)? {
                 let mut words = Vec::new();
                 for word in line.Words().map_err(e)? {
-                    words.push(Word { rect: map(word.BoundingRect().map_err(e)?), text: word.Text().map_err(e)?.to_string() });
+                    words.push(Word {
+                        rect: map(word.BoundingRect().map_err(e)?),
+                        text: word.Text().map_err(e)?.to_string(),
+                    });
                 }
                 let Some(first) = words.first() else { continue };
-                let rect = words.iter().skip(1).fold(first.rect, |a, w| a.union(w.rect));
-                lines.push(Line { rect, text: line.Text().map_err(e)?.to_string(), words });
+                let rect = words
+                    .iter()
+                    .skip(1)
+                    .fold(first.rect, |a, w| a.union(w.rect));
+                lines.push(Line {
+                    rect,
+                    text: line.Text().map_err(e)?.to_string(),
+                    words,
+                });
             }
             tx += tw;
         }

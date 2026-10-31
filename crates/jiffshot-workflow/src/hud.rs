@@ -15,10 +15,12 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, VK_ESCAPE};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, VK_ESCAPE,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, PostQuitMessage, TranslateMessage, MSG, PM_REMOVE,
-    QS_ALLINPUT, WM_HOTKEY, WM_QUIT,
+    DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, PostQuitMessage, TranslateMessage,
+    MSG, PM_REMOVE, QS_ALLINPUT, WM_HOTKEY, WM_QUIT,
 };
 
 /// A control panel next to `area` (desktop pixels).
@@ -48,7 +50,10 @@ struct Hud {
     borders: Vec<BorderView>,
 }
 
-static HUD: Mutex<Hud> = Mutex::new(Hud { panels: Vec::new(), borders: Vec::new() });
+static HUD: Mutex<Hud> = Mutex::new(Hud {
+    panels: Vec::new(),
+    borders: Vec::new(),
+});
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 fn xywh(r: Rect) -> [i32; 4] {
@@ -76,7 +81,10 @@ impl Border {
     pub fn show(rect: Rect) -> Border {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         change(|hud| {
-            hud.borders.push(BorderView { id, area: xywh(rect) });
+            hud.borders.push(BorderView {
+                id,
+                area: xywh(rect),
+            });
             true
         });
         Border { id }
@@ -163,7 +171,13 @@ pub fn finish_panel(result: Option<usize>) {
 /// messages keep flowing, calling `tick` every `tick_ms` (its return value,
 /// if any, becomes the status text). Returns the index of the button
 /// pressed, or `None` for Esc.
-pub fn run_panel(area: Rect, status: &str, buttons: &[&str], tick_ms: u32, tick: impl FnMut() -> Option<String>) -> Option<usize> {
+pub fn run_panel(
+    area: Rect,
+    status: &str,
+    buttons: &[&str],
+    tick_ms: u32,
+    tick: impl FnMut() -> Option<String>,
+) -> Option<usize> {
     run_panel_with_keys(area, status, buttons, &[], tick_ms, tick)
 }
 
@@ -179,7 +193,13 @@ pub fn run_panel_with_keys(
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let depth = open(id);
     change(|hud| {
-        hud.panels.push(PanelView { id, area: xywh(area), status: status.to_owned(), buttons: buttons.iter().map(|b| b.to_string()).collect(), toolbar: None });
+        hud.panels.push(PanelView {
+            id,
+            area: xywh(area),
+            status: status.to_owned(),
+            buttons: buttons.iter().map(|b| b.to_string()).collect(),
+            toolbar: None,
+        });
         true
     });
     let base = HOTKEY_BASE + (depth * KEYS_PER_PANEL) as i32;
@@ -189,14 +209,24 @@ pub fn run_panel_with_keys(
     unsafe {
         RegisterHotKey(std::ptr::null_mut(), base, MOD_NOREPEAT, VK_ESCAPE as u32);
         for (i, key) in keys.iter().enumerate() {
-            RegisterHotKey(std::ptr::null_mut(), base + 1 + i as i32, key.modifiers | MOD_NOREPEAT, key.vk as u32);
+            RegisterHotKey(
+                std::ptr::null_mut(),
+                base + 1 + i as i32,
+                key.modifiers | MOD_NOREPEAT,
+                key.vk as u32,
+            );
         }
     }
     let every = Duration::from_millis(tick_ms.max(1) as u64);
     let mut next = Instant::now() + every;
     let mut quit = false;
     let result = loop {
-        if let Some(result) = OPEN.with(|open| open.borrow().iter().find(|p| p.id == id).and_then(|p| p.answer)) {
+        if let Some(result) = OPEN.with(|open| {
+            open.borrow()
+                .iter()
+                .find(|p| p.id == id)
+                .and_then(|p| p.answer)
+        }) {
             break result;
         }
         if quit {
@@ -257,7 +287,11 @@ pub fn run_panel_with_keys(
 fn open(id: u64) -> usize {
     OPEN.with(|open| {
         let mut open = open.borrow_mut();
-        open.push(Open { id, answer: None, actions: Vec::new() });
+        open.push(Open {
+            id,
+            answer: None,
+            actions: Vec::new(),
+        });
         open.len() - 1
     })
 }
@@ -288,7 +322,13 @@ pub fn run_toolbar(
     let depth = open(id);
     let first = state();
     change(|hud| {
-        hud.panels.push(PanelView { id, area: xywh(area), status: String::new(), buttons: Vec::new(), toolbar: Some(first) });
+        hud.panels.push(PanelView {
+            id,
+            area: xywh(area),
+            status: String::new(),
+            buttons: Vec::new(),
+            toolbar: Some(first),
+        });
         true
     });
     let base = HOTKEY_BASE + (depth * KEYS_PER_PANEL) as i32;
@@ -297,7 +337,12 @@ pub fn run_toolbar(
     unsafe {
         RegisterHotKey(std::ptr::null_mut(), base, MOD_NOREPEAT, VK_ESCAPE as u32);
         for (i, (modifiers, vk, _)) in keys.iter().enumerate() {
-            RegisterHotKey(std::ptr::null_mut(), base + 1 + i as i32, modifiers | MOD_NOREPEAT, *vk as u32);
+            RegisterHotKey(
+                std::ptr::null_mut(),
+                base + 1 + i as i32,
+                modifiers | MOD_NOREPEAT,
+                *vk as u32,
+            );
         }
     }
     let publish = |value: Value| {
@@ -313,7 +358,13 @@ pub fn run_toolbar(
     let mut next = Instant::now() + every;
     let mut quit = false;
     let ended = 'run: loop {
-        let actions = OPEN.with(|open| open.borrow_mut().iter_mut().find(|p| p.id == id).map(|p| std::mem::take(&mut p.actions)).unwrap_or_default());
+        let actions = OPEN.with(|open| {
+            open.borrow_mut()
+                .iter_mut()
+                .find(|p| p.id == id)
+                .map(|p| std::mem::take(&mut p.actions))
+                .unwrap_or_default()
+        });
         for action in &actions {
             if act(action) {
                 break 'run action.clone();
@@ -322,7 +373,12 @@ pub fn run_toolbar(
         if !actions.is_empty() {
             publish(state());
         }
-        if OPEN.with(|open| open.borrow().iter().find(|p| p.id == id).is_some_and(|p| p.answer.is_some())) {
+        if OPEN.with(|open| {
+            open.borrow()
+                .iter()
+                .find(|p| p.id == id)
+                .is_some_and(|p| p.answer.is_some())
+        }) {
             break "stop".to_owned();
         }
         if quit {
@@ -378,13 +434,19 @@ mod tests {
     #[test]
     fn a_tick_can_finish_the_panel_and_the_state_is_cleared() {
         let mut ticks = 0;
-        let result = run_panel(Rect::new(10, 20, 300, 200), "Counting", &["Start now", "Cancel"], 5, || {
-            ticks += 1;
-            if ticks == 3 {
-                finish_panel(Some(1));
-            }
-            Some(format!("tick {ticks}"))
-        });
+        let result = run_panel(
+            Rect::new(10, 20, 300, 200),
+            "Counting",
+            &["Start now", "Cancel"],
+            5,
+            || {
+                ticks += 1;
+                if ticks == 3 {
+                    finish_panel(Some(1));
+                }
+                Some(format!("tick {ticks}"))
+            },
+        );
         assert_eq!(result, Some(1));
         assert_eq!(ticks, 3);
         let hud = HUD.lock().unwrap();
@@ -418,14 +480,22 @@ mod tests {
         assert_eq!(ended, "stop");
         assert_eq!(seen, ["toggle:mic", "stop"]);
         // (Other tests' panels may be up at the same time.)
-        assert!(HUD.lock().unwrap().panels.iter().all(|p| p.toolbar.is_none()));
+        assert!(HUD
+            .lock()
+            .unwrap()
+            .panels
+            .iter()
+            .all(|p| p.toolbar.is_none()));
     }
 
     #[test]
     fn borders_come_and_go_and_serialize_their_area() {
         let border = Border::show(Rect::new(1, 2, 3, 4));
         let json = serde_json::to_string(&*HUD.lock().unwrap()).unwrap();
-        assert!(json.contains(&format!("{{\"id\":{},\"area\":[1,2,3,4]}}", border.id)), "{json}");
+        assert!(
+            json.contains(&format!("{{\"id\":{},\"area\":[1,2,3,4]}}", border.id)),
+            "{json}"
+        );
         let id = border.id;
         drop(border);
         assert!(HUD.lock().unwrap().borders.iter().all(|b| b.id != id));

@@ -87,7 +87,12 @@ fn describe_monitor(handle: HMONITOR) -> Option<Monitor> {
 }
 
 pub fn monitors() -> Vec<Monitor> {
-    unsafe extern "system" fn collect(handle: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL {
+    unsafe extern "system" fn collect(
+        handle: HMONITOR,
+        _: HDC,
+        _: *mut RECT,
+        data: LPARAM,
+    ) -> BOOL {
         // SAFETY: `data` is the `Vec` passed below, alive for the whole call.
         let list = &mut *(data as *mut Vec<Monitor>);
         list.extend(describe_monitor(handle));
@@ -96,7 +101,12 @@ pub fn monitors() -> Vec<Monitor> {
     let mut list: Vec<Monitor> = Vec::new();
     // SAFETY: the callback only touches `list` through the pointer it is given.
     unsafe {
-        EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(collect), &mut list as *mut _ as LPARAM);
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(collect),
+            &mut list as *mut _ as LPARAM,
+        );
     }
     list
 }
@@ -110,13 +120,26 @@ pub fn monitor_at(x: i32, y: i32) -> Option<Monitor> {
 /// Copies a rectangle of the screen (screen coordinates) into a frame.
 pub fn grab(r: Rect) -> io::Result<Frame> {
     if r.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty capture rectangle"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "empty capture rectangle",
+        ));
     }
     let dib = Dib::new(r.width, r.height)?;
     // SAFETY: the screen DC is released before returning; `dib` owns its DC.
     unsafe {
         let screen = GetDC(std::ptr::null_mut());
-        let copied = BitBlt(dib.dc(), 0, 0, r.width, r.height, screen, r.x, r.y, SRCCOPY | CAPTUREBLT);
+        let copied = BitBlt(
+            dib.dc(),
+            0,
+            0,
+            r.width,
+            r.height,
+            screen,
+            r.x,
+            r.y,
+            SRCCOPY | CAPTUREBLT,
+        );
         ReleaseDC(std::ptr::null_mut(), screen);
         if copied == 0 {
             return Err(io::Error::last_os_error());
@@ -134,7 +157,10 @@ pub struct Grabber {
 
 impl Grabber {
     pub fn new(rect: Rect) -> io::Result<Grabber> {
-        Ok(Grabber { rect, dib: Dib::new(rect.width, rect.height)? })
+        Ok(Grabber {
+            rect,
+            dib: Dib::new(rect.width, rect.height)?,
+        })
     }
 
     /// Grabs the rectangle; returns its pixels (top-down BGRX).
@@ -143,7 +169,17 @@ impl Grabber {
         // SAFETY: as in `grab`.
         unsafe {
             let screen = GetDC(std::ptr::null_mut());
-            let copied = BitBlt(self.dib.dc(), 0, 0, r.width, r.height, screen, r.x, r.y, SRCCOPY | CAPTUREBLT);
+            let copied = BitBlt(
+                self.dib.dc(),
+                0,
+                0,
+                r.width,
+                r.height,
+                screen,
+                r.x,
+                r.y,
+                SRCCOPY | CAPTUREBLT,
+            );
             ReleaseDC(std::ptr::null_mut(), screen);
             if copied == 0 {
                 return Err(io::Error::last_os_error());
@@ -173,7 +209,10 @@ impl CursorSnapshot {
         unsafe {
             let mut info: CURSORINFO = std::mem::zeroed();
             info.cbSize = std::mem::size_of::<CURSORINFO>() as u32;
-            if GetCursorInfo(&mut info) == 0 || info.flags & CURSOR_SHOWING == 0 || info.hCursor.is_null() {
+            if GetCursorInfo(&mut info) == 0
+                || info.flags & CURSOR_SHOWING == 0
+                || info.hCursor.is_null()
+            {
                 return None;
             }
             let icon = CopyIcon(info.hCursor);
@@ -192,7 +231,11 @@ impl CursorSnapshot {
                     windows_sys::Win32::Graphics::Gdi::DeleteObject(icon_info.hbmColor);
                 }
             }
-            Some(CursorSnapshot { icon, x: info.ptScreenPos.x - hot_x, y: info.ptScreenPos.y - hot_y })
+            Some(CursorSnapshot {
+                icon,
+                x: info.ptScreenPos.x - hot_x,
+                y: info.ptScreenPos.y - hot_y,
+            })
         }
     }
 
@@ -203,7 +246,11 @@ impl CursorSnapshot {
         let on = |v: u8| -> io::Result<Frame> {
             let mut f = Frame::new(size, size);
             f.pixels.iter_mut().for_each(|b| *b = v);
-            let probe = CursorSnapshot { icon: self.icon, x: 0, y: 0 };
+            let probe = CursorSnapshot {
+                icon: self.icon,
+                x: 0,
+                y: 0,
+            };
             let r = probe.draw_onto(&mut f, (0, 0));
             std::mem::forget(probe);
             r.map(|_| f)
@@ -212,9 +259,21 @@ impl CursorSnapshot {
         let mut out = Frame::new(size, size);
         out.alpha = true;
         for i in 0..(size * size) as usize {
-            let a = 255 - (white.pixels[i * 4 + 1] as i32 - black.pixels[i * 4 + 1] as i32).clamp(0, 255);
-            let un = |c: u8| if a > 0 { (c as i32 * 255 / a).min(255) as u8 } else { 0 };
-            out.pixels[i * 4..i * 4 + 4].copy_from_slice(&[un(black.pixels[i * 4]), un(black.pixels[i * 4 + 1]), un(black.pixels[i * 4 + 2]), a as u8]);
+            let a = 255
+                - (white.pixels[i * 4 + 1] as i32 - black.pixels[i * 4 + 1] as i32).clamp(0, 255);
+            let un = |c: u8| {
+                if a > 0 {
+                    (c as i32 * 255 / a).min(255) as u8
+                } else {
+                    0
+                }
+            };
+            out.pixels[i * 4..i * 4 + 4].copy_from_slice(&[
+                un(black.pixels[i * 4]),
+                un(black.pixels[i * 4 + 1]),
+                un(black.pixels[i * 4 + 2]),
+                a as u8,
+            ]);
         }
         Ok(out)
     }
@@ -225,7 +284,17 @@ impl CursorSnapshot {
         let mut dib = Dib::from_frame(frame)?;
         // SAFETY: draws an owned icon into an owned DC.
         unsafe {
-            DrawIconEx(dib.dc(), self.x - origin.0, self.y - origin.1, self.icon, 0, 0, 0, std::ptr::null_mut(), DI_NORMAL);
+            DrawIconEx(
+                dib.dc(),
+                self.x - origin.0,
+                self.y - origin.1,
+                self.icon,
+                0,
+                0,
+                0,
+                std::ptr::null_mut(),
+                DI_NORMAL,
+            );
         }
         frame.pixels.copy_from_slice(dib.pixels_mut());
         Ok(())

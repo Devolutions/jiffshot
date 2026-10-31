@@ -59,7 +59,10 @@ pub fn read_meta(capture: &Path) -> Option<CaptureMeta> {
 }
 
 pub fn write_meta(capture: &Path, meta: &CaptureMeta) -> io::Result<()> {
-    std::fs::write(sidecar(capture), serde_json::to_vec_pretty(meta).map_err(io::Error::other)?)
+    std::fs::write(
+        sidecar(capture),
+        serde_json::to_vec_pretty(meta).map_err(io::Error::other)?,
+    )
 }
 
 /// The extension of a capture's saved edits (a Jiffshot document).
@@ -73,7 +76,10 @@ pub fn edits_of(capture: &Path) -> Option<PathBuf> {
 /// Files that belong with a capture: its sidecar, edits and pointer.
 pub fn companions(capture: &Path) -> Vec<PathBuf> {
     let stem = capture.with_extension("");
-    let mut out = vec![capture.with_extension("json"), capture.with_extension(EDITS_EXT)];
+    let mut out = vec![
+        capture.with_extension("json"),
+        capture.with_extension(EDITS_EXT),
+    ];
     out.push(PathBuf::from(format!("{}.cursor.png", stem.display())));
     out.push(PathBuf::from(format!("{}.cursor.json", stem.display())));
     out
@@ -84,12 +90,21 @@ pub fn companions(capture: &Path) -> Vec<PathBuf> {
 pub fn rename(capture: &Path, name: &str) -> io::Result<PathBuf> {
     let name = name.trim();
     if name.is_empty() || name.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "a file name cannot contain \\ / : * ? \" < > |"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a file name cannot contain \\ / : * ? \" < > |",
+        ));
     }
-    let ext = capture.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = capture
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let target = capture.with_file_name(format!("{name}.{ext}"));
     if target.exists() {
-        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "a capture with that name exists"));
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "a capture with that name exists",
+        ));
     }
     let new_stem = target.with_extension("");
     let old_stem = capture.with_extension("");
@@ -137,7 +152,9 @@ impl Library {
             let hr = SHGetKnownFolderPath(&FOLDERID_Pictures, 0, std::ptr::null_mut(), &mut path);
             let result = if hr == 0 && !path.is_null() {
                 let len = (0..).take_while(|&i| *path.add(i) != 0).count();
-                Some(PathBuf::from(String::from_utf16_lossy(std::slice::from_raw_parts(path, len))))
+                Some(PathBuf::from(String::from_utf16_lossy(
+                    std::slice::from_raw_parts(path, len),
+                )))
             } else {
                 None
             };
@@ -145,7 +162,9 @@ impl Library {
             result
         };
         let pictures = pictures
-            .or_else(|| std::env::var_os("USERPROFILE").map(|home| Path::new(&home).join("Pictures")))
+            .or_else(|| {
+                std::env::var_os("USERPROFILE").map(|home| Path::new(&home).join("Pictures"))
+            })
             .unwrap_or_else(std::env::temp_dir);
         pictures.join(crate::paths::NAME)
     }
@@ -192,13 +211,30 @@ impl Library {
             .flatten()
             .flatten()
             .filter(|month| month.path().is_dir())
-            .flat_map(|month| std::fs::read_dir(month.path()).into_iter().flatten().flatten())
-            .filter(|entry| entry.path().extension().is_some_and(|e| e.eq_ignore_ascii_case("png") || e.eq_ignore_ascii_case("mp4")))
-            .filter(|entry| !entry.path().to_string_lossy().ends_with(".thumb.png") && !entry.path().to_string_lossy().ends_with(".cursor.png"))
+            .flat_map(|month| {
+                std::fs::read_dir(month.path())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+            })
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("png") || e.eq_ignore_ascii_case("mp4"))
+            })
+            .filter(|entry| {
+                !entry.path().to_string_lossy().ends_with(".thumb.png")
+                    && !entry.path().to_string_lossy().ends_with(".cursor.png")
+            })
             .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
             .collect();
         items.sort_by(|a, b| b.0.cmp(&a.0));
-        items.into_iter().take(limit).map(|(_, path)| path).collect()
+        items
+            .into_iter()
+            .take(limit)
+            .map(|(_, path)| path)
+            .collect()
     }
 }
 
@@ -208,7 +244,8 @@ mod tests {
 
     #[test]
     fn save_writes_png_and_sidecar_without_overwriting() {
-        let root = std::env::temp_dir().join(format!("jiffshot-library-test-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("jiffshot-library-test-{}", std::process::id()));
         let library = Library::new(root.clone());
         let frame = Frame::new(4, 3);
         let meta = CaptureMeta {

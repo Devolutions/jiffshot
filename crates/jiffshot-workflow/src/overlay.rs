@@ -16,11 +16,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, VK_BACK, VK_DOWN, VK_ESCAPE, VK_F1, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
+    RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, VK_BACK, VK_DOWN, VK_ESCAPE, VK_F1, VK_LEFT,
+    VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, PostQuitMessage, TranslateMessage, MSG, PM_REMOVE, QS_ALLINPUT,
-    WM_HOTKEY, WM_QUIT,
+    DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, PostQuitMessage, TranslateMessage,
+    MSG, PM_REMOVE, QS_ALLINPUT, WM_HOTKEY, WM_QUIT,
 };
 
 /// How the overlay selects.
@@ -46,11 +47,20 @@ pub enum Mode {
 pub enum Selection {
     Region(Rect),
     /// A freehand outline (screen points) inside `rect`.
-    Freehand { rect: Rect, points: Vec<(i32, i32)> },
+    Freehand {
+        rect: Rect,
+        points: Vec<(i32, i32)>,
+    },
     /// Several regions, all inside `rect`.
-    Multi { rect: Rect, regions: Vec<Rect> },
+    Multi {
+        rect: Rect,
+        regions: Vec<Rect>,
+    },
     /// A window or child window; `target` indexes [`Overlay::targets`].
-    Window { rect: Rect, target: usize },
+    Window {
+        rect: Rect,
+        target: usize,
+    },
     Monitor(Rect),
     Desktop(Rect),
 }
@@ -120,7 +130,9 @@ fn constrained(a: (i32, i32), b: (i32, i32), shift: bool, ctrl: bool) -> Rect {
         (false, true) => Some(1.0),
         _ => None,
     };
-    let Some(ratio) = ratio else { return Rect::from_points(a, b) };
+    let Some(ratio) = ratio else {
+        return Rect::from_points(a, b);
+    };
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let w = (dx.abs() as f32).max(dy.abs() as f32 * ratio);
     let h = w / ratio;
@@ -181,7 +193,13 @@ pub struct Overlay {
 impl Overlay {
     /// `snapshot` covers the virtual screen starting at `origin`; `cursor`
     /// is the initial pointer position in screen pixels.
-    pub fn new(snapshot: Frame, origin: (i32, i32), targets: Targets, monitors: Vec<Monitor>, cursor: (i32, i32)) -> io::Result<Overlay> {
+    pub fn new(
+        snapshot: Frame,
+        origin: (i32, i32),
+        targets: Targets,
+        monitors: Vec<Monitor>,
+        cursor: (i32, i32),
+    ) -> io::Result<Overlay> {
         Ok(Overlay {
             cursor: (cursor.0 - origin.0, cursor.1 - origin.1),
             origin,
@@ -234,11 +252,20 @@ impl Overlay {
 
     fn lit_now(&mut self) -> Lit {
         if self.mode == Mode::Freehand && !self.path.is_empty() {
-            let r = self.path.iter().fold(Rect::new(self.path[0].0, self.path[0].1, 1, 1), |r, p| r.union(Rect::new(p.0, p.1, 1, 1)));
+            let r = self
+                .path
+                .iter()
+                .fold(Rect::new(self.path[0].0, self.path[0].1, 1, 1), |r, p| {
+                    r.union(Rect::new(p.0, p.1, 1, 1))
+                });
             return Lit::Region(r);
         }
         if let (true, Some(press)) = (self.dragging, self.press) {
-            return Lit::Region(constrained(press, self.cursor, self.shift, self.ctrl).intersect(self.bounds()).unwrap_or_default());
+            return Lit::Region(
+                constrained(press, self.cursor, self.shift, self.ctrl)
+                    .intersect(self.bounds())
+                    .unwrap_or_default(),
+            );
         }
         let fixed_size = match self.mode {
             Mode::Fixed(w, h) => Some((w, h)),
@@ -248,10 +275,22 @@ impl Overlay {
         if let Some((w, h)) = fixed_size {
             let (cx, cy) = self.cursor;
             let b = self.bounds();
-            let x = if b.width >= w { (cx - w / 2).clamp(b.x, b.right() - w) } else { b.x };
-            let y = if b.height >= h { (cy - h / 2).clamp(b.y, b.bottom() - h) } else { b.y };
+            let x = if b.width >= w {
+                (cx - w / 2).clamp(b.x, b.right() - w)
+            } else {
+                b.x
+            };
+            let y = if b.height >= h {
+                (cy - h / 2).clamp(b.y, b.bottom() - h)
+            } else {
+                b.y
+            };
             let r = Rect::new(x, y, w, h);
-            return Lit::Region(if matches!(self.mode, Mode::VideoFixed(..)) { r } else { r.intersect(b).unwrap_or_default() });
+            return Lit::Region(if matches!(self.mode, Mode::VideoFixed(..)) {
+                r
+            } else {
+                r.intersect(b).unwrap_or_default()
+            });
         }
         let (x, y) = self.screen_cursor();
         let deepest = self.targets.hit(x, y, 0);
@@ -260,7 +299,12 @@ impl Overlay {
             self.levels_up = 0;
         }
         match self.targets.hit(x, y, self.levels_up) {
-            Some(i) => Lit::Window(i, self.targets.list[i].rect.offset(-self.origin.0, -self.origin.1)),
+            Some(i) => Lit::Window(
+                i,
+                self.targets.list[i]
+                    .rect
+                    .offset(-self.origin.0, -self.origin.1),
+            ),
             None => Lit::Monitor(self.monitor().0),
         }
     }
@@ -272,10 +316,22 @@ impl Overlay {
         let title = match lit {
             Lit::Window(i, _) => {
                 let t = &self.targets.list[i];
-                let name = if t.title.is_empty() { t.class.clone() } else { t.title.clone() };
-                let name: String = if name.chars().count() > 60 { name.chars().take(59).chain(['…']).collect() } else { name };
+                let name = if t.title.is_empty() {
+                    t.class.clone()
+                } else {
+                    t.title.clone()
+                };
+                let name: String = if name.chars().count() > 60 {
+                    name.chars().take(59).chain(['…']).collect()
+                } else {
+                    name
+                };
                 let level = self.targets.depth_of(i);
-                Some(if level > 0 { format!("{name}  ·  child {level}") } else { name })
+                Some(if level > 0 {
+                    format!("{name}  ·  child {level}")
+                } else {
+                    name
+                })
             }
             Lit::Monitor(_) => Some("Screen".to_owned()),
             Lit::Region(_) => None,
@@ -304,7 +360,9 @@ impl Overlay {
 
     /// The freehand outline so far, in screen pixels.
     pub fn path(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
-        self.path.iter().map(|&(x, y)| (x + self.origin.0, y + self.origin.1))
+        self.path
+            .iter()
+            .map(|&(x, y)| (x + self.origin.0, y + self.origin.1))
     }
 
     /// The areas added so far in multi-area mode, in screen pixels.
@@ -329,7 +387,8 @@ impl Overlay {
                 }
             }
         }
-        if self.mode == Mode::Freehand && self.press.is_some() && self.path.last() != Some(&(x, y)) {
+        if self.mode == Mode::Freehand && self.press.is_some() && self.path.last() != Some(&(x, y))
+        {
             self.path.push((x, y));
         }
     }
@@ -343,9 +402,20 @@ impl Overlay {
         self.cursor = (x, y);
         if self.mode == Mode::Freehand {
             if self.path.len() >= 3 {
-                let rect = self.lit_now().rect().intersect(self.bounds()).unwrap_or_default();
-                let points = self.path.iter().map(|&(px, py)| (px + self.origin.0, py + self.origin.1)).collect();
-                self.outcome = Some(Some(Selection::Freehand { rect: self.to_screen(rect), points }));
+                let rect = self
+                    .lit_now()
+                    .rect()
+                    .intersect(self.bounds())
+                    .unwrap_or_default();
+                let points = self
+                    .path
+                    .iter()
+                    .map(|&(px, py)| (px + self.origin.0, py + self.origin.1))
+                    .collect();
+                self.outcome = Some(Some(Selection::Freehand {
+                    rect: self.to_screen(rect),
+                    points,
+                }));
             }
             self.path.clear();
             self.press = None;
@@ -354,7 +424,9 @@ impl Overlay {
         }
         if self.mode == Mode::MultiArea {
             if self.dragging {
-                if let Some(r) = self.press.and_then(|p| constrained(p, self.cursor, self.shift, self.ctrl).intersect(self.bounds())) {
+                if let Some(r) = self.press.and_then(|p| {
+                    constrained(p, self.cursor, self.shift, self.ctrl).intersect(self.bounds())
+                }) {
                     self.regions.push(r);
                 }
             }
@@ -372,7 +444,8 @@ impl Overlay {
         }
         if self.dragging {
             if let Some(press) = self.press {
-                let region = constrained(press, self.cursor, self.shift, self.ctrl).intersect(self.bounds());
+                let region =
+                    constrained(press, self.cursor, self.shift, self.ctrl).intersect(self.bounds());
                 self.outcome = Some(region.map(|r| Selection::Region(self.to_screen(r))));
             }
         } else if self.press.is_some() {
@@ -384,7 +457,10 @@ impl Overlay {
 
     fn select_lit(&mut self) {
         let selection = match self.lit_now() {
-            Lit::Window(target, r) => Selection::Window { rect: self.to_screen(r), target },
+            Lit::Window(target, r) => Selection::Window {
+                rect: self.to_screen(r),
+                target,
+            },
             Lit::Monitor(r) => Selection::Monitor(self.to_screen(r)),
             Lit::Region(r) => Selection::Region(self.to_screen(r)),
         };
@@ -398,8 +474,15 @@ impl Overlay {
             return;
         }
         let (x, y) = self.screen_cursor();
-        let max = self.targets.hit(x, y, 0).map_or(0, |i| self.targets.depth_of(i));
-        self.levels_up = if delta > 0 { (self.levels_up + 1).min(max) } else { self.levels_up.saturating_sub(1) };
+        let max = self
+            .targets
+            .hit(x, y, 0)
+            .map_or(0, |i| self.targets.depth_of(i));
+        self.levels_up = if delta > 0 {
+            (self.levels_up + 1).min(max)
+        } else {
+            self.levels_up.saturating_sub(1)
+        };
     }
 
     pub fn cancel(&mut self) {
@@ -431,7 +514,10 @@ impl Overlay {
                 if let Some(first) = self.regions.first().copied() {
                     let all = self.regions.iter().fold(first, |a, r| a.union(*r));
                     let regions = self.regions.iter().map(|r| self.to_screen(*r)).collect();
-                    self.outcome = Some(Some(Selection::Multi { rect: self.to_screen(all), regions }));
+                    self.outcome = Some(Some(Selection::Multi {
+                        rect: self.to_screen(all),
+                        regions,
+                    }));
                 }
             }
             VK_BACK if self.mode == Mode::MultiArea => {
@@ -447,15 +533,23 @@ impl Overlay {
             VK_F1 => self.show_help = !self.show_help,
             _ if vk == b'M' as u16 => self.show_magnifier = !self.show_magnifier,
             _ if vk == b'G' as u16 => self.show_guides = !self.show_guides,
-            _ if (b'1' as u16..=b'4' as u16).contains(&vk) && matches!(self.mode, Mode::Video | Mode::VideoFixed(..)) => {
+            _ if (b'1' as u16..=b'4' as u16).contains(&vk)
+                && matches!(self.mode, Mode::Video | Mode::VideoFixed(..)) =>
+            {
                 let (w, h) = GUIDES[(vk - b'1' as u16) as usize];
                 self.mode = match self.mode {
-                    Mode::VideoFixed(current_w, current_h) if (current_w, current_h) == (w, h) => Mode::Video,
+                    Mode::VideoFixed(current_w, current_h) if (current_w, current_h) == (w, h) => {
+                        Mode::Video
+                    }
                     _ => Mode::VideoFixed(w, h),
                 };
             }
-            _ if vk == b'F' as u16 => self.outcome = Some(Some(Selection::Monitor(self.to_screen(self.monitor().0)))),
-            _ if vk == b'A' as u16 => self.outcome = Some(Some(Selection::Desktop(self.to_screen(self.bounds())))),
+            _ if vk == b'F' as u16 => {
+                self.outcome = Some(Some(Selection::Monitor(self.to_screen(self.monitor().0))))
+            }
+            _ if vk == b'A' as u16 => {
+                self.outcome = Some(Some(Selection::Desktop(self.to_screen(self.bounds()))))
+            }
             _ => {}
         }
         None
@@ -466,7 +560,13 @@ impl Overlay {
         match self.lit_now() {
             Lit::Window(i, r) => {
                 let t = &self.targets.list[i];
-                format!("window #{i} (depth {}) {:?} class={} title={:?}", t.depth, self.to_screen(r), t.class, t.title)
+                format!(
+                    "window #{i} (depth {}) {:?} class={} title={:?}",
+                    t.depth,
+                    self.to_screen(r),
+                    t.class,
+                    t.title
+                )
             }
             Lit::Monitor(r) => format!("screen {:?}", self.to_screen(r)),
             Lit::Region(r) => format!("region {:?}", self.to_screen(r)),
@@ -517,7 +617,9 @@ fn announcement(id: u64, overlay: &Overlay) -> String {
 /// cropping its snapshot) and the selection; `None` at once without the
 /// app.
 pub fn run(overlay: Overlay) -> (Overlay, Option<Selection>) {
-    let Some(hooks) = crate::hooks() else { return (overlay, None) };
+    let Some(hooks) = crate::hooks() else {
+        return (overlay, None);
+    };
     let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
     let announce = announcement(id, &overlay);
     *session() = Some(Session { id, overlay });
@@ -525,17 +627,27 @@ pub fn run(overlay: Overlay) -> (Overlay, Option<Selection>) {
     // SAFETY: a thread hotkey and a plain message pump; the hotkey is
     // released below.
     unsafe {
-        RegisterHotKey(std::ptr::null_mut(), HOTKEY_ESC, MOD_NOREPEAT, VK_ESCAPE as u32);
+        RegisterHotKey(
+            std::ptr::null_mut(),
+            HOTKEY_ESC,
+            MOD_NOREPEAT,
+            VK_ESCAPE as u32,
+        );
         (hooks.overlay)(announce);
         let mut msg: MSG = std::mem::zeroed();
-        while !session().as_ref().is_some_and(|s| s.overlay.outcome.is_some()) && !quit {
+        while !session()
+            .as_ref()
+            .is_some_and(|s| s.overlay.outcome.is_some())
+            && !quit
+        {
             MsgWaitForMultipleObjects(0, std::ptr::null(), 0, 100, QS_ALLINPUT);
             while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
                 if msg.message == WM_QUIT {
                     quit = true;
                     break;
                 }
-                if msg.message == WM_HOTKEY && msg.hwnd.is_null() && msg.wParam as i32 == HOTKEY_ESC {
+                if msg.message == WM_HOTKEY && msg.hwnd.is_null() && msg.wParam as i32 == HOTKEY_ESC
+                {
                     if let Some(s) = session().as_mut() {
                         s.overlay.cancel();
                     }
@@ -580,22 +692,57 @@ pub fn demo(mode: i32) -> String {
             for x in rect.x..rect.right() {
                 let at = y as usize * stride + x as usize * 4;
                 let bar = y < rect.y + 32;
-                snapshot.pixels[at..at + 3].copy_from_slice(if bar { &[0x30, 0x30, 0x30] } else { &fill });
+                snapshot.pixels[at..at + 3].copy_from_slice(if bar {
+                    &[0x30, 0x30, 0x30]
+                } else {
+                    &fill
+                });
             }
         }
-        Target { hwnd: 0, rect, title: title.to_owned(), class: "Demo".into(), process_id: 0, depth: 0, parent: None }
+        Target {
+            hwnd: 0,
+            rect,
+            title: title.to_owned(),
+            class: "Demo".into(),
+            process_id: 0,
+            depth: 0,
+            parent: None,
+        }
     };
     let targets = Targets {
         list: vec![
-            window(Rect::new(140, 120, 640, 400), "Quarterly report.xlsx - Spreadsheet", [0xF4, 0xF6, 0xF8], &mut snapshot),
-            window(Rect::new(1500, 160, 820, 460), "Inbox - Mail", [0xFA, 0xEE, 0xE0], &mut snapshot),
+            window(
+                Rect::new(140, 120, 640, 400),
+                "Quarterly report.xlsx - Spreadsheet",
+                [0xF4, 0xF6, 0xF8],
+                &mut snapshot,
+            ),
+            window(
+                Rect::new(1500, 160, 820, 460),
+                "Inbox - Mail",
+                [0xFA, 0xEE, 0xE0],
+                &mut snapshot,
+            ),
         ],
     };
     let monitors = vec![
-        Monitor { rect: Rect::new(0, 0, 1280, 720), work: Rect::new(0, 0, 1280, 680), dpi: 96, primary: true, device: "DEMO1".into() },
-        Monitor { rect: Rect::new(1280, 0, 1280, 720), work: Rect::new(1280, 0, 1280, 720), dpi: 144, primary: false, device: "DEMO2".into() },
+        Monitor {
+            rect: Rect::new(0, 0, 1280, 720),
+            work: Rect::new(0, 0, 1280, 680),
+            dpi: 96,
+            primary: true,
+            device: "DEMO1".into(),
+        },
+        Monitor {
+            rect: Rect::new(1280, 0, 1280, 720),
+            work: Rect::new(1280, 0, 1280, 720),
+            dpi: 144,
+            primary: false,
+            device: "DEMO2".into(),
+        },
     ];
-    let mut overlay = Overlay::new(snapshot, (0, 0), targets, monitors, (400, 300)).expect("a demo overlay");
+    let mut overlay =
+        Overlay::new(snapshot, (0, 0), targets, monitors, (400, 300)).expect("a demo overlay");
     overlay.mode = match mode {
         1 => Mode::Freehand,
         2 => Mode::MultiArea,
@@ -614,20 +761,45 @@ mod tests {
 
     fn overlay() -> Overlay {
         let monitors = vec![
-            Monitor { rect: Rect::new(0, 0, 1000, 600), work: Rect::new(0, 0, 1000, 560), dpi: 96, primary: true, device: "A".into() },
-            Monitor { rect: Rect::new(1000, 0, 800, 600), work: Rect::new(1000, 0, 800, 600), dpi: 144, primary: false, device: "B".into() },
+            Monitor {
+                rect: Rect::new(0, 0, 1000, 600),
+                work: Rect::new(0, 0, 1000, 560),
+                dpi: 96,
+                primary: true,
+                device: "A".into(),
+            },
+            Monitor {
+                rect: Rect::new(1000, 0, 800, 600),
+                work: Rect::new(1000, 0, 800, 600),
+                dpi: 144,
+                primary: false,
+                device: "B".into(),
+            },
         ];
-        Overlay::new(Frame::new(1800, 600), (0, 0), Targets::default(), monitors, (100, 100)).unwrap()
+        Overlay::new(
+            Frame::new(1800, 600),
+            (0, 0),
+            Targets::default(),
+            monitors,
+            (100, 100),
+        )
+        .unwrap()
     }
 
     #[test]
     fn hover_lights_the_screen_under_the_pointer() {
         let mut o = overlay();
         let v = o.view();
-        assert_eq!((v.lit, v.lit_kind, v.scale), (Rect::new(0, 0, 1000, 600), 2, 1.0));
+        assert_eq!(
+            (v.lit, v.lit_kind, v.scale),
+            (Rect::new(0, 0, 1000, 600), 2, 1.0)
+        );
         o.pointer_moved(1200, 300);
         let v = o.view();
-        assert_eq!((v.lit, v.title.as_deref(), v.scale), (Rect::new(1000, 0, 800, 600), Some("Screen"), 1.5));
+        assert_eq!(
+            (v.lit, v.title.as_deref(), v.scale),
+            (Rect::new(1000, 0, 800, 600), Some("Screen"), 1.5)
+        );
     }
 
     #[test]
@@ -639,7 +811,11 @@ mod tests {
         o.set_modifiers(true, false);
         o.pointer_moved(300, 150);
         let v = o.view();
-        assert_eq!((v.lit.width, v.lit.height), (v.lit.width, v.lit.width), "Shift makes a square");
+        assert_eq!(
+            (v.lit.width, v.lit.height),
+            (v.lit.width, v.lit.width),
+            "Shift makes a square"
+        );
         assert!(v.dragging);
         o.pointer_released(300, 150);
         assert!(matches!(o.outcome, Some(Some(Selection::Region(r))) if r.width == r.height));
@@ -652,7 +828,9 @@ mod tests {
         assert!(o.view().help);
         assert_eq!(o.key(VK_RIGHT, true), Some((110, 100)));
         o.key(b'F' as u16, false);
-        assert!(matches!(o.outcome, Some(Some(Selection::Monitor(r))) if r == Rect::new(0, 0, 1000, 600)));
+        assert!(
+            matches!(o.outcome, Some(Some(Selection::Monitor(r))) if r == Rect::new(0, 0, 1000, 600))
+        );
     }
 
     #[test]
@@ -664,7 +842,14 @@ mod tests {
             primary: true,
             device: "A".into(),
         }];
-        let mut o = Overlay::new(Frame::new(2560, 1440), (0, 0), Targets::default(), monitors, (1200, 700)).unwrap();
+        let mut o = Overlay::new(
+            Frame::new(2560, 1440),
+            (0, 0),
+            Targets::default(),
+            monitors,
+            (1200, 700),
+        )
+        .unwrap();
         o.mode = Mode::Video;
 
         for (index, &(w, h)) in GUIDES.iter().enumerate() {
@@ -674,13 +859,19 @@ mod tests {
         o.key(b'1' as u16, false);
         assert_eq!(o.view().lit, Rect::new(240, 160, 1920, 1080));
         o.key(b'1' as u16, false);
-        assert_eq!(o.view().lit_kind, 2, "pressing the active size again restores window selection");
+        assert_eq!(
+            o.view().lit_kind,
+            2,
+            "pressing the active size again restores window selection"
+        );
 
         o.key(b'1' as u16, false);
         o.pointer_pressed(1200, 700);
         o.pointer_moved(1300, 800);
         o.pointer_released(1300, 800);
-        assert!(matches!(o.outcome, Some(Some(Selection::Region(r))) if r == Rect::new(340, 260, 1920, 1080)));
+        assert!(
+            matches!(o.outcome, Some(Some(Selection::Region(r))) if r == Rect::new(340, 260, 1920, 1080))
+        );
     }
 
     #[test]
@@ -692,12 +883,21 @@ mod tests {
             primary: true,
             device: "A".into(),
         }];
-        let mut o = Overlay::new(Frame::new(1280, 720), (0, 0), Targets::default(), monitors, (600, 300)).unwrap();
+        let mut o = Overlay::new(
+            Frame::new(1280, 720),
+            (0, 0),
+            Targets::default(),
+            monitors,
+            (600, 300),
+        )
+        .unwrap();
         o.mode = Mode::VideoFixed(1920, 1080);
 
         assert_eq!(o.view().size, "1920 × 1080");
         o.pointer_pressed(600, 300);
         o.pointer_released(600, 300);
-        assert!(matches!(o.outcome, Some(Some(Selection::Region(r))) if (r.width, r.height) == (1920, 1080)));
+        assert!(
+            matches!(o.outcome, Some(Some(Selection::Region(r))) if (r.width, r.height) == (1920, 1080))
+        );
     }
 }

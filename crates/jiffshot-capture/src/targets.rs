@@ -9,14 +9,17 @@
 use crate::{from_wide, Rect};
 use std::ffi::c_void;
 use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM, RECT, TRUE};
-use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS};
+use windows_sys::Win32::Graphics::Dwm::{
+    DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+};
 use windows_sys::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameW, GetLayeredWindowAttributes, GetWindow, GetWindowDisplayAffinity, GetWindowLongW, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_EXSTYLE, GW_CHILD,
-    GW_HWNDNEXT, LWA_ALPHA, WDA_NONE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    EnumWindows, GetClassNameW, GetLayeredWindowAttributes, GetWindow, GetWindowDisplayAffinity,
+    GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, GWL_EXSTYLE, GW_CHILD, GW_HWNDNEXT, LWA_ALPHA, WDA_NONE, WS_EX_LAYERED,
+    WS_EX_TRANSPARENT,
 };
 
 #[derive(Clone, Debug)]
@@ -93,7 +96,12 @@ fn is_capturable_top_level(hwnd: HWND, exclude: &[isize]) -> bool {
             return false;
         }
         let mut cloaked: u32 = 0;
-        DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED as u32, &mut cloaked as *mut u32 as *mut c_void, 4);
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED as u32,
+            &mut cloaked as *mut u32 as *mut c_void,
+            4,
+        );
         if cloaked != 0 {
             return false;
         }
@@ -146,7 +154,9 @@ impl Targets {
             if DESKTOP_CLASSES.contains(&class.as_str()) {
                 continue;
             }
-            let Some(rect) = frame_rect(hwnd).intersect(clip) else { continue };
+            let Some(rect) = frame_rect(hwnd).intersect(clip) else {
+                continue;
+            };
             if rect.width < MIN_SIZE || rect.height < MIN_SIZE {
                 continue;
             }
@@ -156,7 +166,14 @@ impl Targets {
         targets
     }
 
-    fn push(&mut self, hwnd: HWND, rect: Rect, class: String, depth: u32, parent: Option<usize>) -> usize {
+    fn push(
+        &mut self,
+        hwnd: HWND,
+        rect: Rect,
+        class: String,
+        depth: u32,
+        parent: Option<usize>,
+    ) -> usize {
         let mut process_id = 0;
         // SAFETY: out-parameter only.
         unsafe { GetWindowThreadProcessId(hwnd, &mut process_id) };
@@ -202,7 +219,10 @@ impl Targets {
     /// topmost window there, moved `levels_up` steps towards its top-level
     /// window. Returns its index.
     pub fn hit(&self, x: i32, y: i32, levels_up: u32) -> Option<usize> {
-        let top = self.list.iter().position(|t| t.depth == 0 && t.rect.contains(x, y))?;
+        let top = self
+            .list
+            .iter()
+            .position(|t| t.depth == 0 && t.rect.contains(x, y))?;
         let end = self.list[top + 1..]
             .iter()
             .position(|t| t.depth == 0)
@@ -210,7 +230,8 @@ impl Targets {
         let mut best = top;
         for (i, t) in self.list.iter().enumerate().take(end).skip(top + 1) {
             // Siblings come in z-order, so the first match at a depth wins.
-            if t.depth > self.list[best].depth && t.rect.contains(x, y) && self.is_ancestor(best, i) {
+            if t.depth > self.list[best].depth && t.rect.contains(x, y) && self.is_ancestor(best, i)
+            {
                 best = i;
             }
         }
@@ -258,7 +279,8 @@ pub fn process_name(process_id: u32) -> Option<String> {
         }
         let mut buffer = [0u16; 1024];
         let mut len = buffer.len() as u32;
-        let ok = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut len);
+        let ok =
+            QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut len);
         CloseHandle(process);
         if ok == 0 {
             return None;
@@ -273,18 +295,26 @@ mod tests {
     use super::*;
 
     fn target(rect: Rect, depth: u32, parent: Option<usize>) -> Target {
-        Target { hwnd: 0, rect, title: String::new(), class: String::new(), process_id: 0, depth, parent }
+        Target {
+            hwnd: 0,
+            rect,
+            title: String::new(),
+            class: String::new(),
+            process_id: 0,
+            depth,
+            parent,
+        }
     }
 
     #[test]
     fn hit_prefers_deepest_child_of_topmost_window() {
         let targets = Targets {
             list: vec![
-                target(Rect::new(0, 0, 100, 100), 0, None),   // 0: front window
+                target(Rect::new(0, 0, 100, 100), 0, None), // 0: front window
                 target(Rect::new(0, 0, 100, 20), 1, Some(0)), // 1: toolbar
                 target(Rect::new(0, 20, 100, 80), 1, Some(0)), // 2: body
                 target(Rect::new(10, 30, 30, 30), 2, Some(2)), // 3: button in body
-                target(Rect::new(0, 0, 400, 400), 0, None),   // 4: window behind
+                target(Rect::new(0, 0, 400, 400), 0, None), // 4: window behind
             ],
         };
         assert_eq!(targets.hit(15, 35, 0), Some(3));

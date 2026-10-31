@@ -57,7 +57,9 @@ impl Stamp {
     }
 
     pub fn from_name(name: &str) -> Option<Stamp> {
-        ALL.iter().copied().find(|s| s.name().eq_ignore_ascii_case(name))
+        ALL.iter()
+            .copied()
+            .find(|s| s.name().eq_ignore_ascii_case(name))
     }
 }
 
@@ -75,7 +77,10 @@ struct Pen<'a> {
 
 impl Pen<'_> {
     fn p(&self, x: f32, y: f32) -> Pt {
-        Pt::new(self.r.x0 + x * self.r.width(), self.r.y0 + y * self.r.height())
+        Pt::new(
+            self.r.x0 + x * self.r.width(),
+            self.r.y0 + y * self.r.height(),
+        )
     }
 
     fn unit(&self) -> f32 {
@@ -101,7 +106,8 @@ impl Pen<'_> {
         }
         pb.close();
         if let Some(path) = pb.finish() {
-            self.pm.fill_path(&path, &Self::paint(color), FillRule::Winding, self.t, None);
+            self.pm
+                .fill_path(&path, &Self::paint(color), FillRule::Winding, self.t, None);
         }
     }
 
@@ -109,7 +115,8 @@ impl Pen<'_> {
         let c = self.p(cx, cy);
         let rr = Box2::around(c, r * self.r.width(), r * self.r.height());
         if let Some(path) = rr.to_skia().and_then(PathBuilder::from_oval) {
-            self.pm.fill_path(&path, &Self::paint(color), FillRule::Winding, self.t, None);
+            self.pm
+                .fill_path(&path, &Self::paint(color), FillRule::Winding, self.t, None);
         }
     }
 
@@ -124,8 +131,14 @@ impl Pen<'_> {
             }
         }
         if let Some(path) = pb.finish() {
-            let stroke = Stroke { width: width * self.unit(), line_cap: LineCap::Round, line_join: LineJoin::Round, ..Stroke::default() };
-            self.pm.stroke_path(&path, &Self::paint(color), &stroke, self.t, None);
+            let stroke = Stroke {
+                width: width * self.unit(),
+                line_cap: LineCap::Round,
+                line_join: LineJoin::Round,
+                ..Stroke::default()
+            };
+            self.pm
+                .stroke_path(&path, &Self::paint(color), &stroke, self.t, None);
         }
     }
 
@@ -135,7 +148,11 @@ impl Pen<'_> {
 
     /// A glyph-like bar-and-dot mark (for ! and i).
     fn bar_dot(&mut self, flip: bool) {
-        let (bar, dot) = if flip { ((0.44, 0.68), 0.3) } else { ((0.22, 0.6), 0.74) };
+        let (bar, dot) = if flip {
+            ((0.44, 0.68), 0.3)
+        } else {
+            ((0.22, 0.6), 0.74)
+        };
         self.polyline(&[(0.5, bar.0 + 0.06), (0.5, bar.1)], 0.13, Rgba::WHITE);
         self.circle(0.5, dot, 0.075, Rgba::WHITE);
     }
@@ -146,7 +163,11 @@ pub fn draw(stamp: Stamp, rect: &Box2, pm: &mut Pixmap, t: Transform) {
     match stamp {
         Stamp::Check => {
             pen.badge(GREEN);
-            pen.polyline(&[(0.27, 0.52), (0.43, 0.68), (0.74, 0.34)], 0.11, Rgba::WHITE);
+            pen.polyline(
+                &[(0.27, 0.52), (0.43, 0.68), (0.74, 0.34)],
+                0.11,
+                Rgba::WHITE,
+            );
         }
         Stamp::Cross => {
             pen.badge(RED);
@@ -168,7 +189,10 @@ pub fn draw(stamp: Stamp, rect: &Box2, pm: &mut Pixmap, t: Transform) {
                 .map(|i| {
                     let a = i as f32 / 64.0 * std::f32::consts::TAU;
                     let x = 16.0 * a.sin().powi(3);
-                    let y = 13.0 * a.cos() - 5.0 * (2.0 * a).cos() - 2.0 * (3.0 * a).cos() - (4.0 * a).cos();
+                    let y = 13.0 * a.cos()
+                        - 5.0 * (2.0 * a).cos()
+                        - 2.0 * (3.0 * a).cos()
+                        - (4.0 * a).cos();
                     (0.5 + x / 34.0, 0.47 - y / 34.0)
                 })
                 .collect();
@@ -185,7 +209,19 @@ pub fn draw(stamp: Stamp, rect: &Box2, pm: &mut Pixmap, t: Transform) {
         }
         Stamp::Question => {
             pen.badge(PURPLE);
-            pen.polyline(&[(0.36, 0.36), (0.42, 0.25), (0.56, 0.23), (0.65, 0.33), (0.6, 0.45), (0.5, 0.52), (0.5, 0.6)], 0.11, Rgba::WHITE);
+            pen.polyline(
+                &[
+                    (0.36, 0.36),
+                    (0.42, 0.25),
+                    (0.56, 0.23),
+                    (0.65, 0.33),
+                    (0.6, 0.45),
+                    (0.5, 0.52),
+                    (0.5, 0.6),
+                ],
+                0.11,
+                Rgba::WHITE,
+            );
             pen.circle(0.5, 0.75, 0.07, Rgba::WHITE);
         }
         Stamp::Exclamation => {
@@ -202,17 +238,42 @@ pub fn draw(stamp: Stamp, rect: &Box2, pm: &mut Pixmap, t: Transform) {
             pen.polyline(&[(0.28, 0.5), (0.72, 0.5)], 0.12, Rgba::WHITE);
         }
         Stamp::Pointer => {
-            let arrow = [(0.25, 0.05), (0.25, 0.8), (0.42, 0.65), (0.55, 0.95), (0.66, 0.9), (0.53, 0.61), (0.76, 0.61)];
+            let arrow = [
+                (0.25, 0.05),
+                (0.25, 0.8),
+                (0.42, 0.65),
+                (0.55, 0.95),
+                (0.66, 0.9),
+                (0.53, 0.61),
+                (0.76, 0.61),
+            ];
             let outline: Vec<(f32, f32)> = arrow.to_vec();
             pen.polygon(&outline, Rgba::BLACK);
-            let inner: Vec<(f32, f32)> = arrow.iter().map(|&(x, y)| (0.45 + (x - 0.45) * 0.8, 0.55 + (y - 0.55) * 0.82)).collect();
+            let inner: Vec<(f32, f32)> = arrow
+                .iter()
+                .map(|&(x, y)| (0.45 + (x - 0.45) * 0.8, 0.55 + (y - 0.55) * 0.82))
+                .collect();
             pen.polygon(&inner, Rgba::WHITE);
         }
         Stamp::ThumbsUp => {
             pen.badge(BLUE);
-            pen.polygon(&[(0.24, 0.47), (0.36, 0.47), (0.36, 0.76), (0.24, 0.76)], Rgba::WHITE);
             pen.polygon(
-                &[(0.4, 0.47), (0.52, 0.24), (0.58, 0.24), (0.6, 0.3), (0.56, 0.44), (0.74, 0.44), (0.77, 0.5), (0.72, 0.74), (0.66, 0.77), (0.4, 0.77)],
+                &[(0.24, 0.47), (0.36, 0.47), (0.36, 0.76), (0.24, 0.76)],
+                Rgba::WHITE,
+            );
+            pen.polygon(
+                &[
+                    (0.4, 0.47),
+                    (0.52, 0.24),
+                    (0.58, 0.24),
+                    (0.6, 0.3),
+                    (0.56, 0.44),
+                    (0.74, 0.44),
+                    (0.77, 0.5),
+                    (0.72, 0.74),
+                    (0.66, 0.77),
+                    (0.4, 0.77),
+                ],
                 Rgba::WHITE,
             );
         }

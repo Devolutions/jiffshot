@@ -13,5 +13,8 @@ pub fn config_dir() -> Option<PathBuf> {
 /// `%LOCALAPPDATA%\Jiffshot` (the temp folder without it): logs and caches,
 /// which start fresh.
 pub fn local_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join(NAME)
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(NAME)
 }

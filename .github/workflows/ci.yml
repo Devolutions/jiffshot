@@ -169,6 +169,290 @@ jobs:
           path: jiffshot-${{ matrix.rid }}
           if-no-files-found: error
 
+  linux:
+    name: linux-x64
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TERM_COLOR: always
+      JIFFSHOT_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux build and media dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            clang \
+            gcc \
+            libclang-dev \
+            libleptonica-dev \
+            libtesseract-dev \
+            tesseract-ocr-eng \
+            pkg-config \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-tools \
+            gstreamer1.0-pipewire \
+            gstreamer1.0-pulseaudio \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav \
+            dpkg-dev \
+            desktop-file-utils \
+            xvfb \
+            x11-utils \
+            xclip \
+            libxtst6 \
+            libgtk-3-0t64 \
+            python3-dbus-next \
+            python3-gi \
+            dbus
+
+      - name: Set up Rust
+        run: |
+          rustup show
+          rustup component add clippy
+          cargo --version
+          rustc --version
+
+      - name: Cache Cargo and the Rustolonia host
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cache/rustolonia/host
+            target
+          key: linux-x64-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: linux-x64-
+
+      - name: Test
+        run: cargo test --release --locked --workspace
+
+      - name: Lint Linux app
+        run: cargo clippy --locked --no-deps -p jiffshot --all-targets -- -D warnings
+
+      - name: Build Linux app
+        run: cargo build --release --locked -p jiffshot
+
+      - name: Test Linux global shortcut portal integration
+        run: |
+          dbus-run-session -- python3 app/tests/linux_shortcuts_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux editor responsiveness
+        run: |
+          dbus-run-session -- python3 app/tests/linux_load_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux export dialog
+        run: |
+          dbus-run-session -- python3 app/tests/linux_export_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux native file picker fallback
+        run: |
+          dbus-run-session -- python3 app/tests/linux_file_dialog_fallback_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux interactive editor effects
+        run: |
+          dbus-run-session -- python3 app/tests/linux_interactive_effects_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux video GIF export
+        run: |
+          dbus-run-session -- python3 app/tests/linux_video_export_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux saved-capture sharing
+        run: |
+          dbus-run-session -- python3 app/tests/linux_share_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux webcam preferences
+        run: |
+          dbus-run-session -- python3 app/tests/linux_webcam_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux recording frame-rate GUI
+        run: |
+          dbus-run-session -- python3 app/tests/linux_recording_frame_rate_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux interactive screenshots
+        run: |
+          dbus-run-session -- python3 app/tests/linux_screenshot_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux automatic capture copies
+        run: |
+          dbus-run-session -- python3 app/tests/linux_automatic_copy_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux screen text capture
+        run: |
+          dbus-run-session -- python3 app/tests/linux_grab_text_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux timed capture
+        run: |
+          dbus-run-session -- python3 app/tests/linux_timed_capture_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux screen capture presets
+        run: |
+          dbus-run-session -- python3 app/tests/linux_screen_presets_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux interval capture controls
+        run: |
+          dbus-run-session -- python3 app/tests/linux_interval_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux daily capture scheduling
+        run: |
+          dbus-run-session -- python3 app/tests/linux_schedule_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux tray and background capture
+        run: |
+          dbus-run-session -- python3 app/tests/linux_tray_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Test Linux login startup
+        run: |
+          dbus-run-session -- python3 app/tests/linux_autostart_e2e.py \
+            --binary target/release/jiffshot --runtime-dir target/release
+
+      - name: Package Ubuntu tar.gz and DEB
+        run: python3 package/linux/build.py --format tar.gz deb
+
+      - name: Test Linux package builder and contents
+        env:
+          JIFFSHOT_TEST_FORMATS: tar.gz,deb
+        run: python3 -m unittest discover -s package/linux -p test_build.py -v
+
+      - name: Smoke-test the relocated portable package
+        run: |
+          mkdir -p "$RUNNER_TEMP/jiffshot portable"
+          tar -xzf package/out/linux/*.tar.gz -C "$RUNNER_TEMP/jiffshot portable"
+          launcher=$(find "$RUNNER_TEMP/jiffshot portable" -path '*/bin/jiffshot' -type f)
+          python3 package/linux/smoke.py --launcher "$launcher"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jiffshot-linux-x64
+          path: package/out/linux/*
+          if-no-files-found: error
+
+  linux-rpm:
+    name: linux-x64 Fedora RPM
+    runs-on: ubuntu-24.04
+    container: fedora:43
+    env:
+      CARGO_TERM_COLOR: always
+      JIFFSHOT_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Install native Fedora build and packaging dependencies
+        run: |
+          dnf install --setopt=install_weak_deps=False -y \
+            git tar gzip curl ca-certificates gcc-c++ clang-devel \
+            leptonica-devel tesseract-devel pkgconf-pkg-config \
+            gstreamer1-devel gstreamer1-plugins-base-devel \
+            python3 binutils rpm-build cpio desktop-file-utils
+
+      - uses: actions/checkout@v7
+
+      - name: Set up Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" show
+
+      - name: Cache Cargo and the Rustolonia host
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cache/rustolonia/host
+            target
+          key: fedora43-linux-x64-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: fedora43-linux-x64-
+
+      - name: Build against Fedora runtime libraries
+        run: cargo build --release --locked -p jiffshot
+
+      - name: Package native Fedora RPM
+        run: python3 package/linux/build.py --format rpm --output-dir package/out/linux-rpm
+
+      - name: Test RPM builder and contents
+        env:
+          JIFFSHOT_TEST_FORMATS: rpm
+          JIFFSHOT_PACKAGE_DIR: package/out/linux-rpm
+        run: python3 -m unittest discover -s package/linux -p test_build.py -v
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jiffshot-linux-x64-rpm
+          path: package/out/linux-rpm/*
+          if-no-files-found: error
+
+  linux-package-install:
+    name: Install Linux packages (${{ matrix.format }})
+    needs: [linux, linux-rpm]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - format: deb
+            image: ubuntu:24.04
+            artifact: jiffshot-linux-x64
+          - format: rpm
+            image: fedora:43
+            artifact: jiffshot-linux-x64-rpm
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: package/out/install
+
+      - name: Clean install, desktop registration, launch, and uninstall
+        run: |
+          docker run --rm --volume "$PWD:/work:ro" "${{ matrix.image }}" \
+            bash -ceu '
+              if [ "$1" = deb ]; then
+                apt-get update -qq
+                apt-get install --no-install-recommends -y \
+                  /work/package/out/install/*.deb python3 xvfb x11-utils
+              else
+                dnf install --setopt=install_weak_deps=False -y \
+                  /work/package/out/install/*.rpm python3 /usr/bin/Xvfb /usr/bin/xwininfo
+              fi
+              grep -F "application/x-jiffshot=" /usr/share/applications/mimeinfo.cache
+              grep -F "application/x-jiffshot" /usr/share/mime/globs2
+              python3 /work/package/linux/smoke.py --launcher /usr/bin/jiffshot
+              mkdir -p /root/.config/Jiffshot
+              touch /root/.config/Jiffshot/package-removal-sentinel
+              if [ "$1" = deb ]; then
+                apt-get remove -y jiffshot
+              else
+                rpm -V jiffshot
+                dnf remove -y jiffshot
+              fi
+              test ! -e /usr/bin/jiffshot
+              test ! -e /usr/share/applications/com.devolutions.Jiffshot.desktop
+              test -e /root/.config/Jiffshot/package-removal-sentinel
+            ' -- "${{ matrix.format }}"
+
   msi:
     name: ${{ matrix.rid }} MSI
     environment:

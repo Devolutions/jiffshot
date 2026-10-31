@@ -221,6 +221,27 @@ jobs:
             Compress-Archive -Path "$portable\*" `
               -DestinationPath "release\Devolutions.Jiffshot-$arch-$env:RELEASE_VERSION.zip"
           }
+          $linuxAssets = @(
+            @{
+              Directory = 'artifacts\jiffshot-linux-x64'
+              Name = "Devolutions.Jiffshot-linux-x64-$env:RELEASE_VERSION.tar.gz"
+            },
+            @{
+              Directory = 'artifacts\jiffshot-linux-x64'
+              Name = "jiffshot_$($env:RELEASE_VERSION)_amd64.deb"
+            },
+            @{
+              Directory = 'artifacts\jiffshot-linux-x64-rpm'
+              Name = "jiffshot-$env:RELEASE_VERSION-1.x86_64.rpm"
+            }
+          )
+          foreach ($asset in $linuxAssets) {
+            $path = Join-Path $asset.Directory $asset.Name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing Linux release package: $path"
+            }
+            Copy-Item -LiteralPath $path -Destination (Join-Path 'release' $asset.Name)
+          }
           Get-ChildItem release -File | Sort-Object Name | ForEach-Object {
             '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
           } | Set-Content release\SHA256SUMS.txt -Encoding ascii
@@ -252,4 +273,4 @@ jobs:
         if: inputs.dry_run
         shell: pwsh
         run: |
-          "Dry run completed for $env:RELEASE_TAG using $env:SIGNING_ENVIRONMENT. Signed packages and SHA256SUMS.txt are in the release-assets artifact. No tag or GitHub Release was created." >> $env:GITHUB_STEP_SUMMARY
+          "Dry run completed for $env:RELEASE_TAG using $env:SIGNING_ENVIRONMENT. Signed Windows packages, unsigned Linux tar.gz/DEB/RPM packages, and SHA256SUMS.txt are in the release-assets artifact. No tag or GitHub Release was created." >> $env:GITHUB_STEP_SUMMARY

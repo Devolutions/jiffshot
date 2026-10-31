@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+launcher=$(readlink -f -- "$0")
+bindir=$(CDPATH= cd -- "$(dirname -- "$launcher")" && pwd)
+runtime="$bindir/../lib/jiffshot"
+export JIFFSHOT_LAUNCHER="$launcher"
+export LD_LIBRARY_PATH="$runtime${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$runtime/jiffshot" "$@"

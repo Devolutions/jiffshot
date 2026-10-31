@@ -18,12 +18,13 @@ mod selftest;
 mod toast;
 mod tray;
 
-use crate::vm::{CaptureBinding, CaptureViewModel, MainBinding, MainViewModel, TrayBinding, TrayViewModel};
+pub use crate::ui_only::UiOnly;
+use crate::vm::{
+    CaptureBinding, CaptureViewModel, MainBinding, MainViewModel, TrayBinding, TrayViewModel,
+};
 use rustolonia::{AppScope, Result, Window};
 use std::cell::RefCell;
-use std::mem::ManuallyDrop;
 use std::path::PathBuf;
-use std::thread::ThreadId;
 
 thread_local! {
     static MAIN: RefCell<Option<MainBinding>> = const { RefCell::new(None) };
@@ -59,54 +60,15 @@ fn set_canvas(canvas: canvas_view::CanvasView) {
 
 /// The editor window's binding. On the UI thread, once mounted.
 pub fn main() -> MainBinding {
-    MAIN.with(|m| m.borrow().clone()).expect("the main window is mounted")
+    MAIN.with(|m| m.borrow().clone())
+        .expect("the main window is mounted")
 }
 
 /// The Capture window's binding. On the UI thread, once mounted.
 pub fn capture() -> CaptureBinding {
-    CAPTURE.with(|m| m.borrow().clone()).expect("the Capture window is mounted")
-}
-
-/// A UI-thread value carried by a `Send` callback. Using it on another thread
-/// panics; dropping it on another thread (a callback released by the host's
-/// finalizer) leaks it instead.
-pub struct UiOnly<T> {
-    value: ManuallyDrop<T>,
-    thread: ThreadId,
-}
-
-// SAFETY: the value is only reached, and only dropped, on the thread that
-// made it.
-unsafe impl<T> Send for UiOnly<T> {}
-unsafe impl<T> Sync for UiOnly<T> {}
-
-impl<T> UiOnly<T> {
-    pub fn new(value: T) -> Self {
-        Self {
-            value: ManuallyDrop::new(value),
-            thread: std::thread::current().id(),
-        }
-    }
-
-    pub fn get(&self) -> &T {
-        assert_eq!(self.thread, std::thread::current().id(), "UI value used off the UI thread");
-        &self.value
-    }
-}
-
-impl<T: Clone> Clone for UiOnly<T> {
-    fn clone(&self) -> Self {
-        Self::new(self.get().clone())
-    }
-}
-
-impl<T> Drop for UiOnly<T> {
-    fn drop(&mut self) {
-        if self.thread == std::thread::current().id() {
-            // SAFETY: dropped once, here.
-            unsafe { ManuallyDrop::drop(&mut self.value) }
-        }
-    }
+    CAPTURE
+        .with(|m| m.borrow().clone())
+        .expect("the Capture window is mounted")
 }
 
 /// The program icon as a file, for window and tray icons (written once next
@@ -114,7 +76,10 @@ impl<T> Drop for UiOnly<T> {
 pub fn icon_file() -> String {
     static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     PATH.get_or_init(|| {
-        let dir = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Jiffshot");
+        let dir = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Jiffshot");
         let path = dir.join("jiffshot.ico");
         let bytes = include_bytes!("../../../assets/jiffshot.ico");
         if std::fs::read(&path).ok().as_deref() != Some(&bytes[..]) {

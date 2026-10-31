@@ -8,10 +8,12 @@ publish.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-jiffshot-capture = { path = "../jiffshot-capture" }
 jiffshot-doc = { path = "../jiffshot-doc" }
-jiffshot-control = { path = "../jiffshot-control" }
-windows.workspace = true
 tiny-skia.workspace = true
 resvg = { version = "0.45", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+jiffshot-capture = { path = "../jiffshot-capture" }
+jiffshot-control = { path = "../jiffshot-control" }
+windows.workspace = true
 windows-sys.workspace = true

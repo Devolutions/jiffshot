@@ -48,7 +48,8 @@ impl Rgba {
 
     pub fn premultiplied(self) -> PremultipliedColorU8 {
         let m = |c: u8| ((c as u16 * self.a as u16 + 127) / 255) as u8;
-        PremultipliedColorU8::from_rgba(m(self.r), m(self.g), m(self.b), self.a).expect("channels never exceed alpha")
+        PremultipliedColorU8::from_rgba(m(self.r), m(self.g), m(self.b), self.a)
+            .expect("channels never exceed alpha")
     }
 
     pub fn from_premultiplied(p: PremultipliedColorU8) -> Rgba {
@@ -91,8 +92,17 @@ impl Rgba {
     }
 
     pub fn lerp(self, other: Rgba, t: f32) -> Rgba {
-        let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8;
-        Rgba::new(mix(self.r, other.r), mix(self.g, other.g), mix(self.b, other.b), mix(self.a, other.a))
+        let mix = |a: u8, b: u8| {
+            (a as f32 + (b as f32 - a as f32) * t)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        Rgba::new(
+            mix(self.r, other.r),
+            mix(self.g, other.g),
+            mix(self.b, other.b),
+            mix(self.a, other.a),
+        )
     }
 }
 

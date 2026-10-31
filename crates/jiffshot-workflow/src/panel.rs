@@ -30,19 +30,56 @@ const ADVANCED: &[(&str, &str)] = &[
     ("Scrolling Horizontal", "horizontal"),
     ("Scrolling Both Ways", "both"),
 ];
-const VIDEO_SELECTIONS: &[(&str, &str)] = &[("Region", "region"), ("Window", "window"), ("Fullscreen", "fullscreen")];
+const VIDEO_SELECTIONS: &[(&str, &str)] = &[
+    ("Region", "region"),
+    ("Window", "window"),
+    ("Fullscreen", "fullscreen"),
+];
 /// Capture effects in groups, as (group, effects); a group of one is a
 /// plain item.
 const EFFECT_GROUPS: &[(&str, &[&str])] = &[
     ("Border", &["Border"]),
-    ("Edges", &["Torn edge", "Torn bottom", "Sawtooth edge", "Wave edge", "Fade edges"]),
+    (
+        "Edges",
+        &[
+            "Torn edge",
+            "Torn bottom",
+            "Sawtooth edge",
+            "Wave edge",
+            "Fade edges",
+        ],
+    ),
     ("Shadow", &["Shadow"]),
     ("Perspective", &["Perspective", "Tilt"]),
     ("Page Curl", &["Page curl"]),
     ("Rounded Corners", &["Rounded corners"]),
     ("Reflection", &["Reflection"]),
-    ("Filters", &["Sharpen", "Blur image", "Monochrome", "Grayscale", "Sepia", "Invert", "Vignette"]),
-    ("Color Adjustment", &["Brighten", "Darken", "More contrast", "Less contrast", "Saturate", "Desaturate", "Hue shift", "Gamma up", "Gamma down"]),
+    (
+        "Filters",
+        &[
+            "Sharpen",
+            "Blur image",
+            "Monochrome",
+            "Grayscale",
+            "Sepia",
+            "Invert",
+            "Vignette",
+        ],
+    ),
+    (
+        "Color Adjustment",
+        &[
+            "Brighten",
+            "Darken",
+            "More contrast",
+            "Less contrast",
+            "Saturate",
+            "Desaturate",
+            "Hue shift",
+            "Gamma up",
+            "Gamma down",
+        ],
+    ),
     ("Color Replacement", &["Replace color"]),
     ("Scale Image", &["Scale to 1920"]),
 ];
@@ -124,8 +161,20 @@ pub fn fields(tab: usize) -> &'static [Field] {
 
 pub fn switches(tab: usize) -> &'static [Switch] {
     match tab {
-        0 | 1 => &[Switch::Preview, Switch::Clipboard, Switch::Cursor, Switch::Delay],
-        _ => &[Switch::Webcam, Switch::Microphone, Switch::SystemAudio, Switch::RecordCursor, Switch::ScreenDraw, Switch::Preview],
+        0 | 1 => &[
+            Switch::Preview,
+            Switch::Clipboard,
+            Switch::Cursor,
+            Switch::Delay,
+        ],
+        _ => &[
+            Switch::Webcam,
+            Switch::Microphone,
+            Switch::SystemAudio,
+            Switch::RecordCursor,
+            Switch::ScreenDraw,
+            Switch::Preview,
+        ],
     }
 }
 
@@ -165,7 +214,10 @@ pub fn switch_label(s: &Settings, switch: Switch) -> String {
         Switch::Delay if !switch_on(s, switch) => "Time Delay".into(),
         Switch::Delay => match timing(s) {
             "interval" => format!("Interval ({} s)", s.interval_seconds.max(3)),
-            "schedule" => format!("Schedule ({})", s.schedule_default.as_deref().unwrap_or("09:00")),
+            "schedule" => format!(
+                "Schedule ({})",
+                s.schedule_default.as_deref().unwrap_or("09:00")
+            ),
             _ => format!("Time Delay ({} s)", s.delay_seconds),
         },
         Switch::Webcam => "Record Webcam".into(),
@@ -176,13 +228,17 @@ pub fn switch_label(s: &Settings, switch: Switch) -> String {
 }
 
 fn label_of<'a>(list: &[(&'a str, &str)], value: &str) -> &'a str {
-    list.iter().find(|(_, v)| *v == value).map_or(list[0].0, |(l, _)| l)
+    list.iter()
+        .find(|(_, v)| *v == value)
+        .map_or(list[0].0, |(l, _)| l)
 }
 
 /// What a dropdown shows.
 pub fn field_text(s: &Settings, tab: usize, field: Field) -> String {
     match field {
-        Field::Selection if tab == 2 => label_of(VIDEO_SELECTIONS, &s.capture_window.video_selection).into(),
+        Field::Selection if tab == 2 => {
+            label_of(VIDEO_SELECTIONS, &s.capture_window.video_selection).into()
+        }
         Field::Selection => {
             let all: Vec<(&str, &str)> = SELECTIONS.iter().chain(ADVANCED).copied().collect();
             let name = label_of(&all, &s.capture_window.selection);
@@ -209,7 +265,10 @@ pub fn fixed(s: &Settings) -> bool {
 }
 
 fn audio(s: &Settings) -> (bool, bool) {
-    (matches!(s.record_audio.as_str(), "system" | "both"), matches!(s.record_audio.as_str(), "microphone" | "both"))
+    (
+        matches!(s.record_audio.as_str(), "system" | "both"),
+        matches!(s.record_audio.as_str(), "microphone" | "both"),
+    )
 }
 
 fn set_audio(s: &mut Settings, system: bool, mic: bool) {
@@ -322,9 +381,19 @@ pub(crate) fn key_name(key: &str) -> String {
 }
 
 /// The Capture button's label and the line under it.
-pub fn capture_button(s: &Settings, tab: usize, capture_key: &str, timelapse_running: bool) -> (&'static str, String) {
+pub fn capture_button(
+    s: &Settings,
+    tab: usize,
+    capture_key: &str,
+    timelapse_running: bool,
+) -> (&'static str, String) {
     if tab == 2 {
-        return ("Capture", crate::recorder::key_names().1.map_or("The toolbar stops it".into(), |k| format!("{k} stops")));
+        return (
+            "Capture",
+            crate::recorder::key_names()
+                .1
+                .map_or("The toolbar stops it".into(), |k| format!("{k} stops")),
+        );
     }
     match timing(s) {
         "interval" if s.capture_window.timer => {
@@ -380,9 +449,22 @@ pub fn view(s: &Settings, capture_key: &str, timelapse_running: bool) -> View {
         tab,
         fields: fields(tab)
             .iter()
-            .map(|&f| FieldRow { id: f.id(), label: field_label(f), text: field_text(s, tab, f), gear: has_gear(tab, f).then_some("selection") })
+            .map(|&f| FieldRow {
+                id: f.id(),
+                label: field_label(f),
+                text: field_text(s, tab, f),
+                gear: has_gear(tab, f).then_some("selection"),
+            })
             .collect(),
-        switches: switches(tab).iter().map(|&sw| SwitchRow { id: sw.id(), label: switch_label(s, sw), on: switch_on(s, sw), more: more_panel(sw) }).collect(),
+        switches: switches(tab)
+            .iter()
+            .map(|&sw| SwitchRow {
+                id: sw.id(),
+                label: switch_label(s, sw),
+                on: switch_on(s, sw),
+                more: more_panel(sw),
+            })
+            .collect(),
         capture,
         hint,
         widget: s.show_widget,
@@ -406,19 +488,33 @@ pub struct MenuItem {
 }
 
 fn item(id: impl Into<String>, label: impl Into<String>) -> MenuItem {
-    MenuItem { id: id.into(), label: label.into(), enabled: true, ..MenuItem::default() }
+    MenuItem {
+        id: id.into(),
+        label: label.into(),
+        enabled: true,
+        ..MenuItem::default()
+    }
 }
 
 fn check(id: impl Into<String>, label: impl Into<String>, checked: bool) -> MenuItem {
-    MenuItem { checked, ..item(id, label) }
+    MenuItem {
+        checked,
+        ..item(id, label)
+    }
 }
 
 fn separator() -> MenuItem {
-    MenuItem { separator: true, ..MenuItem::default() }
+    MenuItem {
+        separator: true,
+        ..MenuItem::default()
+    }
 }
 
 fn submenu(label: impl Into<String>, items: Vec<MenuItem>) -> MenuItem {
-    MenuItem { items, ..item("", label) }
+    MenuItem {
+        items,
+        ..item("", label)
+    }
 }
 
 /// A menu by name: a dropdown ("selection", "effects", "share"), the bottom
@@ -427,44 +523,102 @@ fn submenu(label: impl Into<String>, items: Vec<MenuItem>) -> MenuItem {
 pub fn menu(s: &Settings, which: &str) -> Vec<MenuItem> {
     let tab = s.capture_window.tab.min(2);
     match which {
-        "selection" if tab == 2 => VIDEO_SELECTIONS.iter().map(|(l, v)| check(format!("vsel:{v}"), *l, s.capture_window.video_selection == *v)).collect(),
+        "selection" if tab == 2 => VIDEO_SELECTIONS
+            .iter()
+            .map(|(l, v)| {
+                check(
+                    format!("vsel:{v}"),
+                    *l,
+                    s.capture_window.video_selection == *v,
+                )
+            })
+            .collect(),
         "selection" => {
-            let current = if s.capture_window.selection == "fixed" { "image" } else { s.capture_window.selection.as_str() };
-            let mut items: Vec<MenuItem> = SELECTIONS.iter().map(|(l, v)| check(format!("sel:{v}"), *l, *v == current)).collect();
+            let current = if s.capture_window.selection == "fixed" {
+                "image"
+            } else {
+                s.capture_window.selection.as_str()
+            };
+            let mut items: Vec<MenuItem> = SELECTIONS
+                .iter()
+                .map(|(l, v)| check(format!("sel:{v}"), *l, *v == current))
+                .collect();
             items.push(separator());
-            let advanced: Vec<MenuItem> = ADVANCED.iter().map(|(l, v)| check(format!("sel:{v}"), *l, *v == current)).collect();
+            let advanced: Vec<MenuItem> = ADVANCED
+                .iter()
+                .map(|(l, v)| check(format!("sel:{v}"), *l, *v == current))
+                .collect();
             let in_advanced = ADVANCED.iter().any(|(_, v)| *v == current);
-            items.push(MenuItem { checked: in_advanced, ..submenu("Advanced", advanced) });
+            items.push(MenuItem {
+                checked: in_advanced,
+                ..submenu("Advanced", advanced)
+            });
             items
         }
         "share" => {
-            let (list, current, prefix) = if tab == 2 { (VIDEO_SHARES, &s.video_share, "vshare") } else { (SHARES, &s.share, "share") };
-            list.iter().map(|(l, v)| check(format!("{prefix}:{v}"), *l, current == v)).collect()
+            let (list, current, prefix) = if tab == 2 {
+                (VIDEO_SHARES, &s.video_share, "vshare")
+            } else {
+                (SHARES, &s.share, "share")
+            };
+            list.iter()
+                .map(|(l, v)| check(format!("{prefix}:{v}"), *l, current == v))
+                .collect()
         }
         "effects" => {
-            let names: Vec<&str> = jiffshot_doc::effects::catalog(jiffshot_doc::Rgba::BLACK).into_iter().map(|(n, _)| n).collect();
+            let names: Vec<&str> = jiffshot_doc::effects::catalog(jiffshot_doc::Rgba::BLACK)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect();
             let on = |name: &str| s.capture_effects.iter().any(|c| c == name);
-            let effect = |name: &str| MenuItem { keep_open: true, ..check(format!("fx:{name}"), name, on(name)) };
+            let effect = |name: &str| MenuItem {
+                keep_open: true,
+                ..check(format!("fx:{name}"), name, on(name))
+            };
             let mut items = Vec::new();
             for (group, effects) in EFFECT_GROUPS {
-                let effects: Vec<&str> = effects.iter().copied().filter(|e| names.contains(e)).collect();
+                let effects: Vec<&str> = effects
+                    .iter()
+                    .copied()
+                    .filter(|e| names.contains(e))
+                    .collect();
                 match effects.as_slice() {
                     [] => {}
-                    [one] => items.push(MenuItem { label: (*group).into(), ..effect(one) }),
-                    many => items.push(MenuItem { checked: many.iter().any(|e| on(e)), ..submenu(*group, many.iter().map(|e| effect(e)).collect()) }),
+                    [one] => items.push(MenuItem {
+                        label: (*group).into(),
+                        ..effect(one)
+                    }),
+                    many => items.push(MenuItem {
+                        checked: many.iter().any(|e| on(e)),
+                        ..submenu(*group, many.iter().map(|e| effect(e)).collect())
+                    }),
                 }
             }
-            let grouped: Vec<&str> = EFFECT_GROUPS.iter().flat_map(|(_, e)| e.iter().copied()).collect();
-            items.extend(names.iter().filter(|n| !grouped.contains(n)).map(|n| effect(n)));
+            let grouped: Vec<&str> = EFFECT_GROUPS
+                .iter()
+                .flat_map(|(_, e)| e.iter().copied())
+                .collect();
+            items.extend(
+                names
+                    .iter()
+                    .filter(|n| !grouped.contains(n))
+                    .map(|n| effect(n)),
+            );
             items.push(separator());
-            items.push(MenuItem { enabled: !s.capture_effects.is_empty(), ..item("fx-last", "Remove last effect") });
+            items.push(MenuItem {
+                enabled: !s.capture_effects.is_empty(),
+                ..item("fx-last", "Remove last effect")
+            });
             items.push(check("fx-none", "None", s.capture_effects.is_empty()));
             items
         }
         "presets" => {
             let mut items = Vec::new();
             if s.presets.is_empty() {
-                items.push(MenuItem { enabled: false, ..item("", "No presets yet") });
+                items.push(MenuItem {
+                    enabled: false,
+                    ..item("", "No presets yet")
+                });
             }
             for (i, p) in s.presets.iter().enumerate() {
                 let label = match &p.hotkey {
@@ -478,14 +632,34 @@ pub fn menu(s: &Settings, which: &str) -> Vec<MenuItem> {
             items.push(separator());
             items.push(item("panel:new-preset", "New preset from these settings…"));
             if !s.presets.is_empty() {
-                items.push(submenu("Edit", s.presets.iter().enumerate().map(|(i, p)| item(format!("panel:edit-preset:{i}"), p.name.clone())).collect()));
-                items.push(submenu("Delete", s.presets.iter().enumerate().map(|(i, p)| item(format!("preset-delete:{i}"), p.name.clone())).collect()));
+                items.push(submenu(
+                    "Edit",
+                    s.presets
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| item(format!("panel:edit-preset:{i}"), p.name.clone()))
+                        .collect(),
+                ));
+                items.push(submenu(
+                    "Delete",
+                    s.presets
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| item(format!("preset-delete:{i}"), p.name.clone()))
+                        .collect(),
+                ));
             }
             items.push(item("presets-import", "Import presets…"));
-            items.push(MenuItem { enabled: !s.presets.is_empty(), ..item("presets-export", "Export presets…") });
+            items.push(MenuItem {
+                enabled: !s.presets.is_empty(),
+                ..item("presets-export", "Export presets…")
+            });
             items
         }
-        "new-preset" => vec![item("panel:new-preset", "New preset from these settings…"), item("presets-import", "Import presets…")],
+        "new-preset" => vec![
+            item("panel:new-preset", "New preset from these settings…"),
+            item("presets-import", "Import presets…"),
+        ],
         "file" => vec![
             item("panel:prefs", "Preferences…"),
             separator(),
@@ -499,15 +673,33 @@ pub fn menu(s: &Settings, which: &str) -> Vec<MenuItem> {
             item("close", "Close Window\tEsc"),
             item("exit", "Exit Jiffshot"),
         ],
-        "edit" => vec![item("reset", "Reset this tab's options"), separator(), item("panel:prefs", "Preferences…")],
+        "edit" => vec![
+            item("reset", "Reset this tab's options"),
+            separator(),
+            item("panel:prefs", "Preferences…"),
+        ],
         "view" => {
-            let mut items: Vec<MenuItem> = TABS.iter().enumerate().map(|(t, name)| check(format!("tab:{t}"), format!("{name}\tCtrl+{}", t + 1), t == tab)).collect();
+            let mut items: Vec<MenuItem> = TABS
+                .iter()
+                .enumerate()
+                .map(|(t, name)| {
+                    check(
+                        format!("tab:{t}"),
+                        format!("{name}\tCtrl+{}", t + 1),
+                        t == tab,
+                    )
+                })
+                .collect();
             items.push(separator());
             items.push(check("widget", "Show Capture Widget", s.show_widget));
             items.push(item("window:topmost", "Keep on Top"));
             items
         }
-        "help" => vec![item("panel:shortcuts", "Keyboard Shortcuts"), separator(), item("window:about", "About Jiffshot")],
+        "help" => vec![
+            item("panel:shortcuts", "Keyboard Shortcuts"),
+            separator(),
+            item("window:about", "About Jiffshot"),
+        ],
         _ => Vec::new(),
     }
 }
@@ -612,30 +804,65 @@ pub fn pick(s: &mut Settings, id: &str) -> Pick {
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Row {
-    Number { label: String, value: i64, min: i64, max: i64 },
-    Check { label: String, value: bool },
-    Choice { label: String, choices: Vec<String>, value: usize },
-    Text { label: String, value: String },
+    Number {
+        label: String,
+        value: i64,
+        min: i64,
+        max: i64,
+    },
+    Check {
+        label: String,
+        value: bool,
+    },
+    Choice {
+        label: String,
+        choices: Vec<String>,
+        value: usize,
+    },
+    Text {
+        label: String,
+        value: String,
+    },
     /// Read-only text.
-    Note { text: String },
+    Note {
+        text: String,
+    },
     /// A folder path, with a button to choose one.
-    Folder { label: String, value: String },
+    Folder {
+        label: String,
+        value: String,
+    },
 }
 
 pub fn number(label: &str, value: i64, min: i64, max: i64) -> Row {
-    Row::Number { label: label.into(), value, min, max }
+    Row::Number {
+        label: label.into(),
+        value,
+        min,
+        max,
+    }
 }
 
 pub fn check_row(label: &str, value: bool) -> Row {
-    Row::Check { label: label.into(), value }
+    Row::Check {
+        label: label.into(),
+        value,
+    }
 }
 
 pub fn choice(label: &str, choices: &[&str], value: usize) -> Row {
-    Row::Choice { label: label.into(), choices: choices.iter().map(|c| c.to_string()).collect(), value }
+    Row::Choice {
+        label: label.into(),
+        choices: choices.iter().map(|c| c.to_string()).collect(),
+        value,
+    }
 }
 
 pub fn text(label: &str, value: impl Into<String>) -> Row {
-    Row::Text { label: label.into(), value: value.into() }
+    Row::Text {
+        label: label.into(),
+        value: value.into(),
+    }
 }
 
 pub fn note(text: impl Into<String>) -> Row {
@@ -653,7 +880,12 @@ pub struct Panel {
 }
 
 fn panel_of(id: &str, title: &str, rows: Vec<Row>) -> Option<Panel> {
-    Some(Panel { id: id.into(), title: title.into(), rows, ok: Some("OK") })
+    Some(Panel {
+        id: id.into(),
+        title: title.into(),
+        rows,
+        ok: Some("OK"),
+    })
 }
 
 /// The panel named `id`: "selection", "delay", "webcam", "microphone",
@@ -662,56 +894,139 @@ fn panel_of(id: &str, title: &str, rows: Vec<Row>) -> Option<Panel> {
 pub fn panel(s: &Settings, id: &str, runs_at_startup: bool, capture_key: &str) -> Option<Panel> {
     let tab = s.capture_window.tab.min(2);
     match id {
-        "selection" if tab == 1 && matches!(s.capture_window.selection.as_str(), "image" | "fixed") => {
+        "selection"
+            if tab == 1 && matches!(s.capture_window.selection.as_str(), "image" | "fixed") =>
+        {
             let (x, y) = s.capture_window.fixed_at.unwrap_or((0, 0));
-            panel_of(id, "Region options", vec![
-                check_row("Fixed region", fixed(s)),
-                number("Width", s.fixed_size.0 as i64, 16, 16384),
-                number("Height", s.fixed_size.1 as i64, 16, 16384),
-                check_row("Set position", s.capture_window.fixed_at.is_some()),
-                number("X", x as i64, -32768, 32767),
-                number("Y", y as i64, -32768, 32767),
-                check_row("Keep the pointer as a movable object", s.cursor_as_object),
-            ])
+            panel_of(
+                id,
+                "Region options",
+                vec![
+                    check_row("Fixed region", fixed(s)),
+                    number("Width", s.fixed_size.0 as i64, 16, 16384),
+                    number("Height", s.fixed_size.1 as i64, 16, 16384),
+                    check_row("Set position", s.capture_window.fixed_at.is_some()),
+                    number("X", x as i64, -32768, 32767),
+                    number("Y", y as i64, -32768, 32767),
+                    check_row("Keep the pointer as a movable object", s.cursor_as_object),
+                ],
+            )
         }
-        "selection" if tab == 1 => panel_of(id, "Selection options", vec![check_row("Keep the pointer as a movable object", s.cursor_as_object)]),
+        "selection" if tab == 1 => panel_of(
+            id,
+            "Selection options",
+            vec![check_row(
+                "Keep the pointer as a movable object",
+                s.cursor_as_object,
+            )],
+        ),
         "selection" => {
             let fps = FPS.iter().position(|&f| f == s.record_fps).unwrap_or(2);
-            panel_of(id, "Recording options", vec![choice("Frames a second", &["15", "24", "30", "60"], fps), number("Countdown (seconds)", s.countdown as i64, 0, 10)])
+            panel_of(
+                id,
+                "Recording options",
+                vec![
+                    choice("Frames a second", &["15", "24", "30", "60"], fps),
+                    number("Countdown (seconds)", s.countdown as i64, 0, 10),
+                ],
+            )
         }
         "delay" => {
             let kind = TIMINGS.iter().position(|t| *t == timing(s)).unwrap_or(0);
-            let seconds = if s.delay_seconds > 0 { s.delay_seconds } else { s.capture_window.delay.max(1) };
-            panel_of(id, "Time delay", vec![
-                choice("Type", &["Delay", "Interval", "Schedule"], kind),
-                number("Delay (seconds)", seconds as i64, 1, 600),
-                number("Interval (seconds)", s.interval_seconds.max(3) as i64, 3, 86_400),
-                check_row("Skip identical captures", s.interval_skip_identical),
-                text("Daily at", s.schedule_default.clone().unwrap_or_else(|| "09:00".into())),
-            ])
+            let seconds = if s.delay_seconds > 0 {
+                s.delay_seconds
+            } else {
+                s.capture_window.delay.max(1)
+            };
+            panel_of(
+                id,
+                "Time delay",
+                vec![
+                    choice("Type", &["Delay", "Interval", "Schedule"], kind),
+                    number("Delay (seconds)", seconds as i64, 1, 600),
+                    number(
+                        "Interval (seconds)",
+                        s.interval_seconds.max(3) as i64,
+                        3,
+                        86_400,
+                    ),
+                    check_row("Skip identical captures", s.interval_skip_identical),
+                    text(
+                        "Daily at",
+                        s.schedule_default.clone().unwrap_or_else(|| "09:00".into()),
+                    ),
+                ],
+            )
         }
         "webcam" => {
-            let current = s.webcam.clone().unwrap_or_else(|| s.capture_window.webcam_corner.clone());
+            let current = s
+                .webcam
+                .clone()
+                .unwrap_or_else(|| s.capture_window.webcam_corner.clone());
             let corner = CORNERS.iter().position(|c| *c == current).unwrap_or(3);
-            panel_of(id, "Webcam", vec![
-                choice("Corner", &CORNER_NAMES, corner),
-                choice("Shape", &["Circle", "Rectangle"], (s.webcam_shape == "rectangle") as usize),
-                number("Size (% of height)", (s.webcam_size * 100.0).round() as i64, 10, 50),
-            ])
+            panel_of(
+                id,
+                "Webcam",
+                vec![
+                    choice("Corner", &CORNER_NAMES, corner),
+                    choice(
+                        "Shape",
+                        &["Circle", "Rectangle"],
+                        (s.webcam_shape == "rectangle") as usize,
+                    ),
+                    number(
+                        "Size (% of height)",
+                        (s.webcam_size * 100.0).round() as i64,
+                        10,
+                        50,
+                    ),
+                ],
+            )
         }
-        "microphone" => panel_of(id, "Microphone", vec![check_row("Remove background noise", s.noise_gate)]),
-        "cursor" => panel_of(id, "Cursor effects", vec![check_row("Highlight cursor", s.cursor_highlight), check_row("Click animation", s.click_rings)]),
-        "draw" => panel_of(id, "Screen Draw", vec![number("Fade after (s, 0 keeps)", s.draw_fade_seconds as i64, 0, 60)]),
+        "microphone" => panel_of(
+            id,
+            "Microphone",
+            vec![check_row("Remove background noise", s.noise_gate)],
+        ),
+        "cursor" => panel_of(
+            id,
+            "Cursor effects",
+            vec![
+                check_row("Highlight cursor", s.cursor_highlight),
+                check_row("Click animation", s.click_rings),
+            ],
+        ),
+        "draw" => panel_of(
+            id,
+            "Screen Draw",
+            vec![number(
+                "Fade after (s, 0 keeps)",
+                s.draw_fade_seconds as i64,
+                0,
+                60,
+            )],
+        ),
         "prefs" => {
             let fps = FPS.iter().position(|&f| f == s.record_fps).unwrap_or(2);
-            panel_of(id, "Capture Preferences", vec![
-                check_row("Run when Windows starts", runs_at_startup),
-                check_row("Show the Capture Widget", s.show_widget),
-                number("Recording countdown (s)", s.countdown as i64, 0, 10),
-                choice("Recording frame rate", &["15", "24", "30", "60"], fps),
-            ])
+            panel_of(
+                id,
+                "Capture Preferences",
+                vec![
+                    check_row("Run when Windows starts", runs_at_startup),
+                    check_row("Show the Capture Widget", s.show_widget),
+                    number("Recording countdown (s)", s.countdown as i64, 0, 10),
+                    choice("Recording frame rate", &["15", "24", "30", "60"], fps),
+                ],
+            )
         }
-        "new-preset" => Some(Panel { ok: Some("Save"), ..panel_of(id, "New preset from these settings", vec![text("Name", ""), text("Hotkey", "")])? }),
+        "new-preset" => Some(Panel {
+            ok: Some("Save"),
+            ..panel_of(
+                id,
+                "New preset from these settings",
+                vec![text("Name", ""), text("Hotkey", "")],
+            )?
+        }),
         "shortcuts" => {
             let key = key_name(capture_key);
             Some(Panel {
@@ -734,7 +1049,17 @@ pub fn panel(s: &Settings, id: &str, runs_at_startup: bool, capture_key: &str) -
         _ => {
             let i: usize = id.strip_prefix("edit-preset:")?.parse().ok()?;
             let p = s.presets.get(i)?;
-            Some(Panel { ok: Some("Save"), ..panel_of(id, "Edit preset", vec![text("Name", p.name.clone()), text("Hotkey", p.hotkey.clone().unwrap_or_default())])? })
+            Some(Panel {
+                ok: Some("Save"),
+                ..panel_of(
+                    id,
+                    "Edit preset",
+                    vec![
+                        text("Name", p.name.clone()),
+                        text("Hotkey", p.hotkey.clone().unwrap_or_default()),
+                    ],
+                )?
+            })
         }
     }
 }
@@ -755,15 +1080,30 @@ pub enum Applied {
 }
 
 pub fn int(values: &[Value], i: usize) -> i64 {
-    values.get(i).and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f.round() as i64)).or_else(|| v.as_bool().map(i64::from))).unwrap_or(0)
+    values
+        .get(i)
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_f64().map(|f| f.round() as i64))
+                .or_else(|| v.as_bool().map(i64::from))
+        })
+        .unwrap_or(0)
 }
 
 pub fn on(values: &[Value], i: usize) -> bool {
-    values.get(i).and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|n| n != 0))).unwrap_or(false)
+    values
+        .get(i)
+        .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|n| n != 0)))
+        .unwrap_or(false)
 }
 
 pub fn string(values: &[Value], i: usize) -> String {
-    values.get(i).and_then(Value::as_str).unwrap_or("").trim().to_owned()
+    values
+        .get(i)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_owned()
 }
 
 /// Applies the values of panel `id` (one per row, in order: numbers,
@@ -776,7 +1116,12 @@ pub fn apply(s: &mut Settings, id: &str, values: &[Value], runs_at_startup: bool
             s.capture_window.selection = "image".into();
             s.capture_window.fixed = on(values, 0);
             s.fixed_size = (clamp(1, 16, 16384) as i32, clamp(2, 16, 16384) as i32);
-            s.capture_window.fixed_at = on(values, 3).then(|| (clamp(4, -32768, 32767) as i32, clamp(5, -32768, 32767) as i32));
+            s.capture_window.fixed_at = on(values, 3).then(|| {
+                (
+                    clamp(4, -32768, 32767) as i32,
+                    clamp(5, -32768, 32767) as i32,
+                )
+            });
             s.cursor_as_object = on(values, 6);
             Applied::Changed
         }
@@ -804,7 +1149,11 @@ pub fn apply(s: &mut Settings, id: &str, values: &[Value], runs_at_startup: bool
                 s.schedule_default = Some(at.clone());
             }
             // The panel turns the switch on, as the kind chosen.
-            s.delay_seconds = if kind == "delay" { s.capture_window.delay } else { 0 };
+            s.delay_seconds = if kind == "delay" {
+                s.capture_window.delay
+            } else {
+                0
+            };
             s.capture_window.timer = kind != "delay";
             if kind == "schedule" && s.schedule.is_some() {
                 Applied::MoveSchedule(at)
@@ -818,7 +1167,12 @@ pub fn apply(s: &mut Settings, id: &str, values: &[Value], runs_at_startup: bool
                 s.webcam = Some(corner.clone());
             }
             s.capture_window.webcam_corner = corner;
-            s.webcam_shape = if int(values, 1) == 1 { "rectangle" } else { "circle" }.into();
+            s.webcam_shape = if int(values, 1) == 1 {
+                "rectangle"
+            } else {
+                "circle"
+            }
+            .into();
             s.webcam_size = clamp(2, 10, 50) as f32 / 100.0;
             Applied::Changed
         }
@@ -851,12 +1205,23 @@ pub fn apply(s: &mut Settings, id: &str, values: &[Value], runs_at_startup: bool
                 return Applied::Problem("Type a name for the preset.".into());
             }
             if !hotkey.is_empty() && crate::tray::parse_hotkey(&hotkey).is_none() {
-                return Applied::Problem("Hotkeys look like Ctrl+Shift+1, Alt+F9 or PrtScn.".into());
+                return Applied::Problem(
+                    "Hotkeys look like Ctrl+Shift+1, Alt+F9 or PrtScn.".into(),
+                );
             }
             let hotkey = Some(hotkey).filter(|k| !k.is_empty());
             let mut presets = s.presets.clone();
-            match id.strip_prefix("edit-preset:").and_then(|i| i.parse::<usize>().ok()) {
-                Some(i) if i < presets.len() => presets[i] = Preset { name, hotkey, ..presets[i].clone() },
+            match id
+                .strip_prefix("edit-preset:")
+                .and_then(|i| i.parse::<usize>().ok())
+            {
+                Some(i) if i < presets.len() => {
+                    presets[i] = Preset {
+                        name,
+                        hotkey,
+                        ..presets[i].clone()
+                    }
+                }
                 Some(_) => return Applied::Problem("That preset is gone.".into()),
                 None => {
                     let preset = new_preset(s, name, hotkey);
@@ -881,8 +1246,16 @@ pub fn new_preset(s: &Settings, name: String, hotkey: Option<String>) -> Preset 
         delay: s.delay_seconds,
         cursor: s.include_cursor,
         hotkey,
-        effects: if tab == 2 { Vec::new() } else { s.capture_effects.clone() },
-        share: Some(if tab == 2 { s.video_share.clone() } else { s.share.clone() }),
+        effects: if tab == 2 {
+            Vec::new()
+        } else {
+            s.capture_effects.clone()
+        },
+        share: Some(if tab == 2 {
+            s.video_share.clone()
+        } else {
+            s.share.clone()
+        }),
     }
 }
 
@@ -902,7 +1275,14 @@ mod tests {
     use super::*;
 
     fn settings() -> Settings {
-        let mut s = Settings { fixed_size: (800, 600), delay_seconds: 4, record_audio: "both".into(), webcam: Some("top-left".into()), share: "email".into(), ..Settings::default() };
+        let mut s = Settings {
+            fixed_size: (800, 600),
+            delay_seconds: 4,
+            record_audio: "both".into(),
+            webcam: Some("top-left".into()),
+            share: "email".into(),
+            ..Settings::default()
+        };
         s.capture_effects = vec!["Border".into(), "Shadow".into()];
         s.capture_window.selection = "fixed".into();
         s
@@ -917,7 +1297,10 @@ mod tests {
         assert_eq!(field_text(&s, 2, Field::Selection), "Region");
         let mut m = s.clone();
         m.capture_window.selection = "multi".into();
-        assert_eq!((field_text(&m, 1, Field::Selection), mode_of(&m, 1)), ("Multiple Area".to_owned(), "multi".to_owned()));
+        assert_eq!(
+            (field_text(&m, 1, Field::Selection), mode_of(&m, 1)),
+            ("Multiple Area".to_owned(), "multi".to_owned())
+        );
     }
 
     #[test]
@@ -925,9 +1308,16 @@ mod tests {
         let mut s = settings();
         assert!(switch_on(&s, Switch::Webcam));
         flip(&mut s, Switch::Webcam);
-        assert_eq!((s.webcam.as_deref(), s.capture_window.webcam_corner.as_str()), (None, "top-left"));
+        assert_eq!(
+            (s.webcam.as_deref(), s.capture_window.webcam_corner.as_str()),
+            (None, "top-left")
+        );
         flip(&mut s, Switch::Webcam);
-        assert_eq!(s.webcam.as_deref(), Some("top-left"), "the corner comes back");
+        assert_eq!(
+            s.webcam.as_deref(),
+            Some("top-left"),
+            "the corner comes back"
+        );
         flip(&mut s, Switch::SystemAudio);
         assert_eq!(s.record_audio, "microphone");
         flip(&mut s, Switch::Delay);
@@ -950,29 +1340,47 @@ mod tests {
         assert_eq!(capture_button(&s, 1, "PrtScn", false).0, "Start");
         assert_eq!(capture_button(&s, 1, "PrtScn", true).0, "Stop");
         s.capture_window.timing = "schedule".into();
-        assert_eq!(capture_button(&s, 1, "PrtScn", false), ("Schedule", "Daily at 09:00".to_owned()));
+        assert_eq!(
+            capture_button(&s, 1, "PrtScn", false),
+            ("Schedule", "Daily at 09:00".to_owned())
+        );
         s.capture_window.timer = false;
-        assert_eq!(capture_button(&s, 1, "PrtScn", false), ("Capture", "Print Screen".to_owned()));
+        assert_eq!(
+            capture_button(&s, 1, "PrtScn", false),
+            ("Capture", "Print Screen".to_owned())
+        );
     }
 
     #[test]
     fn the_view_lists_each_tabs_rows() {
         let mut s = settings();
         s.capture_window.tab = 0;
-        assert_eq!(view(&s, "PrtScn", false).fields.iter().map(|f| f.id).collect::<Vec<_>>(), ["share"]);
+        assert_eq!(
+            view(&s, "PrtScn", false)
+                .fields
+                .iter()
+                .map(|f| f.id)
+                .collect::<Vec<_>>(),
+            ["share"]
+        );
         s.capture_window.tab = 2;
         let v = view(&s, "PrtScn", false);
         assert_eq!(v.switches.len(), 6);
         assert_eq!(v.switches[0].more, Some("webcam"));
         assert_eq!(v.fields[0].gear, Some("selection"));
-        assert!(serde_json::to_string(&v).unwrap().contains("\"capture\":\"Capture\""));
+        assert!(serde_json::to_string(&v)
+            .unwrap()
+            .contains("\"capture\":\"Capture\""));
     }
 
     #[test]
     fn picks_change_the_settings() {
         let mut s = settings();
         assert_eq!(pick(&mut s, "sel:multi"), Pick::Changed);
-        assert!(s.capture_window.fixed, "the older fixed setting becomes Region's fixed option");
+        assert!(
+            s.capture_window.fixed,
+            "the older fixed setting becomes Region's fixed option"
+        );
         assert_eq!(pick(&mut s, "fx:Border"), Pick::Changed);
         assert_eq!(s.capture_effects, ["Shadow"]);
         assert_eq!(pick(&mut s, "fx:Tilt"), Pick::Changed);
@@ -980,7 +1388,10 @@ mod tests {
         assert_eq!(s.capture_effects, ["Shadow"]);
         assert_eq!(pick(&mut s, "tab:2"), Pick::Changed);
         assert_eq!(pick(&mut s, "panel:webcam"), Pick::Panel("webcam".into()));
-        assert_eq!(pick(&mut s, "preset-delete:0"), Pick::Presets(s.presets[1..].to_vec()));
+        assert_eq!(
+            pick(&mut s, "preset-delete:0"),
+            Pick::Presets(s.presets[1..].to_vec())
+        );
         assert_eq!(pick(&mut s, "nonsense"), Pick::Nothing);
     }
 
@@ -1000,30 +1411,74 @@ mod tests {
         s.capture_window.tab = 1;
         let p = panel(&s, "selection", false, "PrtScn").unwrap();
         assert_eq!(p.rows.len(), 7);
-        let values: Vec<Value> = vec![true.into(), 1024.into(), 768.into(), false.into(), 0.into(), 0.into(), true.into()];
+        let values: Vec<Value> = vec![
+            true.into(),
+            1024.into(),
+            768.into(),
+            false.into(),
+            0.into(),
+            0.into(),
+            true.into(),
+        ];
         assert_eq!(apply(&mut s, "selection", &values, false), Applied::Changed);
-        assert_eq!((s.fixed_size, s.capture_window.selection.as_str(), s.capture_window.fixed), ((1024, 768), "image", true));
+        assert_eq!(
+            (
+                s.fixed_size,
+                s.capture_window.selection.as_str(),
+                s.capture_window.fixed
+            ),
+            ((1024, 768), "image", true)
+        );
 
         let bad: Vec<Value> = vec![2.into(), 3.into(), 10.into(), true.into(), "nine".into()];
-        assert!(matches!(apply(&mut s, "delay", &bad, false), Applied::Problem(_)));
+        assert!(matches!(
+            apply(&mut s, "delay", &bad, false),
+            Applied::Problem(_)
+        ));
         let good: Vec<Value> = vec![1.into(), 3.into(), 30.into(), true.into(), "09:30".into()];
         assert_eq!(apply(&mut s, "delay", &good, false), Applied::Changed);
-        assert_eq!((s.capture_window.timing.as_str(), s.capture_window.timer, s.interval_seconds), ("interval", true, 30));
+        assert_eq!(
+            (
+                s.capture_window.timing.as_str(),
+                s.capture_window.timer,
+                s.interval_seconds
+            ),
+            ("interval", true, 30)
+        );
 
         let preset: Vec<Value> = vec!["Mine".into(), "Ctrl+Shift+9".into()];
         match apply(&mut s, "new-preset", &preset, false) {
-            Applied::Presets(p) => assert_eq!(p.last().map(|p| (p.name.as_str(), p.hotkey.as_deref())), Some(("Mine", Some("Ctrl+Shift+9")))),
+            Applied::Presets(p) => assert_eq!(
+                p.last().map(|p| (p.name.as_str(), p.hotkey.as_deref())),
+                Some(("Mine", Some("Ctrl+Shift+9")))
+            ),
             other => panic!("{other:?}"),
         }
         let nameless: Vec<Value> = vec!["".into(), "".into()];
-        assert!(matches!(apply(&mut s, "new-preset", &nameless, false), Applied::Problem(_)));
-        assert_eq!(apply(&mut s, "prefs", &[true.into(), false.into(), 3.into(), 1.into()], false), Applied::Startup(true));
+        assert!(matches!(
+            apply(&mut s, "new-preset", &nameless, false),
+            Applied::Problem(_)
+        ));
+        assert_eq!(
+            apply(
+                &mut s,
+                "prefs",
+                &[true.into(), false.into(), 3.into(), 1.into()],
+                false
+            ),
+            Applied::Startup(true)
+        );
     }
 
     #[test]
     fn presets_import_merges_by_name() {
         let current = Settings::default().presets;
-        let json = serde_json::to_vec(&[Preset { name: current[0].name.clone(), mode: "video".into(), ..Preset::default() }]).unwrap();
+        let json = serde_json::to_vec(&[Preset {
+            name: current[0].name.clone(),
+            mode: "video".into(),
+            ..Preset::default()
+        }])
+        .unwrap();
         let merged = import_presets(&current, &json).unwrap();
         assert_eq!(merged.len(), current.len());
         assert_eq!(merged.last().unwrap().mode, "video");

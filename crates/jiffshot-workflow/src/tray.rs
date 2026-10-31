@@ -15,16 +15,17 @@ use std::cell::RefCell;
 use std::time::Instant;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, VK_F11,
-    VK_SNAPSHOT,
-};
 use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
+    MOD_SHIFT, VK_F11, VK_SNAPSHOT,
+};
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW, KillTimer, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SetTimer, TranslateMessage, MSG, SW_SHOWNORMAL, WM_APP, WM_DESTROY, WM_HOTKEY, WM_TIMER, WNDCLASSEXW,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW, KillTimer,
+    PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer, TranslateMessage, MSG,
+    SW_SHOWNORMAL, WM_APP, WM_DESTROY, WM_HOTKEY, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW,
+    WS_POPUP,
 };
 
 pub const CLASS: &str = "JiffshotCaptureTray";
@@ -123,8 +124,14 @@ pub fn parse_hotkey(text: &str) -> Option<(HOT_KEY_MODIFIERS, u16)> {
             "alt" => mods |= MOD_ALT,
             "win" => mods |= windows_sys::Win32::UI::Input::KeyboardAndMouse::MOD_WIN,
             "prtscn" | "printscreen" => key = Some(VK_SNAPSHOT),
-            k if k.len() == 1 && k.chars().next().unwrap().is_ascii_alphanumeric() => key = Some(k.to_ascii_uppercase().as_bytes()[0] as u16),
-            k if k.starts_with('f') && k[1..].parse::<u16>().is_ok_and(|n| (1..=24).contains(&n)) => key = Some(0x6F + k[1..].parse::<u16>().unwrap()),
+            k if k.len() == 1 && k.chars().next().unwrap().is_ascii_alphanumeric() => {
+                key = Some(k.to_ascii_uppercase().as_bytes()[0] as u16)
+            }
+            k if k.starts_with('f')
+                && k[1..].parse::<u16>().is_ok_and(|n| (1..=24).contains(&n)) =>
+            {
+                key = Some(0x6F + k[1..].parse::<u16>().unwrap())
+            }
             _ => return None,
         }
     }
@@ -155,7 +162,9 @@ fn run_value_exists(name: &str) -> bool {
 }
 
 pub(crate) fn set_run_at_startup(on: bool) {
-    use windows_sys::Win32::System::Registry::{RegCloseKey, RegCreateKeyW, RegDeleteValueW, RegSetValueExW, HKEY, REG_SZ};
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyW, RegDeleteValueW, RegSetValueExW, HKEY, REG_SZ,
+    };
     let mut key: HKEY = std::ptr::null_mut();
     // SAFETY: opens, writes or deletes one value under our own user's Run key.
     unsafe {
@@ -163,9 +172,18 @@ pub(crate) fn set_run_at_startup(on: bool) {
             return;
         }
         if on {
-            let exe = std::env::current_exe().map(|p| format!("\"{}\"", p.display())).unwrap_or_default();
+            let exe = std::env::current_exe()
+                .map(|p| format!("\"{}\"", p.display()))
+                .unwrap_or_default();
             let value = wide(&exe);
-            RegSetValueExW(key, wide(jiffshot_capture::paths::NAME).as_ptr(), 0, REG_SZ, value.as_ptr() as *const u8, (value.len() * 2) as u32);
+            RegSetValueExW(
+                key,
+                wide(jiffshot_capture::paths::NAME).as_ptr(),
+                0,
+                REG_SZ,
+                value.as_ptr() as *const u8,
+                (value.len() * 2) as u32,
+            );
         } else {
             RegDeleteValueW(key, wide(jiffshot_capture::paths::NAME).as_ptr());
         }
@@ -270,7 +288,10 @@ pub(crate) fn publish_state() {
     if let Some(settings) = with_app(|app| app.settings.clone()) {
         *crate::SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()) = Some(settings);
     }
-    (hooks.state)(TrayState { run_at_startup: runs_at_startup(), ..state });
+    (hooks.state)(TrayState {
+        run_at_startup: runs_at_startup(),
+        ..state
+    });
 }
 
 /// The tray menu's commands, run on the capture side's thread.
@@ -342,7 +363,10 @@ impl TrayAction {
     pub fn post(self) {
         // SAFETY: posts to our own tray window, found by class.
         unsafe {
-            let hwnd = windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW(wide(CLASS).as_ptr(), std::ptr::null());
+            let hwnd = windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW(
+                wide(CLASS).as_ptr(),
+                std::ptr::null(),
+            );
             if !hwnd.is_null() {
                 PostMessageW(hwnd, WM_APP_COMMAND, self.id(), 0);
             }
@@ -396,8 +420,9 @@ fn register_hotkeys(hwnd: HWND) -> (String, Vec<String>) {
     let mut problems = Vec::new();
     let capture_key = if register_hotkey(hwnd, HOTKEY_CAPTURE, 0, VK_SNAPSHOT) {
         "PrtScn".to_owned()
-    } else if let Some(&(_, _, name)) =
-        FALLBACK_KEYS.iter().find(|(modifiers, vk, _)| register_hotkey(hwnd, HOTKEY_CAPTURE, *modifiers, *vk))
+    } else if let Some(&(_, _, name)) = FALLBACK_KEYS
+        .iter()
+        .find(|(modifiers, vk, _)| register_hotkey(hwnd, HOTKEY_CAPTURE, *modifiers, *vk))
     {
         problems.push(format!(
             "PrtScn is unavailable because {}; {name} captures until it frees up",
@@ -405,7 +430,10 @@ fn register_hotkeys(hwnd: HWND) -> (String, Vec<String>) {
         ));
         name.to_owned()
     } else {
-        problems.push(format!("PrtScn is unavailable because {} and no fallback key is free; use the tray icon", print_screen_owner()));
+        problems.push(format!(
+            "PrtScn is unavailable because {} and no fallback key is free; use the tray icon",
+            print_screen_owner()
+        ));
         "the tray icon".to_owned()
     };
     if !register_hotkey(hwnd, HOTKEY_SCREEN, MOD_CONTROL, VK_SNAPSHOT) {
@@ -431,7 +459,12 @@ fn retry_print_screen(hwnd: HWND) {
         with_app(|app| app.capture_key = "PrtScn".to_owned());
         log("PrtScn became free; capture key is now PrtScn");
         publish_state();
-        notify(hwnd, "Jiffshot hotkeys", "PrtScn now starts a Jiffshot capture", false);
+        notify(
+            hwnd,
+            "Jiffshot hotkeys",
+            "PrtScn now starts a Jiffshot capture",
+            false,
+        );
         // SAFETY: as above.
         unsafe { KillTimer(hwnd, TIMER_HOTKEY_RETRY) };
     } else {
@@ -455,7 +488,14 @@ fn spawn_finish(capture: Capture, settings: Settings, owner: HWND) {
         let outcome = workflow::finish(capture, &settings, owner);
         // SAFETY: the window outlives worker threads in practice; if it is
         // gone the post fails and the box is leaked, which is harmless at exit.
-        unsafe { PostMessageW(owner as HWND, WM_APP_DONE, 0, Box::into_raw(Box::new(outcome)) as LPARAM) };
+        unsafe {
+            PostMessageW(
+                owner as HWND,
+                WM_APP_DONE,
+                0,
+                Box::into_raw(Box::new(outcome)) as LPARAM,
+            )
+        };
     });
 }
 
@@ -481,7 +521,13 @@ fn capture_interactive(mode: usize) {
         let grabbed = started.elapsed();
         let targets = Targets::enumerate(desktop, &[hwnd as isize]);
         let enumerated = started.elapsed();
-        let overlay = Overlay::new(snapshot, (desktop.x, desktop.y), targets, screen::monitors(), pointer)?;
+        let overlay = Overlay::new(
+            snapshot,
+            (desktop.x, desktop.y),
+            targets,
+            screen::monitors(),
+            pointer,
+        )?;
         log(&format!(
             "overlay ready in {:.0} ms (grab {:.0}, windows {:.0}, setup {:.0}) for {}x{}",
             started.elapsed().as_secs_f64() * 1000.0,
@@ -507,7 +553,9 @@ fn capture_interactive(mode: usize) {
     overlay.mode = match mode {
         MODE_FREEHAND => overlay::Mode::Freehand,
         MODE_MULTI => overlay::Mode::MultiArea,
-        MODE_FIXED => overlay::Mode::Fixed(settings.fixed_size.0.max(16), settings.fixed_size.1.max(16)),
+        MODE_FIXED => {
+            overlay::Mode::Fixed(settings.fixed_size.0.max(16), settings.fixed_size.1.max(16))
+        }
         MODE_VIDEO => overlay::Mode::Video,
         _ => overlay::Mode::Normal,
     };
@@ -520,7 +568,13 @@ fn capture_interactive(mode: usize) {
         return;
     }
     let mut settings = settings;
-    if let Some((cursor, effects, share)) = with_app(|app| (app.override_cursor.take(), app.override_effects.take(), app.override_share.take())) {
+    if let Some((cursor, effects, share)) = with_app(|app| {
+        (
+            app.override_cursor.take(),
+            app.override_effects.take(),
+            app.override_share.take(),
+        )
+    }) {
         if let Some(c) = cursor {
             settings.include_cursor = c;
         }
@@ -536,8 +590,18 @@ fn capture_interactive(mode: usize) {
         return;
     };
     let rect = selection.rect();
-    let include_cursor = settings.include_cursor && matches!(mode, MODE_ALL | MODE_IMAGE | MODE_WINDOW | MODE_FREEHAND | MODE_MULTI | MODE_FIXED);
-    let Some(capture) = workflow::from_overlay(&overlay, &selection, cursor.as_ref(), include_cursor, settings.cursor_as_object) else {
+    let include_cursor = settings.include_cursor
+        && matches!(
+            mode,
+            MODE_ALL | MODE_IMAGE | MODE_WINDOW | MODE_FREEHAND | MODE_MULTI | MODE_FIXED
+        );
+    let Some(capture) = workflow::from_overlay(
+        &overlay,
+        &selection,
+        cursor.as_ref(),
+        include_cursor,
+        settings.cursor_as_object,
+    ) else {
         with_app(|app| app.busy = false);
         return;
     };
@@ -546,7 +610,13 @@ fn capture_interactive(mode: usize) {
     publish_state();
     // All-in-One asks what to make of the area once it is selected.
     let mode = if mode == MODE_ALL {
-        match crate::hud::run_panel(rect, "Capture this area as", &["Image", "Video", "Scrolling", "Panoramic"], 1000, || None) {
+        match crate::hud::run_panel(
+            rect,
+            "Capture this area as",
+            &["Image", "Video", "Scrolling", "Panoramic"],
+            1000,
+            || None,
+        ) {
             Some(0) => MODE_IMAGE,
             Some(1) => MODE_VIDEO,
             Some(2) => MODE_SCROLLING,
@@ -560,26 +630,32 @@ fn capture_interactive(mode: usize) {
         mode
     };
     match mode {
-        MODE_TEXT => {
-            match modes::text(&capture.frame) {
-                Ok(text) if !text.trim().is_empty() => {
-                    let copied = jiffshot_capture::clipboard::copy_text(&text, hwnd as isize);
-                    let preview: String = text.chars().take(180).collect();
-                    let title = if copied.is_ok() { "Text copied" } else { "Text found (clipboard busy)" };
-                    log(&format!("grab text: {} characters", text.chars().count()));
-                    notify(hwnd, title, &preview, false);
-                    crate::show_text(&text);
-                }
-                Ok(_) => notify(hwnd, "Grab text", "No text found in the selection", true),
-                Err(error) => notify(hwnd, "Grab text failed", &error, true),
+        MODE_TEXT => match modes::text(&capture.frame) {
+            Ok(text) if !text.trim().is_empty() => {
+                let copied = jiffshot_capture::clipboard::copy_text(&text, hwnd as isize);
+                let preview: String = text.chars().take(180).collect();
+                let title = if copied.is_ok() {
+                    "Text copied"
+                } else {
+                    "Text found (clipboard busy)"
+                };
+                log(&format!("grab text: {} characters", text.chars().count()));
+                notify(hwnd, title, &preview, false);
+                crate::show_text(&text);
             }
-        }
+            Ok(_) => notify(hwnd, "Grab text", "No text found in the selection", true),
+            Err(error) => notify(hwnd, "Grab text failed", &error, true),
+        },
         // These run until done, so they stay busy until then.
         MODE_SCROLLING => return spawn_scrolling(modes::scrolling, rect, settings, hwnd),
         MODE_SCROLL_BOTH => return spawn_scrolling(modes::scrolling_both, rect, settings, hwnd),
         MODE_SCROLL_H => return spawn_scrolling(modes::scrolling_horizontal, rect, settings, hwnd),
         MODE_PANORAMIC => match modes::panoramic(rect) {
-            Ok(Some(frame)) => spawn_finish(workflow::from_frame(CaptureKind::Panoramic, rect, frame), settings, hwnd),
+            Ok(Some(frame)) => spawn_finish(
+                workflow::from_frame(CaptureKind::Panoramic, rect, frame),
+                settings,
+                hwnd,
+            ),
             Ok(None) => {}
             Err(error) => notify(hwnd, "Panoramic capture failed", &error.to_string(), true),
         },
@@ -595,7 +671,12 @@ fn capture_interactive(mode: usize) {
 
 /// Runs a scrolling capture on a worker thread (it scrolls and grabs for a
 /// while), then finishes it here; busy until then.
-fn spawn_scrolling(scroll: fn(Rect) -> std::io::Result<jiffshot_capture::Frame>, rect: Rect, settings: Settings, owner: HWND) {
+fn spawn_scrolling(
+    scroll: fn(Rect) -> std::io::Result<jiffshot_capture::Frame>,
+    rect: Rect,
+    settings: Settings,
+    owner: HWND,
+) {
     let owner = owner as isize;
     std::thread::spawn(move || {
         let started = Instant::now();
@@ -605,8 +686,17 @@ fn spawn_scrolling(scroll: fn(Rect) -> std::io::Result<jiffshot_capture::Frame>,
             let hwnd = owner as HWND;
             match result {
                 Ok(frame) => {
-                    log(&format!("scrolling capture {}x{} in {:.1} s", frame.width, frame.height, started.elapsed().as_secs_f64()));
-                    spawn_finish(workflow::from_frame(CaptureKind::Scrolling, rect, frame), settings, hwnd);
+                    log(&format!(
+                        "scrolling capture {}x{} in {:.1} s",
+                        frame.width,
+                        frame.height,
+                        started.elapsed().as_secs_f64()
+                    ));
+                    spawn_finish(
+                        workflow::from_frame(CaptureKind::Scrolling, rect, frame),
+                        settings,
+                        hwnd,
+                    );
                 }
                 Err(error) => notify(hwnd, "Scrolling capture failed", &error.to_string(), true),
             }
@@ -620,7 +710,14 @@ fn spawn_video_finish(path: std::path::PathBuf, rect: Rect, settings: Settings, 
     std::thread::spawn(move || {
         let outcome = workflow::finish_video(&path, rect, &settings, owner);
         // SAFETY: as in `spawn_finish`.
-        unsafe { PostMessageW(owner as HWND, WM_APP_DONE, 0, Box::into_raw(Box::new(outcome)) as LPARAM) };
+        unsafe {
+            PostMessageW(
+                owner as HWND,
+                WM_APP_DONE,
+                0,
+                Box::into_raw(Box::new(outcome)) as LPARAM,
+            )
+        };
     });
 }
 
@@ -649,23 +746,47 @@ fn capture_steps() {
         let outcome = match library.save(&capture.frame, &capture.meta) {
             Ok(path) => {
                 // The editable guide next to its image; the editor opens it.
-                let _ = jiffshot_doc::io::save_document(&doc, &path.with_extension(jiffshot_capture::library::EDITS_EXT));
+                let _ = jiffshot_doc::io::save_document(
+                    &doc,
+                    &path.with_extension(jiffshot_capture::library::EDITS_EXT),
+                );
                 let opened = settings.open_in_editor && workflow::open_editor(&settings, &path);
-                Outcome { message: format!("Step Capture: {} steps saved", steps.len()), is_error: false, opened_editor: opened }
+                Outcome {
+                    message: format!("Step Capture: {} steps saved", steps.len()),
+                    is_error: false,
+                    opened_editor: opened,
+                }
             }
-            Err(error) => Outcome { message: format!("Could not save the guide: {error}"), is_error: true, opened_editor: false },
+            Err(error) => Outcome {
+                message: format!("Could not save the guide: {error}"),
+                is_error: true,
+                opened_editor: false,
+            },
         };
         // SAFETY: as in `spawn_finish`.
-        unsafe { PostMessageW(owner as HWND, WM_APP_DONE, 0, Box::into_raw(Box::new(outcome)) as LPARAM) };
+        unsafe {
+            PostMessageW(
+                owner as HWND,
+                WM_APP_DONE,
+                0,
+                Box::into_raw(Box::new(outcome)) as LPARAM,
+            )
+        };
     });
 }
 
 /// Takes the image on the clipboard (or an image file copied there) as a
 /// capture.
 fn capture_from_clipboard() {
-    let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else { return };
+    let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else {
+        return;
+    };
     let frame = match jiffshot_capture::clipboard::read(hwnd as isize) {
-        Ok(Some(jiffshot_capture::clipboard::Pasted::Image { width, height, rgba })) => {
+        Ok(Some(jiffshot_capture::clipboard::Pasted::Image {
+            width,
+            height,
+            rgba,
+        })) => {
             let mut f = jiffshot_capture::Frame::new(width, height);
             f.alpha = rgba.chunks_exact(4).any(|p| p[3] < 255);
             for (d, s) in f.pixels.chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
@@ -673,24 +794,42 @@ fn capture_from_clipboard() {
             }
             Some(f)
         }
-        Ok(Some(jiffshot_capture::clipboard::Pasted::Files(files))) => files.iter().find_map(|p| jiffshot_doc::io::load_image(p).ok()).map(|pm| workflow::frame_from_pixmap(&pm)),
+        Ok(Some(jiffshot_capture::clipboard::Pasted::Files(files))) => files
+            .iter()
+            .find_map(|p| jiffshot_doc::io::load_image(p).ok())
+            .map(|pm| workflow::frame_from_pixmap(&pm)),
         _ => None,
     };
     match frame {
         Some(frame) => {
             let rect = Rect::new(0, 0, frame.width as i32, frame.height as i32);
-            spawn_finish(workflow::from_frame(CaptureKind::Region, rect, frame), settings, hwnd);
+            spawn_finish(
+                workflow::from_frame(CaptureKind::Region, rect, frame),
+                settings,
+                hwnd,
+            );
         }
-        None => notify(hwnd, "Capture from clipboard", "There is no image on the clipboard", true),
+        None => notify(
+            hwnd,
+            "Capture from clipboard",
+            "There is no image on the clipboard",
+            true,
+        ),
     }
 }
 
 /// Asks for image files and adds each to the library as a capture.
 fn capture_from_file() {
-    use windows_sys::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OPENFILENAMEW};
-    let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else { return };
+    use windows_sys::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OPENFILENAMEW,
+    };
+    let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else {
+        return;
+    };
     let mut buf = vec![0u16; 32 * 1024];
-    let filter: Vec<u16> = "Images\0*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp\0All files\0*.*\0\0".encode_utf16().collect();
+    let filter: Vec<u16> = "Images\0*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp\0All files\0*.*\0\0"
+        .encode_utf16()
+        .collect();
     let title = wide("Capture from file");
     // SAFETY: a plain C struct; zero is valid for every field.
     let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
@@ -706,7 +845,11 @@ fn capture_from_file() {
         return;
     }
     // One file: its full path. Several: the folder, then each name.
-    let parts: Vec<String> = buf.split(|&c| c == 0).take_while(|p| !p.is_empty()).map(String::from_utf16_lossy).collect();
+    let parts: Vec<String> = buf
+        .split(|&c| c == 0)
+        .take_while(|p| !p.is_empty())
+        .map(String::from_utf16_lossy)
+        .collect();
     use std::path::PathBuf;
     let files: Vec<PathBuf> = match parts.as_slice() {
         [one] => vec![PathBuf::from(one)],
@@ -722,9 +865,18 @@ fn capture_from_file() {
                 // Only the last one opens in the editor.
                 s.open_in_editor &= i + 1 == files.len();
                 s.copy_to_clipboard = false;
-                spawn_finish(workflow::from_frame(CaptureKind::Region, rect, frame), s, hwnd);
+                spawn_finish(
+                    workflow::from_frame(CaptureKind::Region, rect, frame),
+                    s,
+                    hwnd,
+                );
             }
-            Err(error) => notify(hwnd, "Capture from file", &format!("{}: {error}", path.display()), true),
+            Err(error) => notify(
+                hwnd,
+                "Capture from file",
+                &format!("{}: {error}", path.display()),
+                true,
+            ),
         }
     }
 }
@@ -753,14 +905,26 @@ fn arm_schedule(hwnd: HWND, schedule: Option<&str>) {
 }
 
 fn schedule_tick() {
-    let Some((hwnd, settings, last)) = with_app(|app| (app.hwnd, app.settings.clone(), app.scheduled_fired)) else { return };
-    let Some(at) = settings.schedule.as_deref() else { return };
-    if minutes_until(at) != Some(0) || last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(120)) {
+    let Some((hwnd, settings, last)) =
+        with_app(|app| (app.hwnd, app.settings.clone(), app.scheduled_fired))
+    else {
+        return;
+    };
+    let Some(at) = settings.schedule.as_deref() else {
+        return;
+    };
+    if minutes_until(at) != Some(0)
+        || last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(120))
+    {
         return;
     }
     with_app(|app| app.scheduled_fired = Some(std::time::Instant::now()));
     let (x, y) = cursor_pos();
-    let rect = settings.schedule_area.map(|(x, y, w, h)| Rect::new(x, y, w, h)).or_else(|| screen::monitor_at(x, y).map(|m| m.rect)).unwrap_or_else(screen::virtual_screen);
+    let rect = settings
+        .schedule_area
+        .map(|(x, y, w, h)| Rect::new(x, y, w, h))
+        .or_else(|| screen::monitor_at(x, y).map(|m| m.rect))
+        .unwrap_or_else(screen::virtual_screen);
     if let Ok(capture) = workflow::immediate(CaptureKind::Region, rect, false) {
         let mut quiet = settings;
         quiet.open_in_editor = false;
@@ -773,7 +937,16 @@ fn schedule_tick() {
 /// Starts or stops the time-lapse (an interval capture of the last area,
 /// or the screen under the pointer).
 pub fn toggle_timelapse() {
-    let Some((hwnd, running, seconds, last)) = with_app(|app| (app.hwnd, app.timelapse.is_some(), app.settings.interval_seconds.max(1), app.last_region)) else { return };
+    let Some((hwnd, running, seconds, last)) = with_app(|app| {
+        (
+            app.hwnd,
+            app.timelapse.is_some(),
+            app.settings.interval_seconds.max(1),
+            app.last_region,
+        )
+    }) else {
+        return;
+    };
     if running {
         with_app(|app| app.timelapse = None);
         // SAFETY: a timer on our own window.
@@ -782,17 +955,30 @@ pub fn toggle_timelapse() {
         return;
     }
     let (x, y) = cursor_pos();
-    let rect = last.or_else(|| screen::monitor_at(x, y).map(|m| m.rect)).unwrap_or_else(screen::virtual_screen);
+    let rect = last
+        .or_else(|| screen::monitor_at(x, y).map(|m| m.rect))
+        .unwrap_or_else(screen::virtual_screen);
     with_app(|app| app.timelapse = Some((rect, 0)));
-    notify(hwnd, "Time-lapse", &format!("Capturing every {seconds} s; choose Time-lapse again to stop"), false);
+    notify(
+        hwnd,
+        "Time-lapse",
+        &format!("Capturing every {seconds} s; choose Time-lapse again to stop"),
+        false,
+    );
     // SAFETY: as above.
     unsafe { SetTimer(hwnd, TIMER_TIMELAPSE, seconds * 1000, None) };
     timelapse_tick();
 }
 
 fn timelapse_tick() {
-    let Some((hwnd, settings, Some((rect, last)))) = with_app(|app| (app.hwnd, app.settings.clone(), app.timelapse)) else { return };
-    let Ok(capture) = workflow::immediate(CaptureKind::Region, rect, false) else { return };
+    let Some((hwnd, settings, Some((rect, last)))) =
+        with_app(|app| (app.hwnd, app.settings.clone(), app.timelapse))
+    else {
+        return;
+    };
+    let Ok(capture) = workflow::immediate(CaptureKind::Region, rect, false) else {
+        return;
+    };
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in capture.frame.pixels.iter().step_by(7) {
         h = (h ^ *b as u64).wrapping_mul(0x100_0000_01b3);
@@ -839,7 +1025,9 @@ pub fn start_from_panel(s: Settings) {
     }
     let mode = crate::panel::mode_of(&s, tab);
     match (mode.as_str(), s.capture_window.fixed_at) {
-        ("fixed", Some((x, y))) if tab == 1 => capture_rect_after_delay(Rect::new(x, y, s.fixed_size.0, s.fixed_size.1)),
+        ("fixed", Some((x, y))) if tab == 1 => {
+            capture_rect_after_delay(Rect::new(x, y, s.fixed_size.0, s.fixed_size.1))
+        }
         _ => start_mode_after_delay(&mode),
     }
 }
@@ -858,7 +1046,12 @@ pub fn set_schedule(at: Option<String>) {
     };
     arm_schedule(hwnd, at.as_deref());
     if let Some(at) = at {
-        notify(hwnd, "Scheduled capture", &format!("The screen will be captured every day at {at}"), false);
+        notify(
+            hwnd,
+            "Scheduled capture",
+            &format!("The screen will be captured every day at {at}"),
+            false,
+        );
     }
     publish_state();
 }
@@ -871,7 +1064,10 @@ pub fn current_settings() -> Settings {
 pub fn apply_settings(settings: Settings) {
     with_app(|app| {
         let presets = std::mem::take(&mut app.settings.presets);
-        app.settings = Settings { presets, ..settings };
+        app.settings = Settings {
+            presets,
+            ..settings
+        };
         app.settings.save();
     });
     publish_state();
@@ -885,9 +1081,20 @@ pub(crate) fn remember_recording(control: &crate::recorder::Control) {
         s.record_cursor = control.cursor.load(Relaxed);
         s.cursor_highlight = control.highlight.load(Relaxed);
         s.click_rings = control.clicks.load(Relaxed);
-        s.webcam = control.webcam.load(Relaxed).then(|| control.webcam_corner.lock().unwrap().clone());
-        s.webcam_shape = if control.webcam_circle.load(Relaxed) { "circle" } else { "rectangle" }.to_owned();
-        s.record_audio = match (control.system.load(Relaxed), control.microphone.load(Relaxed)) {
+        s.webcam = control
+            .webcam
+            .load(Relaxed)
+            .then(|| control.webcam_corner.lock().unwrap().clone());
+        s.webcam_shape = if control.webcam_circle.load(Relaxed) {
+            "circle"
+        } else {
+            "rectangle"
+        }
+        .to_owned();
+        s.record_audio = match (
+            control.system.load(Relaxed),
+            control.microphone.load(Relaxed),
+        ) {
             (true, true) => "both",
             (true, false) => "system",
             (false, true) => "microphone",
@@ -901,7 +1108,9 @@ pub(crate) fn remember_recording(control: &crate::recorder::Control) {
 
 /// Replaces the presets and their hotkeys.
 pub fn set_presets(presets: Vec<crate::settings::Preset>) {
-    let Some((hwnd, old)) = with_app(|app| (app.hwnd, app.settings.presets.len())) else { return };
+    let Some((hwnd, old)) = with_app(|app| (app.hwnd, app.settings.presets.len())) else {
+        return;
+    };
     for i in 0..old.max(presets.len()) {
         // SAFETY: hotkeys of our own window (unregistering a missing one
         // fails harmlessly).
@@ -919,9 +1128,18 @@ pub fn run_preset_now(index: usize) {
 }
 
 fn dispatch_mode(mode: usize) {
-    if matches!(mode, MODE_FULLSCREEN | MODE_CLIPBOARD | MODE_FILE | MODE_VIDEO_FULL) {
+    if matches!(
+        mode,
+        MODE_FULLSCREEN | MODE_CLIPBOARD | MODE_FILE | MODE_VIDEO_FULL
+    ) {
         // A preset's choices apply to the overlay's captures only.
-        with_app(|app| (app.override_cursor, app.override_effects, app.override_share) = (None, None, None));
+        with_app(|app| {
+            (
+                app.override_cursor,
+                app.override_effects,
+                app.override_share,
+            ) = (None, None, None)
+        });
     }
     match mode {
         usize::MAX => start_menu_capture(),
@@ -937,7 +1155,9 @@ fn dispatch_mode(mode: usize) {
 /// Records the whole screen under the pointer, without selecting.
 fn record_screen_under_cursor() {
     let (x, y) = cursor_pos();
-    let Some(monitor) = screen::monitor_at(x, y) else { return };
+    let Some(monitor) = screen::monitor_at(x, y) else {
+        return;
+    };
     let Some((hwnd, settings)) = with_app(|app| {
         if app.busy {
             return None;
@@ -959,8 +1179,14 @@ fn record_screen_under_cursor() {
 /// Starts a capture by preset mode name, after the delay setting (image
 /// captures; recordings count down themselves).
 pub fn start_mode_after_delay(name: &str) {
-    let mode = if name == "video" { MODE_VIDEO } else { mode_named(name).unwrap_or(MODE_IMAGE) };
-    let Some((hwnd, delay)) = with_app(|app| (app.hwnd, app.settings.delay_seconds)) else { return };
+    let mode = if name == "video" {
+        MODE_VIDEO
+    } else {
+        mode_named(name).unwrap_or(MODE_IMAGE)
+    };
+    let Some((hwnd, delay)) = with_app(|app| (app.hwnd, app.settings.delay_seconds)) else {
+        return;
+    };
     if delay == 0 || mode == MODE_VIDEO {
         // Let the Capture window disappear from the screen first.
         with_app(|app| app.pending_mode = Some(Ok(mode)));
@@ -969,37 +1195,58 @@ pub fn start_mode_after_delay(name: &str) {
         return;
     }
     with_app(|app| app.pending_mode = Some(Ok(mode)));
-    notify(hwnd, "Jiffshot", &format!("Capturing in {delay} seconds…"), false);
+    notify(
+        hwnd,
+        "Jiffshot",
+        &format!("Capturing in {delay} seconds…"),
+        false,
+    );
     // SAFETY: as above.
     unsafe { SetTimer(hwnd, TIMER_MODE, delay * 1000, None) };
 }
 
 /// Captures exactly `rect` after the delay setting.
 pub fn capture_rect_after_delay(rect: Rect) {
-    let Some((hwnd, delay)) = with_app(|app| (app.hwnd, app.settings.delay_seconds)) else { return };
+    let Some((hwnd, delay)) = with_app(|app| (app.hwnd, app.settings.delay_seconds)) else {
+        return;
+    };
     with_app(|app| app.pending_mode = Some(Err(rect)));
     // SAFETY: a timer on our own window.
     unsafe { SetTimer(hwnd, TIMER_MODE, (delay * 1000).max(150), None) };
 }
 
 fn run_pending_mode() {
-    let Some((hwnd, settings, pending)) = with_app(|app| (app.hwnd, app.settings.clone(), app.pending_mode.take())) else { return };
+    let Some((hwnd, settings, pending)) =
+        with_app(|app| (app.hwnd, app.settings.clone(), app.pending_mode.take()))
+    else {
+        return;
+    };
     match pending {
         Some(Ok(mode)) => dispatch_mode(mode),
-        Some(Err(rect)) => match workflow::immediate(CaptureKind::Region, rect, settings.include_cursor) {
-            Ok(capture) => spawn_finish(capture, settings, hwnd),
-            Err(error) => notify(hwnd, "Capture failed", &error.to_string(), true),
-        },
+        Some(Err(rect)) => {
+            match workflow::immediate(CaptureKind::Region, rect, settings.include_cursor) {
+                Ok(capture) => spawn_finish(capture, settings, hwnd),
+                Err(error) => notify(hwnd, "Capture failed", &error.to_string(), true),
+            }
+        }
         None => {}
     }
 }
 
 fn run_preset(index: usize) {
-    let Some((hwnd, preset)) = with_app(|app| (app.hwnd, app.settings.presets.get(index).cloned())) else { return };
+    let Some((hwnd, preset)) = with_app(|app| (app.hwnd, app.settings.presets.get(index).cloned()))
+    else {
+        return;
+    };
     let Some(preset) = preset else { return };
     if preset.delay > 0 && with_app(|app| app.pending_preset.is_none()).unwrap_or(false) {
         with_app(|app| app.pending_preset = Some(index));
-        notify(hwnd, &preset.name, &format!("Capturing in {} seconds…", preset.delay), false);
+        notify(
+            hwnd,
+            &preset.name,
+            &format!("Capturing in {} seconds…", preset.delay),
+            false,
+        );
         // SAFETY: a timer on our own window.
         unsafe { SetTimer(hwnd, TIMER_PRESET, preset.delay * 1000, None) };
         return;
@@ -1016,7 +1263,11 @@ fn register_preset_hotkeys(hwnd: HWND, presets: &[crate::settings::Preset]) {
     for (i, p) in presets.iter().enumerate() {
         if let Some((mods, vk)) = p.hotkey.as_deref().and_then(parse_hotkey) {
             if !register_hotkey(hwnd, HOTKEY_PRESET + i as i32, mods, vk) {
-                log(&format!("preset hotkey {} for {} is taken", p.hotkey.as_deref().unwrap_or(""), p.name));
+                log(&format!(
+                    "preset hotkey {} for {} is taken",
+                    p.hotkey.as_deref().unwrap_or(""),
+                    p.name
+                ));
             }
         }
     }
@@ -1024,20 +1275,36 @@ fn register_preset_hotkeys(hwnd: HWND, presets: &[crate::settings::Preset]) {
 
 /// Captures the menus open right now.
 fn capture_menus() {
-    let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else { return };
+    let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else {
+        return;
+    };
     match modes::menus() {
         Ok(Some(frame)) => {
             let rect = Rect::new(0, 0, frame.width as i32, frame.height as i32);
-            spawn_finish(workflow::from_frame(CaptureKind::Menu, rect, frame), settings, hwnd);
+            spawn_finish(
+                workflow::from_frame(CaptureKind::Menu, rect, frame),
+                settings,
+                hwnd,
+            );
         }
-        Ok(None) => notify(hwnd, "Menu capture", "No open menu was found. Open the menu during the countdown.", true),
+        Ok(None) => notify(
+            hwnd,
+            "Menu capture",
+            "No open menu was found. Open the menu during the countdown.",
+            true,
+        ),
         Err(error) => notify(hwnd, "Menu capture failed", &error.to_string(), true),
     }
 }
 
 fn start_menu_capture() {
     if let Some(hwnd) = with_app(|app| app.hwnd) {
-        notify(hwnd, "Menu capture", "Open the menu to capture; it is captured in 3 seconds.", false);
+        notify(
+            hwnd,
+            "Menu capture",
+            "Open the menu to capture; it is captured in 3 seconds.",
+            false,
+        );
         // SAFETY: a timer on our own window.
         unsafe { SetTimer(hwnd, TIMER_MENU, 3000, None) };
     }
@@ -1045,7 +1312,9 @@ fn start_menu_capture() {
 
 /// Captures a rectangle without the overlay.
 fn capture_now(kind: CaptureKind, rect: Rect) {
-    let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else { return };
+    let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else {
+        return;
+    };
     match workflow::immediate(kind, rect, settings.include_cursor) {
         Ok(capture) => {
             with_app(|app| app.last_region = Some(rect));
@@ -1071,7 +1340,12 @@ fn repeat_last_region() {
 
 fn start_delayed() {
     if let Some((hwnd, seconds)) = with_app(|app| (app.hwnd, app.settings.delay_seconds.max(1))) {
-        notify(hwnd, "Jiffshot", &format!("Capturing in {seconds} seconds…"), false);
+        notify(
+            hwnd,
+            "Jiffshot",
+            &format!("Capturing in {seconds} seconds…"),
+            false,
+        );
         // SAFETY: a timer on our own window.
         unsafe { SetTimer(hwnd, TIMER_DELAY, seconds * 1000, None) };
     }
@@ -1083,7 +1357,14 @@ pub(crate) fn open_library() {
     let path = wide(&root.to_string_lossy());
     // SAFETY: opens a folder in Explorer; all strings are NUL-terminated.
     unsafe {
-        ShellExecuteW(std::ptr::null_mut(), wide("open").as_ptr(), path.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            wide("open").as_ptr(),
+            path.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
     }
 }
 
@@ -1142,7 +1423,12 @@ fn run_menu_command(hwnd: HWND, command: usize) {
             let schedule = with_app(|app| {
                 app.settings.schedule = match app.settings.schedule.take() {
                     Some(_) => None,
-                    None => Some(app.settings.schedule_default.clone().unwrap_or_else(|| "09:00".to_owned())),
+                    None => Some(
+                        app.settings
+                            .schedule_default
+                            .clone()
+                            .unwrap_or_else(|| "09:00".to_owned()),
+                    ),
                 };
                 app.settings.save();
                 app.settings.schedule.clone()
@@ -1150,7 +1436,12 @@ fn run_menu_command(hwnd: HWND, command: usize) {
             .flatten();
             arm_schedule(hwnd, schedule.as_deref());
             if let Some(at) = schedule {
-                notify(hwnd, "Scheduled capture", &format!("The screen will be captured every day at {at}"), false);
+                notify(
+                    hwnd,
+                    "Scheduled capture",
+                    &format!("The screen will be captured every day at {at}"),
+                    false,
+                );
             }
         }
         ID_STARTUP => set_run_at_startup(!runs_at_startup()),
@@ -1214,7 +1505,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // SAFETY: posted by `spawn_finish` with a leaked Box<Outcome>.
             let outcome = Box::from_raw(lparam as *mut Outcome);
             if outcome.is_error || !outcome.opened_editor {
-                let title = if outcome.is_error { "Capture saved with problems" } else { "Capture saved" };
+                let title = if outcome.is_error {
+                    "Capture saved with problems"
+                } else {
+                    "Capture saved"
+                };
                 notify(hwnd, title, &outcome.message, outcome.is_error);
             }
             0
@@ -1373,7 +1668,10 @@ mod tests {
 
     #[test]
     fn hotkeys_parse() {
-        assert_eq!(parse_hotkey("Ctrl+Shift+1"), Some((MOD_CONTROL | MOD_SHIFT, b'1' as u16)));
+        assert_eq!(
+            parse_hotkey("Ctrl+Shift+1"),
+            Some((MOD_CONTROL | MOD_SHIFT, b'1' as u16))
+        );
         assert_eq!(parse_hotkey("alt + F9"), Some((MOD_ALT, 0x78)));
         assert_eq!(parse_hotkey("PrtScn"), Some((0, VK_SNAPSHOT)));
         assert_eq!(parse_hotkey("Ctrl+"), None);

@@ -80,7 +80,12 @@ pub struct Box2 {
 
 impl Box2 {
     pub fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Box2 {
-        Box2 { x0: x0.min(x1), y0: y0.min(y1), x1: x0.max(x1), y1: y0.max(y1) }
+        Box2 {
+            x0: x0.min(x1),
+            y0: y0.min(y1),
+            x1: x0.max(x1),
+            y1: y0.max(y1),
+        }
     }
 
     pub fn from_points(a: Pt, b: Pt) -> Box2 {
@@ -99,7 +104,12 @@ impl Box2 {
     pub fn bounding(points: impl IntoIterator<Item = Pt>) -> Option<Box2> {
         let mut it = points.into_iter();
         let first = it.next()?;
-        let mut b = Box2 { x0: first.x, y0: first.y, x1: first.x, y1: first.y };
+        let mut b = Box2 {
+            x0: first.x,
+            y0: first.y,
+            x1: first.x,
+            y1: first.y,
+        };
         for p in it {
             b.x0 = b.x0.min(p.x);
             b.y0 = b.y0.min(p.y);
@@ -134,15 +144,30 @@ impl Box2 {
     }
 
     pub fn inflate(&self, d: f32) -> Box2 {
-        Box2 { x0: self.x0 - d, y0: self.y0 - d, x1: self.x1 + d, y1: self.y1 + d }
+        Box2 {
+            x0: self.x0 - d,
+            y0: self.y0 - d,
+            x1: self.x1 + d,
+            y1: self.y1 + d,
+        }
     }
 
     pub fn offset(&self, dx: f32, dy: f32) -> Box2 {
-        Box2 { x0: self.x0 + dx, y0: self.y0 + dy, x1: self.x1 + dx, y1: self.y1 + dy }
+        Box2 {
+            x0: self.x0 + dx,
+            y0: self.y0 + dy,
+            x1: self.x1 + dx,
+            y1: self.y1 + dy,
+        }
     }
 
     pub fn union(&self, o: &Box2) -> Box2 {
-        Box2 { x0: self.x0.min(o.x0), y0: self.y0.min(o.y0), x1: self.x1.max(o.x1), y1: self.y1.max(o.y1) }
+        Box2 {
+            x0: self.x0.min(o.x0),
+            y0: self.y0.min(o.y0),
+            x1: self.x1.max(o.x1),
+            y1: self.y1.max(o.y1),
+        }
     }
 
     pub fn intersects(&self, o: &Box2) -> bool {
@@ -154,20 +179,38 @@ impl Box2 {
     }
 
     pub fn to_skia(&self) -> Option<tiny_skia::Rect> {
-        tiny_skia::Rect::from_ltrb(self.x0, self.y0, self.x1.max(self.x0 + 0.01), self.y1.max(self.y0 + 0.01))
+        tiny_skia::Rect::from_ltrb(
+            self.x0,
+            self.y0,
+            self.x1.max(self.x0 + 0.01),
+            self.y1.max(self.y0 + 0.01),
+        )
     }
 
     /// Smallest whole-pixel rectangle covering this box.
     pub fn to_irect(&self) -> IRect {
         let x = self.x0.floor() as i32;
         let y = self.y0.floor() as i32;
-        IRect { x, y, w: self.x1.ceil() as i32 - x, h: self.y1.ceil() as i32 - y }
+        IRect {
+            x,
+            y,
+            w: self.x1.ceil() as i32 - x,
+            h: self.y1.ceil() as i32 - y,
+        }
     }
 
     /// Maps `p` from this box onto `to`, proportionally.
     pub fn map(&self, p: Pt, to: &Box2) -> Pt {
-        let sx = if self.width().abs() < 1e-6 { 1.0 } else { to.width() / self.width() };
-        let sy = if self.height().abs() < 1e-6 { 1.0 } else { to.height() / self.height() };
+        let sx = if self.width().abs() < 1e-6 {
+            1.0
+        } else {
+            to.width() / self.width()
+        };
+        let sy = if self.height().abs() < 1e-6 {
+            1.0
+        } else {
+            to.height() / self.height()
+        };
         Pt::new(to.x0 + (p.x - self.x0) * sx, to.y0 + (p.y - self.y0) * sy)
     }
 }
@@ -211,7 +254,12 @@ impl IRect {
         }
         let x = self.x.min(o.x);
         let y = self.y.min(o.y);
-        IRect::new(x, y, self.right().max(o.right()) - x, self.bottom().max(o.bottom()) - y)
+        IRect::new(
+            x,
+            y,
+            self.right().max(o.right()) - x,
+            self.bottom().max(o.bottom()) - y,
+        )
     }
 
     pub fn intersect(&self, o: &IRect) -> Option<IRect> {
@@ -252,8 +300,17 @@ mod tests {
         let b = Box2::new(10.5, 20.0, 2.2, 5.9);
         assert_eq!((b.x0, b.y0, b.x1, b.y1), (2.2, 5.9, 10.5, 20.0));
         assert_eq!(b.to_irect(), IRect::new(2, 5, 9, 15));
-        assert_eq!(IRect::new(0, 0, 10, 10).intersect(&IRect::new(5, 5, 10, 10)), Some(IRect::new(5, 5, 5, 5)));
-        assert_eq!(IRect::new(0, 0, 1, 1).union(&IRect::default()), IRect::new(0, 0, 1, 1));
-        assert!((dist_to_segment(Pt::new(5.0, 3.0), Pt::new(0.0, 0.0), Pt::new(10.0, 0.0)) - 3.0).abs() < 1e-5);
+        assert_eq!(
+            IRect::new(0, 0, 10, 10).intersect(&IRect::new(5, 5, 10, 10)),
+            Some(IRect::new(5, 5, 5, 5))
+        );
+        assert_eq!(
+            IRect::new(0, 0, 1, 1).union(&IRect::default()),
+            IRect::new(0, 0, 1, 1)
+        );
+        assert!(
+            (dist_to_segment(Pt::new(5.0, 3.0), Pt::new(0.0, 0.0), Pt::new(10.0, 0.0)) - 3.0).abs()
+                < 1e-5
+        );
     }
 }

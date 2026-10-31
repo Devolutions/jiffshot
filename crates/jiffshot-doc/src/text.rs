@@ -40,30 +40,75 @@ pub enum Align {
 /// Regular, bold, italic and bold-italic file names for a family.
 fn files(family: &str) -> Option<[&'static str; 4]> {
     Some(match family.to_ascii_lowercase().as_str() {
-        "segoe ui" => ["segoeui.ttf", "segoeuib.ttf", "segoeuii.ttf", "segoeuiz.ttf"],
+        "segoe ui" => [
+            "segoeui.ttf",
+            "segoeuib.ttf",
+            "segoeuii.ttf",
+            "segoeuiz.ttf",
+        ],
         "arial" => ["arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf"],
-        "calibri" => ["calibri.ttf", "calibrib.ttf", "calibrii.ttf", "calibriz.ttf"],
-        "cambria" => ["cambria.ttc", "cambriab.ttf", "cambriai.ttf", "cambriaz.ttf"],
+        "calibri" => [
+            "calibri.ttf",
+            "calibrib.ttf",
+            "calibrii.ttf",
+            "calibriz.ttf",
+        ],
+        "cambria" => [
+            "cambria.ttc",
+            "cambriab.ttf",
+            "cambriai.ttf",
+            "cambriaz.ttf",
+        ],
         "comic sans ms" => ["comic.ttf", "comicbd.ttf", "comici.ttf", "comicz.ttf"],
-        "consolas" => ["consola.ttf", "consolab.ttf", "consolai.ttf", "consolaz.ttf"],
+        "consolas" => [
+            "consola.ttf",
+            "consolab.ttf",
+            "consolai.ttf",
+            "consolaz.ttf",
+        ],
         "courier new" => ["cour.ttf", "courbd.ttf", "couri.ttf", "courbi.ttf"],
-        "georgia" => ["georgia.ttf", "georgiab.ttf", "georgiai.ttf", "georgiaz.ttf"],
+        "georgia" => [
+            "georgia.ttf",
+            "georgiab.ttf",
+            "georgiai.ttf",
+            "georgiaz.ttf",
+        ],
         "impact" => ["impact.ttf", "impact.ttf", "impact.ttf", "impact.ttf"],
         "tahoma" => ["tahoma.ttf", "tahomabd.ttf", "tahoma.ttf", "tahomabd.ttf"],
         "times new roman" => ["times.ttf", "timesbd.ttf", "timesi.ttf", "timesbi.ttf"],
         "trebuchet ms" => ["trebuc.ttf", "trebucbd.ttf", "trebucit.ttf", "trebucbi.ttf"],
-        "verdana" => ["verdana.ttf", "verdanab.ttf", "verdanai.ttf", "verdanaz.ttf"],
+        "verdana" => [
+            "verdana.ttf",
+            "verdanab.ttf",
+            "verdanai.ttf",
+            "verdanaz.ttf",
+        ],
         // macOS families in imported files, mapped to the closest Windows font.
         "helvetica" | "helvetica neue" => return files("arial"),
-        "proxima nova" | "sf pro" | "sf pro text" | ".sf ns" | "avenir" | "avenir next" => return files("segoe ui"),
+        "proxima nova" | "sf pro" | "sf pro text" | ".sf ns" | "avenir" | "avenir next" => {
+            return files("segoe ui")
+        }
         "menlo" | "monaco" | "sf mono" => return files("consolas"),
         // Common Linux fonts, so tests and exports work off Windows too.
-        "dejavu sans" => ["DejaVuSans.ttf", "DejaVuSans-Bold.ttf", "DejaVuSans-Oblique.ttf", "DejaVuSans-BoldOblique.ttf"],
+        "dejavu sans" => [
+            "DejaVuSans.ttf",
+            "DejaVuSans-Bold.ttf",
+            "DejaVuSans-Oblique.ttf",
+            "DejaVuSans-BoldOblique.ttf",
+        ],
         _ => return None,
     })
 }
 
-const FALLBACK_FILES: &[&str] = &["seguisym.ttf", "msyh.ttc", "YuGothR.ttc", "malgun.ttf", "Nirmala.ttc", "seguiemj.ttf", "DejaVuSans.ttf"];
+const FALLBACK_FILES: &[&str] = &[
+    "seguisym.ttf",
+    "msyh.ttc",
+    "YuGothR.ttc",
+    "malgun.ttf",
+    "Nirmala.ttc",
+    "seguiemj.ttf",
+    "DejaVuSans.ttf",
+];
 
 fn font_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
@@ -71,9 +116,20 @@ fn font_dirs() -> Vec<PathBuf> {
         dirs.push(PathBuf::from(windir).join("Fonts"));
     }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        dirs.push(PathBuf::from(local).join("Microsoft").join("Windows").join("Fonts"));
+        dirs.push(
+            PathBuf::from(local)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Fonts"),
+        );
     }
-    for d in ["/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/TTF", "/usr/share/fonts", "/Library/Fonts", "/System/Library/Fonts"] {
+    for d in [
+        "/usr/share/fonts/truetype/dejavu",
+        "/usr/share/fonts/TTF",
+        "/usr/share/fonts",
+        "/Library/Fonts",
+        "/System/Library/Fonts",
+    ] {
         dirs.push(PathBuf::from(d));
     }
     dirs
@@ -103,7 +159,11 @@ pub fn font(family: &str, bold: bool, italic: bool) -> Option<FontArc> {
     let index = bold as usize + 2 * italic as usize;
     let found = files(family)
         .and_then(|f| load_file(f[index]).or_else(|| load_file(f[0])))
-        .or_else(|| (family != DEFAULT_FAMILY).then(|| font(DEFAULT_FAMILY, bold, italic)).flatten())
+        .or_else(|| {
+            (family != DEFAULT_FAMILY)
+                .then(|| font(DEFAULT_FAMILY, bold, italic))
+                .flatten()
+        })
         .or_else(|| font_from_list(&["DejaVuSans.ttf", "arial.ttf"]))
         .or_else(|| fallbacks().first().cloned());
     cache().lock().unwrap().insert(key, found.clone());
@@ -231,7 +291,11 @@ pub fn layout(text: &str, style: &TextStyle, max_width: Option<f32>) -> Layout {
                 prev = None;
             }
             for (f, id, adv) in glyphs {
-                if line.width > 0.0 && line.width + adv > max && word.trim_end().len() > 1 && visible > max {
+                if line.width > 0.0
+                    && line.width + adv > max
+                    && word.trim_end().len() > 1
+                    && visible > max
+                {
                     lines.push(std::mem::take(&mut line));
                     prev = None;
                 }
@@ -239,19 +303,34 @@ pub fn layout(text: &str, style: &TextStyle, max_width: Option<f32>) -> Layout {
                     Some((pf, pid)) if pf == f => fonts[f].as_scaled(scales[f]).kern(pid, id),
                     _ => 0.0,
                 };
-                line.glyphs.push(Placed { font: f, id, x: line.width + kern });
+                line.glyphs.push(Placed {
+                    font: f,
+                    id,
+                    x: line.width + kern,
+                });
                 line.width += adv + kern;
                 prev = Some((f, id));
             }
         }
         // Trailing spaces do not count toward alignment.
-        let trailing: f32 = paragraph.chars().rev().take_while(|c| *c == ' ').map(|c| advance(pick(c).0, pick(c).1)).sum();
+        let trailing: f32 = paragraph
+            .chars()
+            .rev()
+            .take_while(|c| *c == ' ')
+            .map(|c| advance(pick(c).0, pick(c).1))
+            .sum();
         if line.glyphs.len() > 0 && trailing > 0.0 && trailing < line.width {
             line.width -= trailing;
         }
         lines.push(line);
     }
-    Layout { fonts, scales, lines, ascent, line_height }
+    Layout {
+        fonts,
+        scales,
+        lines,
+        ascent,
+        line_height,
+    }
 }
 
 /// The ab_glyph scale that renders `font` at an em size of `size` pixels.
@@ -261,7 +340,13 @@ fn em_scale(font: &FontArc, size: f32) -> PxScale {
 }
 
 /// For each line: its left edge, width and baseline, as `draw` places it.
-pub fn line_extents(layout: &Layout, x: f32, y: f32, box_width: f32, align: Align) -> Vec<(f32, f32, f32)> {
+pub fn line_extents(
+    layout: &Layout,
+    x: f32,
+    y: f32,
+    box_width: f32,
+    align: Align,
+) -> Vec<(f32, f32, f32)> {
     layout
         .lines
         .iter()
@@ -272,7 +357,11 @@ pub fn line_extents(layout: &Layout, x: f32, y: f32, box_width: f32, align: Alig
                 Align::Center => (box_width - line.width) / 2.0,
                 Align::Right => box_width - line.width,
             };
-            (x + dx, line.width, y + layout.ascent + row as f32 * layout.line_height)
+            (
+                x + dx,
+                line.width,
+                y + layout.ascent + row as f32 * layout.line_height,
+            )
         })
         .collect()
 }
@@ -280,7 +369,16 @@ pub fn line_extents(layout: &Layout, x: f32, y: f32, box_width: f32, align: Alig
 /// Draws `layout` with its top-left at (`x`, `y`) in document pixels, each
 /// line aligned within `box_width`. `origin` is the document position of the
 /// target pixmap's top-left pixel.
-pub fn draw(target: &mut Pixmap, origin: (i32, i32), layout: &Layout, x: f32, y: f32, box_width: f32, align: Align, color: Rgba) {
+pub fn draw(
+    target: &mut Pixmap,
+    origin: (i32, i32),
+    layout: &Layout,
+    x: f32,
+    y: f32,
+    box_width: f32,
+    align: Align,
+    color: Rgba,
+) {
     for (row, line) in layout.lines.iter().enumerate() {
         let dx = match align {
             Align::Left => 0.0,
@@ -290,11 +388,16 @@ pub fn draw(target: &mut Pixmap, origin: (i32, i32), layout: &Layout, x: f32, y:
         let baseline = y + layout.ascent + row as f32 * layout.line_height - origin.1 as f32;
         for g in &line.glyphs {
             let font = &layout.fonts[g.font];
-            let glyph = g.id.with_scale_and_position(layout.scales[g.font], ab_glyph::point(x + dx + g.x - origin.0 as f32, baseline));
+            let glyph = g.id.with_scale_and_position(
+                layout.scales[g.font],
+                ab_glyph::point(x + dx + g.x - origin.0 as f32, baseline),
+            );
             if let Some(outlined) = font.outline_glyph(glyph) {
                 let b = outlined.px_bounds();
                 let (bx, by) = (b.min.x as i32, b.min.y as i32);
-                outlined.draw(|px, py, coverage| blend(target, bx + px as i32, by + py as i32, color, coverage));
+                outlined.draw(|px, py, coverage| {
+                    blend(target, bx + px as i32, by + py as i32, color, coverage)
+                });
             }
         }
     }
@@ -305,7 +408,12 @@ mod tests {
     use super::*;
 
     fn style(size: f32) -> TextStyle<'static> {
-        TextStyle { family: DEFAULT_FAMILY, size, bold: false, italic: false }
+        TextStyle {
+            family: DEFAULT_FAMILY,
+            size,
+            bold: false,
+            italic: false,
+        }
     }
 
     #[test]
@@ -321,7 +429,19 @@ mod tests {
         let lines = layout("a\nb\n", &style(20.0), None);
         assert_eq!(lines.line_count(), 3);
         let mut p = Pixmap::new(200, 40).unwrap();
-        draw(&mut p, (0, 0), &one, 0.0, 0.0, 200.0, Align::Left, Rgba::BLACK);
-        assert!(p.data().chunks(4).any(|px| px[3] > 200), "glyphs were drawn");
+        draw(
+            &mut p,
+            (0, 0),
+            &one,
+            0.0,
+            0.0,
+            200.0,
+            Align::Left,
+            Rgba::BLACK,
+        );
+        assert!(
+            p.data().chunks(4).any(|px| px[3] > 200),
+            "glyphs were drawn"
+        );
     }
 }

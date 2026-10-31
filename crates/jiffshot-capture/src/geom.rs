@@ -11,16 +11,31 @@ pub struct Rect {
 
 impl Rect {
     pub const fn new(x: i32, y: i32, width: i32, height: i32) -> Rect {
-        Rect { x, y, width, height }
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     pub const fn from_ltrb(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
-        Rect { x: left, y: top, width: right - left, height: bottom - top }
+        Rect {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top,
+        }
     }
 
     /// The rectangle spanning two pixels, both included.
     pub fn from_points(a: (i32, i32), b: (i32, i32)) -> Rect {
-        Rect::from_ltrb(a.0.min(b.0), a.1.min(b.1), a.0.max(b.0) + 1, a.1.max(b.1) + 1)
+        Rect::from_ltrb(
+            a.0.min(b.0),
+            a.1.min(b.1),
+            a.0.max(b.0) + 1,
+            a.1.max(b.1) + 1,
+        )
     }
 
     pub const fn right(self) -> i32 {
@@ -73,7 +88,12 @@ impl Rect {
     }
 
     pub const fn inflate(self, d: i32) -> Rect {
-        Rect::new(self.x - d, self.y - d, self.width + 2 * d, self.height + 2 * d)
+        Rect::new(
+            self.x - d,
+            self.y - d,
+            self.width + 2 * d,
+            self.height + 2 * d,
+        )
     }
 
     pub const fn offset(self, dx: i32, dy: i32) -> Rect {
@@ -91,7 +111,10 @@ mod tests {
 
     #[test]
     fn from_points_includes_both_ends() {
-        assert_eq!(Rect::from_points((10, 20), (5, 30)), Rect::new(5, 20, 6, 11));
+        assert_eq!(
+            Rect::from_points((10, 20), (5, 30)),
+            Rect::new(5, 20, 6, 11)
+        );
         assert_eq!(Rect::from_points((3, 3), (3, 3)), Rect::new(3, 3, 1, 1));
     }
 

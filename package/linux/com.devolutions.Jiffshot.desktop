@@ -1,0 +1,43 @@
+[Desktop Entry]
+Type=Application
+Name=Jiffshot
+Comment=Screen capture, recording, and non-destructive image editing
+Exec=jiffshot %f
+TryExec=jiffshot
+Icon=com.devolutions.Jiffshot
+Terminal=false
+Categories=Graphics;2DGraphics;
+MimeType=application/x-jiffshot;image/png;image/jpeg;image/bmp;image/gif;image/webp;video/mp4;video/webm;video/x-msvideo;video/quicktime;video/x-matroska;
+Actions=Capture;InteractiveCapture;GrabText;Scrolling;HorizontalScrolling;Panoramic;Interval;Record;
+
+[Desktop Action Capture]
+Name=Capture screen or window
+Exec=jiffshot --capture
+
+[Desktop Action InteractiveCapture]
+Name=Choose a screenshot in the desktop
+Exec=jiffshot --capture-interactive
+
+[Desktop Action GrabText]
+Name=Grab text from the screen
+Exec=jiffshot --grab-text
+
+[Desktop Action Scrolling]
+Name=Scrolling capture
+Exec=jiffshot --scrolling
+
+[Desktop Action HorizontalScrolling]
+Name=Horizontal scrolling capture
+Exec=jiffshot --scrolling-horizontal
+
+[Desktop Action Panoramic]
+Name=Panoramic capture
+Exec=jiffshot --panoramic
+
+[Desktop Action Interval]
+Name=Interval capture
+Exec=jiffshot --interval
+
+[Desktop Action Record]
+Name=Record screen
+Exec=jiffshot --record

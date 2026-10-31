@@ -13,10 +13,12 @@ use std::time::Duration;
 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, VK_ESCAPE,
+    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+    VK_ESCAPE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameW, GetCursorPos, GetWindowLongW, IsWindowVisible, SetCursorPos, GWL_STYLE, WS_POPUP,
+    EnumWindows, GetClassNameW, GetCursorPos, GetWindowLongW, IsWindowVisible, SetCursorPos,
+    GWL_STYLE, WS_POPUP,
 };
 
 /// Longest scrolling capture, in pixels.
@@ -32,7 +34,14 @@ fn wheel(notches: i32) {
     let input = INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
-            mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: (notches * 120) as u32, dwFlags: MOUSEEVENTF_WHEEL, time: 0, dwExtraInfo: 0 },
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: (notches * 120) as u32,
+                dwFlags: MOUSEEVENTF_WHEEL,
+                time: 0,
+                dwExtraInfo: 0,
+            },
         },
     };
     // SAFETY: one well-formed input event.
@@ -84,7 +93,14 @@ fn hwheel(notches: i32) {
     let input = INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
-            mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: (notches * 120) as u32, dwFlags: MOUSEEVENTF_HWHEEL, time: 0, dwExtraInfo: 0 },
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: (notches * 120) as u32,
+                dwFlags: MOUSEEVENTF_HWHEEL,
+                time: 0,
+                dwExtraInfo: 0,
+            },
         },
     };
     // SAFETY: one well-formed input event.
@@ -139,7 +155,9 @@ pub fn scrolling_horizontal(rect: Rect) -> io::Result<Frame> {
     }
     // SAFETY: as above.
     unsafe { SetCursorPos(saved.x, saved.y) };
-    stitch::stitch_vertical(&frames).map(|f| transpose(&f)).ok_or_else(|| io::Error::other("nothing to stitch"))
+    stitch::stitch_vertical(&frames)
+        .map(|f| transpose(&f))
+        .ok_or_else(|| io::Error::other("nothing to stitch"))
 }
 
 /// Scrolls both ways: a vertical scrolling capture per column, moving
@@ -204,8 +222,12 @@ pub fn panoramic(rect: Rect) -> io::Result<Option<Frame>> {
                 Some((dx, dy)) => {
                     let at = (at.0 + dx, at.1 + dy);
                     frames.push((next, at));
-                    let (x0, x1) = frames.iter().fold((0, 0), |(a, b), (_, p)| (a.min(p.0), b.max(p.0)));
-                    let (y0, y1) = frames.iter().fold((0, 0), |(a, b), (_, p)| (a.min(p.1), b.max(p.1)));
+                    let (x0, x1) = frames
+                        .iter()
+                        .fold((0, 0), |(a, b), (_, p)| (a.min(p.0), b.max(p.0)));
+                    let (y0, y1) = frames
+                        .iter()
+                        .fold((0, 0), |(a, b), (_, p)| (a.min(p.1), b.max(p.1)));
                     Some(format!(
                         "{} frames, {} × {} px so far. Keep going, or Finish.",
                         frames.len(),
@@ -249,11 +271,25 @@ fn is_menu_class(class: &str) -> bool {
 pub fn open_menus() -> Vec<Rect> {
     unsafe extern "system" fn visit(hwnd: HWND, out: LPARAM) -> BOOL {
         let out = &mut *(out as *mut Vec<Rect>);
-        if IsWindowVisible(hwnd) == 0 || GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_POPUP == 0 || !is_menu_class(&class_of(hwnd)) {
+        if IsWindowVisible(hwnd) == 0
+            || GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_POPUP == 0
+            || !is_menu_class(&class_of(hwnd))
+        {
             return 1;
         }
-        let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-        if DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS as u32, &mut r as *mut RECT as *mut _, std::mem::size_of::<RECT>() as u32) == 0 {
+        let mut r = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+            &mut r as *mut RECT as *mut _,
+            std::mem::size_of::<RECT>() as u32,
+        ) == 0
+        {
             let rect = Rect::from_ltrb(r.left, r.top, r.right, r.bottom);
             if rect.width > 8 && rect.height > 8 {
                 out.push(rect);
@@ -270,7 +306,9 @@ pub fn open_menus() -> Vec<Rect> {
 /// The open menus, cut out of the screen with transparency around them.
 pub fn menus() -> io::Result<Option<Frame>> {
     let rects = open_menus();
-    let Some(bounds) = rects.iter().copied().reduce(|a, b| a.union(b)) else { return Ok(None) };
+    let Some(bounds) = rects.iter().copied().reduce(|a, b| a.union(b)) else {
+        return Ok(None);
+    };
     let mut frame = screen::grab(bounds)?;
     frame.alpha = true;
     let stride = frame.stride();
@@ -286,5 +324,9 @@ pub fn menus() -> io::Result<Option<Frame>> {
 /// Recognized text in a frame, one line per line.
 pub fn text(frame: &Frame) -> Result<String, String> {
     let lines = jiffshot_capture::ocr::recognize(frame.width, frame.height, &frame.pixels)?;
-    Ok(lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\r\n"))
+    Ok(lines
+        .into_iter()
+        .map(|l| l.text)
+        .collect::<Vec<_>>()
+        .join("\r\n"))
 }

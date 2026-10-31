@@ -20,7 +20,13 @@ pub struct Document {
 
 impl Document {
     pub fn new(background: Pixmap) -> Document {
-        Document { width: background.width(), height: background.height(), background: Arc::new(background), objects: Vec::new(), next_id: 1 }
+        Document {
+            width: background.width(),
+            height: background.height(),
+            background: Arc::new(background),
+            objects: Vec::new(),
+            next_id: 1,
+        }
     }
 
     pub fn blank(width: u32, height: u32, color: Rgba) -> Document {
@@ -104,7 +110,11 @@ impl Document {
 
     /// Topmost object under `p`.
     pub fn hit(&self, p: Pt, tolerance: f32) -> Option<u64> {
-        self.objects.iter().rev().find(|o| o.hit(p, tolerance)).map(|o| o.id)
+        self.objects
+            .iter()
+            .rev()
+            .find(|o| o.hit(p, tolerance))
+            .map(|o| o.id)
     }
 
     /// Restores ids after loading, so new objects never reuse one.
@@ -127,7 +137,10 @@ impl Document {
             match format {
                 "Letters" | "Lowercase" => {
                     let c = l.chars().next()?;
-                    (l.len() == 1 && c.is_ascii_alphabetic() && (format == "Letters") == c.is_ascii_uppercase()).then(|| (c.to_ascii_uppercase() as u8 - b'A' + 1) as u32)
+                    (l.len() == 1
+                        && c.is_ascii_alphabetic()
+                        && (format == "Letters") == c.is_ascii_uppercase())
+                    .then(|| (c.to_ascii_uppercase() as u8 - b'A' + 1) as u32)
                 }
                 "Roman" => from_roman(l),
                 _ => l.parse().ok(),
@@ -161,7 +174,11 @@ impl Document {
                 }
             }
         }
-        let max = labels.iter().filter_map(|l| l.parse::<u32>().ok()).max().unwrap_or(0);
+        let max = labels
+            .iter()
+            .filter_map(|l| l.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0);
         (max + 1).to_string()
     }
 
@@ -188,7 +205,10 @@ impl Document {
     /// Renders `area` (grown as needed, clipped to the canvas) and returns
     /// the pixels with the document area they cover.
     pub fn render_area(&self, area: IRect, checker: bool) -> Option<(IRect, Pixmap)> {
-        let area = self.closure(area.to_box()).to_irect().intersect(&self.bounds())?;
+        let area = self
+            .closure(area.to_box())
+            .to_irect()
+            .intersect(&self.bounds())?;
         // Paths clipped at the edge of the target antialias slightly
         // differently, so draw with a margin and keep only the inside.
         let padded = area.inflate(2).intersect(&self.bounds())?;
@@ -202,7 +222,10 @@ impl Document {
         let mut scratch = if padded == area {
             scratch
         } else {
-            raster::extract(&scratch, IRect::new(area.x - padded.x, area.y - padded.y, area.w, area.h))?
+            raster::extract(
+                &scratch,
+                IRect::new(area.x - padded.x, area.y - padded.y, area.w, area.h),
+            )?
         };
         if checker {
             let whole = IRect::of_size(scratch.width(), scratch.height());
@@ -215,13 +238,21 @@ impl Document {
     /// area actually updated.
     pub fn render_into(&self, display: &mut Pixmap, area: IRect, checker: bool) -> Option<IRect> {
         let (area, pixels) = self.render_area(area, checker)?;
-        raster::copy_area(&pixels, IRect::of_size(pixels.width(), pixels.height()), display, area.x, area.y);
+        raster::copy_area(
+            &pixels,
+            IRect::of_size(pixels.width(), pixels.height()),
+            display,
+            area.x,
+            area.y,
+        );
         Some(area)
     }
 
     /// The finished image with real transparency, for export.
     pub fn flatten(&self) -> Pixmap {
-        self.render_area(self.bounds(), false).map(|(_, p)| p).unwrap_or_else(|| (*self.background).clone())
+        self.render_area(self.bounds(), false)
+            .map(|(_, p)| p)
+            .unwrap_or_else(|| (*self.background).clone())
     }
 
     pub fn translate_objects(&mut self, dx: f32, dy: f32) {
@@ -233,11 +264,15 @@ impl Document {
     /// Crops the canvas to `r` (clipped to it). Objects keep their place on
     /// the image.
     pub fn crop(&mut self, r: IRect) -> bool {
-        let Some(r) = r.intersect(&self.bounds()) else { return false };
+        let Some(r) = r.intersect(&self.bounds()) else {
+            return false;
+        };
         if r == self.bounds() {
             return false;
         }
-        let Some(bg) = raster::extract(&self.background, r) else { return false };
+        let Some(bg) = raster::extract(&self.background, r) else {
+            return false;
+        };
         self.set_background(bg);
         self.translate_objects(-r.x as f32, -r.y as f32);
         true
@@ -246,15 +281,26 @@ impl Document {
     /// Changes the canvas size; the old image lands at (`dx`, `dy`) and the
     /// new area is filled with `fill`.
     pub fn resize_canvas(&mut self, width: u32, height: u32, dx: i32, dy: i32, fill: Rgba) {
-        let Some(mut bg) = raster::solid(width, height, fill) else { return };
-        bg.draw_pixmap(dx, dy, self.background.as_ref().as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
+        let Some(mut bg) = raster::solid(width, height, fill) else {
+            return;
+        };
+        bg.draw_pixmap(
+            dx,
+            dy,
+            self.background.as_ref().as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            tiny_skia::Transform::identity(),
+            None,
+        );
         self.set_background(bg);
         self.translate_objects(dx as f32, dy as f32);
     }
 
     /// Resamples the image to `width` x `height`, scaling objects with it.
     pub fn scale(&mut self, width: u32, height: u32) {
-        let Some(bg) = raster::resample(&self.background, width, height) else { return };
+        let Some(bg) = raster::resample(&self.background, width, height) else {
+            return;
+        };
         let from = self.bounds().to_box();
         let to = IRect::of_size(width, height).to_box();
         for o in &mut self.objects {
@@ -266,13 +312,19 @@ impl Document {
     /// Quarter turn, clockwise or not.
     pub fn rotate(&mut self, clockwise: bool) {
         let (w, h) = (self.width as usize, self.height as usize);
-        let Some(mut out) = Pixmap::new(self.height, self.width) else { return };
+        let Some(mut out) = Pixmap::new(self.height, self.width) else {
+            return;
+        };
         {
             let src = self.background.pixels();
             let dst = out.pixels_mut();
             for y in 0..h {
                 for x in 0..w {
-                    let (nx, ny) = if clockwise { (h - 1 - y, x) } else { (y, w - 1 - x) };
+                    let (nx, ny) = if clockwise {
+                        (h - 1 - y, x)
+                    } else {
+                        (y, w - 1 - x)
+                    };
                     dst[ny * h + nx] = src[y * w + x];
                 }
             }
@@ -319,7 +371,21 @@ impl Document {
     }
 }
 
-const ROMAN: &[(u32, &str)] = &[(1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"), (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")];
+const ROMAN: &[(u32, &str)] = &[
+    (1000, "m"),
+    (900, "cm"),
+    (500, "d"),
+    (400, "cd"),
+    (100, "c"),
+    (90, "xc"),
+    (50, "l"),
+    (40, "xl"),
+    (10, "x"),
+    (9, "ix"),
+    (5, "v"),
+    (4, "iv"),
+    (1, "i"),
+];
 
 fn to_roman(mut n: u32) -> String {
     let mut out = String::new();
@@ -357,44 +423,99 @@ mod tests {
     #[test]
     fn partial_render_matches_full_with_reading_objects() {
         let mut d = doc();
-        d.add(Kind::Shape { rect: Box2::new(20.0, 20.0, 120.0, 80.0), shape: ShapeKind::Ellipse }, Style::default());
-        d.add(Kind::Blur { rect: Box2::new(50.0, 10.0, 150.0, 90.0), mode: BlurMode::Blur, amount: 6.0 }, Style::default());
-        d.add(Kind::Magnify { rect: Box2::new(100.0, 30.0, 160.0, 90.0), zoom: 2.0, ellipse: true, offset: Pt::default() }, Style::default());
+        d.add(
+            Kind::Shape {
+                rect: Box2::new(20.0, 20.0, 120.0, 80.0),
+                shape: ShapeKind::Ellipse,
+            },
+            Style::default(),
+        );
+        d.add(
+            Kind::Blur {
+                rect: Box2::new(50.0, 10.0, 150.0, 90.0),
+                mode: BlurMode::Blur,
+                amount: 6.0,
+            },
+            Style::default(),
+        );
+        d.add(
+            Kind::Magnify {
+                rect: Box2::new(100.0, 30.0, 160.0, 90.0),
+                zoom: 2.0,
+                ellipse: true,
+                offset: Pt::default(),
+            },
+            Style::default(),
+        );
         let full = d.flatten();
         let mut display = raster::solid(200, 100, Rgba::RED).unwrap();
         d.render_into(&mut display, IRect::new(0, 0, 200, 100), false);
         let mut partial = full.clone();
-        raster::copy_area(&raster::solid(200, 100, Rgba::RED).unwrap(), IRect::new(60, 40, 20, 20), &mut partial, 60, 40);
-        let updated = d.render_into(&mut partial, IRect::new(60, 40, 20, 20), false).unwrap();
+        raster::copy_area(
+            &raster::solid(200, 100, Rgba::RED).unwrap(),
+            IRect::new(60, 40, 20, 20),
+            &mut partial,
+            60,
+            40,
+        );
+        let updated = d
+            .render_into(&mut partial, IRect::new(60, 40, 20, 20), false)
+            .unwrap();
         assert!(updated.w >= 100, "grown to the blur box: {updated:?}");
         // tiny-skia antialiases a few edge pixels differently depending on
         // the target size; a missing dependency differs far more widely.
-        let channels = |p: &tiny_skia::PremultipliedColorU8| [p.red(), p.green(), p.blue(), p.alpha()];
+        let channels =
+            |p: &tiny_skia::PremultipliedColorU8| [p.red(), p.green(), p.blue(), p.alpha()];
         let diff = |a: &Pixmap, b: &Pixmap| {
             a.pixels()
                 .iter()
                 .zip(b.pixels())
-                .map(|(x, y)| channels(x).iter().zip(channels(y)).map(|(p, q)| p.abs_diff(q)).max().unwrap())
+                .map(|(x, y)| {
+                    channels(x)
+                        .iter()
+                        .zip(channels(y))
+                        .map(|(p, q)| p.abs_diff(q))
+                        .max()
+                        .unwrap()
+                })
                 .filter(|d| *d > 2)
                 .collect::<Vec<u8>>()
         };
         let d1 = diff(&partial, &full);
-        assert!(d1.len() <= 12 && d1.iter().all(|d| *d < 48), "partial render differs: {d1:?}");
+        assert!(
+            d1.len() <= 12 && d1.iter().all(|d| *d < 48),
+            "partial render differs: {d1:?}"
+        );
         assert!(diff(&display, &full).is_empty());
     }
 
     #[test]
     fn crop_rotate_flip_keep_objects_on_the_image() {
         let mut d = doc();
-        let id = d.add(Kind::Shape { rect: Box2::new(20.0, 10.0, 40.0, 30.0), shape: ShapeKind::Rectangle }, Style::default());
+        let id = d.add(
+            Kind::Shape {
+                rect: Box2::new(20.0, 10.0, 40.0, 30.0),
+                shape: ShapeKind::Rectangle,
+            },
+            Style::default(),
+        );
         assert!(d.crop(IRect::new(10, 5, 100, 50)));
         assert_eq!(d.size(), (100, 50));
-        assert_eq!(d.get(id).unwrap().rect(), Some(Box2::new(10.0, 5.0, 30.0, 25.0)));
+        assert_eq!(
+            d.get(id).unwrap().rect(),
+            Some(Box2::new(10.0, 5.0, 30.0, 25.0))
+        );
         d.rotate(true);
         assert_eq!(d.size(), (50, 100));
-        assert_eq!(d.get(id).unwrap().rect(), Some(Box2::new(25.0, 10.0, 45.0, 30.0)));
+        assert_eq!(
+            d.get(id).unwrap().rect(),
+            Some(Box2::new(25.0, 10.0, 45.0, 30.0))
+        );
         d.flip(true);
-        assert_eq!(d.get(id).unwrap().rect(), Some(Box2::new(5.0, 10.0, 25.0, 30.0)));
+        assert_eq!(
+            d.get(id).unwrap().rect(),
+            Some(Box2::new(5.0, 10.0, 25.0, 30.0))
+        );
         d.rotate(false);
         assert_eq!(d.size(), (100, 50));
     }
@@ -403,7 +524,12 @@ mod tests {
     fn step_labels_continue() {
         let mut d = doc();
         assert_eq!(d.next_step_label(), "1");
-        let step = |label: &str| Kind::Step { center: Pt::new(5.0, 5.0), radius: 10.0, label: label.into(), shape: crate::object::ShapeKind::Ellipse };
+        let step = |label: &str| Kind::Step {
+            center: Pt::new(5.0, 5.0),
+            radius: 10.0,
+            label: label.into(),
+            shape: crate::object::ShapeKind::Ellipse,
+        };
         d.add(step("7"), Style::default());
         assert_eq!(d.next_step_label(), "8");
         d.add(step("B"), Style::default());

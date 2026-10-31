@@ -18,6 +18,7 @@ use rustolonia::{AppScope, Result};
 use jiffshot_capture::library::{edits_of, Library, EDITS_EXT};
 use jiffshot_doc::editor::{self as ed, Tool, EVENT_COLOR_PICKED};
 use jiffshot_doc::object::{Cap, Dash, Kind, Object, Style};
+use jiffshot_doc::raster::trim_bounds;
 use jiffshot_doc::text::Align;
 use jiffshot_doc::{combine, effects, io, Document, Rgba};
 use std::cell::RefCell;
@@ -2273,27 +2274,6 @@ fn path_of_uri(uri: &str) -> PathBuf {
         i += 1;
     }
     PathBuf::from(String::from_utf8_lossy(&out).replace('/', "\\"))
-}
-
-/// The image without its edges of one solid color (the top-left pixel's),
-/// or `None` when there is nothing to trim.
-fn trim_bounds(image: &jiffshot_doc::Pixmap) -> Option<jiffshot_doc::IRect> {
-    let (w, h) = (image.width() as usize, image.height() as usize);
-    let px = image.pixels();
-    let edge = px.first()?.demultiply();
-    let same = |x: usize, y: usize| {
-        let c = px[y * w + x].demultiply();
-        let d = |a: u8, b: u8| (a as i32 - b as i32).abs() <= 8;
-        d(c.red(), edge.red()) && d(c.green(), edge.green()) && d(c.blue(), edge.blue()) && d(c.alpha(), edge.alpha())
-    };
-    let row = |y: usize| (0..w).all(|x| same(x, y));
-    let col = |x: usize, y0: usize, y1: usize| (y0..y1).all(|y| same(x, y));
-    let top = (0..h).find(|&y| !row(y))?;
-    let bottom = (0..h).rev().find(|&y| !row(y))? + 1;
-    let left = (0..w).find(|&x| !col(x, top, bottom))?;
-    let right = (0..w).rev().find(|&x| !col(x, top, bottom))? + 1;
-    let r = jiffshot_doc::IRect::new(left as i32, top as i32, (right - left) as i32, (bottom - top) as i32);
-    (r != jiffshot_doc::IRect::new(0, 0, w as i32, h as i32)).then_some(r)
 }
 
 #[cfg(test)]

@@ -57,8 +57,14 @@ pub fn print(owner: isize, file: &Path) -> Result<(), String> {
 /// Copies the file into `folder` (a OneDrive, Dropbox or network folder),
 /// never overwriting.
 pub fn to_folder(file: &Path, folder: &Path) -> Result<PathBuf, String> {
-    let name = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Capture".into());
-    let ext = file.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "png".into());
+    let name = file
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Capture".into());
+    let ext = file
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "png".into());
     let mut target = folder.join(format!("{name}.{ext}"));
     let mut n = 2;
     while target.exists() {
@@ -95,7 +101,13 @@ struct MapiMessageW {
     files: *mut MapiFileDescW,
 }
 
-type MapiSendMailW = unsafe extern "system" fn(session: usize, ui: usize, message: *const MapiMessageW, flags: u32, reserved: u32) -> u32;
+type MapiSendMailW = unsafe extern "system" fn(
+    session: usize,
+    ui: usize,
+    message: *const MapiMessageW,
+    flags: u32,
+    reserved: u32,
+) -> u32;
 
 /// Opens a new message in the default mail program with `file` attached
 /// (Simple MAPI, which Outlook and most desktop mail programs provide).
@@ -104,7 +116,12 @@ pub fn email(owner: isize, file: &Path, subject: &str) -> Result<(), String> {
     const MAPI_LOGON_UI: u32 = 1;
     const MAPI_DIALOG: u32 = 8;
     let path = wide(&file.to_string_lossy());
-    let name = wide(&file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+    let name = wide(
+        &file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
     let subject = wide(subject);
     // SAFETY: mapi32.dll's MAPISendMailW has this signature; every pointer
     // handed to it outlives the call.
@@ -117,7 +134,14 @@ pub fn email(owner: isize, file: &Path, subject: &str) -> Result<(), String> {
             return Err("the mail program does not support attachments from other apps".into());
         };
         let send: MapiSendMailW = std::mem::transmute(proc_);
-        let mut attachment = MapiFileDescW { reserved: 0, flags: 0, position: u32::MAX, path: path.as_ptr(), name: name.as_ptr(), file_type: std::ptr::null_mut() };
+        let mut attachment = MapiFileDescW {
+            reserved: 0,
+            flags: 0,
+            position: u32::MAX,
+            path: path.as_ptr(),
+            name: name.as_ptr(),
+            file_type: std::ptr::null_mut(),
+        };
         let message = MapiMessageW {
             reserved: 0,
             subject: subject.as_ptr(),
@@ -134,7 +158,9 @@ pub fn email(owner: isize, file: &Path, subject: &str) -> Result<(), String> {
         };
         match send(0, owner as usize, &message, MAPI_DIALOG | MAPI_LOGON_UI, 0) {
             0 | 1 => Ok(()), // success, or the user cancelled
-            code => Err(format!("the mail program refused the message (MAPI error {code})")),
+            code => Err(format!(
+                "the mail program refused the message (MAPI error {code})"
+            )),
         }
     }
 }

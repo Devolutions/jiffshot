@@ -147,16 +147,7 @@ pub fn select(entries: &[Entry], query: &str, filter: &str, sort: &str, now: Sys
     out
 }
 
-/// "a, b ,, c" → ["a", "b", "c"].
-pub fn parse_tags(text: &str) -> Vec<String> {
-    let mut tags: Vec<String> = Vec::new();
-    for t in text.split([',', ';']).map(str::trim).filter(|t| !t.is_empty()) {
-        if !tags.iter().any(|x| x.eq_ignore_ascii_case(t)) {
-            tags.push(t.to_owned());
-        }
-    }
-    tags
-}
+pub(crate) use crate::library_tags::parse_tags;
 
 #[derive(Clone)]
 pub struct Item {

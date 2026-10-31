@@ -42,14 +42,28 @@ impl Dib {
                 return Err(io::Error::last_os_error());
             }
             let mut bits = std::ptr::null_mut();
-            let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+            let bitmap = CreateDIBSection(
+                dc,
+                &info,
+                DIB_RGB_COLORS,
+                &mut bits,
+                std::ptr::null_mut(),
+                0,
+            );
             if bitmap.is_null() || bits.is_null() {
                 let error = io::Error::last_os_error();
                 DeleteDC(dc);
                 return Err(error);
             }
             let previous = SelectObject(dc, bitmap);
-            Ok(Dib { dc, bitmap, previous, bits: bits.cast(), width, height })
+            Ok(Dib {
+                dc,
+                bitmap,
+                previous,
+                bits: bits.cast(),
+                width,
+                height,
+            })
         }
     }
 
@@ -86,7 +100,12 @@ impl Dib {
     }
 
     pub fn to_frame(&self) -> Frame {
-        Frame { width: self.width as u32, height: self.height as u32, pixels: self.pixels().to_vec(), alpha: false }
+        Frame {
+            width: self.width as u32,
+            height: self.height as u32,
+            pixels: self.pixels().to_vec(),
+            alpha: false,
+        }
     }
 }
 

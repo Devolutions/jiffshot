@@ -26,34 +26,36 @@
 //! The running instance also serves `jiffshot-cli` (scripts and AI agents)
 //! over a named pipe; see `control.rs` and `docs/cli.md`.
 
-mod hud;
+#![cfg(windows)]
+
 mod control;
-mod screendraw;
-mod stepcap;
-mod vfx;
+mod hud;
 mod icon;
 mod modes;
 mod overlay;
-mod recorder;
-mod selftest_scroll;
 pub mod panel;
 pub mod prefs;
+mod recorder;
+mod screendraw;
+mod selftest_scroll;
 pub mod settings;
+mod stepcap;
 mod tray;
 pub mod ui_api;
+mod vfx;
 mod workflow;
 
-use overlay::Overlay;
 use jiffshot_capture::screen::{self, Monitor};
 use jiffshot_capture::targets::Targets;
 use jiffshot_capture::{wide, Frame, Rect};
+use overlay::Overlay;
 use std::io::Write;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
 use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
 use windows_sys::Win32::System::Threading::CreateMutexW;
-use std::sync::OnceLock;
 use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW};
 
 /// What the capture side asks of the app it runs in.
@@ -98,11 +100,16 @@ pub fn panel_action(id: u64, action: &str) {
 }
 
 /// The capture side's settings as last published (see [`settings_snapshot`]).
-pub(crate) static SNAPSHOT: std::sync::Mutex<Option<settings::Settings>> = std::sync::Mutex::new(None);
+pub(crate) static SNAPSHOT: std::sync::Mutex<Option<settings::Settings>> =
+    std::sync::Mutex::new(None);
 
 /// The capture side's settings, as of its last change.
 pub fn settings_snapshot() -> settings::Settings {
-    SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(settings::Settings::load)
+    SNAPSHOT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(settings::Settings::load)
 }
 
 /// Runs `f` on the capture side's thread, where its state lives; safe from
@@ -186,7 +193,9 @@ pub mod capture {
 static HOOKS: OnceLock<Hooks> = OnceLock::new();
 
 /// Capture modes the editor asks for with [`request_capture`].
-pub use tray::{TrayAction, TrayState, MODE_IMAGE, MODE_SCROLLING, MODE_TEXT, MODE_VIDEO, OPEN_CAPTURE_WINDOW};
+pub use tray::{
+    TrayAction, TrayState, MODE_IMAGE, MODE_SCROLLING, MODE_TEXT, MODE_VIDEO, OPEN_CAPTURE_WINDOW,
+};
 
 /// The app's hooks; `None` for command-line modes, which run without an app.
 pub(crate) fn hooks() -> Option<&'static Hooks> {
@@ -200,7 +209,11 @@ pub fn log(line: &str) {
     let dir = jiffshot_capture::paths::local_dir();
     {
         let _ = std::fs::create_dir_all(&dir);
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("capture.log")) {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("capture.log"))
+        {
             let _ = writeln!(file, "{line}");
         }
     }
@@ -211,7 +224,10 @@ fn ms(d: Duration) -> f64 {
 }
 
 fn parse_rect(text: &str) -> Option<Rect> {
-    let v: Vec<i32> = text.split(',').map(|p| p.trim().parse().ok()).collect::<Option<_>>()?;
+    let v: Vec<i32> = text
+        .split(',')
+        .map(|p| p.trim().parse().ok())
+        .collect::<Option<_>>()?;
     match v.as_slice() {
         [x, y, w, h] => Some(Rect::new(*x, *y, *w, *h)),
         _ => None,
@@ -236,7 +252,13 @@ fn list_windows() {
     let targets = Targets::enumerate(screen::virtual_screen(), &[]);
     for t in &targets.list {
         let title: String = t.title.chars().take(70).collect();
-        println!("{}{:?} {} {:?}", "  ".repeat(t.depth as usize), t.rect, t.class, title);
+        println!(
+            "{}{:?} {} {:?}",
+            "  ".repeat(t.depth as usize),
+            t.rect,
+            t.class,
+            title
+        );
     }
     println!("{} targets", targets.list.len());
 }
@@ -250,7 +272,12 @@ fn grab(spec: &str, out: &Path) -> std::io::Result<()> {
     } else {
         parse_rect(spec)
     }
-    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "expected X,Y,W,H or 'screen'"))?;
+    .ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "expected X,Y,W,H or 'screen'",
+        )
+    })?;
     let started = Instant::now();
     let frame = screen::grab(rect)?;
     let grabbed = started.elapsed();
@@ -274,7 +301,9 @@ struct Timing {
 
 impl Timing {
     fn new() -> Timing {
-        Timing { samples: Vec::new() }
+        Timing {
+            samples: Vec::new(),
+        }
     }
 
     fn time<R>(&mut self, f: impl FnOnce() -> R) -> R {
@@ -288,8 +317,16 @@ impl Timing {
         let mut s = self.samples.clone();
         s.sort_by(f64::total_cmp);
         let avg = s.iter().sum::<f64>() / s.len().max(1) as f64;
-        let p95 = s.get((s.len() as f64 * 0.95) as usize).or(s.last()).copied().unwrap_or(0.0);
-        format!("{} updates, avg {avg:.2} ms, p95 {p95:.2} ms, max {:.2} ms", s.len(), s.last().copied().unwrap_or(0.0))
+        let p95 = s
+            .get((s.len() as f64 * 0.95) as usize)
+            .or(s.last())
+            .copied()
+            .unwrap_or(0.0);
+        format!(
+            "{} updates, avg {avg:.2} ms, p95 {p95:.2} ms, max {:.2} ms",
+            s.len(),
+            s.last().copied().unwrap_or(0.0)
+        )
     }
 }
 
@@ -297,7 +334,10 @@ impl Timing {
 /// renders it).
 fn print_view(overlay: &mut Overlay) {
     let v = overlay.view();
-    println!("  shows {:?} ({:?}, {}) on {:?} at {}x", v.lit, v.title, v.size, v.monitor, v.scale);
+    println!(
+        "  shows {:?} ({:?}, {}) on {:?} at {}x",
+        v.lit, v.title, v.size, v.monitor, v.scale
+    );
 }
 
 /// Builds the overlay exactly as the hotkey does, then feeds it scripted
@@ -314,9 +354,20 @@ fn selftest(dir: &Path) -> std::io::Result<()> {
     let grabbed = started.elapsed();
     let targets = Targets::enumerate(desktop, &[]);
     let enumerated = started.elapsed();
-    let primary = monitors.iter().find(|m| m.primary).or(monitors.first()).expect("a monitor").clone();
+    let primary = monitors
+        .iter()
+        .find(|m| m.primary)
+        .or(monitors.first())
+        .expect("a monitor")
+        .clone();
     let start = primary.rect.center();
-    let mut overlay = Overlay::new(snapshot, (desktop.x, desktop.y), targets, monitors.clone(), start)?;
+    let mut overlay = Overlay::new(
+        snapshot,
+        (desktop.x, desktop.y),
+        targets,
+        monitors.clone(),
+        start,
+    )?;
     println!(
         "overlay ready in {:.1} ms: grab {:.1} ms, {} targets in {:.1} ms, setup {:.1} ms",
         ms(started.elapsed()),
@@ -333,7 +384,13 @@ fn selftest(dir: &Path) -> std::io::Result<()> {
         .targets
         .list
         .iter()
-        .filter(|t| t.depth == 0 && primary.rect.intersect(t.rect).is_some_and(|r| r.area() * 2 > t.rect.area()))
+        .filter(|t| {
+            t.depth == 0
+                && primary
+                    .rect
+                    .intersect(t.rect)
+                    .is_some_and(|r| r.area() * 2 > t.rect.area())
+        })
         .max_by_key(|t| t.rect.area().min(primary.rect.area() * 9 / 10))
         .map(|t| t.rect);
     if let Some(rect) = window {
@@ -356,7 +413,10 @@ fn selftest(dir: &Path) -> std::io::Result<()> {
     let r = primary.rect;
     for i in 0..600 {
         let t = i as f64 / 599.0;
-        let p = (r.x + (r.width as f64 * t) as i32, r.y + (r.height as f64 * (0.5 + 0.45 * (t * 12.0).sin())) as i32);
+        let p = (
+            r.x + (r.width as f64 * t) as i32,
+            r.y + (r.height as f64 * (0.5 + 0.45 * (t * 12.0).sin())) as i32,
+        );
         let (x, y) = client(p);
         hover.time(|| {
             overlay.pointer_moved(x, y);
@@ -384,11 +444,16 @@ fn selftest(dir: &Path) -> std::io::Result<()> {
     print_view(&mut overlay);
     let (bx, by) = client(b);
     overlay.pointer_released(bx, by);
-    let selection = overlay.outcome.clone().flatten().expect("drag produces a region");
+    let selection = overlay
+        .outcome
+        .clone()
+        .flatten()
+        .expect("drag produces a region");
     println!("selection: {selection:?}");
 
     let finish = Instant::now();
-    let capture = workflow::from_overlay(&overlay, &selection, None, false, false).expect("selection inside desktop");
+    let capture = workflow::from_overlay(&overlay, &selection, None, false, false)
+        .expect("selection inside desktop");
     let cropped = finish.elapsed();
     let out = dir.join("3-selection.png");
     capture.frame.save_png(&out)?;
@@ -414,16 +479,34 @@ fn selftest(dir: &Path) -> std::io::Result<()> {
     overlay.pointer_pressed(cx + radius, cy);
     for i in 1..=90 {
         let t = i as f64 / 90.0 * std::f64::consts::TAU;
-        overlay.pointer_moved(cx + (radius as f64 * t.cos()) as i32, cy + (radius as f64 * t.sin()) as i32);
+        overlay.pointer_moved(
+            cx + (radius as f64 * t.cos()) as i32,
+            cy + (radius as f64 * t.sin()) as i32,
+        );
     }
     overlay.pointer_released(cx + radius, cy);
-    let freehand = overlay.outcome.clone().flatten().expect("freehand selection");
-    let capture = workflow::from_overlay(&overlay, &freehand, None, false, false).expect("freehand capture");
+    let freehand = overlay
+        .outcome
+        .clone()
+        .flatten()
+        .expect("freehand selection");
+    let capture =
+        workflow::from_overlay(&overlay, &freehand, None, false, false).expect("freehand capture");
     let px = |f: &Frame, x: u32, y: u32| f.pixels[(y * f.width + x) as usize * 4 + 3];
     let (w, h) = (capture.frame.width, capture.frame.height);
-    println!("freehand: {w}x{h}, corner alpha {}, center alpha {}", px(&capture.frame, 0, 0), px(&capture.frame, w / 2, h / 2));
-    assert!(w.abs_diff(2 * radius as u32) <= 3 && h.abs_diff(2 * radius as u32) <= 3, "freehand bounds follow the path");
-    assert!(px(&capture.frame, 0, 0) == 0 && px(&capture.frame, w / 2, h / 2) == 255, "freehand masks outside the path");
+    println!(
+        "freehand: {w}x{h}, corner alpha {}, center alpha {}",
+        px(&capture.frame, 0, 0),
+        px(&capture.frame, w / 2, h / 2)
+    );
+    assert!(
+        w.abs_diff(2 * radius as u32) <= 3 && h.abs_diff(2 * radius as u32) <= 3,
+        "freehand bounds follow the path"
+    );
+    assert!(
+        px(&capture.frame, 0, 0) == 0 && px(&capture.frame, w / 2, h / 2) == 255,
+        "freehand masks outside the path"
+    );
 
     // Multiple areas: two drags, Backspace removes one, a third, Enter.
     overlay.outcome = None;
@@ -437,15 +520,33 @@ fn selftest(dir: &Path) -> std::io::Result<()> {
     let (ox, oy) = client((r.x, r.y));
     drag(&mut overlay, (ox + 100, oy + 100), (ox + 300, oy + 200));
     drag(&mut overlay, (ox + 400, oy + 400), (ox + 500, oy + 450));
-    overlay.key(windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_BACK, false);
+    overlay.key(
+        windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_BACK,
+        false,
+    );
     drag(&mut overlay, (ox + 500, oy + 300), (ox + 600, oy + 380));
-    overlay.key(windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_RETURN, false);
-    let multi = overlay.outcome.clone().flatten().expect("multi-area selection");
-    let capture = workflow::from_overlay(&overlay, &multi, None, false, false).expect("multi capture");
+    overlay.key(
+        windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_RETURN,
+        false,
+    );
+    let multi = overlay
+        .outcome
+        .clone()
+        .flatten()
+        .expect("multi-area selection");
+    let capture =
+        workflow::from_overlay(&overlay, &multi, None, false, false).expect("multi capture");
     let (w, h) = (capture.frame.width, capture.frame.height);
     println!("multi: {multi:?} -> {w}x{h}");
-    assert_eq!((w, h), (501, 281), "two areas kept after Backspace (drags include the end pixel)");
-    assert!(px(&capture.frame, 1, 1) == 255 && px(&capture.frame, 1, h - 2) == 0, "gaps between areas are transparent");
+    assert_eq!(
+        (w, h),
+        (501, 281),
+        "two areas kept after Backspace (drags include the end pixel)"
+    );
+    assert!(
+        px(&capture.frame, 1, 1) == 255 && px(&capture.frame, 1, h - 2) == 0,
+        "gaps between areas are transparent"
+    );
 
     // Fixed size: a click places the area around the pointer.
     overlay.outcome = None;
@@ -460,7 +561,10 @@ fn selftest(dir: &Path) -> std::io::Result<()> {
     // Capture effects run on the frame before it is saved.
     let mut frame = capture.frame.clone();
     workflow::apply_effects(&mut frame, &["Border".to_owned()]);
-    println!("effects: {}x{} -> {}x{} with a border", w, h, frame.width, frame.height);
+    println!(
+        "effects: {}x{} -> {}x{} with a border",
+        w, h, frame.width, frame.height
+    );
     assert!(frame.width >= w && frame.height >= h);
     Ok(())
 }
@@ -468,7 +572,8 @@ fn selftest(dir: &Path) -> std::io::Result<()> {
 /// Runs the post-capture workflow (library save, editor hand-off) into
 /// `dir`, with the clipboard left alone.
 fn save_test(spec: &str, dir: &Path) -> std::io::Result<()> {
-    let rect = parse_rect(spec).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "expected X,Y,W,H"))?;
+    let rect = parse_rect(spec)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "expected X,Y,W,H"))?;
     let capture = workflow::immediate(jiffshot_capture::library::CaptureKind::Region, rect, true)?;
     // The library goes where the test says (this command runs alone).
     std::env::set_var("JIFFSHOT_LIBRARY", dir);
@@ -477,14 +582,18 @@ fn save_test(spec: &str, dir: &Path) -> std::io::Result<()> {
         ..settings::Settings::default()
     };
     let outcome = workflow::finish(capture, &settings, 0);
-    println!("{} (editor opened: {})", outcome.message, outcome.opened_editor);
+    println!(
+        "{} (editor opened: {})",
+        outcome.message, outcome.opened_editor
+    );
     Ok(())
 }
 
 fn ocr(path: &Path) -> std::io::Result<()> {
     let frame = Frame::load_png(path)?;
     let started = Instant::now();
-    let lines = jiffshot_capture::ocr::recognize(frame.width, frame.height, &frame.pixels).map_err(std::io::Error::other)?;
+    let lines = jiffshot_capture::ocr::recognize(frame.width, frame.height, &frame.pixels)
+        .map_err(std::io::Error::other)?;
     for line in &lines {
         println!("{:?} {}", line.rect, line.text);
     }
@@ -493,7 +602,15 @@ fn ocr(path: &Path) -> std::io::Result<()> {
 }
 
 fn usage() {
-    println!("{}", include_str!("lib.rs").lines().take_while(|l| l.starts_with("//!")).map(|l| l.trim_start_matches("//!").trim_start_matches(' ')).collect::<Vec<_>>().join("\n"));
+    println!(
+        "{}",
+        include_str!("lib.rs")
+            .lines()
+            .take_while(|l| l.starts_with("//!"))
+            .map(|l| l.trim_start_matches("//!").trim_start_matches(' '))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }
 
 /// The capture a command-line flag asks for (`--window` opens the Capture
@@ -522,7 +639,11 @@ pub fn claim_instance() -> bool {
     // SAFETY: a named mutex for single-instance detection; the handle is
     // intentionally held for the life of the process.
     unsafe {
-        CreateMutexW(std::ptr::null(), 0, wide("Local\\Jiffshot.Capture").as_ptr());
+        CreateMutexW(
+            std::ptr::null(),
+            0,
+            wide("Local\\Jiffshot.Capture").as_ptr(),
+        );
         GetLastError() != ERROR_ALREADY_EXISTS
     }
 }
@@ -537,11 +658,19 @@ pub fn forward_to_running(mode: Option<usize>) {
             // Pass on this launch's right to take the foreground (a shortcut
             // or a click started it), so the overlay gets the keyboard.
             let mut process = 0;
-            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(hwnd, &mut process);
+            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+                hwnd,
+                &mut process,
+            );
             windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(process);
             match mode {
                 Some(usize::MAX) => PostMessageW(hwnd, tray::WM_APP_MENU, 0, 0),
-                m => PostMessageW(hwnd, tray::WM_APP_CAPTURE, m.unwrap_or(tray::OPEN_CAPTURE_WINDOW), 0),
+                m => PostMessageW(
+                    hwnd,
+                    tray::WM_APP_CAPTURE,
+                    m.unwrap_or(tray::OPEN_CAPTURE_WINDOW),
+                    0,
+                ),
             };
         }
     }
@@ -550,17 +679,22 @@ pub fn forward_to_running(mode: Option<usize>) {
 /// Starts the capture side on its own thread: the tray icon, hotkeys and
 /// everything they open, with `initial` started once it is up. When it stops
 /// (the tray's Exit), `app.quit` runs on that thread.
-pub fn start_engine(initial: Option<usize>, app: Hooks) -> std::io::Result<std::thread::JoinHandle<i32>> {
+pub fn start_engine(
+    initial: Option<usize>,
+    app: Hooks,
+) -> std::io::Result<std::thread::JoinHandle<i32>> {
     let _ = HOOKS.set(app);
     // Scripts and agents drive this instance through `jiffshot-cli`.
     control::start();
-    std::thread::Builder::new().name("jiffshot-capture".into()).spawn(move || {
-        let code = tray::run(initial);
-        if let Some(hooks) = hooks() {
-            (hooks.quit)();
-        }
-        code
-    })
+    std::thread::Builder::new()
+        .name("jiffshot-capture".into())
+        .spawn(move || {
+            let code = tray::run(initial);
+            if let Some(hooks) = hooks() {
+                (hooks.quit)();
+            }
+            code
+        })
 }
 
 /// Asks the capture side to stop (as its Exit does); safe from any thread.
@@ -569,7 +703,12 @@ pub fn stop_engine() {
     unsafe {
         let hwnd = FindWindowW(wide(tray::CLASS).as_ptr(), std::ptr::null());
         if !hwnd.is_null() {
-            PostMessageW(hwnd, windows_sys::Win32::UI::WindowsAndMessaging::WM_CLOSE, 0, 0);
+            PostMessageW(
+                hwnd,
+                windows_sys::Win32::UI::WindowsAndMessaging::WM_CLOSE,
+                0,
+                0,
+            );
         }
     }
 }
@@ -597,14 +736,27 @@ pub fn run_command(args: &[String]) -> Option<i32> {
     // from a GUI-subsystem build; harmless when there is none.
     unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
     screen::enable_per_monitor_dpi();
-    let result = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+    let result = match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
         ["--write-icon", out] => icon::ico().and_then(|bytes| std::fs::write(out, bytes)),
         ["--write-logo", size, out] => size
             .parse::<u32>()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "logo size must be a positive whole number"))
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "logo size must be a positive whole number",
+                )
+            })
             .and_then(icon::png)
             .and_then(|bytes| std::fs::write(out, bytes)),
-        ["--write-logo", ..] => Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "usage: --write-logo SIZE OUT.png")),
+        ["--write-logo", ..] => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage: --write-logo SIZE OUT.png",
+        )),
         ["--monitors"] => {
             print_monitors(&screen::monitors());
             Ok(())
@@ -619,7 +771,12 @@ pub fn run_command(args: &[String]) -> Option<i32> {
             unsafe {
                 let hwnd = FindWindowW(wide(tray::CLASS).as_ptr(), std::ptr::null());
                 if !hwnd.is_null() {
-                    PostMessageW(hwnd, windows_sys::Win32::UI::WindowsAndMessaging::WM_CLOSE, 0, 0);
+                    PostMessageW(
+                        hwnd,
+                        windows_sys::Win32::UI::WindowsAndMessaging::WM_CLOSE,
+                        0,
+                        0,
+                    );
                 }
             }
             Ok(())
@@ -628,7 +785,9 @@ pub fn run_command(args: &[String]) -> Option<i32> {
         ["--ocr", file] => ocr(Path::new(file)),
         ["--scroll-selftest", dir] => selftest_scroll::run(Path::new(dir)),
         ["--menu-selftest", dir] => selftest_scroll::menus(Path::new(dir)),
-        ["--record-selftest", dir, seconds] => selftest_scroll::record(Path::new(dir), seconds.parse().unwrap_or(3.0)),
+        ["--record-selftest", dir, seconds] => {
+            selftest_scroll::record(Path::new(dir), seconds.parse().unwrap_or(3.0))
+        }
         ["--selftest", dir] => selftest(Path::new(dir)),
         _ => {
             usage();

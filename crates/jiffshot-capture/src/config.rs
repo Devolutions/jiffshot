@@ -54,7 +54,9 @@ fn with_dir<R>(f: impl FnOnce(&Path) -> R) -> Option<R> {
 
 /// One side's section (`"capture"` or `"editor"`), `Null` when there is none.
 pub fn section(name: &str) -> Value {
-    with_dir(|dir| read(dir).remove(name)).flatten().unwrap_or(Value::Null)
+    with_dir(|dir| read(dir).remove(name))
+        .flatten()
+        .unwrap_or(Value::Null)
 }
 
 /// Replaces one side's section, keeping everything else.
@@ -67,7 +69,13 @@ pub fn set_section(name: &str, value: Value) {
 }
 
 fn top(key: &str) -> Option<String> {
-    with_dir(|dir| read(dir).get(key).and_then(Value::as_str).map(str::to_owned)).flatten()
+    with_dir(|dir| {
+        read(dir)
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+    .flatten()
 }
 
 fn set_top(key: &str, value: Option<&str>) {
@@ -113,7 +121,8 @@ mod tests {
     use super::*;
 
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("jiffshot-config-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("jiffshot-config-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

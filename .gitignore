@@ -1,7 +1,9 @@
 # Rust
 /target/
 
-# MSI packaging (package/)
+# Packaging (package/)
 /package/bin/
 /package/obj/
 /package/out/
+/package/linux/__pycache__/
+/app/tests/__pycache__/

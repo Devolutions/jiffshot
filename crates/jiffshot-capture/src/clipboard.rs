@@ -9,10 +9,12 @@ use std::time::Duration;
 use windows_sys::Win32::Foundation::{GlobalFree, HANDLE, HWND};
 use windows_sys::Win32::Graphics::Gdi::{BITMAPINFOHEADER, BI_RGB};
 use windows_sys::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW,
-    SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    RegisterClipboardFormatW, SetClipboardData,
 };
-use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
+use windows_sys::Win32::System::Memory::{
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+};
 use windows_sys::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
 const CF_DIB: u32 = 8;
@@ -23,7 +25,11 @@ const CF_DIBV5: u32 = 17;
 /// Something on the clipboard the editor can paste.
 pub enum Pasted {
     /// Straight-alpha RGBA, top-down.
-    Image { width: u32, height: u32, rgba: Vec<u8> },
+    Image {
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
     Files(Vec<PathBuf>),
     Text(String),
 }
@@ -75,7 +81,11 @@ pub fn decode_dib(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
         return None;
     }
     // BI_BITFIELDS with a plain BITMAPINFOHEADER appends three masks.
-    let masks = if compression == 3 && header_size == 40 { 12 } else { 0 };
+    let masks = if compression == 3 && header_size == 40 {
+        12
+    } else {
+        0
+    };
     let offset = header_size + masks;
     let (w, h) = (width as usize, height.unsigned_abs() as usize);
     let row = (w * bits as usize / 8 + 3) & !3;
@@ -108,14 +118,20 @@ pub fn decode_dib(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 
 fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     let mut decoder = png::Decoder::new(bytes);
-    decoder.set_transformations(png::Transformations::normalize_to_color8() | png::Transformations::ALPHA);
+    decoder.set_transformations(
+        png::Transformations::normalize_to_color8() | png::Transformations::ALPHA,
+    );
     let mut reader = decoder.read_info().ok()?;
     let mut buf = vec![0; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf).ok()?;
     let (w, h) = (info.width as usize, info.height as usize);
     let rgba = match info.color_type {
         png::ColorType::Rgba => buf[..w * h * 4].to_vec(),
-        png::ColorType::GrayscaleAlpha => buf.chunks_exact(2).take(w * h).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::GrayscaleAlpha => buf
+            .chunks_exact(2)
+            .take(w * h)
+            .flat_map(|p| [p[0], p[0], p[0], p[1]])
+            .collect(),
         _ => return None,
     };
     Some((info.width, info.height, rgba))
@@ -201,7 +217,11 @@ pub fn copy(frame: &Frame, owner: isize) -> io::Result<()> {
 
 /// Replaces the clipboard contents with text.
 pub fn copy_text(text: &str, owner: isize) -> io::Result<()> {
-    let units: Vec<u8> = text.encode_utf16().chain(Some(0)).flat_map(|u| u.to_le_bytes()).collect();
+    let units: Vec<u8> = text
+        .encode_utf16()
+        .chain(Some(0))
+        .flat_map(|u| u.to_le_bytes())
+        .collect();
     put(owner, &[(CF_UNICODETEXT, &units)])
 }
 
@@ -255,7 +275,11 @@ pub fn read(owner: isize) -> io::Result<Option<Pasted>> {
             }
         }
         if let Some((width, height, rgba)) = image {
-            Some(Pasted::Image { width, height, rgba })
+            Some(Pasted::Image {
+                width,
+                height,
+                rgba,
+            })
         } else if IsClipboardFormatAvailable(CF_HDROP) != 0 {
             let drop = GetClipboardData(CF_HDROP) as HDROP;
             let count = DragQueryFileW(drop, u32::MAX, std::ptr::null_mut(), 0);
@@ -270,7 +294,10 @@ pub fn read(owner: isize) -> io::Result<Option<Pasted>> {
             Some(Pasted::Files(files))
         } else if IsClipboardFormatAvailable(CF_UNICODETEXT) != 0 {
             global_bytes(GetClipboardData(CF_UNICODETEXT)).map(|b| {
-                let units: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                let units: Vec<u16> = b
+                    .chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect();
                 Pasted::Text(crate::from_wide(&units))
             })
         } else {
