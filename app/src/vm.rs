@@ -1091,6 +1091,7 @@ pub trait LibraryItemViewModel: Send + 'static {
     fn set_tags(&mut self, value: String) -> Result<()>;
     fn toggle_select(&mut self) -> Result<()>;
     fn show_in_folder(&mut self) -> Result<()>;
+    fn copy(&mut self) -> Result<()>;
 }
 
 /// A `LibraryItemViewModel`'s published values.

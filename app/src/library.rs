@@ -305,6 +305,11 @@ impl LibraryItemViewModel for Item {
         self.act("reveal", None);
         Ok(())
     }
+
+    fn copy(&mut self) -> Result<()> {
+        self.act("copy", None);
+        Ok(())
+    }
 }
 
 fn cache_dir() -> PathBuf {
@@ -353,16 +358,30 @@ pub fn write_thumbnail(doc: &Document, capture: &Path) {
     }
 }
 
-fn render_source(capture: &Path) -> Option<Pixmap> {
-    if capture.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp4")) {
-        return crate::video::thumbnail(capture);
-    }
+pub fn is_video(capture: &Path) -> bool {
+    capture.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
+}
+
+/// Whether the capture has saved edits on top of its original file.
+pub fn has_edits(capture: &Path) -> bool {
+    jiffshot_capture::library::edits_of(capture).is_some()
+}
+
+/// An image capture as it looks with its saved edits applied.
+pub fn render_image(capture: &Path) -> Option<Pixmap> {
     if let Some(edits) = jiffshot_capture::library::edits_of(capture) {
         if let Ok(doc) = io::load_document(&edits) {
             return Some(doc.flatten());
         }
     }
     io::load_image(capture).ok()
+}
+
+fn render_source(capture: &Path) -> Option<Pixmap> {
+    if is_video(capture) {
+        return crate::video::thumbnail(capture);
+    }
+    render_image(capture)
 }
 
 /// Makes missing or stale thumbnails off the UI thread and shows each one

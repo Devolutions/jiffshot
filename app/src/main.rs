@@ -10,6 +10,7 @@
 mod app;
 mod canvas;
 mod capture_window;
+mod drag_out;
 mod library;
 mod ocr;
 mod settings;
@@ -499,6 +500,7 @@ fn main() -> rustolonia::Result<()> {
         ui::mount_main_window(scope, Model, show_editor)?;
         if let Some(window) = scope.main_window() {
             winutil::set_main_hwnd(scope.platform_handle(&window).unwrap_or(0));
+            drag_out::install(winutil::main_hwnd());
         }
         // The Capture window, hidden until asked for (the UI self-test
         // drives it too).

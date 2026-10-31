@@ -1845,7 +1845,82 @@ impl App {
         }
     }
 
-    /// Pin, close, delete, rename, tag, select or reveal library items.
+    /// An image capture as it looks now, including unsaved edits when it is
+    /// open in the editor.
+    fn capture_pixmap(&self, path: &Path) -> Option<jiffshot_doc::Pixmap> {
+        if library::is_video(path) {
+            return None;
+        }
+        if self.source.as_deref() == Some(path) {
+            if let Some(flat) = with_editor(|e| e.document().flatten()) {
+                return Some(flat);
+            }
+        }
+        library::render_image(path)
+    }
+
+    /// Files that stand for captures outside Jiffshot: edited images are
+    /// flattened to PNGs in a scratch folder, the rest are the captures
+    /// themselves.
+    pub fn shareable_files(&self, targets: &[PathBuf]) -> Vec<PathBuf> {
+        let scratch = jiffshot_capture::paths::local_dir().join("shared");
+        let mut used = std::collections::HashSet::new();
+        let mut files = Vec::new();
+        for t in targets.iter().filter(|t| t.exists()) {
+            let open_modified = self.source.as_ref() == Some(t) && with_editor(|e| e.is_modified()).unwrap_or(false);
+            if library::is_video(t) || !(open_modified || library::has_edits(t)) {
+                files.push(t.clone());
+                continue;
+            }
+            let stem = t.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "capture".to_owned());
+            let mut name = format!("{stem}.png");
+            let mut n = 2;
+            while !used.insert(name.to_lowercase()) {
+                name = format!("{stem} ({n}).png");
+                n += 1;
+            }
+            let out = scratch.join(name);
+            let written = self
+                .capture_pixmap(t)
+                .and_then(|pm| jiffshot_doc::io::encode(&pm, jiffshot_doc::io::Format::Png, 0).ok())
+                .is_some_and(|bytes| std::fs::create_dir_all(&scratch).and_then(|()| std::fs::write(&out, bytes)).is_ok());
+            files.push(if written { out } else { t.clone() });
+        }
+        files
+    }
+
+    /// Copies one image as pixels, or any other captures as files.
+    fn copy_captures(&mut self, targets: &[PathBuf]) {
+        let hwnd = winutil::main_hwnd();
+        if let [one] = targets {
+            if let Some(pm) = self.capture_pixmap(one) {
+                let frame = winutil::frame_from_pixmap(&pm);
+                match jiffshot_capture::clipboard::copy(&frame, hwnd) {
+                    Ok(()) => self.set_status(format!("Copied the image ({} × {}) to the clipboard", pm.width(), pm.height())),
+                    Err(error) => self.set_status(format!("Copy failed: {error}")),
+                }
+                return;
+            }
+        }
+        let files = self.shareable_files(targets);
+        if files.is_empty() {
+            return self.set_status("Nothing to copy");
+        }
+        match jiffshot_capture::clipboard::copy_files(&files, hwnd) {
+            Ok(()) => self.set_status(format!("Copied {} to the clipboard", count_of(files.len()))),
+            Err(error) => self.set_status(format!("Copy failed: {error}")),
+        }
+    }
+
+    /// The files to drag out for a pressed library item, if it is still listed.
+    pub fn drag_files(&self, path: &Path) -> Vec<PathBuf> {
+        if !self.library_items.iter().any(|i| i.path == path) {
+            return Vec::new();
+        }
+        self.shareable_files(&self.library_targets(path))
+    }
+
+    /// Pin, close, delete, rename, tag, select, copy or reveal library items.
     pub fn library_action(&mut self, path: &Path, what: &str, value: Option<String>) {
         let targets = self.library_targets(path);
         match what {
@@ -1862,6 +1937,7 @@ impl App {
                 return;
             }
             "reveal" => return winutil::reveal(path),
+            "copy" => return self.copy_captures(&targets),
             "pin" => {
                 let pin = !library::Entry::read(path.to_path_buf()).pinned();
                 for t in &targets {
