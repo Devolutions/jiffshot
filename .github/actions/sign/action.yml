@@ -1,5 +1,5 @@
 name: Sign Windows artifacts
-description: Sign and verify binaries or MSIs using psign and Azure Trusted Signing.
+description: Sign and verify Windows binaries and packages using psign and Azure Trusted Signing.
 inputs:
   files:
     description: Newline-separated file paths or patterns to sign.

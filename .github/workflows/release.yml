@@ -194,14 +194,16 @@ jobs:
             $portable = "artifacts\jiffshot-win-$arch"
             $msiName = "Devolutions.Jiffshot-$arch-$env:RELEASE_VERSION.msi"
             $msi = "artifacts\jiffshot-win-$arch-msi\$msiName"
-            foreach ($required in @("$portable\jiffshot.exe", "$portable\rustolonia_host.dll", "$portable\README-portable.txt", $msi)) {
+            $msixName = "Devolutions.Jiffshot-$arch-$env:RELEASE_VERSION.msix"
+            $msix = "artifacts\jiffshot-win-$arch-msix\$msixName"
+            foreach ($required in @("$portable\jiffshot.exe", "$portable\rustolonia_host.dll", "$portable\README-portable.txt", $msi, $msix)) {
               if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Missing release file: $required" }
             }
             $signedTargets = @(
               Get-ChildItem -Path $portable -File |
                 Where-Object { $_.Extension -in @('.exe', '.dll') } |
                 ForEach-Object { $_.FullName }
-            ) + @($msi)
+            ) + @($msi, $msix)
             foreach ($path in $signedTargets) {
               $signature = Get-AuthenticodeSignature -LiteralPath $path
               if ($signature.Status -ne 'Valid' `
@@ -215,8 +217,9 @@ jobs:
               throw "Release jiffshot.exe ($arch) version ($($exeInfo.FileVersion) / $($exeInfo.ProductVersion)) does not match $env:RELEASE_VERSION"
             }
             Copy-Item -LiteralPath $msi -Destination "release\$msiName"
+            Copy-Item -LiteralPath $msix -Destination "release\$msixName"
             Compress-Archive -Path "$portable\*" `
-              -DestinationPath "release\Devolutions.Jiffshot-$arch-$env:RELEASE_VERSION-portable.zip"
+              -DestinationPath "release\Devolutions.Jiffshot-$arch-$env:RELEASE_VERSION.zip"
           }
           Get-ChildItem release -File | Sort-Object Name | ForEach-Object {
             '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
