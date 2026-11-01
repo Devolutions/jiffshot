@@ -88,7 +88,7 @@ The detailed feature list below describes the Windows application. The Linux bui
   <img src="docs/images/capture-window.png" alt="Jiffshot Capture Window" width="760" />
 </p>
 
-- **All-in-One, Image & Video Tabs:** Use the dedicated Capture Window (or the compact top-of-screen **Capture Widget**) to configure selection modes, automatic effects, share destinations, cursor capture, and timers before starting.
+- **Choose, Image & Video Tabs:** Use the compact Capture window (or Capture Widget) to configure selection modes and effects. The main window keeps capture actions in focus; Share and capture options are available from compact menus. On Choose, select an area first, then choose Image, Video, Scrolling, or Panoramic, or cancel. Image sharing and clipboard settings apply to image outputs; video uses the Video tab's recording and sharing settings.
 - **Smart Selection Overlay:** Captures from an instant frozen desktop snapshot so transient UI states never move while you aim. Includes a live pixel magnifier with coordinates and `#RRGGBB` color readout, dimension labels, and on-screen help (`F1`).
 - **Specialized Capture Modes:**
   - **Scrolling Capture:** Automatically scrolls and stitches vertical, horizontal, or two-axis scrolling windows and web pages.
@@ -97,7 +97,7 @@ The detailed feature list below describes the Windows application. The Linux bui
   - **Open Menus:** Delayed capture mode designed to grab open context menus and dropdowns.
   - **Grab Text (Windows OCR):** Select any area on screen to extract selectable, copyable text instantly.
   - **Step Capture:** Record a numbered click-by-click guide automatically—every click captures a screenshot and places a sequential step badge at the cursor.
-- **Timers, Schedules & Presets:** Delay captures by seconds, run an automatic **time-lapse** (skipping identical frames), schedule a daily capture at a set time (`HH:MM`), or save custom **Presets** with their own global hotkeys.
+- **Timers, Schedules & Presets:** Delay captures by seconds, run an automatic **time-lapse** (skipping identical frames), schedule a daily capture at a set time (`HH:MM`), or save custom **Presets** with their own global hotkeys. Interval captures use the last area or the screen under the pointer; scheduled captures use the saved area or the screen under the pointer. They bypass the chooser and ignore the preview, clipboard, and cursor switches; the selected image share destination still applies. Choose shows active intervals and schedules and lets you stop or cancel them after changing timer modes. Changing the interval updates a running time-lapse.
 - **Post-Capture Sharing:** Send captures automatically to the clipboard, the editor, a file, email, Microsoft Word, PowerPoint, Excel, OneNote, Paint, any configured external program, an FTP server (using Windows Credential Manager), or a printer.
 
 <p align="center">
@@ -609,7 +609,7 @@ cargo test --release --workspace                          # capture side, docume
 ./target/release/jiffshot.exe --record-selftest DIR 4         # records its own test window
 ```
 
-The editor drives its own UI when `JIFFSHOT_UITEST=DIR` is set (with `JIFFSHOT_UITEST_IMAGE`, `JIFFSHOT_UITEST_VIDEO`, an isolated `JIFFSHOT_LIBRARY` and, to leave your settings alone, scratch `APPDATA` and `LOCALAPPDATA`), writing screenshots of every window and `ui-log.txt` to `DIR`. `cargo run -p jiffshot-doc --example synthetic -- OUT.png` writes the test image its coordinates assume.
+The editor drives its own UI when `JIFFSHOT_UITEST=DIR` is set (with `JIFFSHOT_UITEST_IMAGE`, `JIFFSHOT_UITEST_VIDEO`, an isolated `JIFFSHOT_LIBRARY` and, to leave your settings alone, scratch `APPDATA` and `LOCALAPPDATA`), writing screenshots of every window and `ui-log.txt` to `DIR`. Set `JIFFSHOT_UITEST_CAPTURE_ONLY=1` to check just the Capture window and chooser, and `JIFFSHOT_UITEST_KEEP=1` to leave it open for inspection. To exercise library edits, set `JIFFSHOT_LIBRARY` to an existing folder inside `DIR`; otherwise those steps are skipped to protect the normal library. `cargo run -p jiffshot-doc --example synthetic -- OUT.png` writes the test image its coordinates assume.
 On macOS, set `JIFFSHOT_UITEST_OVERLAY=1` to run a focused synthetic selection-window lifecycle test without screen captures; also use scratch `JIFFSHOT_CONFIG_DIR` and `JIFFSHOT_LOCAL_DIR`.
 `JIFFSHOT_UITEST_RECENT=1` uses an empty `JIFFSHOT_LIBRARY` inside `JIFFSHOT_UITEST` to check editor and tray recent-file actions with a synthetic image whose name contains Unicode and URI-reserved characters, including malformed-URI reporting.
 `JIFFSHOT_UITEST_LIBRARY=1` uses the same isolated-library requirement to check filtering, pinning, tags, multi-selection, combining, renaming with companions, collision handling, saved edits, closed items, and metadata errors using synthetic captures.

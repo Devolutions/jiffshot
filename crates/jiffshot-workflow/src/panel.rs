@@ -12,10 +12,15 @@ use crate::settings::{Preset, Settings};
 use crate::workflow::{SHARES, VIDEO_SHARES};
 #[cfg(target_os = "macos")]
 use jiffshot_capture::Rect;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const TABS: [&str; 3] = ["All-in-One", "Image", "Video"];
+pub const TABS: [&str; 3] = ["Choose", "Image", "Video"];
+
+/// The chooser shown after selecting an area on Choose.
+pub const SELECT_CREATE_PROMPT: &str = "Choose what to create";
+/// The chooser's actions, in dispatch order.
+pub const SELECT_CREATE_CHOICES: [&str; 5] = ["Image", "Video", "Scrolling (auto)", "Panoramic (manual)", "Cancel"];
 
 /// The Image tab's selections, with the preset mode names they stand for.
 const SELECTIONS: &[(&str, &str)] = &[
@@ -156,13 +161,13 @@ impl Switch {
     }
 }
 
-/// The dropdowns a tab shows. The selection is not one of them: Image and
-/// Video show it as mode tiles, and All-in-One asks after the area is
-/// selected.
+/// The visible field actions a tab shows. Choose asks what to capture after an
+/// area is selected.
 pub fn fields(tab: usize) -> &'static [Field] {
     match tab {
-        0 | 2 => &[Field::Share],
-        _ => &[Field::Effects, Field::Share],
+        0 => &[Field::Share],
+        1 => &[Field::Selection, Field::Effects, Field::Share],
+        _ => &[Field::Selection, Field::Share],
     }
 }
 
@@ -175,9 +180,9 @@ pub fn switches(tab: usize) -> &'static [Switch] {
             Switch::Delay,
         ],
         _ => &[
+            Switch::Webcam,
             Switch::Microphone,
             Switch::SystemAudio,
-            Switch::Webcam,
             Switch::RecordCursor,
             Switch::ScreenDraw,
             Switch::Preview,
@@ -185,32 +190,17 @@ pub fn switches(tab: usize) -> &'static [Switch] {
     }
 }
 
-/// Whether an option changes how the capture is taken (true) or what
-/// happens to it afterwards (false).
-fn before(switch: Switch) -> bool {
-    !matches!(switch, Switch::Preview | Switch::Clipboard)
+fn has_gear(tab: usize, field: Field) -> bool {
+    matches!((tab, field), (1 | 2, Field::Selection))
 }
-
-/// The Image tab's selections shown as tiles; the rest are under More.
-const TILES: usize = 5;
 
 /// The panel behind a switch's › button, if it has one.
-fn more_panel(switch: Switch) -> Option<&'static str> {
-    match switch {
-        Switch::Delay => Some("delay"),
-        Switch::Webcam => Some("webcam"),
-        Switch::Microphone => Some("microphone"),
-        Switch::RecordCursor => Some("cursor"),
-        Switch::ScreenDraw => Some("draw"),
-        _ => None,
-    }
-}
-
-fn field_label(field: Field) -> &'static str {
-    match field {
-        Field::Selection => "Selection:",
-        Field::Effects => "Effects:",
-        Field::Share => "Share:",
+fn field_label(tab: usize, field: Field) -> &'static str {
+    match (tab, field) {
+        (0, Field::Share) => "Share",
+        (_, Field::Selection) => "Selection:",
+        (_, Field::Effects) => "Effects:",
+        (_, Field::Share) => "Share:",
     }
 }
 
@@ -225,10 +215,13 @@ pub fn switch_label(s: &Settings, switch: Switch) -> String {
         Switch::Cursor | Switch::RecordCursor => "Capture Cursor".into(),
         Switch::Delay if !switch_on(s, switch) => "Time Delay".into(),
         Switch::Delay => match timing(s) {
-            "interval" => format!("Interval ({} s)", s.interval_seconds.max(3)),
+            "interval" => format!("Interval ({} s)", s.interval_seconds.max(1)),
             "schedule" => format!(
                 "Schedule ({})",
-                s.schedule_default.as_deref().unwrap_or("09:00")
+                s.schedule
+                    .as_deref()
+                    .or(s.schedule_default.as_deref())
+                    .unwrap_or("09:00")
             ),
             _ => format!("Time Delay ({} s)", s.delay_seconds),
         },
@@ -405,28 +398,55 @@ fn action(verb: &'static str, detail: String, hint: String) -> Action {
     Action { verb, detail, hint }
 }
 
+/// The active timing workflow, including whether selection is bypassed.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureTiming {
+    #[default]
+    Manual,
+    Interval,
+    Schedule,
+}
+
+/// The timing workflow shown for a Capture window tab.
+pub fn capture_timing(s: &Settings, tab: usize) -> CaptureTiming {
+    if tab == 2 || !s.capture_window.timer {
+        return CaptureTiming::Manual;
+    }
+    match timing(s) {
+        "interval" => CaptureTiming::Interval,
+        "schedule" => CaptureTiming::Schedule,
+        _ => CaptureTiming::Manual,
+    }
+}
+
 /// What the Capture button says for the current tab and timer.
-pub fn capture_button(s: &Settings, tab: usize, capture_key: &str, timelapse_running: bool) -> Action {
+pub fn capture_button(s: &Settings, tab: usize, _capture_key: &str, timelapse_running: bool) -> Action {
     if tab == 2 {
         let stops = crate::recorder::key_names().1.map_or("Stop it from the toolbar".into(), |k| format!("{k} stops"));
         return action("Record", field_text(s, 2, Field::Selection), stops);
     }
     let what = if tab == 0 { "Select an area".to_owned() } else { field_text(s, 1, Field::Selection) };
-    let press = |key: &str| if key.is_empty() { "or press Enter".to_owned() } else { format!("or press {}", key_name(key)) };
-    match timing(s) {
-        "interval" if s.capture_window.timer => {
-            let every = format!("{what} · every {} s", s.interval_seconds.max(3));
-            action(if timelapse_running { "Stop" } else { "Start" }, every, press(""))
+    // The global capture hotkey starts an interactive image capture, not necessarily this action.
+    let press = || "or press Enter".to_owned();
+    match capture_timing(s, tab) {
+        CaptureTiming::Interval if timelapse_running => action("Stop", "Interval capture is running".into(), press()),
+        CaptureTiming::Interval => {
+            let every = format!("Last area or screen under pointer · every {} s", s.interval_seconds.max(1));
+            action("Start", every, press())
         }
-        "schedule" if s.capture_window.timer => {
+        CaptureTiming::Schedule => {
             let at = s.schedule_default.clone().unwrap_or_else(|| "09:00".into());
             match &s.schedule {
-                Some(on) => action("Cancel", format!("Daily at {on}"), press("")),
-                None => action("Schedule", format!("{what} · daily at {at}"), press("")),
+                Some(on) => action("Cancel", format!("Daily at {on}"), press()),
+                None => {
+                    let area = if s.schedule_area.is_some() { "Saved area" } else { "Screen under pointer" };
+                    action("Schedule", format!("{area} · daily at {at}"), press())
+                }
             }
         }
-        _ if s.delay_seconds > 0 => action("Capture", format!("{what} · in {} s", s.delay_seconds), press(capture_key)),
-        _ => action("Capture", what, press(capture_key)),
+        _ if s.delay_seconds > 0 => action("Capture", format!("{what} · in {} s", s.delay_seconds), press()),
+        _ => action("Capture", what, press()),
     }
 }
 
@@ -437,100 +457,34 @@ pub struct FieldRow {
     pub id: &'static str,
     pub label: &'static str,
     pub text: String,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq)]
-pub struct SwitchRow {
-    pub id: &'static str,
-    pub label: String,
-    pub on: bool,
-    /// The › button's panel, if there is one.
-    pub more: Option<&'static str>,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum GroupRow {
-    Field(FieldRow),
-    Switch(SwitchRow),
-}
-
-/// Options that apply at the same time: before (or while) capturing, or
-/// after.
-#[derive(Clone, Debug, Serialize, PartialEq)]
-pub struct Group {
-    pub title: &'static str,
-    pub rows: Vec<GroupRow>,
-}
-
-/// One of the tiles that choose what to capture.
-#[derive(Clone, Debug, Serialize, PartialEq)]
-pub struct ModeTile {
-    /// The pick id it sends, unless it opens `menu`.
-    pub pick: String,
-    /// The selection it stands for ("more" for the More tile).
-    pub value: String,
-    pub label: String,
-    pub on: bool,
-    pub menu: Option<&'static str>,
+    /// The gear button's panel, if there is one.
+    pub gear: Option<&'static str>,
 }
 
 /// What the window shows for the current tab.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct View {
     pub tab: usize,
-    /// What to capture; empty on All-in-One, which asks afterwards.
-    pub modes: Vec<ModeTile>,
-    /// The panel behind the gear next to the tiles.
-    pub mode_gear: Option<&'static str>,
-    pub groups: Vec<Group>,
+    pub timing: CaptureTiming,
+    pub interval_running: bool,
+    pub active_schedule: Option<String>,
+    pub fields: Vec<FieldRow>,
     pub capture: Action,
     pub widget: bool,
 }
 
-fn tile(prefix: &str, (label, value): (&str, &str), on: bool) -> ModeTile {
-    ModeTile { pick: format!("{prefix}:{value}"), value: value.into(), label: label.into(), on, menu: None }
-}
-
-/// The tiles for `tab`: Image's main selections and a More tile for the
-/// rest, or Video's three.
-pub fn modes(s: &Settings, tab: usize) -> Vec<ModeTile> {
-    match tab {
-        0 => Vec::new(),
-        1 => {
-            let current = if s.capture_window.selection == "fixed" { "image" } else { s.capture_window.selection.as_str() };
-            let mut tiles: Vec<ModeTile> = SELECTIONS[..TILES].iter().map(|&(l, v)| tile("sel", (l.trim_end_matches(" Window"), v), v == current)).collect();
-            let extra = SELECTIONS[TILES..].iter().chain(ADVANCED).find(|(_, v)| *v == current);
-            tiles.push(ModeTile {
-                pick: String::new(),
-                value: "more".into(),
-                label: extra.map_or("More", |(l, _)| l).into(),
-                on: extra.is_some(),
-                menu: Some("more"),
-            });
-            tiles
-        }
-        _ => VIDEO_SELECTIONS.iter().map(|&(l, v)| tile("vsel", (l, v), s.capture_window.video_selection == v)).collect(),
-    }
-}
-
-pub fn groups(s: &Settings, tab: usize) -> Vec<Group> {
-    let switch = |sw: Switch| GroupRow::Switch(SwitchRow { id: sw.id(), label: switch_label(s, sw), on: switch_on(s, sw), more: more_panel(sw) });
-    let field = |f: Field| GroupRow::Field(FieldRow { id: f.id(), label: field_label(f), text: field_text(s, tab, f) });
-    let (first, then) = if tab == 2 { ("While recording", "After recording") } else { ("Before capture", "After capture") };
-    let all = switches(tab);
-    let mut after: Vec<GroupRow> = fields(tab).iter().map(|&f| field(f)).collect();
-    after.extend(all.iter().filter(|&&sw| !before(sw)).map(|&sw| switch(sw)));
-    vec![Group { title: first, rows: all.iter().filter(|&&sw| before(sw)).map(|&sw| switch(sw)).collect() }, Group { title: then, rows: after }]
-}
-
 pub fn view(s: &Settings, capture_key: &str, timelapse_running: bool) -> View {
     let tab = s.capture_window.tab.min(2);
+    let timing = capture_timing(s, tab);
     View {
         tab,
-        modes: modes(s, tab),
-        mode_gear: (tab != 0).then_some("selection"),
-        groups: groups(s, tab),
+        timing,
+        interval_running: timelapse_running,
+        active_schedule: s.schedule.clone(),
+        fields: fields(tab)
+            .iter()
+            .map(|&f| FieldRow { id: f.id(), label: field_label(tab, f), text: field_text(s, tab, f), gear: has_gear(tab, f).then_some("selection") })
+            .collect(),
         capture: capture_button(s, tab, capture_key, timelapse_running),
         widget: s.show_widget,
     }
@@ -582,13 +536,37 @@ fn submenu(label: impl Into<String>, items: Vec<MenuItem>) -> MenuItem {
     }
 }
 
-/// A menu by name: a dropdown ("selection", "effects", "share"), the More
-/// tile ("more"), the bottom
+fn options_menu(s: &Settings) -> Vec<MenuItem> {
+    let tab = s.capture_window.tab.min(2);
+    let timing = capture_timing(s, tab);
+    let mut items: Vec<MenuItem> = switches(tab)
+        .iter()
+        .map(|&switch| {
+            let label = match (tab, switch) {
+                (0, Switch::Clipboard) => "Copy images".to_owned(),
+                (0, Switch::Cursor) => "Cursor (Image only)".to_owned(),
+                _ => switch_label(s, switch),
+            };
+            MenuItem {
+                enabled: timing == CaptureTiming::Manual || switch == Switch::Delay,
+                ..check(format!("switch:{}", switch.id()), label, switch_on(s, switch))
+            }
+        })
+        .collect();
+    if tab != 2 {
+        items.push(separator());
+        items.push(item("panel:delay", "Configure capture timing…"));
+    }
+    items
+}
+
+/// A menu by name: a dropdown ("selection", "effects", "share"), the bottom
 /// bar ("presets", "new-preset") or a title menu ("file", "edit", "view",
 /// "help").
 pub fn menu(s: &Settings, which: &str) -> Vec<MenuItem> {
     let tab = s.capture_window.tab.min(2);
     match which {
+        "options" => options_menu(s),
         "selection" if tab == 2 => VIDEO_SELECTIONS
             .iter()
             .map(|(l, v)| {
@@ -619,13 +597,6 @@ pub fn menu(s: &Settings, which: &str) -> Vec<MenuItem> {
                 checked: in_advanced,
                 ..submenu("Advanced", advanced)
             });
-            items
-        }
-        "more" => {
-            let current = s.capture_window.selection.as_str();
-            let mut items: Vec<MenuItem> = SELECTIONS[TILES..].iter().map(|(l, v)| check(format!("sel:{v}"), *l, *v == current)).collect();
-            items.push(separator());
-            items.extend(ADVANCED.iter().map(|(l, v)| check(format!("sel:{v}"), *l, *v == current)));
             items
         }
         "share" => {
@@ -853,6 +824,13 @@ pub fn pick(s: &mut Settings, id: &str) -> Pick {
             s.show_widget ^= true;
             Pick::Changed
         }
+        "switch" => match Switch::from_id(arg) {
+            Some(switch) => {
+                flip(s, switch);
+                Pick::Changed
+            }
+            None => Pick::Nothing,
+        },
         "panel" => Pick::Panel(arg.into()),
         "preset" => arg.parse().map_or(Pick::Nothing, Pick::RunPreset),
         "preset-delete" => match arg.parse::<usize>() {
@@ -1751,12 +1729,9 @@ mod tests {
         assert_eq!(capture_button(&s, 1, "PrtScn", true).verb, "Stop");
         s.capture_window.timing = "schedule".into();
         let b = capture_button(&s, 1, "PrtScn", false);
-        assert_eq!((b.verb, b.detail.as_str()), ("Schedule", "Region (800 × 600) · daily at 09:00"));
+        assert_eq!((b.verb, b.detail.as_str()), ("Schedule", "Screen under pointer · daily at 09:00"));
         s.capture_window.timer = false;
-        assert_eq!(
-            capture_button(&s, 1, "PrtScn", false),
-            action("Capture", "Region (800 × 600)".into(), format!("or press {}", crate::keys::display("PrtScn")))
-        );
+        assert_eq!(capture_button(&s, 1, "PrtScn", false), action("Capture", "Region (800 × 600)".into(), "or press Enter".into()));
         s.delay_seconds = 3;
         assert_eq!(capture_button(&s, 0, "", false).detail, "Select an area · in 3 s");
         assert_eq!(capture_button(&s, 0, "", false).hint, "or press Enter");
@@ -1764,40 +1739,232 @@ mod tests {
     }
 
     #[test]
-    fn the_view_lists_each_tabs_rows() {
+    fn capture_hint_uses_the_selected_action_not_the_global_image_hotkey() {
         let mut s = settings();
-        s.capture_window.tab = 0;
-        let v = view(&s, "PrtScn", false);
-        assert!(v.modes.is_empty() && v.mode_gear.is_none());
-        let titles: Vec<&str> = v.groups.iter().map(|g| g.title).collect();
-        assert_eq!(titles, ["Before capture", "After capture"]);
-        assert!(matches!(&v.groups[1].rows[0], GroupRow::Field(f) if f.id == "share"));
-        s.capture_window.tab = 2;
-        let v = view(&s, "PrtScn", false);
-        assert_eq!(v.groups[0].title, "While recording");
-        assert_eq!(v.groups.iter().map(|g| g.rows.len()).sum::<usize>(), 7);
-        assert!(matches!(&v.groups[0].rows[2], GroupRow::Switch(r) if r.more == Some("webcam")));
-        assert_eq!(v.mode_gear, Some("selection"));
-        let json = serde_json::to_string(&v).unwrap();
-        assert!(json.contains("\"verb\":\"Record\"") && json.contains("\"kind\":\"switch\""), "{json}");
+        for (selection, detail) in [
+            ("image", "Region · in 4 s"),
+            ("window", "Window · in 4 s"),
+            ("fullscreen", "Fullscreen · in 4 s"),
+            ("scrolling", "Scrolling Window · in 4 s"),
+            ("text", "Grab Text · in 4 s"),
+        ] {
+            s.capture_window.selection = selection.into();
+            for key in ["PrtScn", "Ctrl+Shift+X", ""] {
+                let action = capture_button(&s, 1, key, false);
+                assert_eq!(action.detail, detail, "selection {selection}");
+                assert_eq!(action.hint, "or press Enter", "selection {selection}, key {key}");
+            }
+        }
+        assert_eq!(capture_button(&s, 0, "PrtScn", false).hint, "or press Enter");
     }
 
     #[test]
-    fn mode_tiles_show_the_selection_and_more_holds_the_rest() {
+    fn select_and_create_tab_keeps_its_area_then_choose_workflow() {
+        assert_eq!(TABS[0], "Choose");
+
         let mut s = settings();
-        let tiles = modes(&s, 1);
-        let labels: Vec<&str> = tiles.iter().map(|t| t.label.as_str()).collect();
-        assert_eq!(labels, ["Region", "Window", "Fullscreen", "Scrolling", "Grab Text", "More"]);
-        assert!(tiles[0].on, "fixed is a Region");
-        assert_eq!(tiles[1].pick, "sel:window");
+        s.capture_window.tab = 0;
+        let v = view(&s, "PrtScn", false);
+        assert_eq!(v.fields.iter().map(|field| field.id).collect::<Vec<_>>(), ["share"]);
+        assert_eq!(v.fields[0].gear, None);
+        assert_eq!(
+            menu(&s, "options").iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["switch:preview", "switch:clipboard", "switch:cursor", "switch:delay", "", "panel:delay"]
+        );
+        assert_eq!(v.capture.detail, "Select an area · in 4 s");
+        assert_eq!(mode_of(&s, 0), "all", "saved presets retain the compatible mode id");
+    }
+
+    #[test]
+    fn select_and_create_labels_explain_which_settings_apply_to_images() {
+        let mut s = settings();
+        s.capture_window.tab = 0;
+        s.capture_window.timing = "interval".into();
+        s.capture_window.timer = false;
+        let v = view(&s, "PrtScn", false);
+        let json = serde_json::to_value(&v).expect("serialize select and create view");
+
+        assert_eq!(json["timing"], "manual");
+        assert_eq!(v.fields[0].label, "Share");
+        let options = menu(&s, "options");
+        assert_eq!(options[0].label, "Preview in Editor");
+        assert_eq!(options[1].label, "Copy images");
+        assert_eq!(options[2].label, "Cursor (Image only)");
+        assert!(options.iter().take(4).all(|item| item.enabled));
+        assert_eq!(v.capture.detail, "Select an area · in 4 s");
+        assert_eq!(mode_of(&s, 0), "all");
+    }
+
+    #[test]
+    fn interval_capture_shows_its_region_and_disables_inapplicable_settings() {
+        let mut s = settings();
+        s.capture_window.tab = 0;
+        s.capture_window.timing = "interval".into();
+        s.capture_window.timer = true;
+        s.interval_seconds = 2;
+        s.open_in_editor = true;
+        s.copy_to_clipboard = true;
+        s.include_cursor = true;
+
+        let v = view(&s, "PrtScn", false);
+        let json = serde_json::to_value(&v).expect("serialize interval view");
+        assert_eq!(json["timing"], "interval");
+        assert_eq!(json["interval_running"], false);
+        assert_eq!(v.capture.verb, "Start");
+        assert_eq!(v.capture.detail, "Last area or screen under pointer · every 2 s");
+        let options = menu(&s, "options");
+        for (i, option) in options.iter().take(3).enumerate() {
+            assert!(!option.enabled, "automatic capture option {i}");
+            assert!(option.checked, "stored option {i} is not changed");
+        }
+        assert!(options[3].enabled);
+        assert_eq!(options[3].label, "Interval (2 s)");
+
+        let running = view(&s, "PrtScn", true);
+        assert!(running.interval_running);
+        assert_eq!((running.capture.verb, running.capture.detail.as_str()), ("Stop", "Interval capture is running"));
+        s.capture_window.timer = false;
+        let manual = serde_json::to_value(view(&s, "PrtScn", true)).expect("serialize manual view");
+        assert_eq!(manual["timing"], "manual");
+        assert_eq!(manual["interval_running"], true);
+        assert_eq!(manual["capture"]["verb"], "Capture");
+        assert!(menu(&s, "options").iter().take(4).all(|item| item.enabled));
+    }
+
+    #[test]
+    fn scheduled_capture_describes_its_saved_area_or_pointer_screen() {
+        let mut s = settings();
+        s.capture_window.tab = 0;
+        s.capture_window.timing = "schedule".into();
+        s.capture_window.timer = true;
+        s.schedule_default = Some("12:45".into());
+
+        let screen = view(&s, "PrtScn", false);
+        let json = serde_json::to_value(&screen).expect("serialize schedule view");
+        assert_eq!(json["timing"], "schedule");
+        assert_eq!((screen.capture.verb, screen.capture.detail.as_str()), ("Schedule", "Screen under pointer · daily at 12:45"));
+        assert!(!menu(&s, "options")[0].enabled);
+        assert!(menu(&s, "options")[3].enabled);
+
+        s.schedule_area = Some((10, 20, 300, 200));
+        assert_eq!(view(&s, "PrtScn", false).capture.detail, "Saved area · daily at 12:45");
+        s.schedule = Some("12:45".into());
+        let armed = view(&s, "PrtScn", false).capture;
+        assert_eq!((armed.verb, armed.detail.as_str()), ("Cancel", "Daily at 12:45"));
+        s.schedule_default = Some("09:00".into());
+        assert_eq!(switch_label(&s, Switch::Delay), "Schedule (12:45)", "the switch shows the active time");
+    }
+
+    #[test]
+    fn active_schedule_remains_visible_when_switching_timing_modes() {
+        let mut s = settings();
+        s.capture_window.tab = 0;
+        s.schedule = Some("12:45".into());
+        s.delay_seconds = 0;
+
+        for (timer, timing, running, button) in [
+            (false, "schedule", false, "Capture"),
+            (false, "delay", true, "Capture"),
+            (true, "interval", true, "Stop"),
+            (true, "schedule", true, "Cancel"),
+        ] {
+            s.capture_window.timer = timer;
+            s.capture_window.timing = timing.into();
+            let json = serde_json::to_value(view(&s, "PrtScn", running)).expect("serialize capture view");
+            assert_eq!(json["active_schedule"], "12:45", "{timing}, timer={timer}");
+            assert_eq!(json["interval_running"], running, "{timing}, timer={timer}");
+            assert_eq!(json["capture"]["verb"], button, "{timing}, timer={timer}");
+        }
+
+        s.schedule = None;
+        let json = serde_json::to_value(view(&s, "PrtScn", true)).expect("serialize capture view");
+        assert!(json["active_schedule"].is_null(), "a canceled schedule is not reported as active");
+    }
+
+    #[test]
+    fn automatic_timing_applies_to_image_but_not_video_tab() {
+        let mut s = settings();
+        s.capture_window.timing = "interval".into();
+        s.capture_window.timer = true;
+        s.capture_window.tab = 1;
+        let image = view(&s, "PrtScn", false);
+        let image_json = serde_json::to_value(&image).expect("serialize image view");
+        assert_eq!(image_json["timing"], "interval");
+        assert_eq!(image.capture.detail, "Last area or screen under pointer · every 10 s");
+        assert!(!menu(&s, "options")[0].enabled);
+
+        s.capture_window.tab = 2;
+        let video = view(&s, "PrtScn", false);
+        let video_json = serde_json::to_value(&video).expect("serialize video view");
+        assert_eq!(video_json["timing"], "manual");
+        assert_eq!(video.capture.verb, "Record");
+        assert!(menu(&s, "options").iter().all(|item| item.enabled));
+    }
+
+    #[test]
+    fn image_view_shows_dropdowns_and_capture_options() {
+        let mut s = settings();
+        s.capture_window.tab = 1;
+        let v = view(&s, "PrtScn", false);
+        assert_eq!(v.fields.iter().map(|field| field.id).collect::<Vec<_>>(), ["selection", "effects", "share"]);
+        assert_eq!((v.fields[0].text.as_str(), v.fields[0].gear), ("Region (800 × 600)", Some("selection")));
+        assert_eq!(v.fields[1].text, "Border, Shadow");
+        assert_eq!(
+            menu(&s, "options").iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["switch:preview", "switch:clipboard", "switch:cursor", "switch:delay", "", "panel:delay"]
+        );
+        assert_eq!(v.capture.detail, "Region (800 × 600) · in 4 s");
+        let json = serde_json::to_value(&v).expect("serialize image view");
+        assert_eq!(json["fields"][0]["id"], "selection");
+        assert_eq!(json["fields"][0]["gear"], "selection");
+        assert_eq!(json["capture"]["hint"], "or press Enter");
+    }
+
+    #[test]
+    fn video_view_shows_selection_and_recording_options() {
+        let mut s = settings();
+        s.capture_window.tab = 2;
+        let v = view(&s, "PrtScn", false);
+        assert_eq!(v.fields.iter().map(|field| field.id).collect::<Vec<_>>(), ["selection", "share"]);
+        assert_eq!((v.fields[0].text.as_str(), v.fields[0].gear), ("Region", Some("selection")));
+        assert_eq!(
+            menu(&s, "options").iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["switch:webcam", "switch:microphone", "switch:system-audio", "switch:record-cursor", "switch:draw", "switch:preview"]
+        );
+        assert_eq!(v.capture.verb, "Record");
+    }
+
+    #[test]
+    fn option_menu_toggles_settings_and_preserves_their_defaults() {
+        let mut s = settings();
+        s.capture_window.tab = 0;
+        assert!(s.open_in_editor, "captures open in the editor by default");
+        assert_eq!(pick(&mut s, "switch:preview"), Pick::Changed);
+        assert!(!s.open_in_editor);
+        assert_eq!(pick(&mut s, "switch:preview"), Pick::Changed);
+        assert!(s.open_in_editor);
+        assert_eq!(pick(&mut s, "switch:unknown"), Pick::Nothing);
+    }
+
+    #[test]
+    fn selection_dropdown_keeps_main_and_advanced_modes() {
+        let mut s = settings();
+        s.capture_window.tab = 1;
+        let items = menu(&s, "selection");
+        assert!(items.iter().any(|item| item.id == "sel:image" && item.checked), "fixed is a Region");
+        assert!(items.iter().any(|item| item.id == "sel:window"));
+        assert!(items.iter().any(|item| item.id == "sel:clipboard"));
         assert_eq!(pick(&mut s, "sel:panoramic"), Pick::Changed);
-        let more = modes(&s, 1).pop().unwrap();
-        assert_eq!((more.label.as_str(), more.on, more.menu), ("Panoramic", true, Some("more")));
-        let items = menu(&s, "more");
-        assert!(items.iter().any(|i| i.id == "sel:clipboard") && items.iter().any(|i| i.id == "sel:panoramic" && i.checked));
-        assert!(items.iter().all(|i| i.items.is_empty()), "no submenus under More");
-        let video = modes(&s, 2);
-        assert_eq!(video.iter().filter(|t| t.on).map(|t| t.pick.as_str()).collect::<Vec<_>>(), ["vsel:region"]);
+        assert_eq!(view(&s, "PrtScn", false).fields[0].text, "Panoramic");
+        let items = menu(&s, "selection");
+        let advanced = items.iter().find(|item| item.label == "Advanced").expect("advanced selection menu");
+        assert!(advanced.checked);
+        assert!(advanced.items.iter().any(|item| item.id == "sel:panoramic" && item.checked));
+
+        s.capture_window.tab = 2;
+        let video = menu(&s, "selection");
+        assert_eq!(video.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), ["vsel:region", "vsel:window", "vsel:fullscreen"]);
+        assert!(video[0].checked);
     }
 
     #[test]

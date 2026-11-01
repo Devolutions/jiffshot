@@ -41,6 +41,13 @@ pub fn set_cursor_pos(x: i32, y: i32) {
 /// there is none or the post failed.
 pub fn post_to_class(class: &str, msg: u32, wparam: WPARAM, lparam: LPARAM) -> bool {
     let hwnd = find_window(class);
+    if hwnd.is_null() {
+        return false;
+    }
+    #[cfg(windows)]
+    if !crate::is_local_window(hwnd) {
+        return false;
+    }
     // SAFETY: a post to our own window, found by class.
-    !hwnd.is_null() && unsafe { PostMessageW(hwnd, msg, wparam, lparam) } != 0
+    (unsafe { PostMessageW(hwnd, msg, wparam, lparam) }) != 0
 }

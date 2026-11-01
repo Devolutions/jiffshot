@@ -4,7 +4,8 @@
 //! which owns the settings.
 //!
 //! Actions: `tab:N`, `switch:ID`, `menu:NAME`, `pick:ID`, `panel:ID`,
-//! `apply:ID:[values]`, `capture`, `editor`, `closed`.
+//! `apply:ID:[values]`, `capture`, `stop-interval`, `cancel-schedule`,
+//! `editor`, `closed`.
 
 use crate::app;
 use crate::vm::{CaptureViewModel, CaptureViewModelSink};
@@ -95,6 +96,10 @@ pub fn set_window(window: rustolonia::Window, scope: &AppScope) {
     let _ = scope;
 }
 
+pub(crate) fn window() -> Option<rustolonia::Window> {
+    with(|s| s.window.clone())
+}
+
 /// Shows the window with the capture side's current settings, in front.
 pub fn show(scope: &AppScope) {
     with(|s| {
@@ -111,7 +116,7 @@ pub fn show(scope: &AppScope) {
         }
     });
     publish_view();
-    let Some(window) = with(|s| s.window.clone()) else { return };
+    let Some(window) = window() else { return };
     let _ = window.show();
     if let Ok(hwnd) = scope.platform_handle(&window) {
         crate::winutil::bring_forward(hwnd);
@@ -119,7 +124,7 @@ pub fn show(scope: &AppScope) {
 }
 
 fn hide() {
-    if let Some(window) = with(|s| s.window.clone()) {
+    if let Some(window) = window() {
         let _ = window.hide();
     }
 }
@@ -552,6 +557,20 @@ pub(crate) fn ui_only_selftest_action(action: &str) {
     publish_view();
 }
 
+fn interval_action(settings: &Settings, running: bool) -> Option<capture::IntervalAction> {
+    if panel::capture_timing(settings, settings.capture_window.tab.min(2)) != panel::CaptureTiming::Interval {
+        return None;
+    }
+    Some(if running { capture::IntervalAction::Stop } else { capture::IntervalAction::Start })
+}
+
+fn schedule_action(settings: &Settings) -> Option<capture::ScheduleAction> {
+    if panel::capture_timing(settings, settings.capture_window.tab.min(2)) != panel::CaptureTiming::Schedule {
+        return None;
+    }
+    Some(if settings.schedule.is_some() { capture::ScheduleAction::Stop } else { capture::ScheduleAction::Start })
+}
+
 fn act(action: &str) {
     #[cfg(target_os = "macos")]
     if with(|s| {
@@ -592,18 +611,36 @@ fn act(action: &str) {
         #[cfg(target_os = "macos")]
         "select-scheduled-area" => select_scheduled_area(arg),
         "capture" => {
+            let (settings, running) = with(|s| (s.settings.clone(), s.timelapse));
             #[cfg(target_os = "macos")]
-            if capture::start_current() {
-                hide();
-            } else {
-                problem("The capture service is unavailable.");
+            {
+                let posted = if let Some(action) = interval_action(&settings, running) {
+                    capture::set_interval_current(action)
+                } else if let Some(action) = schedule_action(&settings) {
+                    capture::set_schedule_current(action)
+                } else {
+                    capture::start_current()
+                };
+                if posted {
+                    hide();
+                } else {
+                    problem("The capture service is unavailable.");
+                }
             }
             #[cfg(windows)]
             {
                 hide();
-                capture::start(with(|s| s.settings.clone()));
+                if let Some(action) = interval_action(&settings, running) {
+                    capture::set_interval(settings, action);
+                } else if let Some(action) = schedule_action(&settings) {
+                    capture::set_schedule(settings, action);
+                } else {
+                    capture::start(settings);
+                }
             }
         }
+        "stop-interval" => capture::stop_timelapse(),
+        "cancel-schedule" => capture::cancel_schedule(),
         "editor" => app::post(|app| app.show_editor()),
         _ => {}
     }
@@ -640,5 +677,54 @@ impl CaptureViewModel for CaptureModel {
     fn run(&mut self, value: String) -> Result<()> {
         act(&value);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn primary_action_preserves_the_displayed_interval_intent() {
+        let mut settings = Settings::default();
+        settings.capture_window.timer = true;
+        settings.capture_window.timing = "interval".into();
+
+        for tab in [0, 1] {
+            settings.capture_window.tab = tab;
+            assert_eq!(interval_action(&settings, false), Some(capture::IntervalAction::Start));
+            assert_eq!(interval_action(&settings, true), Some(capture::IntervalAction::Stop));
+        }
+        settings.capture_window.tab = 2;
+        assert_eq!(interval_action(&settings, true), None, "video remains a recording action");
+        settings.capture_window.tab = 0;
+        settings.capture_window.timer = false;
+        assert_eq!(interval_action(&settings, true), None, "manual capture remains available");
+        settings.capture_window.timer = true;
+        settings.capture_window.timing = "schedule".into();
+        assert_eq!(interval_action(&settings, true), None, "schedule remains a separate action");
+    }
+
+    #[test]
+    fn primary_action_preserves_the_displayed_schedule_intent() {
+        let mut settings = Settings::default();
+        settings.capture_window.timer = true;
+        settings.capture_window.timing = "schedule".into();
+
+        for tab in [0, 1] {
+            settings.capture_window.tab = tab;
+            settings.schedule = None;
+            assert_eq!(schedule_action(&settings), Some(capture::ScheduleAction::Start));
+            settings.schedule = Some("12:45".into());
+            assert_eq!(schedule_action(&settings), Some(capture::ScheduleAction::Stop));
+        }
+        settings.capture_window.tab = 2;
+        assert_eq!(schedule_action(&settings), None, "video remains a recording action");
+        settings.capture_window.tab = 0;
+        settings.capture_window.timer = false;
+        assert_eq!(schedule_action(&settings), None, "manual capture remains available");
+        settings.capture_window.timer = true;
+        settings.capture_window.timing = "interval".into();
+        assert_eq!(schedule_action(&settings), None, "interval remains a separate action");
     }
 }
