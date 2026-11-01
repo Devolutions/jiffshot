@@ -88,7 +88,7 @@ The detailed feature list below describes the Windows application. The Linux bui
   <img src="docs/images/capture-window.png" alt="Jiffshot Capture Window" width="560" />
 </p>
 
-- **One Capture Window:** The joined action dock groups the **Select**, **Image**, and **Video** mode selector with the round red action button. Choose a mode, then use the separate red button to select an area and choose what to create, capture an image, or record video. Each mode shows its relevant options and Send to destinations; video hides image Effects. Picking Region, Window or Fullscreen in Select or Image sets both image and video; image-only modes like Scrolling keep video on its last area. Press **Enter** to run the selected mode or **Ctrl+1/2/3** to switch modes. Your last mode is remembered. The Capture Widget and tray workflows remain available.
+- **One Capture Window:** The joined action dock groups the **Select**, **Image**, and **Video** mode selector with the round red action button. Choose a mode, then use the separate red button to select an area and choose what to create, capture an image, or record video. Each mode shows its relevant options and Send to destinations; video hides image Effects. Picking Region, Window or Fullscreen in Select or Image sets both image and video; image-only modes like Scrolling keep video on its last area. Press **Enter** to run the selected mode or **Ctrl+1/2/3** to switch modes. Your last mode is remembered. Use **Edit ▸ Reset image and video options** to restore both sets of capture options. The Capture Widget and tray workflows remain available.
 - **Smart Selection Overlay:** Captures from an instant frozen desktop snapshot so transient UI states never move while you aim. Includes a live pixel magnifier with coordinates and `#RRGGBB` color readout, dimension labels, and on-screen help (`F1`).
 - **Specialized Capture Modes:**
   - **Scrolling Capture:** Automatically scrolls and stitches vertical, horizontal, or two-axis scrolling windows and web pages.
@@ -113,7 +113,7 @@ The detailed feature list below describes the Windows application. The Linux bui
   - **Pen, Highlighter & Stamps:** Freehand drawing, multiply-blend highlighters, built-in icon stamps, flood fill, eraser, magic wand background removal, and eyedropper.
   - **Blur, Magnify & Spotlight:** Pixelate, Gaussian-blur, or solid-redact sensitive regions; add circular/rectangular zoom loupes; dim or blur the background outside one or more spotlight areas.
 - **Movable Cursor Object:** Optionally captures the mouse pointer as a separate layer you can move, resize, or delete in the editor. If that layer cannot be saved, the image remains in the library and Jiffshot reports the problem instead of opening an incomplete edit automatically.
-- **Quick Styles & Themes:** Save custom tool styles, switch Quick Style palettes, customize the toolbar order, and switch between **Dark**, **Light**, and **System** themes across every Jiffshot window.
+- **Quick Styles & Themes:** Save custom tool styles, switch Quick Style palettes, customize the toolbar order, and switch between **Dark**, **Light**, and **System** themes across every Jiffshot window. On Windows, Jiffshot's own Dark surfaces use Devolutions' DarkBlue palette.
 
 ### Smart Editing Tools
 

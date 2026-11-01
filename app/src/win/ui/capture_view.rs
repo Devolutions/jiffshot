@@ -7,9 +7,12 @@
 //! option panel or a note under the control that asked for it. This module
 //! only lays them out and sends back actions.
 
+#[cfg(windows)]
+mod caption;
 pub(super) mod parts;
 
 use self::parts::{on_click, payload, post, Form, Input, Subscriptions, GLYPHS};
+use super::dark_blue;
 use crate::vm::CaptureBinding;
 #[cfg(target_os = "macos")]
 use crate::vm::CaptureViewModelSink;
@@ -19,6 +22,8 @@ use rustolonia::{
     MenuItem, MenuItemToggleType, NodeRef, Orientation, PlacementMode, Result, ScrollViewer, Separator, Signal, StackPanel, TextAlignment, TextBlock, TextWrapping, Upcast,
     VerticalAlignment, Window, WindowStartupLocation,
 };
+#[cfg(windows)]
+use rustolonia::{Brush, Path, WindowDecorations, WindowState};
 #[cfg(target_os = "macos")]
 use rustolonia::ScrollBarVisibility;
 use serde::Deserialize;
@@ -29,6 +34,7 @@ use std::rc::Rc;
 struct Palette {
     back: Color,
     card: Color,
+    dock: Color,
     edge: Color,
     frame: Color,
     text: Color,
@@ -39,6 +45,7 @@ struct Palette {
 const LIGHT: Palette = Palette {
     back: parts::rgb(0xF3F3F3),
     card: parts::rgb(0xFFFFFF),
+    dock: parts::rgb(0xE0E0E0),
     edge: parts::rgb(0xE0E0E0),
     frame: parts::rgb(0xC8C8C8),
     text: parts::rgb(0x1F1F1F),
@@ -47,13 +54,14 @@ const LIGHT: Palette = Palette {
 };
 
 const DARK: Palette = Palette {
-    back: parts::rgb(0x1F2023),
-    card: parts::rgb(0x2B2D31),
-    edge: parts::rgb(0x3A3C40),
-    frame: parts::rgb(0x4A4D52),
-    text: parts::rgb(0xEDEEF0),
-    muted: parts::rgb(0xA9ADB4),
-    accent: parts::rgb(0x2F7FD6),
+    back: parts::rgb(dark_blue::windows_or(dark_blue::WINDOW, 0x1F2023)),
+    card: parts::rgb(dark_blue::windows_or(dark_blue::PANEL, 0x2B2D31)),
+    dock: parts::rgb(dark_blue::windows_or(dark_blue::CARD, 0x3A3C40)),
+    edge: parts::rgb(dark_blue::windows_or(dark_blue::BORDER, 0x3A3C40)),
+    frame: parts::rgb(dark_blue::windows_or(dark_blue::STRONG_BORDER, 0x4A4D52)),
+    text: parts::rgb(dark_blue::windows_or(dark_blue::TEXT, 0xEDEEF0)),
+    muted: parts::rgb(dark_blue::windows_or(dark_blue::SECONDARY_TEXT, 0xA9ADB4)),
+    accent: parts::rgb(dark_blue::windows_or(dark_blue::ACCENT, 0x2F7FD6)),
 };
 
 const TITLE: &str = "Jiffshot Capture";
@@ -67,8 +75,8 @@ const MODES: [(&str, &str); 3] = [
 const MODE_GLYPHS: [&str; 3] = ["\u{E8B3}", "\u{E722}", "\u{E714}"];
 
 const WHITE: Color = parts::rgb(0xFFFFFF);
-const SELECTED_MODE_DARK: Color = parts::rgb(0x284662);
-const SELECTED_MODE_ICON_DARK: Color = parts::rgb(0x73BAFF);
+const SELECTED_MODE_DARK: Color = parts::rgb(dark_blue::windows_or(dark_blue::SELECTION, 0x284662));
+const SELECTED_MODE_ICON_DARK: Color = parts::rgb(dark_blue::windows_or(dark_blue::ACCENT_TEXT, 0x73BAFF));
 const CAPTURE_RED: Color = parts::rgb(0xD13438);
 const CAPTURE_RED_HOVER: Color = parts::rgb(0xB82B2F);
 const CAPTURE_RING: Color = parts::rgb(0xF5B0A8);
@@ -239,6 +247,8 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
     let interval_running = scope.signal(false);
     let active_schedule = scope.signal(None::<String>);
     let action = scope.signal((String::from("Capture"), String::new(), String::new()));
+    #[cfg(windows)]
+    let custom_caption = scope.signal(true);
     let (window_ref, fields) = (NodeRef::new(), NodeRef::new());
     // The static controls' subscriptions last as long as the window.
     let subs = Subscriptions::default();
@@ -246,6 +256,29 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
     let menu_button = |label: &str, which: &'static str| {
         on_click(flat(dark).content(label.to_owned()), &subs, move |button: &Button| request("menu", which, button.upcast()))
     };
+    #[cfg(windows)]
+    let title_bar = Grid::el()
+        .column_definitions(format!("{},*,{},{}", caption::MENU_WIDTH, caption::BUTTON_WIDTH, caption::BUTTON_WIDTH))
+        .background(move || if dark.get() { parts::rgb(dark_blue::CHROME) } else { palette(dark).back })
+        .child(
+            Grid::el()
+                .column_definitions("Auto,Auto")
+                .child(Image::el().source(super::icon_file()).width(20.0).height(20.0).margin((14.0, 0.0, 10.0, 0.0)).vertical_alignment(VerticalAlignment::Center))
+                .child(
+                    StackPanel::el()
+                        .grid_column(1)
+                        .orientation(Orientation::Horizontal)
+                        .spacing(2.0)
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .child(menu_button("File", "file"))
+                        .child(menu_button("Edit", "edit"))
+                        .child(menu_button("View", "view"))
+                        .child(menu_button("Help", "help")),
+                ),
+        )
+        .child(caption_button(scope, dark, custom_caption, &subs, 2, "Minimize", false))
+        .child(caption_button(scope, dark, custom_caption, &subs, 3, "Close", true));
+    #[cfg(not(windows))]
     let title_bar = Grid::el()
         .column_definitions("Auto,Auto,*")
         .child(Image::el().source(super::icon_file()).width(20.0).height(20.0).margin((14.0, 0.0, 10.0, 0.0)).vertical_alignment(VerticalAlignment::Center))
@@ -315,7 +348,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         .height(200.0)
         .padding(5.0)
         .corner_radius(16.0)
-        .background(move || palette(dark).edge)
+        .background(move || palette(dark).dock)
         .border_brush(move || palette(dark).frame)
         .border_thickness(1.0)
         .child(
@@ -332,16 +365,6 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                 .child(capture_button.margin((0.0, 4.0, 0.0, 0.0)))
                 .child(detail.margin((0.0, 2.0, 0.0, 0.0))),
         );
-    let reset = on_click(
-        flat(dark)
-            .horizontal_alignment(HorizontalAlignment::Right)
-            .vertical_alignment(VerticalAlignment::Top)
-            .margin((0.0, 4.0, 4.0, 0.0))
-            .tool_tip_tip("Reset image and video options")
-            .content(glyph("\u{E72C}", 15.0)),
-        &subs,
-        |_| run("pick:reset".into()),
-    );
     let stop_interval = status_button(dark, &subs, "Stop", "Stop interval capture", "stop-interval");
     let cancel_schedule = status_button(dark, &subs, "Cancel", "Cancel daily scheduled capture", "cancel-schedule");
     let card = Border::el()
@@ -395,13 +418,11 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                         ),
                 )
                 .child(
-                    Grid::el().grid_column(1).child(reset).child(
-                        Border::el()
-                            .vertical_alignment(VerticalAlignment::Top)
-                            .horizontal_alignment(HorizontalAlignment::Center)
-                            .margin((0.0, 38.0, 0.0, 0.0))
-                            .child(mode_dock),
-                    ),
+                    Border::el()
+                        .grid_column(1)
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .horizontal_alignment(HorizontalAlignment::Center)
+                        .child(mode_dock),
                 ),
         );
 
@@ -448,6 +469,35 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         // only the native window's (the taskbar's and Alt+Tab's).
         .title("")
         .on_loaded(move |_| {
+            #[cfg(windows)]
+            {
+                if !custom_caption.get() {
+                    return;
+                }
+                let Some(window) = window_ref.get() else {
+                    eprintln!("Capture window title bar: window unavailable");
+                    return;
+                };
+                let result = if let Some(hwnd) = parts::hwnd(&loaded_scope, &window) {
+                    parts::set_native_title(hwnd, TITLE);
+                    caption::install(hwnd as windows_sys::Win32::Foundation::HWND)
+                } else {
+                    Err(std::io::Error::other("native window handle unavailable"))
+                };
+                if let Err(error) = result {
+                    eprintln!("Capture window title bar: {error}");
+                    custom_caption.set(false);
+                    let fallback = window
+                        .set_extend_client_area_to_decorations_hint(false)
+                        .and_then(|_| window.set_window_decorations(WindowDecorations::Full))
+                        .and_then(|_| window.set_title(TITLE))
+                        .and_then(|_| window.set_height(350.0));
+                    if let Err(error) = fallback {
+                        eprintln!("Capture window native title bar: {error:?}");
+                    }
+                }
+            }
+            #[cfg(not(windows))]
             if let Some(hwnd) = window_ref.get().and_then(|window| parts::hwnd(&loaded_scope, &window)) {
                 parts::set_native_title(hwnd, TITLE);
             }
@@ -456,7 +506,10 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         .width(560.0)
         .height(320.0)
         .can_resize(false)
-        .can_maximize(false)
+        .can_maximize(false);
+    #[cfg(windows)]
+    let window = window.window_decorations(WindowDecorations::BorderOnly);
+    let window = window
         .window_startup_location(WindowStartupLocation::CenterScreen)
         .extend_client_area_to_decorations_hint(true)
         .extend_client_area_title_bar_height_hint(40.0)
@@ -567,6 +620,57 @@ pub(super) fn view_tab_for_selftest() -> Option<usize> {
 /// A borderless button (`Button.flat`).
 fn flat(dark: Signal<bool>) -> El<Button> {
     Button::el().background(parts::TRANSPARENT).padding((9.0, 4.0)).corner_radius(5.0).foreground(move || palette(dark).text)
+}
+
+#[cfg(windows)]
+fn caption_button(scope: &AppScope, dark: Signal<bool>, visible: Signal<bool>, subs: &Subscriptions, column: i32, label: &'static str, close: bool) -> El<Grid> {
+    let hover = scope.signal(false);
+    let button = on_click(
+        Button::el()
+            .width(caption::BUTTON_WIDTH)
+            .height(caption::HEIGHT)
+            .padding(0.0)
+            .corner_radius(0.0)
+            .border_thickness(0.0)
+            .foreground(parts::TRANSPARENT)
+            .background(parts::TRANSPARENT)
+            .on_pointer_entered(move |_| hover.set(true))
+            .on_pointer_exited(move |_| hover.set(false))
+            .tool_tip_tip(label)
+            .content(label),
+        subs,
+        move |_| {
+            if let Some(window) = with_ui(|ui| ui.window.get()).flatten() {
+                let result = if close { window.close() } else { window.set_window_state(WindowState::Minimized) };
+                if let Err(error) = result {
+                    eprintln!("Capture window {label}: {error:?}");
+                }
+            }
+        },
+    );
+    Grid::el()
+        .grid_column(column)
+        .visible(visible)
+        .child(Border::el().background(move || {
+            if !hover.get() {
+                parts::TRANSPARENT
+            } else if close {
+                parts::rgb(0xC42B1C)
+            } else if dark.get() {
+                parts::rgb(dark_blue::HOVER)
+            } else {
+                parts::rgb(0xE2E2E2)
+            }
+        }))
+        .child(
+            Path::el()
+                .data(if close { "M 0,0 L 9,9 M 9,0 L 0,9" } else { "M 0,0 L 10,0" })
+                .stroke(move || Some(Brush::solid(if close && hover.get() { WHITE } else { palette(dark).text })))
+                .stroke_thickness(1.0)
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .vertical_alignment(VerticalAlignment::Center),
+        )
+        .child(button)
 }
 
 fn status_button(dark: Signal<bool>, subs: &Subscriptions, label: &str, tip: &str, action: &'static str) -> El<Button> {
@@ -778,7 +882,7 @@ fn icon_action_button(
 
 // ---- keys and closing ------------------------------------------------------
 
-/// Enter captures an image; the command key plus 3 records; Escape closes.
+/// Enter runs the selected mode, the command key plus 1-3 switches modes, and Escape closes.
 fn on_key(e: &mut rustolonia::ControlKeyDownEventArgs) {
     if e.handled {
         return;
@@ -1029,6 +1133,8 @@ mod tests {
             let ratio = contrast(WHITE, background);
             assert!(ratio >= 4.5, "{name} contrast {ratio:.2} is below 4.5:1");
         }
+        let ratio = contrast(SELECTED_MODE_ICON_DARK, SELECTED_MODE_DARK);
+        assert!(ratio >= 4.5, "dark selected mode contrast {ratio:.2} is below 4.5:1");
     }
 
     #[test]

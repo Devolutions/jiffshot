@@ -614,7 +614,7 @@ fn capture_menu(settings: &Settings, id: &str) -> Vec<panel::MenuItem> {
         "view" => items.retain(|item| !item.id.starts_with("tab:") && !item.separator),
         "edit" => {
             for item in items.iter_mut().filter(|item| item.id == "reset") {
-                item.label = "Reset capture options".into();
+                item.label = "Reset image and video options".into();
             }
         }
         _ => {}
@@ -854,6 +854,33 @@ mod tests {
             assert!(panel::panel(&scoped_settings, &id, false, "").is_some(), "missing {}", item.id);
         }
         assert!(capture_menu(&settings, "view").iter().all(|item| !item.id.starts_with("tab:")));
+    }
+
+    #[test]
+    fn edit_menu_reset_restores_both_modes_without_changing_the_selected_mode() {
+        let defaults = Settings::default();
+        for tab in 0..=2 {
+            let mut settings = Settings::default();
+            settings.capture_window.tab = tab;
+            settings.capture_window.selection = "scrolling".into();
+            settings.capture_window.video_selection = "fullscreen".into();
+            settings.capture_window.timer = true;
+            settings.record_audio = "both".into();
+            settings.record_fps = 60;
+            let reset = capture_menu(&settings, "edit").into_iter().find(|item| item.id == "reset").expect("Edit menu must contain reset");
+            assert_eq!(reset.label, "Reset image and video options");
+
+            with(|s| s.settings = settings);
+            act(&format!("pick:{}", reset.id));
+            with(|s| {
+                assert_eq!(s.settings.capture_window.tab, tab);
+                assert_eq!(s.settings.capture_window.selection, defaults.capture_window.selection);
+                assert_eq!(s.settings.capture_window.video_selection, defaults.capture_window.video_selection);
+                assert!(!s.settings.capture_window.timer);
+                assert_eq!(s.settings.record_audio, defaults.record_audio);
+                assert_eq!(s.settings.record_fps, defaults.record_fps);
+            });
+        }
     }
 
     #[test]

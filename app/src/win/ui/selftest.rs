@@ -3725,6 +3725,7 @@ fn show_capture_scheduled_fixture(t: &mut Test, timing: &str, running: bool) {
 fn capture_ux_steps(s: &mut Script) {
     let k = sink();
     s.step(|t| {
+        run("theme:Dark");
         match crate::capture_window::window() {
             Some(window) => {
                 if let Err(error) = window.set_show_activated(false).and_then(|_| window.show()) {
@@ -3752,6 +3753,7 @@ fn capture_ux_steps(s: &mut Script) {
         } else {
             t.line("capture window: not shown");
         }
+        t.shot("editor-dark.png");
         show_capture_fixture(t, "interval", false);
         500
     })
@@ -3844,6 +3846,7 @@ fn capture_ux_steps(s: &mut Script) {
         if let Ok(hwnd) = t.note.parse::<isize>() {
             t.shot_of(hwnd, "capture-manual-both-running-light.png");
         }
+        t.shot("editor-light.png");
         show_capture_fixture(t, "delay", false);
         500
     })

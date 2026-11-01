@@ -3,6 +3,7 @@
 //! and bars), lists that refill themselves, and value conversions.
 
 use crate::ui::canvas_view::CanvasView;
+use crate::ui::dark_blue;
 use crate::ui::UiOnly;
 use crate::vm::{MainViewModel, MainViewModelSink};
 use rustolonia::{
@@ -98,17 +99,17 @@ impl Tone {
     /// `#AARRGGBB` in the dark and the light theme.
     fn argb(self, dark: bool) -> u32 {
         let (dark_argb, light_argb) = match self {
-            Tone::Window => (0xFF1B1C1F, 0xFFF3F4F6),
-            Tone::Panel => (0xFF232428, 0xFFFFFFFF),
-            Tone::Tray => (0xFF1F2023, 0xFFECEEF1),
-            Tone::Chip => (0xFF26282C, 0xFFE8EAED),
-            Tone::Well => (0xFF2C2E33, 0xFFE1E4E8),
-            Tone::Border => (0xFF2E3034, 0xFFD5D8DD),
-            Tone::BorderStrong => (0xFF3A3C40, 0xFFC4C8CE),
-            Tone::Muted => (0xFF8A8F98, 0xFF6B7280),
-            Tone::Caption => (0xFFC0C4CC, 0xFF4B5563),
-            Tone::Subtle => (0xFFC8CACE, 0xFF374151),
-            Tone::Text => (0xFFF2F3F5, 0xFF1F2328),
+            Tone::Window => (dark_blue::windows_or(dark_blue::WINDOW, 0xFF1B1C1F), 0xFFF3F4F6),
+            Tone::Panel => (dark_blue::windows_or(dark_blue::PANEL, 0xFF232428), 0xFFFFFFFF),
+            Tone::Tray => (dark_blue::windows_or(dark_blue::CHROME, 0xFF1F2023), 0xFFECEEF1),
+            Tone::Chip => (dark_blue::windows_or(dark_blue::CARD, 0xFF26282C), 0xFFE8EAED),
+            Tone::Well => (dark_blue::windows_or(dark_blue::HOVER, 0xFF2C2E33), 0xFFE1E4E8),
+            Tone::Border => (dark_blue::windows_or(dark_blue::BORDER, 0xFF2E3034), 0xFFD5D8DD),
+            Tone::BorderStrong => (dark_blue::windows_or(dark_blue::INPUT_BORDER, 0xFF3A3C40), 0xFFC4C8CE),
+            Tone::Muted => (dark_blue::windows_or(dark_blue::MUTED_TEXT, 0xFF8A8F98), 0xFF6B7280),
+            Tone::Caption => (dark_blue::windows_or(dark_blue::SECONDARY_TEXT, 0xFFC0C4CC), 0xFF4B5563),
+            Tone::Subtle => (dark_blue::windows_or(dark_blue::SECONDARY_TEXT, 0xFFC8CACE), 0xFF374151),
+            Tone::Text => (dark_blue::windows_or(dark_blue::TEXT, 0xFFF2F3F5), 0xFF1F2328),
         };
         if dark {
             dark_argb
