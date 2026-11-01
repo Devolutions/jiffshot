@@ -5,3 +5,4 @@
 *.yml text
 *.ico binary
 *.png binary
+package/linux/* text eol=lf

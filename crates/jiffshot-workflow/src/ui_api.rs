@@ -81,7 +81,9 @@ fn state_of(view: &View, done: bool, path: usize, regions: usize) -> OverlayStat
         lit_kind: view.lit_kind,
         monitor: r(view.monitor),
         scale: view.scale,
-        color: view.color.map_or([0; 3], |(r, g, b)| [r as i32, g as i32, b as i32]),
+        color: view
+            .color
+            .map_or([0; 3], |(r, g, b)| [r as i32, g as i32, b as i32]),
         path_count: path as i32,
         region_count: regions as i32,
     }
@@ -90,10 +92,20 @@ fn state_of(view: &View, done: bool, path: usize, regions: usize) -> OverlayStat
 /// Input for overlay `session` (desktop pixels; `value` is the wheel delta
 /// or the virtual key), then the state. A session that is over answers
 /// [`FLAG_DONE`].
-pub fn overlay_input(session: u64, kind: i32, x: f64, y: f64, value: i32, mods: i32) -> OverlayState {
+pub fn overlay_input(
+    session: u64,
+    kind: i32,
+    x: f64,
+    y: f64,
+    value: i32,
+    mods: i32,
+) -> OverlayState {
     let mut guard = overlay::session();
     let Some(s) = guard.as_mut().filter(|s| s.id == session) else {
-        return OverlayState { flags: FLAG_DONE, ..OverlayState::default() };
+        return OverlayState {
+            flags: FLAG_DONE,
+            ..OverlayState::default()
+        };
     };
     let o = &mut s.overlay;
     let shift = mods & MOD_SHIFT != 0;
@@ -130,7 +142,9 @@ pub fn overlay_input(session: u64, kind: i32, x: f64, y: f64, value: i32, mods: 
 /// joined by '\n'.
 pub fn overlay_text(session: u64, which: i32) -> String {
     let mut guard = overlay::session();
-    let Some(s) = guard.as_mut().filter(|s| s.id == session) else { return String::new() };
+    let Some(s) = guard.as_mut().filter(|s| s.id == session) else {
+        return String::new();
+    };
     let view = s.overlay.view();
     match which {
         TEXT_TITLE => view.title.unwrap_or_default(),
@@ -144,10 +158,16 @@ pub fn overlay_text(session: u64, which: i32) -> String {
 /// (x, y), the multi-area regions (x, y, w, h) or the video guides (w, h).
 pub fn overlay_points(session: u64, which: i32) -> Vec<i32> {
     let guard = overlay::session();
-    let Some(s) = guard.as_ref().filter(|s| s.id == session) else { return Vec::new() };
+    let Some(s) = guard.as_ref().filter(|s| s.id == session) else {
+        return Vec::new();
+    };
     match which {
         POINTS_PATH => s.overlay.path().flat_map(|(x, y)| [x, y]).collect(),
-        POINTS_REGIONS => s.overlay.regions().flat_map(|r| [r.x, r.y, r.width, r.height]).collect(),
+        POINTS_REGIONS => s
+            .overlay
+            .regions()
+            .flat_map(|r| [r.x, r.y, r.width, r.height])
+            .collect(),
         _ => overlay::GUIDES.iter().flat_map(|&(w, h)| [w, h]).collect(),
     }
 }
@@ -157,7 +177,9 @@ pub fn overlay_points(session: u64, which: i32) -> Vec<i32> {
 /// small.
 pub fn overlay_copy(session: u64, r: Rect, dst: &mut [u8], stride: usize) -> bool {
     let guard = overlay::session();
-    let Some(s) = guard.as_ref().filter(|s| s.id == session) else { return false };
+    let Some(s) = guard.as_ref().filter(|s| s.id == session) else {
+        return false;
+    };
     let (w, h) = (r.width, r.height);
     if w <= 0 || h <= 0 || stride < w as usize * 4 || dst.len() < stride * h as usize {
         return false;
@@ -170,7 +192,10 @@ pub fn overlay_copy(session: u64, r: Rect, dst: &mut [u8], stride: usize) -> boo
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
     let per = (h as usize).div_ceil(threads);
     std::thread::scope(|scope| {
-        for (band, rows) in dst[..stride * h as usize].chunks_mut(per * stride).enumerate() {
+        for (band, rows) in dst[..stride * h as usize]
+            .chunks_mut(per * stride)
+            .enumerate()
+        {
             scope.spawn(move || {
                 for (i, line) in rows.chunks_mut(stride).enumerate() {
                     let line = &mut line[..w as usize * 4];
@@ -183,7 +208,8 @@ pub fn overlay_copy(session: u64, r: Rect, dst: &mut [u8], stride: usize) -> boo
                     if x1 > x0 {
                         let from = sy as usize * src_stride + x0 as usize * 4;
                         let at = (x0 - ox) as usize * 4;
-                        line[at..at + (x1 - x0) as usize * 4].copy_from_slice(&snap.pixels[from..from + (x1 - x0) as usize * 4]);
+                        line[at..at + (x1 - x0) as usize * 4]
+                            .copy_from_slice(&snap.pixels[from..from + (x1 - x0) as usize * 4]);
                     }
                 }
             });
@@ -195,8 +221,15 @@ pub fn overlay_copy(session: u64, r: Rect, dst: &mut [u8], stride: usize) -> boo
 /// The overlay is on screen (for the timing log).
 pub fn overlay_shown(session: u64) {
     let guard = overlay::session();
-    if let Some(started) = guard.as_ref().filter(|s| s.id == session).and_then(|s| s.overlay.started) {
-        crate::log(&format!("overlay on screen {:.0} ms after the hotkey", started.elapsed().as_secs_f64() * 1000.0));
+    if let Some(started) = guard
+        .as_ref()
+        .filter(|s| s.id == session)
+        .and_then(|s| s.overlay.started)
+    {
+        crate::log(&format!(
+            "overlay on screen {:.0} ms after the hotkey",
+            started.elapsed().as_secs_f64() * 1000.0
+        ));
     }
 }
 
@@ -220,7 +253,9 @@ pub fn draw_input(session: u64, kind: i32, x: f64, y: f64, value: i32) -> bool {
     let p = Pt::new(x as f32, y as f32);
     let ended = {
         let mut guard = screendraw::state();
-        let Some(s) = guard.as_mut().filter(|s| s.id == session) else { return false };
+        let Some(s) = guard.as_mut().filter(|s| s.id == session) else {
+            return false;
+        };
         match kind {
             INPUT_PRESS => s.press(p),
             INPUT_MOVE => return s.moved(p),
@@ -242,7 +277,10 @@ pub fn draw_input(session: u64, kind: i32, x: f64, y: f64, value: i32) -> bool {
 
 /// Re-renders fading marks; true when they changed.
 pub fn draw_tick(session: u64) -> bool {
-    screendraw::state().as_mut().filter(|s| s.id == session).is_some_and(|s| s.tick())
+    screendraw::state()
+        .as_mut()
+        .filter(|s| s.id == session)
+        .is_some_and(|s| s.tick())
 }
 
 /// Copies the marks (premultiplied BGRA, `w` × `h`, tightly packed) into
@@ -251,7 +289,9 @@ pub fn draw_tick(session: u64) -> bool {
 pub fn draw_copy(session: u64, dst: &mut [u8], w: u32, h: u32) -> bool {
     let image = {
         let guard = screendraw::state();
-        let Some(s) = guard.as_ref().filter(|s| s.id == session) else { return false };
+        let Some(s) = guard.as_ref().filter(|s| s.id == session) else {
+            return false;
+        };
         s.image.clone()
     };
     let stride = w as usize * 4;
@@ -278,7 +318,9 @@ pub fn draw_copy(session: u64, dst: &mut [u8], w: u32, h: u32) -> bool {
 pub fn draw_demo(r: Rect) -> String {
     screendraw::show(r, std::time::Duration::ZERO);
     let guard = screendraw::state();
-    let Some(s) = guard.as_ref() else { return String::new() };
+    let Some(s) = guard.as_ref() else {
+        return String::new();
+    };
     serde_json::json!({ "id": s.id, "area": [r.x, r.y, r.width, r.height] }).to_string()
 }
 

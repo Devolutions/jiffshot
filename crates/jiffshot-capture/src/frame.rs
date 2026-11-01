@@ -15,7 +15,12 @@ pub struct Frame {
 
 impl Frame {
     pub fn new(width: u32, height: u32) -> Frame {
-        Frame { width, height, pixels: vec![0; width as usize * height as usize * 4], alpha: false }
+        Frame {
+            width,
+            height,
+            pixels: vec![0; width as usize * height as usize * 4],
+            alpha: false,
+        }
     }
 
     pub fn stride(&self) -> usize {
@@ -40,14 +45,24 @@ impl Frame {
     pub fn load_png(path: &Path) -> io::Result<Frame> {
         let file = std::io::BufReader::new(std::fs::File::open(path)?);
         let mut decoder = png::Decoder::new(file);
-        decoder.set_transformations(png::Transformations::normalize_to_color8() | png::Transformations::ALPHA);
+        decoder.set_transformations(
+            png::Transformations::normalize_to_color8() | png::Transformations::ALPHA,
+        );
         let mut reader = decoder.read_info().map_err(io::Error::other)?;
         let mut buf = vec![0; reader.output_buffer_size()];
         let info = reader.next_frame(&mut buf).map_err(io::Error::other)?;
         let mut frame = Frame::new(info.width, info.height);
         let channels = info.color_type.samples();
-        for (dst, src) in frame.pixels.chunks_exact_mut(4).zip(buf.chunks_exact(channels)) {
-            let (r, g, b) = if channels >= 3 { (src[0], src[1], src[2]) } else { (src[0], src[0], src[0]) };
+        for (dst, src) in frame
+            .pixels
+            .chunks_exact_mut(4)
+            .zip(buf.chunks_exact(channels))
+        {
+            let (r, g, b) = if channels >= 3 {
+                (src[0], src[1], src[2])
+            } else {
+                (src[0], src[0], src[0])
+            };
             dst.copy_from_slice(&[b, g, r, 255]);
         }
         Ok(frame)
@@ -70,7 +85,11 @@ impl Frame {
     /// a 4K screenshot must save in well under a second.
     pub fn encode_png(&self, out: impl Write) -> io::Result<()> {
         let mut encoder = png::Encoder::new(out, self.width, self.height);
-        encoder.set_color(if self.alpha { png::ColorType::Rgba } else { png::ColorType::Rgb });
+        encoder.set_color(if self.alpha {
+            png::ColorType::Rgba
+        } else {
+            png::ColorType::Rgb
+        });
         encoder.set_depth(png::BitDepth::Eight);
         encoder.set_compression(png::Compression::Fast);
         encoder.set_filter(png::FilterType::Paeth);

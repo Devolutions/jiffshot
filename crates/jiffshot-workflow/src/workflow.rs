@@ -37,34 +37,63 @@ fn meta(kind: CaptureKind, rect: Rect, frame: &Frame, cursor_included: bool) -> 
     }
 }
 
-const BROWSERS: &[&str] = &["chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe"];
+const BROWSERS: &[&str] = &[
+    "chrome.exe",
+    "msedge.exe",
+    "firefox.exe",
+    "brave.exe",
+    "opera.exe",
+    "vivaldi.exe",
+];
 
 /// The address in a browser window's address bar (UI Automation: the
 /// first edit box, which every major browser puts in its toolbar).
 pub fn browser_url(hwnd: isize) -> Option<String> {
     use windows::Win32::Foundation::HWND as WHWND;
-    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    };
     use windows::Win32::System::Variant::VARIANT;
-    use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, TreeScope_Descendants, UIA_ControlTypePropertyId, UIA_EditControlTypeId, UIA_ValueValuePropertyId};
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, TreeScope_Descendants, UIA_ControlTypePropertyId,
+        UIA_EditControlTypeId, UIA_ValueValuePropertyId,
+    };
     // SAFETY: COM calls on this (worker) thread with valid arguments.
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+        let automation: IUIAutomation =
+            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
         let window = automation.ElementFromHandle(WHWND(hwnd as *mut _)).ok()?;
-        let edit = automation.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_EditControlTypeId.0)).ok()?;
+        let edit = automation
+            .CreatePropertyCondition(
+                UIA_ControlTypePropertyId,
+                &VARIANT::from(UIA_EditControlTypeId.0),
+            )
+            .ok()?;
         let bar = window.FindFirst(TreeScope_Descendants, &edit).ok()?;
         let value = bar.GetCurrentPropertyValue(UIA_ValueValuePropertyId).ok()?;
         let text = value.to_string().trim().to_owned();
         if text.is_empty() || text.contains(' ') {
             return None;
         }
-        Some(if text.contains("://") || text.starts_with("about:") { text } else { format!("https://{text}") })
+        Some(if text.contains("://") || text.starts_with("about:") {
+            text
+        } else {
+            format!("https://{text}")
+        })
     }
 }
 
-fn add_cursor(frame: &mut Frame, rect: Rect, cursor: Option<&CursorSnapshot>, include: bool) -> bool {
+fn add_cursor(
+    frame: &mut Frame,
+    rect: Rect,
+    cursor: Option<&CursorSnapshot>,
+    include: bool,
+) -> bool {
     match cursor {
-        Some(cursor) if include && rect.contains(cursor.x, cursor.y) => cursor.draw_onto(frame, (rect.x, rect.y)).is_ok(),
+        Some(cursor) if include && rect.contains(cursor.x, cursor.y) => {
+            cursor.draw_onto(frame, (rect.x, rect.y)).is_ok()
+        }
         _ => false,
     }
 }
@@ -99,13 +128,24 @@ fn inside(points: &[(i32, i32)], x: i32, y: i32) -> bool {
 /// Crops the overlay's frozen snapshot to the selection.
 /// `cursor_object`: keep the pointer as a separate image (for the editor)
 /// instead of drawing it in.
-pub fn from_overlay(overlay: &Overlay, selection: &Selection, cursor: Option<&CursorSnapshot>, include_cursor: bool, cursor_object: bool) -> Option<Capture> {
+pub fn from_overlay(
+    overlay: &Overlay,
+    selection: &Selection,
+    cursor: Option<&CursorSnapshot>,
+    include_cursor: bool,
+    cursor_object: bool,
+) -> Option<Capture> {
     let rect = selection.rect();
-    let mut frame = overlay.snapshot.crop(rect.offset(-overlay.origin.0, -overlay.origin.1))?;
+    let mut frame = overlay
+        .snapshot
+        .crop(rect.offset(-overlay.origin.0, -overlay.origin.1))?;
     let mut separate = None;
     let cursor_included = match cursor {
         Some(c) if include_cursor && cursor_object && rect.contains(c.x, c.y) => {
-            separate = c.image().ok().map(|img| (img, (c.x - rect.x, c.y - rect.y)));
+            separate = c
+                .image()
+                .ok()
+                .map(|img| (img, (c.x - rect.x, c.y - rect.y)));
             separate.is_some()
         }
         _ => add_cursor(&mut frame, rect, cursor, include_cursor),
@@ -116,7 +156,9 @@ pub fn from_overlay(overlay: &Overlay, selection: &Selection, cursor: Option<&Cu
             mask_frame(&mut frame, rect, |x, y| inside(points, x, y));
         }
         Selection::Multi { regions, .. } => {
-            mask_frame(&mut frame, rect, |x, y| regions.iter().any(|r| r.contains(x, y)));
+            mask_frame(&mut frame, rect, |x, y| {
+                regions.iter().any(|r| r.contains(x, y))
+            });
         }
         _ => {}
     }
@@ -132,7 +174,9 @@ pub fn from_overlay(overlay: &Overlay, selection: &Selection, cursor: Option<&Cu
     // middle of a region.
     let target = match selection {
         Selection::Window { target, .. } => Some(*target),
-        _ => overlay.targets.hit(rect.x + rect.width / 2, rect.y + rect.height / 2, 0),
+        _ => overlay
+            .targets
+            .hit(rect.x + rect.width / 2, rect.y + rect.height / 2, 0),
     };
     let mut window = None;
     if let Some(target) = target {
@@ -141,13 +185,23 @@ pub fn from_overlay(overlay: &Overlay, selection: &Selection, cursor: Option<&Cu
         meta.process = process_name(top.process_id);
         window = Some(top.hwnd);
     }
-    Some(Capture { frame, meta, cursor: separate, window })
+    Some(Capture {
+        frame,
+        meta,
+        cursor: separate,
+        window,
+    })
 }
 
 /// Wraps a frame made some other way (scrolling, panoramic, menus).
 pub fn from_frame(kind: CaptureKind, rect: Rect, frame: Frame) -> Capture {
     let meta = meta(kind, rect, &frame, false);
-    Capture { frame, meta, cursor: None, window: None }
+    Capture {
+        frame,
+        meta,
+        cursor: None,
+        window: None,
+    }
 }
 
 /// Grabs a screen rectangle immediately (full screen and repeat-region
@@ -157,7 +211,12 @@ pub fn immediate(kind: CaptureKind, rect: Rect, include_cursor: bool) -> std::io
     let mut frame = screen::grab(rect)?;
     let cursor_included = add_cursor(&mut frame, rect, cursor.as_ref(), include_cursor);
     let meta = meta(kind, rect, &frame, cursor_included);
-    Ok(Capture { frame, meta, cursor: None, window: None })
+    Ok(Capture {
+        frame,
+        meta,
+        cursor: None,
+        window: None,
+    })
 }
 
 /// Applies effects (by the editor's names) to a capture.
@@ -169,7 +228,11 @@ pub fn apply_effects(frame: &mut Frame, names: &[String]) {
     for p in frame.pixels.chunks_exact(4) {
         rgba.extend_from_slice(&[p[2], p[1], p[0], if frame.alpha { p[3] } else { 255 }]);
     }
-    let Some(pm) = tiny_skia::IntSize::from_wh(frame.width, frame.height).and_then(|s| tiny_skia::Pixmap::from_vec(rgba, s)) else { return };
+    let Some(pm) = tiny_skia::IntSize::from_wh(frame.width, frame.height)
+        .and_then(|s| tiny_skia::Pixmap::from_vec(rgba, s))
+    else {
+        return;
+    };
     let mut doc = jiffshot_doc::Document::new(pm);
     for name in names {
         if let Some(effect) = jiffshot_doc::effects::by_name(name, jiffshot_doc::Rgba::BLACK) {
@@ -204,7 +267,11 @@ pub fn find_editor(configured: Option<&Path>) -> Option<PathBuf> {
         return Some(beside);
     }
     for _ in 0..5 {
-        let dev = dir.join("app").join("artifacts").join("win-x64").join("jiffshot.exe");
+        let dev = dir
+            .join("app")
+            .join("artifacts")
+            .join("win-x64")
+            .join("jiffshot.exe");
         if dev.exists() {
             return Some(dev);
         }
@@ -218,8 +285,11 @@ pub fn find_editor(configured: Option<&Path>) -> Option<PathBuf> {
 /// the editor hold our caller's pipes (or the tray's) open for its lifetime.
 fn launch_detached(program: &Path, file: &Path) -> std::io::Result<()> {
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW};
-    let mut command_line = jiffshot_capture::wide(&format!("\"{}\" \"{}\"", program.display(), file.display()));
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+    let mut command_line =
+        jiffshot_capture::wide(&format!("\"{}\" \"{}\"", program.display(), file.display()));
     let program = jiffshot_capture::wide(&program.to_string_lossy());
     // SAFETY: NUL-terminated strings, a mutable command-line buffer as
     // CreateProcessW requires, and both returned handles closed.
@@ -272,14 +342,21 @@ pub fn finish(mut capture: Capture, settings: &Settings, owner: isize) -> Outcom
     let path = match library.save(&capture.frame, &capture.meta) {
         Ok(path) => path,
         Err(error) => {
-            return Outcome { message: format!("Could not save the capture: {error}"), is_error: true, opened_editor: false }
+            return Outcome {
+                message: format!("Could not save the capture: {error}"),
+                is_error: true,
+                opened_editor: false,
+            }
         }
     };
     if let Some((image, (x, y))) = &capture.cursor {
         // The editor adds these as a movable pointer object.
         let stem = path.with_extension("");
         let _ = image.save_png(&PathBuf::from(format!("{}.cursor.png", stem.display())));
-        let _ = std::fs::write(format!("{}.cursor.json", stem.display()), format!("{{\"x\":{x},\"y\":{y}}}"));
+        let _ = std::fs::write(
+            format!("{}.cursor.json", stem.display()),
+            format!("{{\"x\":{x},\"y\":{y}}}"),
+        );
     }
     let saved = started.elapsed();
     let mut notes = Vec::new();
@@ -318,7 +395,10 @@ pub fn finish(mut capture: Capture, settings: &Settings, owner: isize) -> Outcom
             notes.push(format!("share failed: {error}"));
         }
     }
-    let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    let file = path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut message = format!("{w} × {h} saved as {file}");
     if !notes.is_empty() {
         message = format!("{message}; {}", notes.join("; "));
@@ -328,7 +408,11 @@ pub fn finish(mut capture: Capture, settings: &Settings, owner: isize) -> Outcom
         saved.as_secs_f64() * 1000.0,
         started.elapsed().as_secs_f64() * 1000.0
     ));
-    Outcome { message, is_error, opened_editor }
+    Outcome {
+        message,
+        is_error,
+        opened_editor,
+    }
 }
 
 /// A tiny-skia image (premultiplied RGBA) as a capture frame (BGRA).
@@ -349,12 +433,17 @@ pub fn open_editor(settings: &Settings, path: &Path) -> bool {
     if let Some(hooks) = crate::hooks() {
         return (hooks.open_in_editor)(path);
     }
-    jiffshot_capture::ipc::send_to_editor(path) || find_editor(settings.editor.as_deref()).is_some_and(|e| launch_detached(&e, path).is_ok())
+    jiffshot_capture::ipc::send_to_editor(path)
+        || find_editor(settings.editor.as_deref())
+            .is_some_and(|e| launch_detached(&e, path).is_ok())
 }
 
 /// After a recording: opens it in the editor (or says where it is).
 pub fn finish_video(path: &Path, _rect: Rect, settings: &Settings, owner: isize) -> Outcome {
-    let name = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut opened_editor = false;
     if settings.open_in_editor {
         opened_editor = open_editor(settings, path);
@@ -369,7 +458,11 @@ pub fn finish_video(path: &Path, _rect: Rect, settings: &Settings, owner: isize)
             message = format!("{message}; share failed: {error}");
         }
     }
-    Outcome { message, is_error, opened_editor }
+    Outcome {
+        message,
+        is_error,
+        opened_editor,
+    }
 }
 
 /// Share destinations for captures, as (label, setting) pairs.
@@ -386,20 +479,33 @@ pub const SHARES: &[(&str, &str)] = &[
     ("Printer", "print"),
 ];
 /// The ones that take a video.
-pub const VIDEO_SHARES: &[(&str, &str)] = &[("None", "none"), ("PowerPoint", "powerpoint"), ("Email", "email"), ("File…", "file"), ("Program…", "program")];
+pub const VIDEO_SHARES: &[(&str, &str)] = &[
+    ("None", "none"),
+    ("PowerPoint", "powerpoint"),
+    ("Email", "email"),
+    ("File…", "file"),
+    ("Program…", "program"),
+];
 
 /// Sends a saved capture to `to` (a [`SHARES`] setting); says what it did.
 pub fn share(to: &str, path: &Path, owner: isize) -> Result<Option<String>, String> {
     use jiffshot_capture::share;
-    let office = |exe: &str, app: &str| share::open_in(owner, exe, path).map(|_| Some(format!("opened in {app}")));
+    let office = |exe: &str, app: &str| {
+        share::open_in(owner, exe, path).map(|_| Some(format!("opened in {app}")))
+    };
     match to {
         "" | "none" => Ok(None),
         "file" => match save_copy_dialog(owner, path) {
-            Some(target) => std::fs::copy(path, &target).map(|_| Some(format!("copied to {}", target.display()))).map_err(|e| e.to_string()),
+            Some(target) => std::fs::copy(path, &target)
+                .map(|_| Some(format!("copied to {}", target.display())))
+                .map_err(|e| e.to_string()),
             None => Ok(None),
         },
         "email" => {
-            let subject = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let subject = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
             share::email(owner, path, &subject).map(|_| Some("opened a new message".to_owned()))
         }
         "word" => office("winword.exe", "Word"),
@@ -409,7 +515,9 @@ pub fn share(to: &str, path: &Path, owner: isize) -> Result<Option<String>, Stri
         "paint" => office("mspaint.exe", "Paint"),
         "clipboard" => {
             let image = jiffshot_doc::io::load_image(path).map_err(|e| e.to_string())?;
-            jiffshot_capture::clipboard::copy(&frame_from_pixmap(&image), owner).map(|_| Some("copied to the clipboard".to_owned())).map_err(|e| e.to_string())
+            jiffshot_capture::clipboard::copy(&frame_from_pixmap(&image), owner)
+                .map(|_| Some("copied to the clipboard".to_owned()))
+                .map_err(|e| e.to_string())
         }
         "program" => share::open_with(owner, path).map(|_| None),
         "print" => share::print(owner, path).map(|_| Some("sent to the printer".to_owned())),
@@ -420,12 +528,24 @@ pub fn share(to: &str, path: &Path, owner: isize) -> Result<Option<String>, Stri
 /// Asks where to save a copy of `path` (same type).
 fn save_copy_dialog(owner: isize, path: &Path) -> Option<PathBuf> {
     use jiffshot_capture::{from_wide, wide};
-    use windows_sys::Win32::UI::Controls::Dialogs::{GetSaveFileNameW, OFN_OVERWRITEPROMPT, OPENFILENAMEW};
-    let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "png".into());
+    use windows_sys::Win32::UI::Controls::Dialogs::{
+        GetSaveFileNameW, OFN_OVERWRITEPROMPT, OPENFILENAMEW,
+    };
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "png".into());
     let mut buf = vec![0u16; 1024];
-    let name = wide(&path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+    let name = wide(
+        &path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
     buf[..name.len().min(1023)].copy_from_slice(&name[..name.len().min(1023)]);
-    let filter: Vec<u16> = format!("{} file (*.{ext}) *.{ext}  ", ext.to_uppercase()).encode_utf16().collect();
+    let filter: Vec<u16> = format!("{} file (*.{ext}) *.{ext}  ", ext.to_uppercase())
+        .encode_utf16()
+        .collect();
     let def = wide(&ext);
     // SAFETY: a plain C struct; zero is valid for every field.
     let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };

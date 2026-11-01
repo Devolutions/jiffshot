@@ -16,7 +16,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tiny_skia::Pixmap;
 
-const COLORS: [Rgba; 5] = [Rgba::RED, Rgba::rgb(0xFF, 0xC1, 0x07), Rgba::rgb(0x1E, 0x88, 0xE5), Rgba::rgb(0x43, 0xA0, 0x47), Rgba::WHITE];
+const COLORS: [Rgba; 5] = [
+    Rgba::RED,
+    Rgba::rgb(0xFF, 0xC1, 0x07),
+    Rgba::rgb(0x1E, 0x88, 0xE5),
+    Rgba::rgb(0x43, 0xA0, 0x47),
+    Rgba::WHITE,
+];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Tool {
@@ -57,12 +63,24 @@ pub(crate) fn state() -> MutexGuard<'static, Option<State>> {
 }
 
 fn style(color: Rgba, tool: Tool) -> Style {
-    let mut s = Style { stroke: color, fill: Rgba::TRANSPARENT, width: 6.0, shadow: true, start_cap: Cap::None, end_cap: Cap::None, ..Style::default() };
+    let mut s = Style {
+        stroke: color,
+        fill: Rgba::TRANSPARENT,
+        width: 6.0,
+        shadow: true,
+        start_cap: Cap::None,
+        end_cap: Cap::None,
+        ..Style::default()
+    };
     match tool {
         Tool::Arrow => s.end_cap = Cap::Arrow,
         Tool::Step => {
             s.fill = color;
-            s.text_color = if color == Rgba::WHITE { Rgba::BLACK } else { Rgba::WHITE };
+            s.text_color = if color == Rgba::WHITE {
+                Rgba::BLACK
+            } else {
+                Rgba::WHITE
+            };
             s.font_size = 26.0;
             s.width = 0.0;
         }
@@ -89,23 +107,44 @@ fn alpha(mark: &Mark, fade_after: Duration) -> f32 {
 
 fn kind_for(tool: Tool, a: Pt, b: Pt, label: u32) -> Kind {
     match tool {
-        Tool::Arrow | Tool::Line => Kind::Line { a, b, control: None },
-        Tool::Box => Kind::Shape { rect: Box2::from_points(a, b), shape: ShapeKind::Rectangle },
-        Tool::Ellipse => Kind::Shape { rect: Box2::from_points(a, b), shape: ShapeKind::Ellipse },
+        Tool::Arrow | Tool::Line => Kind::Line {
+            a,
+            b,
+            control: None,
+        },
+        Tool::Box => Kind::Shape {
+            rect: Box2::from_points(a, b),
+            shape: ShapeKind::Rectangle,
+        },
+        Tool::Ellipse => Kind::Shape {
+            rect: Box2::from_points(a, b),
+            shape: ShapeKind::Ellipse,
+        },
         Tool::Pen => Kind::Pen { points: vec![a, b] },
-        Tool::Step => Kind::Step { center: b, radius: 22.0, label: label.to_string(), shape: ShapeKind::Ellipse },
+        Tool::Step => Kind::Step {
+            center: b,
+            radius: 22.0,
+            label: label.to_string(),
+            shape: ShapeKind::Ellipse,
+        },
     }
 }
 
 impl State {
     /// Renders the marks (dropping faded ones) into `image`.
     fn render(&mut self) {
-        let (w, h) = (self.area.width.max(1) as u32, self.area.height.max(1) as u32);
+        let (w, h) = (
+            self.area.width.max(1) as u32,
+            self.area.height.max(1) as u32,
+        );
         let mut doc = Document::blank(w, h, Rgba::TRANSPARENT);
         let fade = self.fade_after;
         self.marks.retain(|m| alpha(m, fade) > 0.0);
         for m in &self.marks {
-            let st = Style { opacity: alpha(m, fade), ..m.style.clone() };
+            let st = Style {
+                opacity: alpha(m, fade),
+                ..m.style.clone()
+            };
             doc.add(m.kind.clone(), st);
         }
         self.image = (!self.marks.is_empty()).then(|| Arc::new(doc.flatten()));
@@ -116,17 +155,27 @@ impl State {
     pub fn press(&mut self, p: Pt) {
         if self.tool == Tool::Step {
             self.step += 1;
-            self.marks.push(Mark { kind: kind_for(Tool::Step, p, p, self.step), style: style(COLORS[self.color], Tool::Step), done: Some(Instant::now()) });
+            self.marks.push(Mark {
+                kind: kind_for(Tool::Step, p, p, self.step),
+                style: style(COLORS[self.color], Tool::Step),
+                done: Some(Instant::now()),
+            });
         } else {
             self.drawing = Some(p);
-            self.marks.push(Mark { kind: kind_for(self.tool, p, p, 0), style: style(COLORS[self.color], self.tool), done: None });
+            self.marks.push(Mark {
+                kind: kind_for(self.tool, p, p, 0),
+                style: style(COLORS[self.color], self.tool),
+                done: None,
+            });
         }
         self.render();
     }
 
     /// The pointer moved; true when that changed a mark.
     pub fn moved(&mut self, p: Pt) -> bool {
-        let (Some(a), Some(last)) = (self.drawing, self.marks.last_mut()) else { return false };
+        let (Some(a), Some(last)) = (self.drawing, self.marks.last_mut()) else {
+            return false;
+        };
         match &mut last.kind {
             Kind::Pen { points } => points.push(p),
             k => *k = kind_for(self.tool, a, p, 0),
@@ -189,10 +238,24 @@ pub fn show(area: Rect, fade_after: Duration) {
         if s.is_some() {
             return;
         }
-        *s = Some(State { id, area, tool: Tool::Arrow, color: 0, marks: Vec::new(), drawing: None, step: 0, fade_after, image: None, generation: 0 });
+        *s = Some(State {
+            id,
+            area,
+            tool: Tool::Arrow,
+            color: 0,
+            marks: Vec::new(),
+            drawing: None,
+            step: 0,
+            fade_after,
+            image: None,
+            generation: 0,
+        });
     }
     if let Some(hooks) = crate::hooks() {
-        (hooks.screen_draw)(serde_json::json!({ "id": id, "area": [area.x, area.y, area.width, area.height] }).to_string());
+        (hooks.screen_draw)(
+            serde_json::json!({ "id": id, "area": [area.x, area.y, area.width, area.height] })
+                .to_string(),
+        );
     }
 }
 
@@ -206,12 +269,17 @@ pub fn hide() {
 
 /// Blends the marks into a recorded frame of the area.
 pub fn blend_into(frame: &mut Frame) {
-    let Some(image) = state().as_ref().and_then(|s| s.image.clone()) else { return };
+    let Some(image) = state().as_ref().and_then(|s| s.image.clone()) else {
+        return;
+    };
     blend_image(frame, &image);
 }
 
 pub(crate) fn blend_image(frame: &mut Frame, image: &Pixmap) {
-    let (w, h) = (image.width().min(frame.width) as usize, image.height().min(frame.height) as usize);
+    let (w, h) = (
+        image.width().min(frame.width) as usize,
+        image.height().min(frame.height) as usize,
+    );
     let (src, stride) = (image.data(), image.width() as usize * 4);
     let dst_stride = frame.stride();
     for y in 0..h {
@@ -237,7 +305,11 @@ mod tests {
 
     #[test]
     fn marks_fade_after_the_delay() {
-        let mark = Mark { kind: kind_for(Tool::Box, Pt::new(0.0, 0.0), Pt::new(10.0, 10.0), 0), style: style(Rgba::RED, Tool::Box), done: Some(Instant::now() - Duration::from_millis(3400)) };
+        let mark = Mark {
+            kind: kind_for(Tool::Box, Pt::new(0.0, 0.0), Pt::new(10.0, 10.0), 0),
+            style: style(Rgba::RED, Tool::Box),
+            done: Some(Instant::now() - Duration::from_millis(3400)),
+        };
         let a = alpha(&mark, Duration::from_secs(3));
         assert!(a > 0.0 && a < 1.0, "fading: {a}");
         assert_eq!(alpha(&mark, Duration::ZERO), 1.0, "never fades when zero");

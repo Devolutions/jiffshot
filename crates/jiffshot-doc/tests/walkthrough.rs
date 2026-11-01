@@ -5,7 +5,11 @@ use jiffshot_doc::editor::{Editor, Modifiers, Tool};
 use jiffshot_doc::{Document, Pt, Rgba};
 use std::time::Instant;
 
-const NONE: Modifiers = Modifiers { shift: false, ctrl: false, alt: false };
+const NONE: Modifiers = Modifiers {
+    shift: false,
+    ctrl: false,
+    alt: false,
+};
 
 fn drag(e: &mut Editor, tool: Tool, a: (f32, f32), b: (f32, f32), steps: usize) {
     let started = Instant::now();
@@ -19,7 +23,11 @@ fn drag(e: &mut Editor, tool: Tool, a: (f32, f32), b: (f32, f32), steps: usize) 
     }
     e.pointer_up(Pt::new(b.0, b.1), NONE);
     e.take_damage();
-    println!("{tool:?}: {:.1} ms, {} objects", started.elapsed().as_secs_f64() * 1000.0, e.document().objects.len());
+    println!(
+        "{tool:?}: {:.1} ms, {} objects",
+        started.elapsed().as_secs_f64() * 1000.0,
+        e.document().objects.len()
+    );
 }
 
 #[test]
@@ -64,16 +72,35 @@ fn wand_selection_and_eraser() {
     e.set_tool(Tool::MagicWand);
     e.pointer_down(Pt::new(150.0, 130.0), NONE, 6.0);
     e.pointer_up(Pt::new(150.0, 130.0), NONE);
-    let lifted = e.selected().expect("the blue block is now an object").rect().unwrap();
-    assert_eq!((lifted.x0, lifted.y0, lifted.width(), lifted.height()), (100.0, 100.0, 120.0, 60.0));
-    assert_eq!(raster::pixel(e.document().background(), 150, 130), Rgba::WHITE, "auto-filled");
+    let lifted = e
+        .selected()
+        .expect("the blue block is now an object")
+        .rect()
+        .unwrap();
+    assert_eq!(
+        (lifted.x0, lifted.y0, lifted.width(), lifted.height()),
+        (100.0, 100.0, 120.0, 60.0)
+    );
+    assert_eq!(
+        raster::pixel(e.document().background(), 150, 130),
+        Rgba::WHITE,
+        "auto-filled"
+    );
 
     e.background_fill = BackgroundFill::Transparent;
     e.set_tool(Tool::Selection);
     e.set_variant("Ellipse");
     drag(&mut e, Tool::Selection, (250.0, 50.0), (350.0, 150.0), 4);
-    assert_eq!(raster::pixel(e.document().background(), 300, 100).a, 0, "transparent hole");
-    assert_eq!(raster::pixel(e.document().background(), 252, 52).a, 255, "outside the ellipse stays");
+    assert_eq!(
+        raster::pixel(e.document().background(), 300, 100).a,
+        0,
+        "transparent hole"
+    );
+    assert_eq!(
+        raster::pixel(e.document().background(), 252, 52).a,
+        255,
+        "outside the ellipse stays"
+    );
 
     drag(&mut e, Tool::Eraser, (20.0, 250.0), (200.0, 250.0), 6);
     assert_eq!(raster::pixel(e.document().background(), 100, 250).a, 0);
@@ -103,12 +130,21 @@ fn select_several_group_align() {
     // Box select the first two with the Select tool.
     drag(&mut e, Tool::Select, (20.0, 20.0), (420.0, 220.0), 4);
     assert_eq!(e.selected_ids().len(), 2);
-    let shift = Modifiers { shift: true, ctrl: false, alt: false };
+    let shift = Modifiers {
+        shift: true,
+        ctrl: false,
+        alt: false,
+    };
     e.pointer_down(Pt::new(500.0, 330.0), shift, 6.0);
     e.pointer_up(Pt::new(500.0, 330.0), shift);
     assert_eq!(e.selected_ids().len(), 3, "Shift-click adds");
     e.align_selected("left");
-    let lefts: Vec<f32> = e.document().objects.iter().map(|o| o.rect().unwrap().x0).collect();
+    let lefts: Vec<f32> = e
+        .document()
+        .objects
+        .iter()
+        .map(|o| o.rect().unwrap().x0)
+        .collect();
     assert!(lefts.iter().all(|x| (*x - 50.0).abs() < 1e-3), "{lefts:?}");
     let g = e.group_selected().unwrap();
     assert_eq!(e.document().objects.len(), 1);
@@ -138,7 +174,9 @@ fn polygon_global_fill_cut_out_edges_and_step_formats() {
     }
     e.pointer_down(Pt::new(51.0, 51.0), NONE, 6.0);
     e.pointer_up(Pt::new(51.0, 51.0), NONE);
-    let Kind::Polygon { points } = &e.document().objects[0].kind else { panic!("a polygon") };
+    let Kind::Polygon { points } = &e.document().objects[0].kind else {
+        panic!("a polygon")
+    };
     assert_eq!(points.len(), 3, "{points:?}");
 
     let mut bg = raster::solid(100, 100, Rgba::WHITE).unwrap();
@@ -148,15 +186,33 @@ fn polygon_global_fill_cut_out_edges_and_step_formats() {
     let mut e = Editor::new(Document::new(bg));
     e.set_tool(Tool::Fill);
     e.set_variant("Global");
-    e.set_tool_style(Tool::Fill, jiffshot_doc::object::Style { fill: Rgba::RED, ..Default::default() });
+    e.set_tool_style(
+        Tool::Fill,
+        jiffshot_doc::object::Style {
+            fill: Rgba::RED,
+            ..Default::default()
+        },
+    );
     e.pointer_down(Pt::new(10.0, 10.0), NONE, 6.0);
     e.pointer_up(Pt::new(10.0, 10.0), NONE);
-    assert_eq!(raster::pixel(e.document().background(), 80, 10), Rgba::RED, "every black pixel");
+    assert_eq!(
+        raster::pixel(e.document().background(), 80, 10),
+        Rgba::RED,
+        "every black pixel"
+    );
 
     let mut d = Document::blank(200, 200, Rgba::WHITE);
-    assert!(jiffshot_doc::effects::cut_out_with(&mut d, jiffshot_doc::IRect::new(0, 50, 200, 60), false, jiffshot_doc::effects::Edge::Sawtooth));
+    assert!(jiffshot_doc::effects::cut_out_with(
+        &mut d,
+        jiffshot_doc::IRect::new(0, 50, 200, 60),
+        false,
+        jiffshot_doc::effects::Edge::Sawtooth
+    ));
     assert_eq!(d.height(), 200 - 60 + 14);
-    assert!((0..200).any(|x| raster::pixel(d.background(), x, 57).a == 0), "a gap in the seam");
+    assert!(
+        (0..200).any(|x| raster::pixel(d.background(), x, 57).a == 0),
+        "a gap in the seam"
+    );
 
     let mut e = Editor::new(Document::blank(300, 100, Rgba::WHITE));
     e.set_tool(Tool::Step);
@@ -166,7 +222,12 @@ fn polygon_global_fill_cut_out_edges_and_step_formats() {
         e.pointer_down(Pt::new(x, 50.0), NONE, 6.0);
         e.pointer_up(Pt::new(x, 50.0), NONE);
     }
-    let labels: Vec<_> = e.document().objects.iter().filter_map(|o| o.text()).collect();
+    let labels: Vec<_> = e
+        .document()
+        .objects
+        .iter()
+        .filter_map(|o| o.text())
+        .collect();
     assert_eq!(labels, ["i", "ii", "iii", "iv"]);
 }
 
@@ -179,8 +240,21 @@ fn template_drop_zones_fill_swap_fit_and_pan() {
     let blue = raster::solid(200, 400, Rgba::BLUE).unwrap();
     let doc = template_with("Before and after", &[], &Options::default()).unwrap();
     let mut e = Editor::new(doc);
-    let zones: Vec<(u64, jiffshot_doc::Box2)> =
-        e.document().objects.iter().filter(|o| o.zone.is_some()).map(|o| (o.id, match &o.kind { Kind::Image { rect, .. } => *rect, _ => unreachable!() })).collect();
+    let zones: Vec<(u64, jiffshot_doc::Box2)> = e
+        .document()
+        .objects
+        .iter()
+        .filter(|o| o.zone.is_some())
+        .map(|o| {
+            (
+                o.id,
+                match &o.kind {
+                    Kind::Image { rect, .. } => *rect,
+                    _ => unreachable!(),
+                },
+            )
+        })
+        .collect();
     assert_eq!(zones.len(), 2);
     let image_of = |e: &Editor, id: u64| match &e.document().get(id).unwrap().kind {
         Kind::Image { image, .. } => image.pixmap.as_ref().map(|p| (p.width(), p.height())),
@@ -191,7 +265,10 @@ fn template_drop_zones_fill_swap_fit_and_pan() {
     let (b, rb) = zones[1];
     e.drop_image(ra.center(), red.clone());
     e.drop_image(rb.center(), blue.clone());
-    assert_eq!((image_of(&e, a), image_of(&e, b)), (Some((400, 200)), Some((200, 400))));
+    assert_eq!(
+        (image_of(&e, a), image_of(&e, b)),
+        (Some((400, 200)), Some((200, 400)))
+    );
     let before = e.document().objects.len();
     e.drop_image(Pt::new(5.0, 5.0), red.clone());
     assert_eq!(e.document().objects.len(), before + 1);
@@ -210,14 +287,19 @@ fn template_drop_zones_fill_swap_fit_and_pan() {
     e.pointer_up(Pt::new(c.x, c.y + 60.0), NONE);
     let pan = e.document().get(b).unwrap().zone.unwrap().pan;
     assert!(pan.y > 50.0 && pan.x == 0.0, "panned down: {pan:?}");
-    let Kind::Image { rect, .. } = &e.document().get(b).unwrap().kind else { unreachable!() };
+    let Kind::Image { rect, .. } = &e.document().get(b).unwrap().kind else {
+        unreachable!()
+    };
     assert_eq!(*rect, rb);
     // Fit shows the whole picture: blue is narrower than the zone.
     e.select(Some(b));
     e.set_zone_fit(true);
     let flat = e.document().flatten();
     let edge = raster::pixel(&flat, (rb.x0 + 3.0) as i32, rb.center().y as i32);
-    assert!(edge.b < 200 || edge.r > 100, "letterboxed at the edge: {edge:?}");
+    assert!(
+        edge.b < 200 || edge.r > 100,
+        "letterboxed at the edge: {edge:?}"
+    );
     // Saved and loaded, with an emptied zone.
     e.select(Some(a));
     e.empty_zone();
@@ -246,8 +328,13 @@ fn pen_smoothing_callout_tails_and_spotlight_magnify() {
     }
     e.pointer_up(Pt::new(588.0, 300.0), NONE);
     let pen = e.document().objects.last().unwrap();
-    let Kind::Pen { points } = &pen.kind else { panic!("{:?}", pen.kind) };
-    let wobble = points.iter().map(|p| (p.y - 300.0).abs()).fold(0.0f32, f32::max);
+    let Kind::Pen { points } = &pen.kind else {
+        panic!("{:?}", pen.kind)
+    };
+    let wobble = points
+        .iter()
+        .map(|p| (p.y - 300.0).abs())
+        .fold(0.0f32, f32::max);
     assert!(wobble < 3.0, "smoothed: {wobble}");
     assert_eq!(points.first().unwrap().x, 100.0, "ends kept");
     // A callout with three tails, each with a handle; undo removes one.
@@ -257,11 +344,22 @@ fn pen_smoothing_callout_tails_and_spotlight_magnify() {
     e.pointer_up(Pt::new(500.0, 160.0), NONE);
     assert!(e.callout_tail(true) && e.callout_tail(true));
     let c = e.selected().unwrap();
-    let Kind::Callout { more_tails, .. } = &c.kind else { panic!() };
+    let Kind::Callout { more_tails, .. } = &c.kind else {
+        panic!()
+    };
     assert_eq!(more_tails.len(), 2);
-    assert_eq!(c.handles().iter().filter(|(h, _)| *h >= jiffshot_doc::object::H_MORE_TAILS && *h < jiffshot_doc::object::H_VERTEX).count(), 2);
+    assert_eq!(
+        c.handles()
+            .iter()
+            .filter(|(h, _)| *h >= jiffshot_doc::object::H_MORE_TAILS
+                && *h < jiffshot_doc::object::H_VERTEX)
+            .count(),
+        2
+    );
     e.undo();
-    let Kind::Callout { more_tails, .. } = &e.selected().unwrap().kind else { panic!() };
+    let Kind::Callout { more_tails, .. } = &e.selected().unwrap().kind else {
+        panic!()
+    };
     assert_eq!(more_tails.len(), 1);
     // Spotlight & magnify on a drawn rectangle: it becomes a framed,
     // enlarged picture over a dimmed image.
@@ -269,8 +367,20 @@ fn pen_smoothing_callout_tails_and_spotlight_magnify() {
     let before = e.document().objects.len();
     e.spotlight_magnify(1.6);
     let objects = &e.document().objects;
-    assert_eq!(objects.len(), before + 1, "the rectangle is replaced by a spotlight and an image");
-    assert!(matches!(objects[objects.len() - 2].kind, Kind::Spotlight { .. }));
-    let Kind::Image { rect, .. } = &objects.last().unwrap().kind else { panic!() };
-    assert!((rect.width() - 160.0).abs() < 1.0 && (rect.height() - 128.0).abs() < 1.0, "{rect:?}");
+    assert_eq!(
+        objects.len(),
+        before + 1,
+        "the rectangle is replaced by a spotlight and an image"
+    );
+    assert!(matches!(
+        objects[objects.len() - 2].kind,
+        Kind::Spotlight { .. }
+    ));
+    let Kind::Image { rect, .. } = &objects.last().unwrap().kind else {
+        panic!()
+    };
+    assert!(
+        (rect.width() - 160.0).abs() < 1.0 && (rect.height() - 128.0).abs() < 1.0,
+        "{rect:?}"
+    );
 }

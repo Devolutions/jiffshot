@@ -1,0 +1,26 @@
+mod aac;
+mod autostart;
+mod capture;
+mod clipboard;
+mod editor;
+mod file_dialog;
+mod frame_stream;
+mod interval;
+mod launch;
+mod library;
+mod main;
+mod notification;
+mod ocr;
+mod portal;
+mod portal_frame;
+mod schedule;
+mod screenshot;
+mod scroll;
+mod settings;
+mod share;
+mod shortcut;
+mod template;
+mod tray;
+mod video;
+
+pub(super) use main::run;

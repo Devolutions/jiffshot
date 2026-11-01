@@ -15,16 +15,17 @@ use jiffshot_capture::library::Library;
 use jiffshot_capture::media::{self, AudioCapture, Reader, VideoSpec, Writer, HNS_PER_SECOND};
 use jiffshot_capture::screen::{CursorSnapshot, Grabber};
 use jiffshot_capture::{Frame, Rect};
+use jiffshot_doc::object::{Kind, Style};
+use jiffshot_doc::{Document, Pixmap, Rgba};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use serde_json::json;
-use jiffshot_doc::object::{Kind, Style};
-use jiffshot_doc::{Document, Rgba, Pixmap};
 use windows_sys::Win32::Foundation::POINT;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, VK_F10, VK_F9,
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
+    MOD_SHIFT, VK_F10, VK_F9,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
@@ -34,8 +35,16 @@ type Key = (HOT_KEY_MODIFIERS, u16, &'static str);
 /// The pause and stop keys, best first: another app (often another capture
 /// tool) may hold Shift+F9 or Shift+F10, and a key registered by nobody
 /// does nothing when pressed.
-const PAUSE_KEYS: [Key; 3] = [(MOD_SHIFT, VK_F9, "Shift+F9"), (MOD_CONTROL | MOD_SHIFT, VK_F9, "Ctrl+Shift+F9"), (MOD_CONTROL | MOD_ALT, VK_F9, "Ctrl+Alt+F9")];
-const STOP_KEYS: [Key; 3] = [(MOD_SHIFT, VK_F10, "Shift+F10"), (MOD_CONTROL | MOD_SHIFT, VK_F10, "Ctrl+Shift+F10"), (MOD_CONTROL | MOD_ALT, VK_F10, "Ctrl+Alt+F10")];
+const PAUSE_KEYS: [Key; 3] = [
+    (MOD_SHIFT, VK_F9, "Shift+F9"),
+    (MOD_CONTROL | MOD_SHIFT, VK_F9, "Ctrl+Shift+F9"),
+    (MOD_CONTROL | MOD_ALT, VK_F9, "Ctrl+Alt+F9"),
+];
+const STOP_KEYS: [Key; 3] = [
+    (MOD_SHIFT, VK_F10, "Shift+F10"),
+    (MOD_CONTROL | MOD_SHIFT, VK_F10, "Ctrl+Shift+F10"),
+    (MOD_CONTROL | MOD_ALT, VK_F10, "Ctrl+Alt+F10"),
+];
 
 /// The pause and stop keys the last check found free.
 static KEYS: Mutex<Option<(Option<Key>, Option<Key>)>> = Mutex::new(None);
@@ -46,7 +55,12 @@ fn free(keys: &[Key]) -> Option<Key> {
     keys.iter().copied().find(|&(modifiers, vk, _)| {
         // SAFETY: a test registration for this thread, removed at once.
         unsafe {
-            let ok = RegisterHotKey(std::ptr::null_mut(), PROBE, modifiers | MOD_NOREPEAT, vk as u32) != 0;
+            let ok = RegisterHotKey(
+                std::ptr::null_mut(),
+                PROBE,
+                modifiers | MOD_NOREPEAT,
+                vk as u32,
+            ) != 0;
             if ok {
                 UnregisterHotKey(std::ptr::null_mut(), PROBE);
             }
@@ -76,7 +90,9 @@ pub fn key_names() -> (Option<&'static str>, Option<&'static str>) {
 /// list keys.
 pub fn keys_text(sep: &str) -> String {
     let (pause, stop) = key_names();
-    let pause = pause.map_or("the toolbar pauses and resumes".to_owned(), |k| format!("{k} pauses and resumes"));
+    let pause = pause.map_or("the toolbar pauses and resumes".to_owned(), |k| {
+        format!("{k} pauses and resumes")
+    });
     let stop = stop.map_or("the toolbar stops".to_owned(), |k| format!("{k} stops"));
     format!("{pause}{sep}{stop}")
 }
@@ -123,13 +139,16 @@ struct Annotations {
 impl Annotations {
     fn blend(&mut self, frame: &mut Frame, now: u64) {
         let before = self.marks.len();
-        self.marks.retain(|(_, _, _, end)| end.is_none_or(|end| now < end));
+        self.marks
+            .retain(|(_, _, _, end)| end.is_none_or(|end| now < end));
         if self.dirty || self.marks.len() != before {
             self.image = None;
             self.document = None;
             if !self.marks.is_empty() {
                 let mut doc = Document::blank(frame.width, frame.height, Rgba::TRANSPARENT);
-                for (_, kind, style, _) in &self.marks { doc.add(kind.clone(), style.clone()); }
+                for (_, kind, style, _) in &self.marks {
+                    doc.add(kind.clone(), style.clone());
+                }
                 if doc.objects.iter().any(|object| object.reads().is_some()) {
                     self.document = Some(doc);
                 } else {
@@ -139,7 +158,9 @@ impl Annotations {
             self.dirty = false;
         }
         if let Some(doc) = &mut self.document {
-            doc.set_background(crate::stepcap::frame_to_pixmap(frame).expect("valid recording frame"));
+            doc.set_background(
+                crate::stepcap::frame_to_pixmap(frame).expect("valid recording frame"),
+            );
             screendraw::blend_image(frame, &doc.flatten());
         } else if let Some(image) = &self.image {
             screendraw::blend_image(frame, image);
@@ -147,39 +168,65 @@ impl Annotations {
     }
 }
 
-pub(crate) fn add_annotation(control: &Control, kind: Kind, style: Style, duration: Duration) -> Result<u64, String> {
-    let mut overlay = control.annotations.lock().expect("annotations lock poisoned");
-    if overlay.size.is_none() { return Err("recording frames are not ready".into()); }
-    if overlay.marks.len() >= 256 { return Err("at most 256 live annotations; use record.clear".into()); }
+pub(crate) fn add_annotation(
+    control: &Control,
+    kind: Kind,
+    style: Style,
+    duration: Duration,
+) -> Result<u64, String> {
+    let mut overlay = control
+        .annotations
+        .lock()
+        .expect("annotations lock poisoned");
+    if overlay.size.is_none() {
+        return Err("recording frames are not ready".into());
+    }
+    if overlay.marks.len() >= 256 {
+        return Err("at most 256 live annotations; use record.clear".into());
+    }
     overlay.next_id += 1;
     let id = overlay.next_id;
-    let end = (!duration.is_zero()).then(|| control.millis.load(Ordering::Relaxed).saturating_add(duration.as_millis() as u64));
+    let end = (!duration.is_zero()).then(|| {
+        control
+            .millis
+            .load(Ordering::Relaxed)
+            .saturating_add(duration.as_millis() as u64)
+    });
     overlay.marks.push((id, kind, style, end));
     overlay.dirty = true;
     Ok(id)
 }
 
 pub(crate) fn clear_annotations(control: &Control) {
-    let mut overlay = control.annotations.lock().expect("annotations lock poisoned");
+    let mut overlay = control
+        .annotations
+        .lock()
+        .expect("annotations lock poisoned");
     overlay.marks.clear();
     overlay.dirty = true;
 }
 
 static RECORDING_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn is_recording() -> bool { RECORDING_ACTIVE.load(Ordering::Acquire) }
+pub(crate) fn is_recording() -> bool {
+    RECORDING_ACTIVE.load(Ordering::Acquire)
+}
 
 struct RecordingLease;
 
 impl RecordingLease {
     fn acquire() -> Result<Self, String> {
-        RECORDING_ACTIVE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| Self).map_err(|_| "another recording is already running (tray or CLI)".into())
+        RECORDING_ACTIVE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| Self)
+            .map_err(|_| "another recording is already running (tray or CLI)".into())
     }
 }
 
 impl Drop for RecordingLease {
-    fn drop(&mut self) { RECORDING_ACTIVE.store(false, Ordering::Release); }
+    fn drop(&mut self) {
+        RECORDING_ACTIVE.store(false, Ordering::Release);
+    }
 }
 
 impl Control {
@@ -187,13 +234,24 @@ impl Control {
     pub fn new(options: &Options) -> Control {
         let c = Control::default();
         c.cursor.store(options.cursor, Ordering::Relaxed);
-        c.highlight.store(options.cursor_highlight, Ordering::Relaxed);
+        c.highlight
+            .store(options.cursor_highlight, Ordering::Relaxed);
         c.clicks.store(options.click_rings, Ordering::Relaxed);
         c.webcam.store(options.webcam.is_some(), Ordering::Relaxed);
-        c.webcam_circle.store(options.webcam_circle, Ordering::Relaxed);
-        *c.webcam_corner.lock().unwrap() = options.webcam.clone().unwrap_or_else(|| options.webcam_corner.clone());
-        c.system.store(matches!(options.audio.as_str(), "system" | "both"), Ordering::Relaxed);
-        c.microphone.store(matches!(options.audio.as_str(), "microphone" | "both"), Ordering::Relaxed);
+        c.webcam_circle
+            .store(options.webcam_circle, Ordering::Relaxed);
+        *c.webcam_corner.lock().unwrap() = options
+            .webcam
+            .clone()
+            .unwrap_or_else(|| options.webcam_corner.clone());
+        c.system.store(
+            matches!(options.audio.as_str(), "system" | "both"),
+            Ordering::Relaxed,
+        );
+        c.microphone.store(
+            matches!(options.audio.as_str(), "microphone" | "both"),
+            Ordering::Relaxed,
+        );
         c
     }
 
@@ -251,7 +309,10 @@ impl Options {
             click_rings: s.click_rings,
             cursor: s.record_cursor,
             webcam: s.webcam.clone(),
-            webcam_corner: s.webcam.clone().unwrap_or_else(|| s.capture_window.webcam_corner.clone()),
+            webcam_corner: s
+                .webcam
+                .clone()
+                .unwrap_or_else(|| s.capture_window.webcam_corner.clone()),
             webcam_circle: s.webcam_shape != "rectangle",
             webcam_size: s.webcam_size,
         }
@@ -304,8 +365,14 @@ impl Webcam {
                 }
             }
         });
-        ready_rx.recv_timeout(Duration::from_secs(5)).map_err(|_| "the webcam did not start".to_owned())??;
-        Ok(Webcam { latest, stop, thread: Some(thread) })
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "the webcam did not start".to_owned())??;
+        Ok(Webcam {
+            latest,
+            stop,
+            thread: Some(thread),
+        })
     }
 }
 
@@ -322,7 +389,11 @@ fn start_audio(microphone: bool, control: &Control) -> Option<AudioCapture> {
     match media::capture_audio(microphone) {
         Ok(c) => Some(c),
         Err(error) => {
-            let what = if microphone { "microphone" } else { "system audio" };
+            let what = if microphone {
+                "microphone"
+            } else {
+                "system audio"
+            };
             control.note(format!("no {what}: {error}"));
             None
         }
@@ -331,7 +402,10 @@ fn start_audio(microphone: bool, control: &Control) -> Option<AudioCapture> {
 
 /// The sound track's format when no source is on at the start, so one
 /// turned on later can still join.
-const DEFAULT_AUDIO: media::AudioSpec = media::AudioSpec { sample_rate: 48_000, channels: 2 };
+const DEFAULT_AUDIO: media::AudioSpec = media::AudioSpec {
+    sample_rate: 48_000,
+    channels: 2,
+};
 
 /// A sound source that follows its switch: started when turned on (if its
 /// format matches the track's), stopped when turned off.
@@ -344,7 +418,13 @@ struct Source {
 }
 
 impl Source {
-    fn follow(&mut self, wanted: &AtomicBool, silent: &AtomicBool, spec: media::AudioSpec, control: &Control) {
+    fn follow(
+        &mut self,
+        wanted: &AtomicBool,
+        silent: &AtomicBool,
+        spec: media::AudioSpec,
+        control: &Control,
+    ) {
         let on = wanted.load(Ordering::Relaxed);
         if on && self.capture.is_none() && !self.failed {
             match start_audio(self.microphone, control) {
@@ -353,8 +433,15 @@ impl Source {
                     self.silence.start(Instant::now());
                 }
                 Some(c) => {
-                    let what = if self.microphone { "microphone" } else { "system sound" };
-                    control.note(format!("{what} left out: {} Hz, the recording is {} Hz", c.spec.sample_rate, spec.sample_rate));
+                    let what = if self.microphone {
+                        "microphone"
+                    } else {
+                        "system sound"
+                    };
+                    control.note(format!(
+                        "{what} left out: {} Hz, the recording is {} Hz",
+                        c.spec.sample_rate, spec.sample_rate
+                    ));
                     self.failed = true;
                 }
                 None => self.failed = true,
@@ -370,7 +457,10 @@ impl Source {
     }
 
     fn update_silence(&self, now: Instant, silent: &AtomicBool) {
-        silent.store(self.capture.is_some() && self.silence.is_silent(now), Ordering::Relaxed);
+        silent.store(
+            self.capture.is_some() && self.silence.is_silent(now),
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -392,15 +482,21 @@ impl SilenceMonitor {
     }
 
     fn observe(&mut self, samples: &[i16], now: Instant) {
-        let energy = samples.iter().map(|sample| u64::from(sample.unsigned_abs()).pow(2)).sum::<u64>();
-        let has_signal = !samples.is_empty() && energy / samples.len() as u64 >= SIGNAL_RMS_THRESHOLD.pow(2);
+        let energy = samples
+            .iter()
+            .map(|sample| u64::from(sample.unsigned_abs()).pow(2))
+            .sum::<u64>();
+        let has_signal =
+            !samples.is_empty() && energy / samples.len() as u64 >= SIGNAL_RMS_THRESHOLD.pow(2);
         if has_signal {
             self.last_signal = Some(now);
         }
     }
 
     fn is_silent(&self, now: Instant) -> bool {
-        self.last_signal.is_some_and(|last_signal| now.saturating_duration_since(last_signal) >= SILENCE_WARNING_AFTER)
+        self.last_signal.is_some_and(|last_signal| {
+            now.saturating_duration_since(last_signal) >= SILENCE_WARNING_AFTER
+        })
     }
 }
 
@@ -408,18 +504,38 @@ fn cursor_in(rect: Rect) -> Option<(i32, i32)> {
     let mut p = POINT { x: 0, y: 0 };
     // SAFETY: out-parameter only.
     unsafe { GetCursorPos(&mut p) };
-    rect.contains(p.x, p.y).then_some((p.x - rect.x, p.y - rect.y))
+    rect.contains(p.x, p.y)
+        .then_some((p.x - rect.x, p.y - rect.y))
 }
 
 /// Records `rect` into `path` until `control.stop` is set. Runs on the
 /// calling thread.
-pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) -> Result<VideoSpec, String> {
+pub fn record_to(
+    path: &Path,
+    rect: Rect,
+    options: &Options,
+    control: &Control,
+) -> Result<VideoSpec, String> {
     let _lease = RecordingLease::acquire()?;
     media::startup()?;
-    let spec = VideoSpec::for_size(rect.width as u32, rect.height as u32, options.fps.clamp(5, 60));
+    let spec = VideoSpec::for_size(
+        rect.width as u32,
+        rect.height as u32,
+        options.fps.clamp(5, 60),
+    );
     let rect = Rect::new(rect.x, rect.y, spec.width as i32, spec.height as i32);
-    let mut system = Source { microphone: false, capture: None, silence: SilenceMonitor::default(), failed: false };
-    let mut microphone = Source { microphone: true, capture: None, silence: SilenceMonitor::default(), failed: false };
+    let mut system = Source {
+        microphone: false,
+        capture: None,
+        silence: SilenceMonitor::default(),
+        failed: false,
+    };
+    let mut microphone = Source {
+        microphone: true,
+        capture: None,
+        silence: SilenceMonitor::default(),
+        failed: false,
+    };
     // The track takes the format of the first source that starts.
     if control.on(&control.system) {
         system.capture = start_audio(false, control);
@@ -430,7 +546,10 @@ pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) 
             microphone.capture = start_audio(true, control);
             microphone.failed = microphone.capture.is_none();
         }
-        microphone.capture.as_ref().map_or(DEFAULT_AUDIO, |c| c.spec)
+        microphone
+            .capture
+            .as_ref()
+            .map_or(DEFAULT_AUDIO, |c| c.spec)
     });
     let mut webcam: Option<Webcam> = None;
     let mut webcam_failed = false;
@@ -453,7 +572,11 @@ pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) 
     let mut written = 0i64;
     let mut audio_frames = 0i64;
     let mut frame = Frame::new(spec.width, spec.height);
-    control.annotations.lock().expect("annotations lock poisoned").size = Some((spec.width, spec.height));
+    control
+        .annotations
+        .lock()
+        .expect("annotations lock poisoned")
+        .size = Some((spec.width, spec.height));
     let drain = |c: &Option<AudioCapture>| {
         if let Some(c) = c {
             while c.samples.try_recv().is_ok() {}
@@ -466,8 +589,16 @@ pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) 
         let now = Instant::now();
         // The toolbar's switches.
         system.follow(&control.system, &control.system_silent, audio_spec, control);
-        microphone.follow(&control.microphone, &control.microphone_silent, audio_spec, control);
-        match (system.capture.is_some() && microphone.capture.is_some(), mixer.is_some()) {
+        microphone.follow(
+            &control.microphone,
+            &control.microphone_silent,
+            audio_spec,
+            control,
+        );
+        match (
+            system.capture.is_some() && microphone.capture.is_some(),
+            mixer.is_some(),
+        ) {
             (true, false) => mixer = Some(Mixer::default()),
             (false, true) => mixer = None,
             _ => {}
@@ -530,13 +661,21 @@ pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) 
             }
             for block in out {
                 let n = (block.len() / 2) as i64;
-                writer.write_audio(&block, audio_frames * HNS_PER_SECOND / rate, n * HNS_PER_SECOND / rate)?;
+                writer.write_audio(
+                    &block,
+                    audio_frames * HNS_PER_SECOND / rate,
+                    n * HNS_PER_SECOND / rate,
+                )?;
                 audio_frames += n;
             }
             let expected = t * rate / HNS_PER_SECOND;
             if expected - audio_frames > rate / 5 {
                 let gap = (expected - audio_frames) as usize;
-                writer.write_audio(&media::silence(gap), audio_frames * HNS_PER_SECOND / rate, gap as i64 * HNS_PER_SECOND / rate)?;
+                writer.write_audio(
+                    &media::silence(gap),
+                    audio_frames * HNS_PER_SECOND / rate,
+                    gap as i64 * HNS_PER_SECOND / rate,
+                )?;
                 audio_frames += gap as i64;
             }
             system.update_silence(now, &control.system_silent);
@@ -547,14 +686,20 @@ pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) 
         // video keeps the audio's pace.
         let due = t / frame_time;
         if due < written {
-            std::thread::sleep(Duration::from_millis((((written * frame_time) - t) / 10_000).clamp(1, 5) as u64));
+            std::thread::sleep(Duration::from_millis(
+                (((written * frame_time) - t) / 10_000).clamp(1, 5) as u64,
+            ));
             continue;
         }
         let pixels = grabber.grab().map_err(|e| e.to_string())?;
         frame.pixels.copy_from_slice(pixels);
         // Screen Draw's window is left out of captures; its marks go in here.
         screendraw::blend_into(&mut frame);
-        control.annotations.lock().expect("annotations lock poisoned").blend(&mut frame, (t / 10_000) as u64);
+        control
+            .annotations
+            .lock()
+            .expect("annotations lock poisoned")
+            .blend(&mut frame, (t / 10_000) as u64);
         let pointer = cursor_in(rect);
         if let (true, Some(p)) = (control.on(&control.highlight), pointer) {
             vfx::highlight(&mut frame, p);
@@ -571,7 +716,14 @@ pub fn record_to(path: &Path, rect: Rect, options: &Options, control: &Control) 
         if let Some(cam) = &webcam {
             if let Some((w, h, bgra)) = cam.latest.lock().unwrap().as_ref() {
                 let corner = control.webcam_corner.lock().unwrap().clone();
-                vfx::picture_in_picture(&mut frame, bgra, (*w, *h), &corner, options.webcam_size, control.on(&control.webcam_circle));
+                vfx::picture_in_picture(
+                    &mut frame,
+                    bgra,
+                    (*w, *h),
+                    &corner,
+                    options.webcam_size,
+                    control.on(&control.webcam_circle),
+                );
             }
         }
         while written <= due {
@@ -597,26 +749,45 @@ fn countdown(rect: Rect, seconds: u32) -> bool {
     }
     let start = Instant::now();
     let total = Duration::from_secs(seconds as u64);
-    let choice = hud::run_panel(rect, &format!("Recording starts in {seconds}…"), &["Start now", "Cancel"], 100, move || {
-        let left = total.saturating_sub(start.elapsed());
-        if left.is_zero() {
-            hud::finish_panel(Some(0));
-            return None;
-        }
-        Some(format!("Recording starts in {}…  (Esc cancels)", left.as_secs() + 1))
-    });
+    let choice = hud::run_panel(
+        rect,
+        &format!("Recording starts in {seconds}…"),
+        &["Start now", "Cancel"],
+        100,
+        move || {
+            let left = total.saturating_sub(start.elapsed());
+            if left.is_zero() {
+                hud::finish_panel(Some(0));
+                return None;
+            }
+            Some(format!(
+                "Recording starts in {}…  (Esc cancels)",
+                left.as_secs() + 1
+            ))
+        },
+    );
     choice == Some(0)
 }
 
 /// The toolbar's state, as the app draws it.
 fn toolbar_state(control: &Control, settings: &Settings) -> serde_json::Value {
     let on = |f: &AtomicBool| f.load(Ordering::Relaxed);
-    let mut notes = control.audio.lock().unwrap().clone().into_iter().collect::<Vec<_>>();
+    let mut notes = control
+        .audio
+        .lock()
+        .unwrap()
+        .clone()
+        .into_iter()
+        .collect::<Vec<_>>();
     if on(&control.system_silent) {
-        notes.push("No sound detected from system audio. Check the selected output device.".to_owned());
+        notes.push(
+            "No sound detected from system audio. Check the selected output device.".to_owned(),
+        );
     }
     if on(&control.microphone_silent) {
-        notes.push("No sound detected from the microphone. Check the selected input device.".to_owned());
+        notes.push(
+            "No sound detected from the microphone. Check the selected input device.".to_owned(),
+        );
     }
     json!({
         "millis": control.millis.load(Ordering::Relaxed),
@@ -658,7 +829,9 @@ fn toolbar_action(action: &str, control: &Control, rect: Rect, fade: Duration) {
             *control.webcam_corner.lock().unwrap() = c.to_owned();
             control.webcam.store(true, Ordering::Relaxed);
         }
-        ("shape", shape) => control.webcam_circle.store(shape != "rectangle", Ordering::Relaxed),
+        ("shape", shape) => control
+            .webcam_circle
+            .store(shape != "rectangle", Ordering::Relaxed),
         _ => {}
     }
 }
@@ -688,15 +861,20 @@ pub fn record(rect: Rect, settings: &Settings) -> Result<Option<PathBuf>, String
         });
         // The pause and stop keys work wherever the focus is.
         let (pause, stop) = check_keys();
-        for (key, best, what) in [(pause, PAUSE_KEYS[0].2, "pauses"), (stop, STOP_KEYS[0].2, "stops")] {
+        for (key, best, what) in [
+            (pause, PAUSE_KEYS[0].2, "pauses"),
+            (stop, STOP_KEYS[0].2, "stops"),
+        ] {
             match key {
                 Some((.., name)) if name != best => log(&format!("{best} is held by another app; {name} {what} the recording")),
                 None => log(&format!("{best} and its alternatives are held by other apps; only the toolbar {what} the recording")),
                 _ => {}
             }
         }
-        let keys: Vec<(u32, u16, &str)> =
-            [(pause, "pause"), (stop, "stop")].into_iter().filter_map(|(key, action)| key.map(|(modifiers, vk, _)| (modifiers, vk, action))).collect();
+        let keys: Vec<(u32, u16, &str)> = [(pause, "pause"), (stop, "stop")]
+            .into_iter()
+            .filter_map(|(key, action)| key.map(|(modifiers, vk, _)| (modifiers, vk, action)))
+            .collect();
         let ended = hud::run_toolbar(
             rect,
             &keys,
@@ -718,7 +896,9 @@ pub fn record(rect: Rect, settings: &Settings) -> Result<Option<PathBuf>, String
         );
         screendraw::hide();
         control.stop.store(true, Ordering::Release);
-        let result = worker.join().map_err(|_| "the recorder crashed".to_owned())?;
+        let result = worker
+            .join()
+            .map_err(|_| "the recorder crashed".to_owned())?;
         crate::tray::remember_recording(&control);
         match ended.as_str() {
             "restart" if result.is_ok() => {
@@ -750,7 +930,7 @@ pub fn record(rect: Rect, settings: &Settings) -> Result<Option<PathBuf>, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jiffshot_doc::{Box2, object::ShapeKind};
+    use jiffshot_doc::{object::ShapeKind, Box2};
 
     #[test]
     fn silence_warning_waits_five_seconds_and_clears_on_signal() {
@@ -772,7 +952,10 @@ mod tests {
         let mut monitor = SilenceMonitor::default();
         monitor.start(start);
 
-        monitor.observe(&[399; 960], start + SILENCE_WARNING_AFTER - Duration::from_millis(1));
+        monitor.observe(
+            &[399; 960],
+            start + SILENCE_WARNING_AFTER - Duration::from_millis(1),
+        );
         assert!(monitor.is_silent(start + SILENCE_WARNING_AFTER));
 
         monitor.observe(&[400; 960], start + SILENCE_WARNING_AFTER);
@@ -801,13 +984,30 @@ mod tests {
         control.microphone_silent.store(true, Ordering::Relaxed);
         control.note("no webcam: unavailable".to_owned());
 
-        let note = toolbar_state(&control, &Settings::default())["note"].as_str().unwrap().to_owned();
+        let note = toolbar_state(&control, &Settings::default())["note"]
+            .as_str()
+            .unwrap()
+            .to_owned();
 
         assert!(note.contains("no webcam: unavailable"), "{note}");
-        assert!(note.contains("No sound detected from system audio."), "{note}");
-        assert!(note.contains("No sound detected from the microphone."), "{note}");
-        assert!(toolbar_state(&control, &Settings::default())["system_silent"].as_bool().unwrap());
-        assert!(toolbar_state(&control, &Settings::default())["microphone_silent"].as_bool().unwrap());
+        assert!(
+            note.contains("No sound detected from system audio."),
+            "{note}"
+        );
+        assert!(
+            note.contains("No sound detected from the microphone."),
+            "{note}"
+        );
+        assert!(
+            toolbar_state(&control, &Settings::default())["system_silent"]
+                .as_bool()
+                .unwrap()
+        );
+        assert!(
+            toolbar_state(&control, &Settings::default())["microphone_silent"]
+                .as_bool()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -827,24 +1027,56 @@ mod tests {
     fn live_annotations_render_expire_and_clear_without_input() {
         let control = Control::default();
         control.annotations.lock().expect("annotations").size = Some((80, 60));
-        let kind = Kind::Shape { rect: Box2::from_xywh(10.0, 10.0, 30.0, 20.0), shape: ShapeKind::Rectangle };
-        let style = Style { fill: Rgba::RED, width: 0.0, ..Style::default() };
-        let id = add_annotation(&control, kind.clone(), style.clone(), Duration::from_millis(100)).expect("annotation");
+        let kind = Kind::Shape {
+            rect: Box2::from_xywh(10.0, 10.0, 30.0, 20.0),
+            shape: ShapeKind::Rectangle,
+        };
+        let style = Style {
+            fill: Rgba::RED,
+            width: 0.0,
+            ..Style::default()
+        };
+        let id = add_annotation(
+            &control,
+            kind.clone(),
+            style.clone(),
+            Duration::from_millis(100),
+        )
+        .expect("annotation");
         assert_eq!(id, 1);
         let mut before_expiry = Frame::new(80, 60);
-        control.annotations.lock().expect("annotations").blend(&mut before_expiry, 99);
+        control
+            .annotations
+            .lock()
+            .expect("annotations")
+            .blend(&mut before_expiry, 99);
         let pixel = (15 * before_expiry.stride()) + 15 * 4;
-        assert_eq!(&before_expiry.pixels[pixel..pixel + 3], &[Rgba::RED.b, Rgba::RED.g, Rgba::RED.r]);
+        assert_eq!(
+            &before_expiry.pixels[pixel..pixel + 3],
+            &[Rgba::RED.b, Rgba::RED.g, Rgba::RED.r]
+        );
         let mut at_expiry = Frame::new(80, 60);
-        control.annotations.lock().expect("annotations").blend(&mut at_expiry, 100);
+        control
+            .annotations
+            .lock()
+            .expect("annotations")
+            .blend(&mut at_expiry, 100);
         assert_eq!(&at_expiry.pixels[pixel..pixel + 3], &[0, 0, 0]);
         add_annotation(&control, kind, style, Duration::ZERO).expect("persistent annotation");
         let mut persistent = Frame::new(80, 60);
-        control.annotations.lock().expect("annotations").blend(&mut persistent, 100_000);
+        control
+            .annotations
+            .lock()
+            .expect("annotations")
+            .blend(&mut persistent, 100_000);
         assert_ne!(&persistent.pixels[pixel..pixel + 3], &[0, 0, 0]);
         clear_annotations(&control);
         let mut cleared = Frame::new(80, 60);
-        control.annotations.lock().expect("annotations").blend(&mut cleared, 100_000);
+        control
+            .annotations
+            .lock()
+            .expect("annotations")
+            .blend(&mut cleared, 100_000);
         assert_eq!(&cleared.pixels[pixel..pixel + 3], &[0, 0, 0]);
     }
 
@@ -862,13 +1094,23 @@ mod tests {
         use jiffshot_doc::Pt;
         let control = Control::default();
         control.annotations.lock().expect("annotations").size = Some((100, 60));
-        let kind = Kind::Group { objects: vec![Object::new(1, Kind::Magnify {
-            rect: Box2::from_xywh(10.0, 10.0, 20.0, 20.0),
-            zoom: 2.0,
-            ellipse: false,
-            offset: Pt::new(40.0, 0.0),
-        }, Style { width: 0.0, ..Style::default() })] };
-        add_annotation(&control, kind, Style::default(), Duration::from_millis(100)).expect("annotation");
+        let kind = Kind::Group {
+            objects: vec![Object::new(
+                1,
+                Kind::Magnify {
+                    rect: Box2::from_xywh(10.0, 10.0, 20.0, 20.0),
+                    zoom: 2.0,
+                    ellipse: false,
+                    offset: Pt::new(40.0, 0.0),
+                },
+                Style {
+                    width: 0.0,
+                    ..Style::default()
+                },
+            )],
+        };
+        add_annotation(&control, kind, Style::default(), Duration::from_millis(100))
+            .expect("annotation");
         for (now, source) in [(0, Rgba::RED), (50, Rgba::BLUE), (100, Rgba::RED)] {
             let mut frame = Frame::new(100, 60);
             for y in 10..30 {
@@ -877,8 +1119,16 @@ mod tests {
                     frame.pixels[at..at + 4].copy_from_slice(&[source.b, source.g, source.r, 0]);
                 }
             }
-            control.annotations.lock().expect("annotations").blend(&mut frame, now);
-            let expected = if now < 100 { (source.r, source.g, source.b) } else { (0, 0, 0) };
+            control
+                .annotations
+                .lock()
+                .expect("annotations")
+                .blend(&mut frame, now);
+            let expected = if now < 100 {
+                (source.r, source.g, source.b)
+            } else {
+                (0, 0, 0)
+            };
             assert_eq!(frame.rgb(60, 20), Some(expected));
             assert_eq!(frame.rgb(5, 5), Some((0, 0, 0)));
         }
@@ -889,11 +1139,17 @@ mod tests {
         use jiffshot_doc::object::BlurMode;
         let control = Control::default();
         control.annotations.lock().expect("annotations").size = Some((80, 60));
-        add_annotation(&control, Kind::Blur {
-            rect: Box2::from_xywh(10.0, 10.0, 20.0, 20.0),
-            mode: BlurMode::Pixelate,
-            amount: 10.0,
-        }, Style::default(), Duration::ZERO).expect("annotation");
+        add_annotation(
+            &control,
+            Kind::Blur {
+                rect: Box2::from_xywh(10.0, 10.0, 20.0, 20.0),
+                mode: BlurMode::Pixelate,
+                amount: 10.0,
+            },
+            Style::default(),
+            Duration::ZERO,
+        )
+        .expect("annotation");
         let mut frame = Frame::new(80, 60);
         for y in 10..30 {
             for x in 10..30 {
@@ -902,7 +1158,11 @@ mod tests {
                 frame.pixels[at..at + 4].copy_from_slice(&[0, 0, red, 0]);
             }
         }
-        control.annotations.lock().expect("annotations").blend(&mut frame, 0);
+        control
+            .annotations
+            .lock()
+            .expect("annotations")
+            .blend(&mut frame, 0);
         let (red, green, blue) = frame.rgb(15, 15).expect("pixel");
         assert!((120..=135).contains(&red));
         assert_eq!((green, blue), (0, 0));

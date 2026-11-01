@@ -5,11 +5,45 @@ use crate::color::Rgba;
 use crate::geom::IRect;
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
+/// Finds the content inside near-solid edges matching the top-left pixel.
+pub fn trim_bounds(image: &Pixmap) -> Option<IRect> {
+    let (width, height) = (image.width() as usize, image.height() as usize);
+    let pixels = image.pixels();
+    let edge = pixels.first()?.demultiply();
+    let same = |x: usize, y: usize| {
+        let color = pixels[y * width + x].demultiply();
+        let close = |a: u8, b: u8| (a as i32 - b as i32).abs() <= 8;
+        close(color.red(), edge.red())
+            && close(color.green(), edge.green())
+            && close(color.blue(), edge.blue())
+            && close(color.alpha(), edge.alpha())
+    };
+    let row = |y: usize| (0..width).all(|x| same(x, y));
+    let column = |x: usize, top: usize, bottom: usize| (top..bottom).all(|y| same(x, y));
+    let top = (0..height).find(|&y| !row(y))?;
+    let bottom = (0..height).rev().find(|&y| !row(y))? + 1;
+    let left = (0..width).find(|&x| !column(x, top, bottom))?;
+    let right = (0..width).rev().find(|&x| !column(x, top, bottom))? + 1;
+    let bounds = IRect::new(
+        left as i32,
+        top as i32,
+        (right - left) as i32,
+        (bottom - top) as i32,
+    );
+    (bounds != IRect::of_size(image.width(), image.height())).then_some(bounds)
+}
+
 /// Copies `area` of `src` to (`dx`, `dy`) in `dst`, clipped to both.
 pub fn copy_area(src: &Pixmap, area: IRect, dst: &mut Pixmap, dx: i32, dy: i32) {
-    let Some(a) = area.intersect(&IRect::of_size(src.width(), src.height())) else { return };
+    let Some(a) = area.intersect(&IRect::of_size(src.width(), src.height())) else {
+        return;
+    };
     let (dx, dy) = (dx + a.x - area.x, dy + a.y - area.y);
-    let Some(d) = IRect::new(dx, dy, a.w, a.h).intersect(&IRect::of_size(dst.width(), dst.height())) else { return };
+    let Some(d) =
+        IRect::new(dx, dy, a.w, a.h).intersect(&IRect::of_size(dst.width(), dst.height()))
+    else {
+        return;
+    };
     let (sx, sy) = (a.x + d.x - dx, a.y + d.y - dy);
     let (ss, ds) = (src.width() as usize * 4, dst.width() as usize * 4);
     let row_bytes = d.w as usize * 4;
@@ -32,7 +66,12 @@ pub fn extract(src: &Pixmap, area: IRect) -> Option<Pixmap> {
 /// Blends `color` at `coverage` (0..=1) over pixel (`x`, `y`).
 #[inline]
 pub fn blend(pixmap: &mut Pixmap, x: i32, y: i32, color: Rgba, coverage: f32) {
-    if x < 0 || y < 0 || x >= pixmap.width() as i32 || y >= pixmap.height() as i32 || coverage <= 0.0 {
+    if x < 0
+        || y < 0
+        || x >= pixmap.width() as i32
+        || y >= pixmap.height() as i32
+        || coverage <= 0.0
+    {
         return;
     }
     let a = color.a as f32 / 255.0 * coverage.min(1.0);
@@ -48,7 +87,9 @@ pub fn blend(pixmap: &mut Pixmap, x: i32, y: i32, color: Rgba, coverage: f32) {
 /// Three box-blur passes (close to a Gaussian of sigma ~ `radius` / 1.7)
 /// over `area`, using only pixels inside it (edges are clamped).
 pub fn blur_area(pixmap: &mut Pixmap, area: IRect, radius: u32) {
-    let Some(a) = area.intersect(&IRect::of_size(pixmap.width(), pixmap.height())) else { return };
+    let Some(a) = area.intersect(&IRect::of_size(pixmap.width(), pixmap.height())) else {
+        return;
+    };
     if radius == 0 {
         return;
     }
@@ -66,7 +107,13 @@ pub fn blur_area(pixmap: &mut Pixmap, area: IRect, radius: u32) {
 /// One horizontal (or vertical) running-sum box blur from `src` to `dst`.
 fn box_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize, horizontal: bool) {
     let (n, lines) = if horizontal { (w, h) } else { (h, w) };
-    let at = |line: usize, i: usize| if horizontal { (line * w + i) * 4 } else { (i * w + line) * 4 };
+    let at = |line: usize, i: usize| {
+        if horizontal {
+            (line * w + i) * 4
+        } else {
+            (i * w + line) * 4
+        }
+    };
     let window = (2 * r + 1) as u32;
     for line in 0..lines {
         let mut sum = [0u32; 4];
@@ -82,7 +129,10 @@ fn box_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize, horizontal
             for c in 0..4 {
                 dst[p + c] = ((sum[c] + window / 2) / window) as u8;
             }
-            let out = at(line, (i as isize - r as isize).clamp(0, n as isize - 1) as usize);
+            let out = at(
+                line,
+                (i as isize - r as isize).clamp(0, n as isize - 1) as usize,
+            );
             let inn = at(line, (i + r + 1).min(n - 1));
             for c in 0..4 {
                 sum[c] = sum[c] + src[inn + c] as u32 - src[out + c] as u32;
@@ -93,7 +143,9 @@ fn box_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize, horizontal
 
 /// Replaces each `block`-sized cell of `area` with its average color.
 pub fn pixelate_area(pixmap: &mut Pixmap, area: IRect, block: u32) {
-    let Some(a) = area.intersect(&IRect::of_size(pixmap.width(), pixmap.height())) else { return };
+    let Some(a) = area.intersect(&IRect::of_size(pixmap.width(), pixmap.height())) else {
+        return;
+    };
     let block = block.max(2) as i32;
     let stride = pixmap.width() as usize * 4;
     let data = pixmap.data_mut();
@@ -130,7 +182,9 @@ pub fn pixelate_area(pixmap: &mut Pixmap, area: IRect, block: u32) {
 /// transparency is visible on screen. `origin` keeps the pattern aligned to
 /// document coordinates when `pixmap` is a piece of the document.
 pub fn checkerboard_under(pixmap: &mut Pixmap, area: IRect, origin: (i32, i32)) {
-    let Some(a) = area.intersect(&IRect::of_size(pixmap.width(), pixmap.height())) else { return };
+    let Some(a) = area.intersect(&IRect::of_size(pixmap.width(), pixmap.height())) else {
+        return;
+    };
     let stride = pixmap.width() as usize * 4;
     let data = pixmap.data_mut();
     for y in a.y..a.bottom() {
@@ -189,6 +243,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn trim_bounds_respects_near_solid_edges_and_noop_images() {
+        let mut image = solid(8, 8, Rgba::WHITE).expect("image should be valid");
+        assert_eq!(trim_bounds(&image), None, "a solid image has no content");
+        for y in 2..6 {
+            for x in 3..7 {
+                set_pixel(&mut image, x, y, Rgba::RED);
+            }
+        }
+        set_pixel(&mut image, 1, 0, Rgba::rgb(247, 255, 255));
+        assert_eq!(
+            trim_bounds(&image),
+            Some(IRect::new(3, 2, 4, 4)),
+            "a channel difference of eight still belongs to the edge"
+        );
+        set_pixel(&mut image, 1, 0, Rgba::rgb(246, 255, 255));
+        assert_eq!(
+            trim_bounds(&image),
+            Some(IRect::new(1, 0, 6, 6)),
+            "a channel difference of nine belongs to the content"
+        );
+        set_pixel(&mut image, 7, 7, Rgba::RED);
+        assert_eq!(
+            trim_bounds(&image),
+            Some(IRect::new(1, 0, 7, 8)),
+            "the content can touch three edges"
+        );
+        set_pixel(&mut image, 0, 3, Rgba::RED);
+        assert_eq!(trim_bounds(&image), None, "all edges contain content");
+    }
+
+    #[test]
     fn copy_clips_on_every_side() {
         let src = solid(4, 4, Rgba::RED).unwrap();
         let mut dst = solid(4, 4, Rgba::WHITE).unwrap();
@@ -220,7 +305,13 @@ mod tests {
 /// Scanline flood fill of the region connected to (`x`, `y`) whose colors
 /// are within `tolerance` (per channel) of the seed. Returns the filled
 /// area.
-pub fn flood_fill(pixmap: &mut Pixmap, x: i32, y: i32, color: Rgba, tolerance: u8) -> Option<IRect> {
+pub fn flood_fill(
+    pixmap: &mut Pixmap,
+    x: i32,
+    y: i32,
+    color: Rgba,
+    tolerance: u8,
+) -> Option<IRect> {
     let (w, h) = (pixmap.width() as i32, pixmap.height() as i32);
     if x < 0 || y < 0 || x >= w || y >= h {
         return None;
@@ -268,7 +359,10 @@ pub fn flood_fill(pixmap: &mut Pixmap, x: i32, y: i32, color: Rgba, tolerance: u
                 let at = (ny * w + i) as usize;
                 if !done[at] && close(pixels[at]) {
                     stack.push((i, ny));
-                    while i <= r && !done[(ny * w + i) as usize] && close(pixels[(ny * w + i) as usize]) {
+                    while i <= r
+                        && !done[(ny * w + i) as usize]
+                        && close(pixels[(ny * w + i) as usize])
+                    {
                         i += 1;
                     }
                 }
@@ -313,7 +407,10 @@ pub fn flood_mask(pixmap: &Pixmap, x: i32, y: i32, tolerance: u8) -> Option<(IRe
         }
     }
     let area = IRect::new(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
-    let mask = (area.y..area.bottom()).flat_map(|yy| (area.x..area.right()).map(move |xx| (xx, yy))).map(|(xx, yy)| done[(yy * w + xx) as usize]).collect();
+    let mask = (area.y..area.bottom())
+        .flat_map(|yy| (area.x..area.right()).map(move |xx| (xx, yy)))
+        .map(|(xx, yy)| done[(yy * w + xx) as usize])
+        .collect();
     Some((area, mask))
 }
 
@@ -342,14 +439,19 @@ pub fn color_mask(pixmap: &Pixmap, x: i32, y: i32, tolerance: u8) -> Option<(IRe
         }
     }
     let area = IRect::new(b.0, b.1, b.2 - b.0 + 1, b.3 - b.1 + 1);
-    let mask = (area.y..area.bottom()).flat_map(|yy| (area.x..area.right()).map(move |xx| (xx, yy))).map(|(xx, yy)| all[(yy * w + xx) as usize]).collect();
+    let mask = (area.y..area.bottom())
+        .flat_map(|yy| (area.x..area.right()).map(move |xx| (xx, yy)))
+        .map(|(xx, yy)| all[(yy * w + xx) as usize])
+        .collect();
     Some((area, mask))
 }
 
 /// Replaces every pixel within `tolerance` of the color at (`x`, `y`) with
 /// `color` (global fill). Returns whether anything changed.
 pub fn replace_color(pixmap: &mut Pixmap, x: i32, y: i32, color: Rgba, tolerance: u8) -> bool {
-    let Some((area, mask)) = color_mask(pixmap, x, y, tolerance) else { return false };
+    let Some((area, mask)) = color_mask(pixmap, x, y, tolerance) else {
+        return false;
+    };
     let fill = color.premultiplied();
     let w = pixmap.width() as i32;
     let px = pixmap.pixels_mut();
@@ -365,8 +467,14 @@ pub fn replace_color(pixmap: &mut Pixmap, x: i32, y: i32, color: Rgba, tolerance
 /// Resamples `src` to `width` x `height` with bicubic filtering.
 pub fn resample(src: &Pixmap, width: u32, height: u32) -> Option<Pixmap> {
     let mut out = Pixmap::new(width.max(1), height.max(1))?;
-    let t = tiny_skia::Transform::from_scale(width as f32 / src.width() as f32, height as f32 / src.height() as f32);
-    let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bicubic, ..Default::default() };
+    let t = tiny_skia::Transform::from_scale(
+        width as f32 / src.width() as f32,
+        height as f32 / src.height() as f32,
+    );
+    let paint = tiny_skia::PixmapPaint {
+        quality: tiny_skia::FilterQuality::Bicubic,
+        ..Default::default()
+    };
     out.draw_pixmap(0, 0, src.as_ref(), &paint, t, None);
     Some(out)
 }

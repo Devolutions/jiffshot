@@ -47,8 +47,16 @@ fn luhn(digits: &[u8]) -> bool {
 
 fn is_email(w: &str) -> bool {
     let w = w.trim_matches(|c: char| !c.is_alphanumeric());
-    let Some((user, host)) = w.split_once('@') else { return false };
-    !user.is_empty() && host.contains('.') && !host.starts_with('.') && !host.ends_with('.') && host.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-')
+    let Some((user, host)) = w.split_once('@') else {
+        return false;
+    };
+    !user.is_empty()
+        && host.contains('.')
+        && !host.starts_with('.')
+        && !host.ends_with('.')
+        && host
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == '-')
 }
 
 fn is_url(w: &str) -> bool {
@@ -59,7 +67,10 @@ fn is_url(w: &str) -> bool {
 fn is_ip(w: &str) -> bool {
     let w = w.trim_matches(|c: char| !c.is_ascii_digit());
     let parts: Vec<&str> = w.split('.').collect();
-    parts.len() == 4 && parts.iter().all(|p| !p.is_empty() && p.len() <= 3 && p.parse::<u16>().is_ok_and(|v| v <= 255))
+    parts.len() == 4
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.len() <= 3 && p.parse::<u16>().is_ok_and(|v| v <= 255))
 }
 
 /// Characters that may sit inside a phone or card number.
@@ -72,7 +83,10 @@ pub fn find(text: &str) -> Vec<(usize, usize, Kind)> {
     let mut found = Vec::new();
     // Word-shaped things.
     let mut start = None;
-    for (i, c) in text.char_indices().chain(std::iter::once((text.len(), ' '))) {
+    for (i, c) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), ' ')))
+    {
         match (c.is_whitespace(), start) {
             (false, None) => start = Some(i),
             (true, Some(s)) => {
@@ -113,12 +127,18 @@ pub fn find(text: &str) -> Vec<(usize, usize, Kind)> {
         }
         let e = bytes.get(j).map_or(text.len(), |b| b.0);
         let run = &text[s..e];
-        let digits: Vec<u8> = run.chars().filter(|c| c.is_ascii_digit()).map(|c| c as u8 - b'0').collect();
+        let digits: Vec<u8> = run
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .map(|c| c as u8 - b'0')
+            .collect();
         let overlaps = found.iter().any(|&(a, b, _)| s < b && a < e);
         if !overlaps {
             let kind = if (13..=19).contains(&digits.len()) && luhn(&digits) {
                 Some(Kind::Card)
-            } else if (10..=15).contains(&digits.len()) && run.chars().any(|c| !c.is_ascii_digit()) || digits.len() >= 10 && run.starts_with('+') {
+            } else if (10..=15).contains(&digits.len()) && run.chars().any(|c| !c.is_ascii_digit())
+                || digits.len() >= 10 && run.starts_with('+')
+            {
                 Some(Kind::Phone)
             } else if (7..=9).contains(&digits.len()) && run.contains('-') && digits.len() >= 7 {
                 Some(Kind::Phone)
@@ -158,7 +178,9 @@ pub fn areas(lines: &[TextLine]) -> Vec<(IRect, Kind)> {
             let mut cursor = 0;
             let mut cover: Option<IRect> = None;
             for (rect, word) in &line.words {
-                let Some(found) = line.text[cursor..].find(word.as_str()) else { continue };
+                let Some(found) = line.text[cursor..].find(word.as_str()) else {
+                    continue;
+                };
                 let ws = cursor + found;
                 let we = ws + word.len();
                 cursor = we;
@@ -179,19 +201,45 @@ mod tests {
     use super::*;
 
     fn kinds(text: &str) -> Vec<(String, Kind)> {
-        find(text).into_iter().map(|(s, e, k)| (text[s..e].to_owned(), k)).collect()
+        find(text)
+            .into_iter()
+            .map(|(s, e, k)| (text[s..e].to_owned(), k))
+            .collect()
     }
 
     #[test]
     fn finds_sensitive_text() {
-        assert_eq!(kinds("Write to jane.doe@example.com today"), [("jane.doe@example.com".into(), Kind::Email)]);
-        assert_eq!(kinds("Call (555) 123-4567 now"), [("(555) 123-4567".into(), Kind::Phone)]);
-        assert_eq!(kinds("Card 4111 1111 1111 1111 exp 12/29"), [("4111 1111 1111 1111".into(), Kind::Card)]);
-        assert!(kinds("Order 4111 1111 1111 1112").iter().all(|(_, k)| *k != Kind::Card), "fails Luhn");
-        assert_eq!(kinds("Server 10.0.12.254 is up"), [("10.0.12.254".into(), Kind::Ip)]);
-        assert_eq!(kinds("See https://example.com/a"), [("https://example.com/a".into(), Kind::Url)]);
+        assert_eq!(
+            kinds("Write to jane.doe@example.com today"),
+            [("jane.doe@example.com".into(), Kind::Email)]
+        );
+        assert_eq!(
+            kinds("Call (555) 123-4567 now"),
+            [("(555) 123-4567".into(), Kind::Phone)]
+        );
+        assert_eq!(
+            kinds("Card 4111 1111 1111 1111 exp 12/29"),
+            [("4111 1111 1111 1111".into(), Kind::Card)]
+        );
+        assert!(
+            kinds("Order 4111 1111 1111 1112")
+                .iter()
+                .all(|(_, k)| *k != Kind::Card),
+            "fails Luhn"
+        );
+        assert_eq!(
+            kinds("Server 10.0.12.254 is up"),
+            [("10.0.12.254".into(), Kind::Ip)]
+        );
+        assert_eq!(
+            kinds("See https://example.com/a"),
+            [("https://example.com/a".into(), Kind::Url)]
+        );
         assert!(kinds("Version 2025.4 released in 2026").is_empty());
-        assert_eq!(kinds("+1 514 555 0199"), [("+1 514 555 0199".into(), Kind::Phone)]);
+        assert_eq!(
+            kinds("+1 514 555 0199"),
+            [("+1 514 555 0199".into(), Kind::Phone)]
+        );
     }
 
     #[test]
@@ -208,6 +256,12 @@ mod tests {
             ],
         };
         let a = areas(&[line]);
-        assert_eq!(a, vec![(IRect::new(45, 0, 80, 20), Kind::Email), (IRect::new(200, 0, 100, 20), Kind::Phone)]);
+        assert_eq!(
+            a,
+            vec![
+                (IRect::new(45, 0, 80, 20), Kind::Email),
+                (IRect::new(200, 0, 100, 20), Kind::Phone)
+            ]
+        );
     }
 }

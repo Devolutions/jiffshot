@@ -14,7 +14,29 @@ tiny-skia.workspace = true
 parking_lot = "0.12"
 serde.workspace = true
 serde_json.workspace = true
+jiffshot-doc = { path = "../crates/jiffshot-doc" }
+
+[target.'cfg(windows)'.dependencies]
 jiffshot-capture = { path = "../crates/jiffshot-capture" }
 jiffshot-workflow = { path = "../crates/jiffshot-workflow" }
-jiffshot-doc = { path = "../crates/jiffshot-doc" }
 windows-sys = { workspace = true, features = ["Win32_Media_Audio", "Win32_Security_Credentials"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3.7", default-features = false, features = ["image-data", "wayland-data-control"] }
+ashpd = { version = "0.11", default-features = false, features = ["async-std"] }
+async-channel = "2"
+async-io = "2"
+dirs = "6"
+futures-lite = "2"
+futures-util = "0.3"
+gstreamer = "0.24"
+gstreamer-app = "0.24"
+gstreamer-pbutils = "0.24"
+gstreamer-video = { version = "0.24", features = ["v1_18"] }
+jiffshot-capture = { path = "../crates/jiffshot-capture" }
+ksni = { version = "0.3", default-features = false, features = ["async-io"] }
+leptess = "0.14"
+png.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+tempfile = "3"
+zbus = { version = "5", default-features = false, features = ["async-io"] }

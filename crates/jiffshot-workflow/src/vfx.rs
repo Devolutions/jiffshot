@@ -25,7 +25,8 @@ fn disc(frame: &mut Frame, center: (f32, f32), inner: f32, outer: f32, color: [u
     let y1 = ((center.1 + outer + 1.0).ceil() as i32).min(h);
     for y in y0..y1 {
         for x in x0..x1 {
-            let d = ((x as f32 + 0.5 - center.0).powi(2) + (y as f32 + 0.5 - center.1).powi(2)).sqrt();
+            let d =
+                ((x as f32 + 0.5 - center.0).powi(2) + (y as f32 + 0.5 - center.1).powi(2)).sqrt();
             let cover = (outer + 0.5 - d).clamp(0.0, 1.0) * (d - inner + 0.5).clamp(0.0, 1.0);
             if cover > 0.0 {
                 let i = y as usize * stride + x as usize * 4;
@@ -37,7 +38,14 @@ fn disc(frame: &mut Frame, center: (f32, f32), inner: f32, outer: f32, color: [u
 
 /// A translucent yellow disc under the pointer (`at` in frame pixels).
 pub fn highlight(frame: &mut Frame, at: (i32, i32)) {
-    disc(frame, (at.0 as f32, at.1 as f32), 0.0, 26.0, [0x2E, 0xE6, 0xFF], 0.35);
+    disc(
+        frame,
+        (at.0 as f32, at.1 as f32),
+        0.0,
+        26.0,
+        [0x2E, 0xE6, 0xFF],
+        0.35,
+    );
 }
 
 /// Watches the mouse buttons and draws an expanding ring for each click.
@@ -53,7 +61,12 @@ impl Clicks {
     /// Call once per frame; `at` is the pointer in frame pixels.
     pub fn update(&mut self, at: (i32, i32)) {
         // SAFETY: plain key-state queries.
-        let (left, right) = unsafe { (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000 != 0, GetAsyncKeyState(VK_RBUTTON as i32) as u16 & 0x8000 != 0) };
+        let (left, right) = unsafe {
+            (
+                GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000 != 0,
+                GetAsyncKeyState(VK_RBUTTON as i32) as u16 & 0x8000 != 0,
+            )
+        };
         if left && !self.down.0 {
             self.rings.push((at, false, Instant::now()));
         }
@@ -69,8 +82,19 @@ impl Clicks {
             let t = when.elapsed().as_secs_f32() / RING_TIME.as_secs_f32();
             let r = 10.0 + 26.0 * t;
             // Left clicks blue, right clicks orange.
-            let color = if *right { [0x0B, 0x9E, 0xF5] } else { [0xD9, 0x6F, 0x1E] };
-            disc(frame, (at.0 as f32, at.1 as f32), r - 3.0, r, color, 0.9 * (1.0 - t));
+            let color = if *right {
+                [0x0B, 0x9E, 0xF5]
+            } else {
+                [0xD9, 0x6F, 0x1E]
+            };
+            disc(
+                frame,
+                (at.0 as f32, at.1 as f32),
+                r - 3.0,
+                r,
+                color,
+                0.9 * (1.0 - t),
+            );
         }
     }
 }
@@ -78,18 +102,41 @@ impl Clicks {
 /// Puts `cam` (BGRA, `cw` x `ch`) into a corner of `frame`: `size` is the
 /// share of the frame's height, `corner` is "top-left", "top-right",
 /// "bottom-left" or "bottom-right", and `circle` crops it round.
-pub fn picture_in_picture(frame: &mut Frame, cam: &[u8], (cw, ch): (u32, u32), corner: &str, size: f32, circle: bool) {
+pub fn picture_in_picture(
+    frame: &mut Frame,
+    cam: &[u8],
+    (cw, ch): (u32, u32),
+    corner: &str,
+    size: f32,
+    circle: bool,
+) {
     if cw == 0 || ch == 0 {
         return;
     }
     let (fw, fh) = (frame.width as i32, frame.height as i32);
     let h = ((fh as f32 * size.clamp(0.1, 0.6)) as i32).max(32);
-    let w = if circle { h } else { (h as f32 * cw as f32 / ch as f32) as i32 };
+    let w = if circle {
+        h
+    } else {
+        (h as f32 * cw as f32 / ch as f32) as i32
+    };
     let margin = 16;
-    let x0 = if corner.ends_with("left") { margin } else { fw - w - margin };
-    let y0 = if corner.starts_with("top") { margin } else { fh - h - margin };
+    let x0 = if corner.ends_with("left") {
+        margin
+    } else {
+        fw - w - margin
+    };
+    let y0 = if corner.starts_with("top") {
+        margin
+    } else {
+        fh - h - margin
+    };
     // Circles show the middle square of the camera picture.
-    let (sx0, sw) = if circle { ((cw.saturating_sub(ch)) / 2, cw.min(ch)) } else { (0, cw) };
+    let (sx0, sw) = if circle {
+        ((cw.saturating_sub(ch)) / 2, cw.min(ch))
+    } else {
+        (0, cw)
+    };
     let (cx, cy, radius) = (w as f32 / 2.0, h as f32 / 2.0, w.min(h) as f32 / 2.0);
     let stride = frame.stride();
     for y in 0..h {
@@ -119,7 +166,11 @@ pub fn picture_in_picture(frame: &mut Frame, cam: &[u8], (cw, ch): (u32, u32), c
             let s = (sy * cw + sx) as usize * 4;
             let i = fy as usize * stride + fx as usize * 4;
             let src = [cam[s], cam[s + 1], cam[s + 2]];
-            let color = if border > 0.0 { [0xFF, 0xFF, 0xFF] } else { src };
+            let color = if border > 0.0 {
+                [0xFF, 0xFF, 0xFF]
+            } else {
+                src
+            };
             blend(&mut frame.pixels[i..i + 4], color, cover);
         }
     }
@@ -136,7 +187,11 @@ pub struct NoiseGate {
 
 impl NoiseGate {
     pub fn new(rate: u32) -> NoiseGate {
-        NoiseGate { gain: 1.0, quiet_for: 0, rate: rate as usize }
+        NoiseGate {
+            gain: 1.0,
+            quiet_for: 0,
+            rate: rate as usize,
+        }
     }
 
     /// Processes interleaved stereo in place.
@@ -147,7 +202,12 @@ impl NoiseGate {
         // Decide per 10 ms window, apply per sample.
         let window = (self.rate / 100).max(1) * 2;
         for chunk in pcm.chunks_mut(window) {
-            let rms = (chunk.iter().map(|s| (*s as f32 / 32768.0).powi(2)).sum::<f32>() / chunk.len() as f32).sqrt();
+            let rms = (chunk
+                .iter()
+                .map(|s| (*s as f32 / 32768.0).powi(2))
+                .sum::<f32>()
+                / chunk.len() as f32)
+                .sqrt();
             if rms >= THRESHOLD {
                 self.quiet_for = 0;
             } else {
@@ -155,7 +215,11 @@ impl NoiseGate {
             }
             let open = self.quiet_for < hold;
             for frame in chunk.chunks_mut(2) {
-                self.gain = if open { 1.0 } else { (self.gain - release).max(0.0) };
+                self.gain = if open {
+                    1.0
+                } else {
+                    (self.gain - release).max(0.0)
+                };
                 for s in frame {
                     *s = (*s as f32 * self.gain) as i16;
                 }
@@ -192,7 +256,11 @@ impl Mixer {
             self.a.extend(std::iter::repeat_n(0, lb - la));
         }
         let n = self.a.len().min(self.b.len()) & !1;
-        self.a.drain(..n).zip(self.b.drain(..n)).map(|(x, y)| (x as i32 + y as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16).collect()
+        self.a
+            .drain(..n)
+            .zip(self.b.drain(..n))
+            .map(|(x, y)| (x as i32 + y as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16)
+            .collect()
     }
 }
 
@@ -216,10 +284,17 @@ mod tests {
     #[test]
     fn gate_closes_on_hiss_and_opens_on_speech() {
         let mut g = NoiseGate::new(48_000);
-        let mut hiss: Vec<i16> = (0..48_000 * 2).map(|i| if i % 2 == 0 { 60 } else { -60 }).collect();
+        let mut hiss: Vec<i16> = (0..48_000 * 2)
+            .map(|i| if i % 2 == 0 { 60 } else { -60 })
+            .collect();
         g.process(&mut hiss);
-        assert!(hiss[hiss.len() - 2..].iter().all(|s| *s == 0), "hiss is gated after the hold");
-        let mut speech: Vec<i16> = (0..4800).map(|i| ((i as f32 * 0.05).sin() * 8000.0) as i16).collect();
+        assert!(
+            hiss[hiss.len() - 2..].iter().all(|s| *s == 0),
+            "hiss is gated after the hold"
+        );
+        let mut speech: Vec<i16> = (0..4800)
+            .map(|i| ((i as f32 * 0.05).sin() * 8000.0) as i16)
+            .collect();
         let before = speech.clone();
         g.process(&mut speech);
         assert_eq!(speech[100], before[100], "speech passes at once");

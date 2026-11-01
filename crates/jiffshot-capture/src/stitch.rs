@@ -8,11 +8,10 @@ use std::collections::HashMap;
 /// Pixels at the right edge left out of row matching: scrollbars move.
 const SCROLLBAR: usize = 24;
 
-fn row_hashes(f: &Frame) -> Vec<u64> {
-    let usable = (f.width as usize).saturating_sub(SCROLLBAR).max(1) * 4;
+fn row_hashes(f: &Frame, left: usize, right: usize) -> Vec<u64> {
     (0..f.height as usize)
         .map(|y| {
-            let row = &f.pixels[y * f.stride()..y * f.stride() + usable];
+            let row = &f.pixels[y * f.stride() + left * 4..y * f.stride() + right * 4];
             let mut h: u64 = 0xcbf2_9ce4_8422_2325;
             for (i, b) in row.iter().enumerate() {
                 if i % 4 != 3 {
@@ -22,6 +21,13 @@ fn row_hashes(f: &Frame) -> Vec<u64> {
             h
         })
         .collect()
+}
+
+fn equal_column(a: &Frame, b: &Frame, x: usize) -> bool {
+    (0..a.height as usize).all(|y| {
+        let start = y * a.stride() + x * 4;
+        a.pixels[start..start + 3] == b.pixels[start..start + 3]
+    })
 }
 
 /// How `next` continues `prev` when the content between a fixed header and
@@ -39,15 +45,41 @@ pub fn vertical_step(prev: &Frame, next: &Frame) -> Option<Step> {
     if (prev.width, prev.height) != (next.width, next.height) {
         return None;
     }
-    let (a, b) = (row_hashes(prev), row_hashes(next));
+    if prev.pixels == next.pixels {
+        return None;
+    }
+    // Stationary sidebars do not move with the rows being matched.
+    let usable = (prev.width as usize).saturating_sub(SCROLLBAR).max(1);
+    let cap = usable / 3;
+    let left = (0..cap)
+        .take_while(|&x| equal_column(prev, next, x))
+        .count();
+    let right = (0..cap)
+        .take_while(|&x| equal_column(prev, next, usable - x - 1))
+        .count();
+    let (a, b) = (
+        row_hashes(prev, left, usable - right),
+        row_hashes(next, left, usable - right),
+    );
     let h = a.len();
     if a == b {
         return None;
     }
     // Rows that stay put at the top and bottom are fixed headers and footers.
     let cap = h / 3;
-    let header = a.iter().zip(&b).take_while(|(x, y)| x == y).count().min(cap);
-    let footer = a.iter().rev().zip(b.iter().rev()).take_while(|(x, y)| x == y).count().min(cap);
+    let header = a
+        .iter()
+        .zip(&b)
+        .take_while(|(x, y)| x == y)
+        .count()
+        .min(cap);
+    let footer = a
+        .iter()
+        .rev()
+        .zip(b.iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count()
+        .min(cap);
     let (top, bottom) = (header, h - footer);
     if bottom <= top + 4 {
         return None;
@@ -70,9 +102,13 @@ pub fn vertical_step(prev: &Frame, next: &Frame) -> Option<Step> {
             }
         }
     }
-    let (&dy, &count) = votes.iter().max_by_key(|(dy, n)| (**n, std::cmp::Reverse(**dy)))?;
+    let (&dy, &count) = votes
+        .iter()
+        .max_by_key(|(dy, n)| (**n, std::cmp::Reverse(**dy)))?;
     let overlap = bottom - top - dy;
-    let distinctive = (top..bottom - dy).filter(|&i| positions.get(&b[i]).is_some_and(|r| r.len() <= 6)).count();
+    let distinctive = (top..bottom - dy)
+        .filter(|&i| positions.get(&b[i]).is_some_and(|r| r.len() <= 6))
+        .count();
     (count * 2 >= distinctive.min(overlap) && count >= 3).then_some(Step { dy, header, footer })
 }
 
@@ -84,10 +120,14 @@ pub fn stitch_vertical(frames: &[Frame]) -> Option<Frame> {
     let first = frames.first()?;
     let (w, h) = (first.width as usize, first.height as usize);
     let stride = w * 4;
-    let steps: Vec<Step> = frames.windows(2).map_while(|p| vertical_step(&p[0], &p[1])).collect();
+    let steps: Vec<Step> = frames
+        .windows(2)
+        .map_while(|p| vertical_step(&p[0], &p[1]))
+        .collect();
     let used = &frames[..steps.len() + 1];
     let footer = steps.iter().map(|s| s.footer).min().unwrap_or(0);
-    let mut rows: Vec<u8> = Vec::with_capacity(stride * (h + steps.iter().map(|s| s.dy).sum::<usize>()));
+    let mut rows: Vec<u8> =
+        Vec::with_capacity(stride * (h + steps.iter().map(|s| s.dy).sum::<usize>()));
     rows.extend_from_slice(&first.pixels[..(h - footer) * stride]);
     for (frame, step) in used[1..].iter().zip(&steps) {
         let end = h - footer;
@@ -97,7 +137,12 @@ pub fn stitch_vertical(frames: &[Frame]) -> Option<Frame> {
     let last = used.last().unwrap();
     rows.extend_from_slice(&last.pixels[(h - footer) * stride..h * stride]);
     let height = rows.len() / stride;
-    Some(Frame { width: w as u32, height: height as u32, pixels: rows, alpha: false })
+    Some(Frame {
+        width: w as u32,
+        height: height as u32,
+        pixels: rows,
+        alpha: false,
+    })
 }
 
 /// Luma, averaged over `k` x `k` blocks.
@@ -194,11 +239,16 @@ pub fn translation(prev: &Frame, next: &Frame) -> Option<(i32, i32)> {
 pub fn compose(frames: &[(Frame, (i32, i32))]) -> Option<Frame> {
     let (f0, _) = frames.first()?;
     let (fw, fh) = (f0.width as i32, f0.height as i32);
-    let same = frames.iter().all(|(f, _)| f.width == f0.width && f.height == f0.height);
+    let same = frames
+        .iter()
+        .all(|(f, _)| f.width == f0.width && f.height == f0.height);
     let x0 = frames.iter().map(|(_, (x, _))| *x).min()?;
     let y0 = frames.iter().map(|(_, (_, y))| *y).min()?;
     let x1 = frames.iter().map(|(f, (x, _))| *x + f.width as i32).max()?;
-    let y1 = frames.iter().map(|(f, (_, y))| *y + f.height as i32).max()?;
+    let y1 = frames
+        .iter()
+        .map(|(f, (_, y))| *y + f.height as i32)
+        .max()?;
     let mut out = Frame::new((x1 - x0) as u32, (y1 - y0) as u32);
     // A path that moved both ways (or frames of different sizes) leaves
     // places no frame covered; they stay transparent.
@@ -230,7 +280,8 @@ mod tests {
             for x in 0..width as usize {
                 let i = y * f.stride() + x * 4;
                 // Blocky noise: structured like UI content, never periodic.
-                let mut n = ((x / 6) as u32).wrapping_mul(0x9E37_79B9) ^ ((y / 6) as u32).wrapping_mul(0x85EB_CA6B);
+                let mut n = ((x / 6) as u32).wrapping_mul(0x9E37_79B9)
+                    ^ ((y / 6) as u32).wrapping_mul(0x85EB_CA6B);
                 n ^= n >> 15;
                 n = n.wrapping_mul(0x2C1B_3C6D);
                 let v = if blank { 250 } else { (n >> 24) as u8 };
@@ -261,19 +312,75 @@ mod tests {
     fn stitches_scrolled_frames_with_fixed_header_and_footer() {
         let p = page(200, 2000);
         let (h, header, footer) = (400, 30, 20);
-        let tops = [0, 170, 340, 510, 680, 850, 1020, 1190, 1360, 1530, 1580, 1580];
-        let frames: Vec<Frame> = tops.iter().map(|&t| view(&p, t, h, header, footer)).collect();
-        assert_eq!(vertical_step(&frames[0], &frames[1]), Some(Step { dy: 170, header, footer }));
+        let tops = [
+            0, 170, 340, 510, 680, 850, 1020, 1190, 1360, 1530, 1580, 1580,
+        ];
+        let frames: Vec<Frame> = tops
+            .iter()
+            .map(|&t| view(&p, t, h, header, footer))
+            .collect();
+        assert_eq!(
+            vertical_step(&frames[0], &frames[1]),
+            Some(Step {
+                dy: 170,
+                header,
+                footer
+            })
+        );
         assert_eq!(vertical_step(&frames[10], &frames[11]), None, "end of page");
         let out = stitch_vertical(&frames).unwrap();
         // The header, every content row down to the last view, the footer.
         assert_eq!(out.height as usize, 1580 + h);
         let s = out.stride();
         for y in [0usize, 100, 700, 1500, 1959] {
-            assert_eq!(&out.pixels[y * s..(y + 1) * s], &p.pixels[y * s..(y + 1) * s], "row {y}");
+            assert_eq!(
+                &out.pixels[y * s..(y + 1) * s],
+                &p.pixels[y * s..(y + 1) * s],
+                "row {y}"
+            );
         }
         let last = out.height as usize - 1;
-        assert_eq!(&out.pixels[last * s..], &p.pixels[(p.height as usize - 1) * s..], "footer");
+        assert_eq!(
+            &out.pixels[last * s..],
+            &p.pixels[(p.height as usize - 1) * s..],
+            "footer"
+        );
+    }
+
+    #[test]
+    fn stitches_scrolled_frames_with_a_fixed_left_sidebar() {
+        let p = page(200, 1000);
+        let mut frames = [view(&p, 0, 300, 30, 20), view(&p, 120, 300, 30, 20)];
+        for frame in &mut frames {
+            let stride = frame.stride();
+            for y in 0..frame.height as usize {
+                for x in 0..12 {
+                    let at = y * stride + x * 4;
+                    frame.pixels[at..at + 4].copy_from_slice(&[
+                        (x * 11 + y * 7) as u8,
+                        y as u8,
+                        x as u8,
+                        0,
+                    ]);
+                }
+            }
+        }
+        assert_eq!(
+            vertical_step(&frames[0], &frames[1]),
+            Some(Step {
+                dy: 120,
+                header: 30,
+                footer: 20,
+            })
+        );
+        let out = stitch_vertical(&frames).unwrap();
+        assert_eq!((out.width, out.height), (200, 420));
+        let offset = 350 * out.stride() + 100 * 4;
+        let expected = 350 * p.stride() + 100 * 4;
+        assert_eq!(
+            &out.pixels[offset..offset + 4],
+            &p.pixels[expected..expected + 4]
+        );
     }
 
     #[test]

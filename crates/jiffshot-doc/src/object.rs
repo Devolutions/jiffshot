@@ -14,8 +14,8 @@ use crate::text::{self, Align, TextStyle};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tiny_skia::{
-    FillRule, FilterQuality, LineCap, LineJoin, Paint, Path, PathBuilder, Pattern, Pixmap, SpreadMode, Stroke,
-    StrokeDash, Transform,
+    FillRule, FilterQuality, LineCap, LineJoin, Paint, Path, PathBuilder, Pattern, Pixmap,
+    SpreadMode, Stroke, StrokeDash, Transform,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,11 +44,15 @@ pub const CAPS: &[(&str, Cap)] = &[
 
 impl Cap {
     pub fn name(self) -> &'static str {
-        CAPS.iter().find(|(_, c)| *c == self).map_or("None", |(n, _)| n)
+        CAPS.iter()
+            .find(|(_, c)| *c == self)
+            .map_or("None", |(n, _)| n)
     }
 
     pub fn from_name(name: &str) -> Cap {
-        CAPS.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map_or(Cap::None, |(_, c)| *c)
+        CAPS.iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map_or(Cap::None, |(_, c)| *c)
     }
 }
 
@@ -166,7 +170,12 @@ impl Default for Style {
 
 impl Style {
     fn text_style(&self) -> TextStyle<'_> {
-        TextStyle { family: &self.font, size: self.font_size, bold: self.bold, italic: self.italic }
+        TextStyle {
+            family: &self.font,
+            size: self.font_size,
+            bold: self.bold,
+            italic: self.italic,
+        }
     }
 }
 
@@ -181,7 +190,10 @@ pub struct ImageRef {
 
 impl ImageRef {
     pub fn new(key: impl Into<String>, pixmap: Pixmap) -> ImageRef {
-        ImageRef { key: key.into(), pixmap: Some(Arc::new(pixmap)) }
+        ImageRef {
+            key: key.into(),
+            pixmap: Some(Arc::new(pixmap)),
+        }
     }
 }
 
@@ -196,9 +208,20 @@ impl PartialEq for ImageRef {
 pub enum Kind {
     /// A line or arrow (caps come from the style), optionally bent through
     /// a quadratic control point.
-    Line { a: Pt, b: Pt, #[serde(default)] control: Option<Pt> },
-    Shape { rect: Box2, shape: ShapeKind },
-    Text { rect: Box2, text: String },
+    Line {
+        a: Pt,
+        b: Pt,
+        #[serde(default)]
+        control: Option<Pt>,
+    },
+    Shape {
+        rect: Box2,
+        shape: ShapeKind,
+    },
+    Text {
+        rect: Box2,
+        text: String,
+    },
     /// A text box with a tail pointing at `tail`: a wedge, or an arrow
     /// when `arrow` is set.
     Callout {
@@ -212,20 +235,59 @@ pub enum Kind {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         more_tails: Vec<Pt>,
     },
-    Step { center: Pt, radius: f32, label: String, #[serde(default = "default_step_shape")] shape: ShapeKind },
-    Pen { points: Vec<Pt> },
-    Highlight { rect: Box2, #[serde(default)] shape: ShapeKind },
-    Blur { rect: Box2, mode: BlurMode, amount: f32 },
+    Step {
+        center: Pt,
+        radius: f32,
+        label: String,
+        #[serde(default = "default_step_shape")]
+        shape: ShapeKind,
+    },
+    Pen {
+        points: Vec<Pt>,
+    },
+    Highlight {
+        rect: Box2,
+        #[serde(default)]
+        shape: ShapeKind,
+    },
+    Blur {
+        rect: Box2,
+        mode: BlurMode,
+        amount: f32,
+    },
     /// A lens showing the content under its center enlarged by `zoom`.
-    Magnify { rect: Box2, zoom: f32, ellipse: bool, #[serde(default)] offset: Pt },
+    Magnify {
+        rect: Box2,
+        zoom: f32,
+        ellipse: bool,
+        #[serde(default)]
+        offset: Pt,
+    },
     /// A closed shape through `points`.
-    Polygon { points: Vec<Pt> },
+    Polygon {
+        points: Vec<Pt>,
+    },
     /// Dims (and optionally blurs) everything outside `rect`.
-    Spotlight { rect: Box2, ellipse: bool, dim: f32, blur: f32, #[serde(default)] rounded: bool },
-    Stamp { rect: Box2, stamp: Stamp },
-    Image { rect: Box2, image: ImageRef },
+    Spotlight {
+        rect: Box2,
+        ellipse: bool,
+        dim: f32,
+        blur: f32,
+        #[serde(default)]
+        rounded: bool,
+    },
+    Stamp {
+        rect: Box2,
+        stamp: Stamp,
+    },
+    Image {
+        rect: Box2,
+        image: ImageRef,
+    },
     /// Objects that move, resize and stack as one.
-    Group { objects: Vec<Object> },
+    Group {
+        objects: Vec<Object>,
+    },
 }
 
 /// Handle ids. 0–7 run clockwise around a box from the top-left corner.
@@ -284,12 +346,19 @@ impl Zone {
     /// filled zone never shows a gap.
     pub fn placement(&self, rect: &Box2, iw: f32, ih: f32) -> (Box2, Pt) {
         let (zw, zh) = (rect.width(), rect.height());
-        let scale = if self.fit { (zw / iw).min(zh / ih) } else { (zw / iw).max(zh / ih) };
+        let scale = if self.fit {
+            (zw / iw).min(zh / ih)
+        } else {
+            (zw / iw).max(zh / ih)
+        };
         let (w, h) = (iw * scale, ih * scale);
         let (mx, my) = (((w - zw) / 2.0).abs(), ((h - zh) / 2.0).abs());
         let pan = Pt::new(self.pan.x.clamp(-mx, mx), self.pan.y.clamp(-my, my));
         let c = rect.center();
-        (Box2::around(Pt::new(c.x + pan.x, c.y + pan.y), w / 2.0, h / 2.0), pan)
+        (
+            Box2::around(Pt::new(c.x + pan.x, c.y + pan.y), w / 2.0, h / 2.0),
+            pan,
+        )
     }
 }
 
@@ -297,7 +366,10 @@ impl Zone {
 pub fn fresh_key(prefix: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
-    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_micros()).unwrap_or(0);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or(0);
     format!("{prefix}-{t:x}-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
@@ -322,7 +394,13 @@ fn text_padding(style: &Style) -> f32 {
 
 impl Object {
     pub fn new(id: u64, kind: Kind, style: Style) -> Object {
-        Object { id, kind, style, rotation: 0.0, zone: None }
+        Object {
+            id,
+            kind,
+            style,
+            rotation: 0.0,
+            zone: None,
+        }
     }
 
     /// Whether this object can be rotated: everything but objects that
@@ -361,7 +439,11 @@ impl Object {
 
     pub fn kind_name(&self) -> &'static str {
         match self.kind {
-            Kind::Line { .. } if self.style.end_cap == Cap::Arrow || self.style.start_cap == Cap::Arrow => "Arrow",
+            Kind::Line { .. }
+                if self.style.end_cap == Cap::Arrow || self.style.start_cap == Cap::Arrow =>
+            {
+                "Arrow"
+            }
             Kind::Line { .. } => "Line",
             Kind::Shape { .. } => "Shape",
             Kind::Text { .. } => "Text",
@@ -415,7 +497,10 @@ impl Object {
             Kind::Pen { points } => Box2::bounding(points.iter().copied()),
             Kind::Line { a, b, control } => Box2::bounding([*a, *b].into_iter().chain(*control)),
             Kind::Polygon { points } => Box2::bounding(points.iter().copied()),
-            Kind::Group { objects } => objects.iter().filter_map(|o| o.rect()).reduce(|a, b| a.union(&b)),
+            Kind::Group { objects } => objects
+                .iter()
+                .filter_map(|o| o.rect())
+                .reduce(|a, b| a.union(&b)),
         }
     }
 
@@ -472,7 +557,9 @@ impl Object {
         }
         let c = self.pivot();
         let corners = [b.min(), Pt::new(b.x1, b.y0), b.max(), Pt::new(b.x0, b.y1)];
-        Box2::bounding(corners.map(|q| rotate_about(q, c, self.rotation))).unwrap().inflate(2.0)
+        Box2::bounding(corners.map(|q| rotate_about(q, c, self.rotation)))
+            .unwrap()
+            .inflate(2.0)
     }
 
     fn base_bounds(&self) -> Box2 {
@@ -484,15 +571,41 @@ impl Object {
                 } else {
                     (arrow_head(w) * self.style.head_size.max(0.3)).max(w * 1.6)
                 };
-                Box2::bounding([*a, *b].into_iter().chain(*control)).unwrap().inflate(caps)
+                Box2::bounding([*a, *b].into_iter().chain(*control))
+                    .unwrap()
+                    .inflate(caps)
             }
-            Kind::Pen { points } | Kind::Polygon { points } => Box2::bounding(points.iter().copied()).unwrap_or_default().inflate(w / 2.0),
-            Kind::Magnify { rect, offset, .. } => rect.union(&rect.offset(offset.x, offset.y)).inflate(w / 2.0),
-            Kind::Callout { rect, tail, more_tails, .. } => more_tails.iter().fold(rect.union(&Box2::from_points(*tail, *tail)), |b, t| b.union(&Box2::from_points(*t, *t))).inflate(w),
-            Kind::Step { center, radius, .. } => Box2::around(*center, *radius, *radius).inflate(w / 2.0),
+            Kind::Pen { points } | Kind::Polygon { points } => {
+                Box2::bounding(points.iter().copied())
+                    .unwrap_or_default()
+                    .inflate(w / 2.0)
+            }
+            Kind::Magnify { rect, offset, .. } => rect
+                .union(&rect.offset(offset.x, offset.y))
+                .inflate(w / 2.0),
+            Kind::Callout {
+                rect,
+                tail,
+                more_tails,
+                ..
+            } => more_tails
+                .iter()
+                .fold(rect.union(&Box2::from_points(*tail, *tail)), |b, t| {
+                    b.union(&Box2::from_points(*t, *t))
+                })
+                .inflate(w),
+            Kind::Step { center, radius, .. } => {
+                Box2::around(*center, *radius, *radius).inflate(w / 2.0)
+            }
             Kind::Spotlight { .. } => Box2::new(-EVERYWHERE, -EVERYWHERE, EVERYWHERE, EVERYWHERE),
             Kind::Blur { rect, .. } | Kind::Highlight { rect, .. } => *rect,
-            Kind::Group { objects } => return objects.iter().map(|o| o.bounds()).reduce(|a, b| a.union(&b)).unwrap_or_default(),
+            Kind::Group { objects } => {
+                return objects
+                    .iter()
+                    .map(|o| o.bounds())
+                    .reduce(|a, b| a.union(&b))
+                    .unwrap_or_default()
+            }
             _ => self.rect().unwrap().inflate(w / 2.0),
         };
         let b = b.inflate(2.0 + self.style.outline_width.max(0.0));
@@ -508,7 +621,10 @@ impl Object {
         match &self.kind {
             Kind::Blur { rect, .. } | Kind::Magnify { rect, .. } => Some(*rect),
             Kind::Spotlight { blur, .. } if *blur > 0.0 => Some(self.bounds()),
-            Kind::Group { objects } => objects.iter().filter_map(|o| o.reads()).reduce(|a, b| a.union(&b)),
+            Kind::Group { objects } => objects
+                .iter()
+                .filter_map(|o| o.reads())
+                .reduce(|a, b| a.union(&b)),
             _ => None,
         }
     }
@@ -520,10 +636,17 @@ impl Object {
             Kind::Group { objects } => objects.iter().any(|o| o.hit(p, tolerance)),
             Kind::Polygon { points } => {
                 let n = points.len();
-                let edge = (0..n).any(|i| dist_to_segment(p, points[i], points[(i + 1) % n]) <= reach);
+                let edge =
+                    (0..n).any(|i| dist_to_segment(p, points[i], points[(i + 1) % n]) <= reach);
                 edge || (self.style.fill.is_visible() && point_in_polygon(p, points))
             }
-            Kind::Magnify { rect, offset, .. } => rect.inflate(tolerance).contains(p) || rect.offset(offset.x, offset.y).inflate(tolerance).contains(p),
+            Kind::Magnify { rect, offset, .. } => {
+                rect.inflate(tolerance).contains(p)
+                    || rect
+                        .offset(offset.x, offset.y)
+                        .inflate(tolerance)
+                        .contains(p)
+            }
             Kind::Line { a, b, control } => match control {
                 None => dist_to_segment(p, *a, *b) <= reach,
                 Some(c) => (0..24).any(|i| {
@@ -533,20 +656,32 @@ impl Object {
                 }),
             },
             Kind::Pen { points } => {
-                points.windows(2).any(|s| dist_to_segment(p, s[0], s[1]) <= reach)
+                points
+                    .windows(2)
+                    .any(|s| dist_to_segment(p, s[0], s[1]) <= reach)
                     || points.first().is_some_and(|q| q.dist(p) <= reach)
             }
             Kind::Shape { rect, .. } if !self.style.fill.is_visible() => {
                 rect.inflate(reach).contains(p) && !rect.inflate(-reach).contains(p)
             }
             Kind::Step { center, radius, .. } => center.dist(p) <= radius + tolerance,
-            Kind::Callout { rect, tail, more_tails, .. } => {
-                rect.inflate(tolerance).contains(p) || std::iter::once(tail).chain(more_tails).any(|t| dist_to_segment(p, rect.center(), *t) <= tolerance + 4.0)
+            Kind::Callout {
+                rect,
+                tail,
+                more_tails,
+                ..
+            } => {
+                rect.inflate(tolerance).contains(p)
+                    || std::iter::once(tail)
+                        .chain(more_tails)
+                        .any(|t| dist_to_segment(p, rect.center(), *t) <= tolerance + 4.0)
             }
             Kind::Spotlight { rect, .. } => {
                 rect.inflate(tolerance).contains(p) && !rect.inflate(-tolerance * 2.0).contains(p)
             }
-            _ => self.rect().is_some_and(|r| r.inflate(tolerance).contains(p)),
+            _ => self
+                .rect()
+                .is_some_and(|r| r.inflate(tolerance).contains(p)),
         }
     }
 
@@ -560,7 +695,12 @@ impl Object {
                 vec![(H_START, *a), (H_END, *b), (H_CONTROL, mid)]
             }
             Kind::Step { center, radius, .. } => vec![(H_R, center.offset(*radius, 0.0))],
-            Kind::Polygon { points } => points.iter().enumerate().take(200).map(|(i, q)| (H_VERTEX + i as u8, *q)).collect(),
+            Kind::Polygon { points } => points
+                .iter()
+                .enumerate()
+                .take(200)
+                .map(|(i, q)| (H_VERTEX + i as u8, *q))
+                .collect(),
             Kind::Magnify { rect, offset, .. } if offset.len() > 0.5 => {
                 let mut h = box_handles(rect);
                 h.push((H_VIEW, rect.center().add(*offset)));
@@ -583,9 +723,18 @@ impl Object {
                 .into_iter()
                 .map(|(id, q)| (id, rotate_about(q, c, self.rotation)))
                 .collect();
-                if let Kind::Callout { tail, more_tails, .. } = &self.kind {
+                if let Kind::Callout {
+                    tail, more_tails, ..
+                } = &self.kind
+                {
                     h.push((H_TAIL, *tail));
-                    h.extend(more_tails.iter().take(6).enumerate().map(|(i, t)| (H_MORE_TAILS + i as u8, *t)));
+                    h.extend(
+                        more_tails
+                            .iter()
+                            .take(6)
+                            .enumerate()
+                            .map(|(i, t)| (H_MORE_TAILS + i as u8, *t)),
+                    );
                 }
                 h
             }
@@ -602,9 +751,18 @@ impl Object {
                     (H_BL, Pt::new(r.x0, r.y1)),
                     (H_L, Pt::new(r.x0, c.y)),
                 ];
-                if let Kind::Callout { tail, more_tails, .. } = &self.kind {
+                if let Kind::Callout {
+                    tail, more_tails, ..
+                } = &self.kind
+                {
                     h.push((H_TAIL, *tail));
-                    h.extend(more_tails.iter().take(6).enumerate().map(|(i, t)| (H_MORE_TAILS + i as u8, *t)));
+                    h.extend(
+                        more_tails
+                            .iter()
+                            .take(6)
+                            .enumerate()
+                            .map(|(i, t)| (H_MORE_TAILS + i as u8, *t)),
+                    );
                 }
                 h
             }
@@ -620,10 +778,17 @@ impl Object {
                     *c = c.offset(dx, dy);
                 }
             }
-            Kind::Pen { points } | Kind::Polygon { points } => points.iter_mut().for_each(|p| *p = p.offset(dx, dy)),
+            Kind::Pen { points } | Kind::Polygon { points } => {
+                points.iter_mut().for_each(|p| *p = p.offset(dx, dy))
+            }
             Kind::Step { center, .. } => *center = center.offset(dx, dy),
             Kind::Group { objects } => objects.iter_mut().for_each(|o| o.translate(dx, dy)),
-            Kind::Callout { rect, tail, more_tails, .. } => {
+            Kind::Callout {
+                rect,
+                tail,
+                more_tails,
+                ..
+            } => {
                 *rect = rect.offset(dx, dy);
                 *tail = tail.offset(dx, dy);
                 more_tails.iter_mut().for_each(|t| *t = t.offset(dx, dy));
@@ -652,7 +817,13 @@ impl Object {
             // Resize in the object's own frame, keeping the opposite handle
             // where it is on screen.
             let anchor_id = (h + 4) % 8;
-            let anchor = |o: &Object| o.handles().into_iter().find(|(id, _)| *id == anchor_id).map(|(_, q)| q).unwrap_or_default();
+            let anchor = |o: &Object| {
+                o.handles()
+                    .into_iter()
+                    .find(|(id, _)| *id == anchor_id)
+                    .map(|(_, q)| q)
+                    .unwrap_or_default()
+            };
             let before = anchor(self);
             let local = self.local(p);
             let rotation = std::mem::replace(&mut self.rotation, 0.0);
@@ -688,7 +859,13 @@ impl Object {
             }
             Kind::Magnify { rect, offset, .. } if h == H_VIEW => *offset = p.sub(rect.center()),
             Kind::Group { objects } => {
-                let Some(old) = objects.iter().filter_map(|o| o.rect()).reduce(|a, b| a.union(&b)) else { return };
+                let Some(old) = objects
+                    .iter()
+                    .filter_map(|o| o.rect())
+                    .reduce(|a, b| a.union(&b))
+                else {
+                    return;
+                };
                 let new = resize_box(old, h, p, square);
                 if new.is_degenerate(2.0) {
                     return;
@@ -698,7 +875,9 @@ impl Object {
                 }
             }
             Kind::Pen { points } => {
-                let Some(old) = Box2::bounding(points.iter().copied()) else { return };
+                let Some(old) = Box2::bounding(points.iter().copied()) else {
+                    return;
+                };
                 let new = resize_box(old, h, p, square);
                 for q in points.iter_mut() {
                     *q = old.map(*q, &new);
@@ -734,7 +913,9 @@ impl Object {
                     *c = f(*c);
                 }
             }
-            Kind::Pen { points } | Kind::Polygon { points } => points.iter_mut().for_each(|q| *q = f(*q)),
+            Kind::Pen { points } | Kind::Polygon { points } => {
+                points.iter_mut().for_each(|q| *q = f(*q))
+            }
             Kind::Magnify { rect, offset, .. } => {
                 let view = f(rect.center().add(*offset));
                 *rect = Box2::from_points(f(rect.min()), f(rect.max()));
@@ -745,7 +926,12 @@ impl Object {
                 *radius *= scale;
                 *center = f(*center);
             }
-            Kind::Callout { rect, tail, more_tails, .. } => {
+            Kind::Callout {
+                rect,
+                tail,
+                more_tails,
+                ..
+            } => {
                 *rect = Box2::from_points(f(rect.min()), f(rect.max()));
                 *tail = f(*tail);
                 more_tails.iter_mut().for_each(|t| *t = f(*t));
@@ -766,7 +952,11 @@ impl Object {
             _ => self.rect()?,
         };
         let ellipse = matches!(self.kind, Kind::Magnify { ellipse: true, .. });
-        let path = if ellipse { PathBuilder::from_oval(r.to_skia()?)? } else { PathBuilder::from_rect(r.to_skia()?) };
+        let path = if ellipse {
+            PathBuilder::from_oval(r.to_skia()?)?
+        } else {
+            PathBuilder::from_rect(r.to_skia()?)
+        };
         path.transform(t)
     }
 
@@ -790,17 +980,42 @@ impl Object {
                 if let Some(path) = self.silhouette(t) {
                     shadow_from_path(target, &path, &self.style);
                 }
-                if let (Kind::Magnify { rect, zoom, ellipse, offset }, Some(src)) = (&self.kind, source) {
-                    draw_magnify_from(target, origin, rect, *offset, *zoom, *ellipse, &self.style, src);
+                if let (
+                    Kind::Magnify {
+                        rect,
+                        zoom,
+                        ellipse,
+                        offset,
+                    },
+                    Some(src),
+                ) = (&self.kind, source)
+                {
+                    draw_magnify_from(
+                        target,
+                        origin,
+                        rect,
+                        *offset,
+                        *zoom,
+                        *ellipse,
+                        &self.style,
+                        src,
+                    );
                     return;
                 }
             }
             self.draw_plain(target, origin);
             return;
         }
-        let area = self.bounds().to_irect().intersect(&IRect::new(origin.0, origin.1, target.width() as i32, target.height() as i32));
+        let area = self.bounds().to_irect().intersect(&IRect::new(
+            origin.0,
+            origin.1,
+            target.width() as i32,
+            target.height() as i32,
+        ));
         let Some(area) = area else { return };
-        let Some(mut layer) = Pixmap::new(area.w as u32, area.h as u32) else { return };
+        let Some(mut layer) = Pixmap::new(area.w as u32, area.h as u32) else {
+            return;
+        };
         // Multiply blending needs the pixels below; blend the finished
         // layer instead.
         let mut flat = self.clone();
@@ -821,7 +1036,11 @@ impl Object {
         }
         let paint = tiny_skia::PixmapPaint {
             opacity: self.style.opacity.clamp(0.0, 1.0),
-            blend_mode: if self.style.multiply { tiny_skia::BlendMode::Multiply } else { tiny_skia::BlendMode::SourceOver },
+            blend_mode: if self.style.multiply {
+                tiny_skia::BlendMode::Multiply
+            } else {
+                tiny_skia::BlendMode::SourceOver
+            },
             quality: FilterQuality::Nearest,
         };
         target.draw_pixmap(x, y, layer.as_ref(), &paint, Transform::identity(), None);
@@ -833,7 +1052,9 @@ impl Object {
         let mut upright = self.clone();
         upright.rotation = 0.0;
         let area = upright.bounds().to_irect();
-        let Some(mut layer) = Pixmap::new(area.w.max(1) as u32, area.h.max(1) as u32) else { return };
+        let Some(mut layer) = Pixmap::new(area.w.max(1) as u32, area.h.max(1) as u32) else {
+            return;
+        };
         upright.style.multiply = false;
         upright.draw(&mut layer, (area.x, area.y));
         let c = self.pivot();
@@ -842,7 +1063,11 @@ impl Object {
             .post_concat(Transform::from_rotate_at(self.rotation, cx, cy));
         let paint = tiny_skia::PixmapPaint {
             quality: FilterQuality::Bilinear,
-            blend_mode: if self.style.multiply { tiny_skia::BlendMode::Multiply } else { tiny_skia::BlendMode::SourceOver },
+            blend_mode: if self.style.multiply {
+                tiny_skia::BlendMode::Multiply
+            } else {
+                tiny_skia::BlendMode::SourceOver
+            },
             ..Default::default()
         };
         target.draw_pixmap(0, 0, layer.as_ref(), &paint, t, None);
@@ -887,17 +1112,36 @@ impl Object {
                 };
                 draw_text(pm, origin, &layout, r.x0 + pad, y, r.width() - 2.0 * pad, s);
             }
-            Kind::Callout { rect, tail, text, shape, arrow, more_tails } => {
-                let tails: Vec<Pt> = std::iter::once(*tail).chain(more_tails.iter().copied()).collect();
+            Kind::Callout {
+                rect,
+                tail,
+                text,
+                shape,
+                arrow,
+                more_tails,
+            } => {
+                let tails: Vec<Pt> = std::iter::once(*tail)
+                    .chain(more_tails.iter().copied())
+                    .collect();
                 draw_callout(pm, origin, t, rect, &tails, text, *shape, *arrow, s)
             }
-            Kind::Step { center, radius, label, shape } => {
+            Kind::Step {
+                center,
+                radius,
+                label,
+                shape,
+            } => {
                 let r = Box2::around(*center, *radius, *radius);
                 if let Some(path) = shape_path(&r, *shape) {
                     fill_styled(pm, &path, s, &r, t, false);
                     stroke(pm, &path, s.stroke, s.width, Dash::Solid, t);
                 }
-                let style = TextStyle { family: &s.font, size: radius * 1.15, bold: true, italic: false };
+                let style = TextStyle {
+                    family: &s.font,
+                    size: radius * 1.15,
+                    bold: true,
+                    italic: false,
+                };
                 let layout = text::layout(label, &style, None);
                 text::draw(
                     pm,
@@ -929,9 +1173,26 @@ impl Object {
                     }
                 }
             }
-            Kind::Magnify { rect, zoom, ellipse, offset } => draw_magnify(pm, origin, rect, *offset, *zoom, *ellipse, s),
-            Kind::Spotlight { rect, ellipse, dim, blur, rounded } => {
-                let shape = if *ellipse { ShapeKind::Ellipse } else if *rounded { ShapeKind::Rounded } else { ShapeKind::Rectangle };
+            Kind::Magnify {
+                rect,
+                zoom,
+                ellipse,
+                offset,
+            } => draw_magnify(pm, origin, rect, *offset, *zoom, *ellipse, s),
+            Kind::Spotlight {
+                rect,
+                ellipse,
+                dim,
+                blur,
+                rounded,
+            } => {
+                let shape = if *ellipse {
+                    ShapeKind::Ellipse
+                } else if *rounded {
+                    ShapeKind::Rounded
+                } else {
+                    ShapeKind::Rectangle
+                };
                 draw_spotlight(pm, origin, rect, shape, *dim, *blur)
             }
             Kind::Stamp { rect, stamp } => stamps::draw(*stamp, rect, pm, t),
@@ -995,20 +1256,40 @@ pub fn shadow_margin(s: &Style) -> f32 {
 
 fn shadow_offset(s: &Style) -> (i32, i32) {
     let (sin, cos) = s.shadow_angle.to_radians().sin_cos();
-    ((cos * s.shadow_distance).round() as i32, (sin * s.shadow_distance).round() as i32)
+    (
+        (cos * s.shadow_distance).round() as i32,
+        (sin * s.shadow_distance).round() as i32,
+    )
 }
 
 /// Fills `path` with the style's fill: a solid color, or a linear or
 /// radial gradient to `fill2` across `area`.
-pub fn fill_styled(pm: &mut Pixmap, path: &Path, s: &Style, area: &Box2, t: Transform, multiply: bool) {
+pub fn fill_styled(
+    pm: &mut Pixmap,
+    path: &Path,
+    s: &Style,
+    area: &Box2,
+    t: Transform,
+    multiply: bool,
+) {
     if !s.fill2.is_visible() || !s.fill.is_visible() {
         return fill(pm, path, s.fill, t, multiply);
     }
-    let stops = vec![tiny_skia::GradientStop::new(0.0, s.fill.to_color()), tiny_skia::GradientStop::new(1.0, s.fill2.to_color())];
+    let stops = vec![
+        tiny_skia::GradientStop::new(0.0, s.fill.to_color()),
+        tiny_skia::GradientStop::new(1.0, s.fill2.to_color()),
+    ];
     let c = area.center();
     let shader = if s.gradient_radial {
         let r = area.width().max(area.height()) / 2.0;
-        tiny_skia::RadialGradient::new(tiny_skia::Point::from_xy(c.x, c.y), tiny_skia::Point::from_xy(c.x, c.y), r.max(1.0), stops, SpreadMode::Pad, Transform::identity())
+        tiny_skia::RadialGradient::new(
+            tiny_skia::Point::from_xy(c.x, c.y),
+            tiny_skia::Point::from_xy(c.x, c.y),
+            r.max(1.0),
+            stops,
+            SpreadMode::Pad,
+            Transform::identity(),
+        )
     } else {
         let (sin, cos) = s.gradient_angle.to_radians().sin_cos();
         let half = (area.width() * cos.abs() + area.height() * sin.abs()) / 2.0;
@@ -1021,7 +1302,9 @@ pub fn fill_styled(pm: &mut Pixmap, path: &Path, s: &Style, area: &Box2, t: Tran
             Transform::identity(),
         )
     };
-    let Some(shader) = shader else { return fill(pm, path, s.fill, t, multiply) };
+    let Some(shader) = shader else {
+        return fill(pm, path, s.fill, t, multiply);
+    };
     let mut paint = Paint::default();
     paint.anti_alias = true;
     paint.shader = shader;
@@ -1033,13 +1316,30 @@ pub fn fill_styled(pm: &mut Pixmap, path: &Path, s: &Style, area: &Box2, t: Tran
 
 /// Draws laid-out text with the style's letter outline, underline and
 /// strikethrough.
-fn draw_text(pm: &mut Pixmap, origin: (i32, i32), layout: &text::Layout, x: f32, y: f32, w: f32, s: &Style) {
+fn draw_text(
+    pm: &mut Pixmap,
+    origin: (i32, i32),
+    layout: &text::Layout,
+    x: f32,
+    y: f32,
+    w: f32,
+    s: &Style,
+) {
     if s.outline.is_visible() && s.outline_width > 0.0 {
         let r = s.outline_width;
         let steps = 12;
         for i in 0..steps {
             let a = i as f32 / steps as f32 * std::f32::consts::TAU;
-            text::draw(pm, origin, layout, x + a.cos() * r, y + a.sin() * r, w, s.align, s.outline);
+            text::draw(
+                pm,
+                origin,
+                layout,
+                x + a.cos() * r,
+                y + a.sin() * r,
+                w,
+                s.align,
+                s.outline,
+            );
         }
     }
     text::draw(pm, origin, layout, x, y, w, s.align, s.text_color);
@@ -1048,8 +1348,18 @@ fn draw_text(pm: &mut Pixmap, origin: (i32, i32), layout: &text::Layout, x: f32,
         for (lx, lw, baseline) in text::line_extents(layout, x, y, w, s.align) {
             for (on, dy) in [(s.underline, thick * 1.5), (s.strike, -s.font_size * 0.28)] {
                 if on && lw > 0.0 {
-                    if let Some(r) = tiny_skia::Rect::from_xywh(lx - origin.0 as f32, baseline + dy - origin.1 as f32, lw, thick) {
-                        pm.fill_rect(r, &paint_of(s.text_color, false), Transform::identity(), None);
+                    if let Some(r) = tiny_skia::Rect::from_xywh(
+                        lx - origin.0 as f32,
+                        baseline + dy - origin.1 as f32,
+                        lw,
+                        thick,
+                    ) {
+                        pm.fill_rect(
+                            r,
+                            &paint_of(s.text_color, false),
+                            Transform::identity(),
+                            None,
+                        );
                     }
                 }
             }
@@ -1074,10 +1384,30 @@ pub fn resize_box(r: Box2, h: Handle, p: Pt, square: bool) -> Box2 {
     if square && matches!(h, H_TL | H_TR | H_BR | H_BL) {
         let side = (x1 - x0).abs().max((y1 - y0).abs());
         match h {
-            H_TL => (x0, y0) = (x1 - side * (x1 - x0).signum(), y1 - side * (y1 - y0).signum()),
-            H_TR => (x1, y0) = (x0 + side * (x1 - x0).signum(), y1 - side * (y1 - y0).signum()),
-            H_BR => (x1, y1) = (x0 + side * (x1 - x0).signum(), y0 + side * (y1 - y0).signum()),
-            _ => (x0, y1) = (x1 - side * (x1 - x0).signum(), y0 + side * (y1 - y0).signum()),
+            H_TL => {
+                (x0, y0) = (
+                    x1 - side * (x1 - x0).signum(),
+                    y1 - side * (y1 - y0).signum(),
+                )
+            }
+            H_TR => {
+                (x1, y0) = (
+                    x0 + side * (x1 - x0).signum(),
+                    y1 - side * (y1 - y0).signum(),
+                )
+            }
+            H_BR => {
+                (x1, y1) = (
+                    x0 + side * (x1 - x0).signum(),
+                    y0 + side * (y1 - y0).signum(),
+                )
+            }
+            _ => {
+                (x0, y1) = (
+                    x1 - side * (x1 - x0).signum(),
+                    y0 + side * (y1 - y0).signum(),
+                )
+            }
         }
     }
     Box2::new(x0, y0, x1, y1)
@@ -1150,7 +1480,12 @@ pub fn stroke(pm: &mut Pixmap, path: &Path, color: Rgba, width: f32, dash: Dash,
     if !color.is_visible() || width <= 0.0 {
         return;
     }
-    let mut s = Stroke { width, line_join: LineJoin::Round, line_cap: LineCap::Round, ..Stroke::default() };
+    let mut s = Stroke {
+        width,
+        line_join: LineJoin::Round,
+        line_cap: LineCap::Round,
+        ..Stroke::default()
+    };
     s.dash = match dash {
         Dash::Solid => None,
         Dash::Dash => StrokeDash::new(vec![width * 3.0, width * 2.0], 0.0),
@@ -1175,13 +1510,15 @@ fn draw_line(pm: &mut Pixmap, t: Transform, a: Pt, b: Pt, control: Option<Pt>, s
     }
     if s.start_cap == Cap::Taper || s.end_cap == Cap::Taper {
         // A filled outline that narrows towards the tapered end(s).
-        let samples: Vec<Pt> = (0..=24).map(|i| {
-            let t = i as f32 / 24.0;
-            match control {
-                Some(c) => quad_at(a2, c, b2, t),
-                None => a2.lerp(b2, t),
-            }
-        }).collect();
+        let samples: Vec<Pt> = (0..=24)
+            .map(|i| {
+                let t = i as f32 / 24.0;
+                match control {
+                    Some(c) => quad_at(a2, c, b2, t),
+                    None => a2.lerp(b2, t),
+                }
+            })
+            .collect();
         let width_at = |t: f32| {
             let from = if s.start_cap == Cap::Taper { 0.15 } else { 1.0 };
             let to = if s.end_cap == Cap::Taper { 0.15 } else { 1.0 };
@@ -1222,7 +1559,10 @@ fn draw_line(pm: &mut Pixmap, t: Transform, a: Pt, b: Pt, control: Option<Pt>, s
             Cap::OpenArrow if fits => {
                 let base = tip.sub(dir.scale(head));
                 let mut pb = PathBuilder::new();
-                let (l, r) = (base.add(perp.scale(head * 0.55)), base.sub(perp.scale(head * 0.55)));
+                let (l, r) = (
+                    base.add(perp.scale(head * 0.55)),
+                    base.sub(perp.scale(head * 0.55)),
+                );
                 pb.move_to(l.x, l.y);
                 pb.line_to(tip.x, tip.y);
                 pb.line_to(r.x, r.y);
@@ -1233,9 +1573,15 @@ fn draw_line(pm: &mut Pixmap, t: Transform, a: Pt, b: Pt, control: Option<Pt>, s
             Cap::Square | Cap::Diamond => {
                 let r = w * 1.4;
                 let pts: Vec<Pt> = if cap == Cap::Square {
-                    [(1.0, 1.0), (1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0)].iter().map(|(u, v)| tip.add(dir.scale(u * r)).add(perp.scale(v * r))).collect()
+                    [(1.0, 1.0), (1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0)]
+                        .iter()
+                        .map(|(u, v)| tip.add(dir.scale(u * r)).add(perp.scale(v * r)))
+                        .collect()
                 } else {
-                    [(1.4, 0.0), (0.0, 1.0), (-1.4, 0.0), (0.0, -1.0)].iter().map(|(u, v)| tip.add(dir.scale(u * r)).add(perp.scale(v * r))).collect()
+                    [(1.4, 0.0), (0.0, 1.0), (-1.4, 0.0), (0.0, -1.0)]
+                        .iter()
+                        .map(|(u, v)| tip.add(dir.scale(u * r)).add(perp.scale(v * r)))
+                        .collect()
                 };
                 if let Some(path) = polygon_path(&pts) {
                     fill(pm, &path, s.stroke, t, false);
@@ -1280,7 +1626,12 @@ fn draw_pen(pm: &mut Pixmap, t: Transform, points: &[Pt], s: &Style) {
         pb.line_to(last.x, last.y);
     }
     let Some(path) = pb.finish() else { return };
-    let mut st = Stroke { width: s.width.max(0.5), line_cap: LineCap::Round, line_join: LineJoin::Round, ..Stroke::default() };
+    let mut st = Stroke {
+        width: s.width.max(0.5),
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..Stroke::default()
+    };
     if s.multiply {
         st.line_cap = LineCap::Square;
     }
@@ -1288,16 +1639,39 @@ fn draw_pen(pm: &mut Pixmap, t: Transform, points: &[Pt], s: &Style) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_callout(pm: &mut Pixmap, origin: (i32, i32), t: Transform, rect: &Box2, tails: &[Pt], text: &str, shape: ShapeKind, arrow: bool, s: &Style) {
+fn draw_callout(
+    pm: &mut Pixmap,
+    origin: (i32, i32),
+    t: Transform,
+    rect: &Box2,
+    tails: &[Pt],
+    text: &str,
+    shape: ShapeKind,
+    arrow: bool,
+    s: &Style,
+) {
     let body = shape_path(rect, shape);
     for &tail in tails.iter().filter(|t| arrow && !rect.contains(**t)) {
         // An arrow from the edge of the body to the tail point.
         let c = rect.center();
         let d = tail.sub(c);
-        let k = (rect.width() / 2.0 / d.x.abs().max(1e-3)).min(rect.height() / 2.0 / d.y.abs().max(1e-3)).min(1.0);
+        let k = (rect.width() / 2.0 / d.x.abs().max(1e-3))
+            .min(rect.height() / 2.0 / d.y.abs().max(1e-3))
+            .min(1.0);
         let start = c.add(d.scale(k));
-        let color = if s.fill.is_visible() { s.fill } else { s.stroke };
-        let line = Style { width: (s.font_size * 0.18).max(3.0), end_cap: Cap::Arrow, start_cap: Cap::None, stroke: color, dash: Dash::Solid, ..s.clone() };
+        let color = if s.fill.is_visible() {
+            s.fill
+        } else {
+            s.stroke
+        };
+        let line = Style {
+            width: (s.font_size * 0.18).max(3.0),
+            end_cap: Cap::Arrow,
+            start_cap: Cap::None,
+            stroke: color,
+            dash: Dash::Solid,
+            ..s.clone()
+        };
         draw_line(pm, t, start, tail, None, &line);
     }
     let wedges: Vec<Path> = tails
@@ -1330,7 +1704,12 @@ fn draw_callout(pm: &mut Pixmap, origin: (i32, i32), t: Transform, rect: &Box2, 
             stroke(pm, path, s.stroke, s.width, s.dash, t);
         }
     }
-    let pad = text_padding(s) + if shape == ShapeKind::Ellipse { rect.width() * 0.12 } else { 0.0 };
+    let pad = text_padding(s)
+        + if shape == ShapeKind::Ellipse {
+            rect.width() * 0.12
+        } else {
+            0.0
+        };
     let inner = rect.width() - 2.0 * pad;
     let layout = text::layout(text, &s.text_style(), Some(inner));
     let y = match s.valign {
@@ -1342,14 +1721,31 @@ fn draw_callout(pm: &mut Pixmap, origin: (i32, i32), t: Transform, rect: &Box2, 
 }
 
 /// The pixels a lens shows, with the document position of their top-left.
-fn magnify_source(pm: &Pixmap, origin: (i32, i32), rect: &Box2, zoom: f32) -> Option<(Pixmap, IRect)> {
+fn magnify_source(
+    pm: &Pixmap,
+    origin: (i32, i32),
+    rect: &Box2,
+    zoom: f32,
+) -> Option<(Pixmap, IRect)> {
     let zoom = zoom.max(1.0);
-    let source = Box2::around(rect.center(), rect.width() / (2.0 * zoom), rect.height() / (2.0 * zoom));
+    let source = Box2::around(
+        rect.center(),
+        rect.width() / (2.0 * zoom),
+        rect.height() / (2.0 * zoom),
+    );
     let e = source.to_irect().inflate(1);
     raster::extract(pm, IRect::new(e.x - origin.0, e.y - origin.1, e.w, e.h)).map(|p| (p, e))
 }
 
-fn draw_magnify(pm: &mut Pixmap, origin: (i32, i32), rect: &Box2, offset: Pt, zoom: f32, ellipse: bool, s: &Style) {
+fn draw_magnify(
+    pm: &mut Pixmap,
+    origin: (i32, i32),
+    rect: &Box2,
+    offset: Pt,
+    zoom: f32,
+    ellipse: bool,
+    s: &Style,
+) {
     if let Some(src) = magnify_source(pm, origin, rect, zoom) {
         draw_magnify_from(pm, origin, rect, offset, zoom, ellipse, s, src);
     }
@@ -1359,16 +1755,40 @@ fn draw_magnify(pm: &mut Pixmap, origin: (i32, i32), rect: &Box2, offset: Pt, zo
 /// or, with an `offset`, into a view moved by it, with a thin outline of
 /// the source area and a connector.
 #[allow(clippy::too_many_arguments)]
-fn draw_magnify_from(pm: &mut Pixmap, origin: (i32, i32), source_rect: &Box2, offset: Pt, zoom: f32, ellipse: bool, s: &Style, (src, e): (Pixmap, IRect)) {
+fn draw_magnify_from(
+    pm: &mut Pixmap,
+    origin: (i32, i32),
+    source_rect: &Box2,
+    offset: Pt,
+    zoom: f32,
+    ellipse: bool,
+    s: &Style,
+    (src, e): (Pixmap, IRect),
+) {
     let zoom = zoom.max(1.0);
     let moved = offset.len() > 0.5;
     let rect = &source_rect.offset(offset.x, offset.y);
     if moved {
         let t = Transform::from_translate(-origin.0 as f32, -origin.1 as f32);
-        let source = Box2::around(source_rect.center(), source_rect.width() / (2.0 * zoom), source_rect.height() / (2.0 * zoom));
-        let outline = if ellipse { source.to_skia().and_then(PathBuilder::from_oval) } else { shape_path(&source, ShapeKind::Rectangle) };
+        let source = Box2::around(
+            source_rect.center(),
+            source_rect.width() / (2.0 * zoom),
+            source_rect.height() / (2.0 * zoom),
+        );
+        let outline = if ellipse {
+            source.to_skia().and_then(PathBuilder::from_oval)
+        } else {
+            shape_path(&source, ShapeKind::Rectangle)
+        };
         if let Some(path) = outline {
-            stroke(pm, &path, s.stroke, (s.width / 2.0).max(1.5), Dash::Solid, t);
+            stroke(
+                pm,
+                &path,
+                s.stroke,
+                (s.width / 2.0).max(1.5),
+                Dash::Solid,
+                t,
+            );
         }
         let (a, b) = (source.center(), rect.center());
         let d = b.sub(a).normalized();
@@ -1378,7 +1798,14 @@ fn draw_magnify_from(pm: &mut Pixmap, origin: (i32, i32), source_rect: &Box2, of
         pb.move_to(from.x, from.y);
         pb.line_to(to.x, to.y);
         if let Some(path) = pb.finish() {
-            stroke(pm, &path, s.stroke, (s.width / 2.0).max(1.5), Dash::Solid, t);
+            stroke(
+                pm,
+                &path,
+                s.stroke,
+                (s.width / 2.0).max(1.5),
+                Dash::Solid,
+                t,
+            );
         }
     }
     let c = source_rect.center();
@@ -1387,16 +1814,39 @@ fn draw_magnify_from(pm: &mut Pixmap, origin: (i32, i32), source_rect: &Box2, of
     let ty = view.y + (e.y as f32 - c.y) * zoom - origin.1 as f32;
     let shader_t = Transform::from_row(zoom, 0.0, 0.0, zoom, tx, ty);
     let lens = rect.offset(-origin.0 as f32, -origin.1 as f32);
-    let path = if ellipse { lens.to_skia().and_then(PathBuilder::from_oval) } else { shape_path(&lens, ShapeKind::Rectangle) };
+    let path = if ellipse {
+        lens.to_skia().and_then(PathBuilder::from_oval)
+    } else {
+        shape_path(&lens, ShapeKind::Rectangle)
+    };
     let Some(path) = path else { return };
     let mut paint = Paint::default();
     paint.anti_alias = true;
-    paint.shader = Pattern::new(src.as_ref(), SpreadMode::Pad, FilterQuality::Bicubic, 1.0, shader_t);
-    pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    paint.shader = Pattern::new(
+        src.as_ref(),
+        SpreadMode::Pad,
+        FilterQuality::Bicubic,
+        1.0,
+        shader_t,
+    );
+    pm.fill_path(
+        &path,
+        &paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
     stroke(pm, &path, s.stroke, s.width, s.dash, Transform::identity());
 }
 
-fn draw_spotlight(pm: &mut Pixmap, origin: (i32, i32), rect: &Box2, shape: ShapeKind, dim: f32, blur: f32) {
+fn draw_spotlight(
+    pm: &mut Pixmap,
+    origin: (i32, i32),
+    rect: &Box2,
+    shape: ShapeKind,
+    dim: f32,
+    blur: f32,
+) {
     let spot = rect.offset(-origin.0 as f32, -origin.1 as f32);
     let Some(spot_path) = shape_path(&spot, shape) else {
         return;
@@ -1406,22 +1856,49 @@ fn draw_spotlight(pm: &mut Pixmap, origin: (i32, i32), rect: &Box2, shape: Shape
         raster::blur_area(pm, IRect::of_size(pm.width(), pm.height()), blur as u32);
         let mut paint = Paint::default();
         paint.anti_alias = true;
-        paint.shader = Pattern::new(original.as_ref(), SpreadMode::Pad, FilterQuality::Nearest, 1.0, Transform::identity());
-        pm.fill_path(&spot_path, &paint, FillRule::Winding, Transform::identity(), None);
+        paint.shader = Pattern::new(
+            original.as_ref(),
+            SpreadMode::Pad,
+            FilterQuality::Nearest,
+            1.0,
+            Transform::identity(),
+        );
+        pm.fill_path(
+            &spot_path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
     }
     let mut pb = PathBuilder::new();
-    pb.push_rect(tiny_skia::Rect::from_xywh(0.0, 0.0, pm.width() as f32, pm.height() as f32).unwrap());
+    pb.push_rect(
+        tiny_skia::Rect::from_xywh(0.0, 0.0, pm.width() as f32, pm.height() as f32).unwrap(),
+    );
     pb.push_path(&spot_path);
     if let Some(path) = pb.finish() {
         let color = Rgba::BLACK.with_alpha((dim.clamp(0.0, 1.0) * 255.0) as u8);
-        pm.fill_path(&path, &paint_of(color, false), FillRule::EvenOdd, Transform::identity(), None);
+        pm.fill_path(
+            &path,
+            &paint_of(color, false),
+            FillRule::EvenOdd,
+            Transform::identity(),
+            None,
+        );
     }
 }
 
 pub fn draw_image(pm: &mut Pixmap, t: Transform, rect: &Box2, src: &Pixmap) {
-    let (sx, sy) = (rect.width() / src.width() as f32, rect.height() / src.height() as f32);
+    let (sx, sy) = (
+        rect.width() / src.width() as f32,
+        rect.height() / src.height() as f32,
+    );
     let exact = (sx - 1.0).abs() < 1e-3 && (sy - 1.0).abs() < 1e-3;
-    let quality = if exact { FilterQuality::Nearest } else { FilterQuality::Bicubic };
+    let quality = if exact {
+        FilterQuality::Nearest
+    } else {
+        FilterQuality::Bicubic
+    };
     let shader_t = Transform::from_row(sx, 0.0, 0.0, sy, rect.x0, rect.y0);
     let mut paint = Paint::default();
     paint.shader = Pattern::new(src.as_ref(), SpreadMode::Pad, quality, 1.0, shader_t);
@@ -1432,31 +1909,84 @@ pub fn draw_image(pm: &mut Pixmap, t: Transform, rect: &Box2, src: &Pixmap) {
 
 /// A drop zone: its image filling or fitting it, clipped to it; or, when
 /// empty, a dashed placeholder saying what to do.
-fn draw_zone(pm: &mut Pixmap, t: Transform, origin: (i32, i32), rect: &Box2, src: Option<&Pixmap>, zone: &Zone, s: &Style) {
-    let Some(area) = shape_path(rect, ShapeKind::Rectangle) else { return };
+fn draw_zone(
+    pm: &mut Pixmap,
+    t: Transform,
+    origin: (i32, i32),
+    rect: &Box2,
+    src: Option<&Pixmap>,
+    zone: &Zone,
+    s: &Style,
+) {
+    let Some(area) = shape_path(rect, ShapeKind::Rectangle) else {
+        return;
+    };
     match src {
         Some(src) => {
             if s.fill.is_visible() {
                 fill(pm, &area, s.fill, t, false);
             }
             let (placed, _) = zone.placement(rect, src.width() as f32, src.height() as f32);
-            let (sx, sy) = (placed.width() / src.width() as f32, placed.height() / src.height() as f32);
+            let (sx, sy) = (
+                placed.width() / src.width() as f32,
+                placed.height() / src.height() as f32,
+            );
             let mut paint = Paint::default();
-            paint.shader = Pattern::new(src.as_ref(), SpreadMode::Pad, FilterQuality::Bicubic, 1.0, Transform::from_row(sx, 0.0, 0.0, sy, placed.x0, placed.y0));
-            let shown = Box2::new(placed.x0.max(rect.x0), placed.y0.max(rect.y0), placed.x1.min(rect.x1), placed.y1.min(rect.y1));
+            paint.shader = Pattern::new(
+                src.as_ref(),
+                SpreadMode::Pad,
+                FilterQuality::Bicubic,
+                1.0,
+                Transform::from_row(sx, 0.0, 0.0, sy, placed.x0, placed.y0),
+            );
+            let shown = Box2::new(
+                placed.x0.max(rect.x0),
+                placed.y0.max(rect.y0),
+                placed.x1.min(rect.x1),
+                placed.y1.min(rect.y1),
+            );
             if let Some(path) = shape_path(&shown, ShapeKind::Rectangle) {
                 pm.fill_path(&path, &paint, FillRule::Winding, t, None);
             }
         }
         None => {
-            fill(pm, &area, Rgba::rgb(0xE9, 0xEC, 0xF1).with_alpha(230), t, false);
+            fill(
+                pm,
+                &area,
+                Rgba::rgb(0xE9, 0xEC, 0xF1).with_alpha(230),
+                t,
+                false,
+            );
             stroke(pm, &area, Rgba::rgb(0x8E, 0x97, 0xA3), 2.0, Dash::Dash, t);
             let size = (rect.height() / 9.0).clamp(12.0, 28.0);
-            let ts = text::TextStyle { family: text::DEFAULT_FAMILY, size, bold: false, italic: false };
-            let layout = text::layout("Drop an image here", &ts, Some(rect.width() - 16.0));
-            let label = Style { text_color: Rgba::rgb(0x5B, 0x63, 0x6E), font_size: size, align: text::Align::Center, ..Style::default() };
+            let ts = text::TextStyle {
+                family: text::DEFAULT_FAMILY,
+                size,
+                bold: false,
+                italic: false,
+            };
+            let prompt = if cfg!(target_os = "linux") {
+                "Select and paste an image"
+            } else {
+                "Drop an image here"
+            };
+            let layout = text::layout(prompt, &ts, Some(rect.width() - 16.0));
+            let label = Style {
+                text_color: Rgba::rgb(0x5B, 0x63, 0x6E),
+                font_size: size,
+                align: text::Align::Center,
+                ..Style::default()
+            };
             let y = rect.center().y - layout.height() / 2.0;
-            draw_text(pm, origin, &layout, rect.x0 + 8.0, y, rect.width() - 16.0, &label);
+            draw_text(
+                pm,
+                origin,
+                &layout,
+                rect.x0 + 8.0,
+                y,
+                rect.width() - 16.0,
+                &label,
+            );
         }
     }
 }
@@ -1467,18 +1997,37 @@ fn shadow_of(layer: &Pixmap, s: &Style) -> Pixmap {
     let c = s.shadow_color;
     for px in shadow.data_mut().chunks_exact_mut(4) {
         let a = px[3] as f32 / 255.0 * c.a as f32 / 255.0;
-        px.copy_from_slice(&[(c.r as f32 * a) as u8, (c.g as f32 * a) as u8, (c.b as f32 * a) as u8, (a * 255.0) as u8]);
+        px.copy_from_slice(&[
+            (c.r as f32 * a) as u8,
+            (c.g as f32 * a) as u8,
+            (c.b as f32 * a) as u8,
+            (a * 255.0) as u8,
+        ]);
     }
-    raster::blur_area(&mut shadow, IRect::of_size(layer.width(), layer.height()), s.shadow_blur.max(0.0) as u32);
+    raster::blur_area(
+        &mut shadow,
+        IRect::of_size(layer.width(), layer.height()),
+        s.shadow_blur.max(0.0) as u32,
+    );
     shadow
 }
 
 fn shadow_from_path(pm: &mut Pixmap, path: &Path, s: &Style) {
     let b = path.bounds();
-    let area = Box2::new(b.left(), b.top(), b.right(), b.bottom()).inflate(shadow_margin(s)).to_irect();
-    let Some(mut layer) = Pixmap::new(area.w.max(1) as u32, area.h.max(1) as u32) else { return };
+    let area = Box2::new(b.left(), b.top(), b.right(), b.bottom())
+        .inflate(shadow_margin(s))
+        .to_irect();
+    let Some(mut layer) = Pixmap::new(area.w.max(1) as u32, area.h.max(1) as u32) else {
+        return;
+    };
     let t = Transform::from_translate(-area.x as f32, -area.y as f32);
-    layer.fill_path(path, &paint_of(Rgba::BLACK, false), FillRule::Winding, t, None);
+    layer.fill_path(
+        path,
+        &paint_of(Rgba::BLACK, false),
+        FillRule::Winding,
+        t,
+        None,
+    );
     let shadow = shadow_of(&layer, s);
     let (sx, sy) = shadow_offset(s);
     pm.draw_pixmap(
@@ -1496,8 +2045,19 @@ mod tests {
     use super::*;
 
     fn arrow() -> Object {
-        let style = Style { end_cap: Cap::Arrow, ..Style::default() };
-        Object::new(1, Kind::Line { a: Pt::new(10.0, 10.0), b: Pt::new(90.0, 10.0), control: None }, style)
+        let style = Style {
+            end_cap: Cap::Arrow,
+            ..Style::default()
+        };
+        Object::new(
+            1,
+            Kind::Line {
+                a: Pt::new(10.0, 10.0),
+                b: Pt::new(90.0, 10.0),
+                control: None,
+            },
+            style,
+        )
     }
 
     #[test]
@@ -1508,12 +2068,35 @@ mod tests {
         assert_eq!(a.kind_name(), "Arrow");
         let mut a = a;
         a.move_handle(H_CONTROL, Pt::new(50.0, 40.0), false);
-        let Kind::Line { control: Some(c), .. } = a.kind else { panic!() };
+        let Kind::Line {
+            control: Some(c), ..
+        } = a.kind
+        else {
+            panic!()
+        };
         assert!((quad_at(Pt::new(10.0, 10.0), c, Pt::new(90.0, 10.0), 0.5).y - 40.0).abs() < 1e-3);
-        let rect = Object::new(2, Kind::Shape { rect: Box2::new(0.0, 0.0, 100.0, 50.0), shape: ShapeKind::Rectangle }, Style::default());
+        let rect = Object::new(
+            2,
+            Kind::Shape {
+                rect: Box2::new(0.0, 0.0, 100.0, 50.0),
+                shape: ShapeKind::Rectangle,
+            },
+            Style::default(),
+        );
         assert!(rect.hit(Pt::new(1.0, 25.0), 2.0));
-        assert!(!rect.hit(Pt::new(50.0, 25.0), 2.0), "unfilled shapes are hit on the border only");
-        assert_eq!(resize_box(Box2::new(0.0, 0.0, 10.0, 10.0), H_BR, Pt::new(20.0, 5.0), true), Box2::new(0.0, 0.0, 20.0, 20.0));
+        assert!(
+            !rect.hit(Pt::new(50.0, 25.0), 2.0),
+            "unfilled shapes are hit on the border only"
+        );
+        assert_eq!(
+            resize_box(
+                Box2::new(0.0, 0.0, 10.0, 10.0),
+                H_BR,
+                Pt::new(20.0, 5.0),
+                true
+            ),
+            Box2::new(0.0, 0.0, 20.0, 20.0)
+        );
     }
 
     #[test]
@@ -1524,7 +2107,11 @@ mod tests {
         arrow().draw(&mut part, (60, 0));
         for x in 0..40 {
             for y in 0..30 {
-                assert_eq!(raster::pixel(&full, x + 60, y), raster::pixel(&part, x, y), "pixel {x},{y}");
+                assert_eq!(
+                    raster::pixel(&full, x + 60, y),
+                    raster::pixel(&part, x, y),
+                    "pixel {x},{y}"
+                );
             }
         }
         assert_eq!(raster::pixel(&full, 50, 10), Rgba::RED);
@@ -1532,13 +2119,28 @@ mod tests {
 
     #[test]
     fn shadows_and_opacity_use_a_layer() {
-        let mut style = Style { shadow: true, opacity: 0.5, fill: Rgba::RED, ..Style::default() };
+        let mut style = Style {
+            shadow: true,
+            opacity: 0.5,
+            fill: Rgba::RED,
+            ..Style::default()
+        };
         style.width = 0.0;
-        let o = Object::new(1, Kind::Shape { rect: Box2::new(10.0, 10.0, 40.0, 40.0), shape: ShapeKind::Rectangle }, style);
+        let o = Object::new(
+            1,
+            Kind::Shape {
+                rect: Box2::new(10.0, 10.0, 40.0, 40.0),
+                shape: ShapeKind::Rectangle,
+            },
+            style,
+        );
         let mut pm = raster::solid(80, 80, Rgba::WHITE).unwrap();
         o.draw(&mut pm, (0, 0));
         let inside = raster::pixel(&pm, 20, 20);
-        assert!(inside.g > 100 && inside.g < 160, "half-transparent red over white: {inside:?}");
+        assert!(
+            inside.g > 100 && inside.g < 160,
+            "half-transparent red over white: {inside:?}"
+        );
         let shadow = raster::pixel(&pm, 42, 42);
         assert!(shadow.r < 250, "shadow below and right: {shadow:?}");
     }

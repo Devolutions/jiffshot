@@ -8,6 +8,11 @@ fn main() {
         std::process::exit(2);
     };
     let doc = jiffshot_doc::io::open(std::path::Path::new(input)).unwrap();
-    eprintln!("{}x{}, {} objects", doc.width(), doc.height(), doc.objects.len());
+    eprintln!(
+        "{}x{}, {} objects",
+        doc.width(),
+        doc.height(),
+        doc.objects.len()
+    );
     jiffshot_doc::io::export(&doc, std::path::Path::new(output)).unwrap();
 }
