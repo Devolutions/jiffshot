@@ -34,7 +34,7 @@ use std::rc::Rc;
 struct Palette {
     back: Color,
     card: Color,
-    dock: Color,
+    track: Color,
     edge: Color,
     frame: Color,
     text: Color,
@@ -45,7 +45,7 @@ struct Palette {
 const LIGHT: Palette = Palette {
     back: parts::rgb(0xF3F3F3),
     card: parts::rgb(0xFFFFFF),
-    dock: parts::rgb(0xE0E0E0),
+    track: parts::rgb(0xE0E0E0),
     edge: parts::rgb(0xE0E0E0),
     frame: parts::rgb(0xC8C8C8),
     text: parts::rgb(0x1F1F1F),
@@ -56,7 +56,7 @@ const LIGHT: Palette = Palette {
 const DARK: Palette = Palette {
     back: parts::rgb(dark_blue::windows_or(dark_blue::WINDOW, 0x1F2023)),
     card: parts::rgb(dark_blue::windows_or(dark_blue::PANEL, 0x2B2D31)),
-    dock: parts::rgb(dark_blue::windows_or(dark_blue::CARD, 0x3A3C40)),
+    track: parts::rgb(dark_blue::windows_or(dark_blue::HOVER, 0x3A3C40)),
     edge: parts::rgb(dark_blue::windows_or(dark_blue::BORDER, 0x3A3C40)),
     frame: parts::rgb(dark_blue::windows_or(dark_blue::STRONG_BORDER, 0x4A4D52)),
     text: parts::rgb(dark_blue::windows_or(dark_blue::TEXT, 0xEDEEF0)),
@@ -343,28 +343,24 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         .text_wrapping(TextWrapping::Wrap)
         .font_size(12.0)
         .foreground(move || palette(dark).text);
-    let mode_dock = Border::el()
-        .width(172.0)
-        .height(200.0)
-        .padding(5.0)
-        .corner_radius(16.0)
-        .background(move || palette(dark).dock)
-        .border_brush(move || palette(dark).frame)
-        .border_thickness(1.0)
+    let mode_capsule = Border::el()
+        .width(168.0)
+        .height(52.0)
+        .padding(3.0)
+        .corner_radius(12.0)
+        .horizontal_alignment(HorizontalAlignment::Center)
+        .background(move || palette(dark).track)
         .child(
-            StackPanel::el()
-                .horizontal_alignment(HorizontalAlignment::Center)
-                .child(
-                    Grid::el()
-                        .width(160.0)
-                        .height(44.0)
-                        .column_definitions("*,*,*")
-                        .children_iter(MODES.iter().enumerate().map(|(i, &(label, tip))| mode_button(dark, tab, &subs, i, label, tip))),
-                )
-                .child(Border::el().width(160.0).height(1.0).margin((0.0, 1.0, 0.0, 0.0)).background(move || palette(dark).frame))
-                .child(capture_button.margin((0.0, 4.0, 0.0, 0.0)))
-                .child(detail.margin((0.0, 2.0, 0.0, 0.0))),
+            Grid::el()
+                .column_definitions("*,*,*")
+                .children_iter(MODES.iter().enumerate().map(|(i, &(label, tip))| mode_button(dark, tab, &subs, i, label, tip))),
         );
+    let mode_cluster = StackPanel::el()
+        .width(172.0)
+        .horizontal_alignment(HorizontalAlignment::Center)
+        .child(mode_capsule)
+        .child(capture_button.margin((0.0, 12.0, 0.0, 0.0)))
+        .child(detail.margin((0.0, 6.0, 0.0, 0.0)));
     let stop_interval = status_button(dark, &subs, "Stop", "Stop interval capture", "stop-interval");
     let cancel_schedule = status_button(dark, &subs, "Cancel", "Cancel daily scheduled capture", "cancel-schedule");
     let card = Border::el()
@@ -422,7 +418,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                         .grid_column(1)
                         .vertical_alignment(VerticalAlignment::Center)
                         .horizontal_alignment(HorizontalAlignment::Center)
-                        .child(mode_dock),
+                        .child(mode_cluster),
                 ),
         );
 
@@ -773,39 +769,53 @@ fn toggle_chip(dark: Signal<bool>, subs: &Subscriptions, toggle: &Toggle) -> El<
     )
 }
 
-/// One mode selector in the joined action dock.
+/// One segment of the icon capsule mode switch.
 fn mode_button(dark: Signal<bool>, tab: Signal<usize>, subs: &Subscriptions, i: usize, label: &str, tip: &str) -> El<Button> {
     let on = move || tab.get() == i;
     let selected_background = move || if dark.get() { SELECTED_MODE_DARK } else { palette(dark).accent };
     let selected_foreground = move || if dark.get() { SELECTED_MODE_ICON_DARK } else { WHITE };
+    let underline = move || if dark.get() { SELECTED_MODE_ICON_DARK } else { WHITE };
     on_click(
         Button::el()
             .grid_column(i as i32)
-            .height(42.0)
-            .padding((4.0, 0.0, 4.0, 0.0))
-            .corner_radius(8.0)
+            .padding(0.0)
+            .corner_radius(9.0)
             .border_thickness(0.0)
             .horizontal_alignment(HorizontalAlignment::Stretch)
             .vertical_alignment(VerticalAlignment::Stretch)
-            .horizontal_content_alignment(HorizontalAlignment::Center)
-            .vertical_content_alignment(VerticalAlignment::Center)
+            .horizontal_content_alignment(HorizontalAlignment::Stretch)
+            .vertical_content_alignment(VerticalAlignment::Stretch)
             .background(move || if on() { selected_background() } else { parts::TRANSPARENT })
             .tool_tip_tip(super::shortcut(tip))
             .content(
-                StackPanel::el()
-                    .spacing(2.0)
+                Grid::el()
                     .child(
-                        glyph(MODE_GLYPHS[i], 17.0)
-                            .horizontal_alignment(HorizontalAlignment::Center)
-                            .foreground(move || if on() { selected_foreground() } else { palette(dark).muted }),
+                        Border::el()
+                            .visible(on)
+                            .height(2.0)
+                            .corner_radius(1.0)
+                            .margin((12.0, 0.0, 12.0, 1.0))
+                            .vertical_alignment(VerticalAlignment::Bottom)
+                            .background(underline),
                     )
                     .child(
-                        TextBlock::el()
-                            .text(label.to_owned())
-                            .horizontal_alignment(HorizontalAlignment::Center)
-                            .font_size(11.5)
-                            .font_weight(move || if on() { FontWeight::DemiBold } else { FontWeight::Normal })
-                            .foreground(move || if on() { WHITE } else { palette(dark).muted }),
+                    StackPanel::el()
+                        .spacing(2.0)
+                        .horizontal_alignment(HorizontalAlignment::Center)
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .child(
+                            glyph(MODE_GLYPHS[i], 17.0)
+                                .horizontal_alignment(HorizontalAlignment::Center)
+                                .foreground(move || if on() { selected_foreground() } else { palette(dark).muted }),
+                        )
+                        .child(
+                            TextBlock::el()
+                                .text(label.to_owned())
+                                .horizontal_alignment(HorizontalAlignment::Center)
+                                .font_size(11.5)
+                                .font_weight(move || if on() { FontWeight::DemiBold } else { FontWeight::Normal })
+                                .foreground(move || if on() { WHITE } else { palette(dark).muted }),
+                        ),
                     ),
             ),
         subs,
