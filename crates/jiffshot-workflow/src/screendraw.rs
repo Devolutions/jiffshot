@@ -3,12 +3,11 @@
 //! steps; C changes the color; right-click or the panel's Draw button
 //! ends drawing. Marks fade out after a few seconds.
 //!
-//! The marks live here and are rendered into one image the size of the
-//! area: the app shows it in a see-through window over the area (left out
-//! of captures, input through `ui_api.rs`), and the recorder blends it into
-//! every frame with [`blend_into`].
+//! The marks live here and are rendered in recording pixels. The app shows
+//! them over the selected desktop area, and the recorder blends them into
+//! each frame.
 
-use jiffshot_capture::{Frame, Rect};
+use jiffshot_capture::{CaptureMapping, Frame};
 use jiffshot_doc::object::{Cap, Kind, ShapeKind, Style};
 use jiffshot_doc::{Box2, Document, Pt, Rgba};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,14 +41,14 @@ struct Mark {
 
 pub(crate) struct State {
     pub id: u64,
-    pub area: Rect,
+    pub mapping: CaptureMapping,
     tool: Tool,
     color: usize,
     marks: Vec<Mark>,
     drawing: Option<Pt>,
     step: u32,
     fade_after: Duration,
-    /// The marks as last rendered (premultiplied RGBA, the area's size),
+    /// The marks as last rendered (premultiplied RGBA, the recording's size),
     /// and how many times they were rendered.
     pub image: Option<Arc<Pixmap>>,
     pub generation: u64,
@@ -133,10 +132,7 @@ fn kind_for(tool: Tool, a: Pt, b: Pt, label: u32) -> Kind {
 impl State {
     /// Renders the marks (dropping faded ones) into `image`.
     fn render(&mut self) {
-        let (w, h) = (
-            self.area.width.max(1) as u32,
-            self.area.height.max(1) as u32,
-        );
+        let (w, h) = self.mapping.size();
         let mut doc = Document::blank(w, h, Rgba::TRANSPARENT);
         let fade = self.fade_after;
         self.marks.retain(|m| alpha(m, fade) > 0.0);
@@ -151,7 +147,7 @@ impl State {
         self.generation += 1;
     }
 
-    /// The left button went down at `p` (area pixels).
+    /// The left button went down at `p` (recording pixels).
     pub fn press(&mut self, p: Pt) {
         if self.tool == Tool::Step {
             self.step += 1;
@@ -229,18 +225,30 @@ pub fn active() -> bool {
     state().is_some()
 }
 
-/// Starts drawing over `area`; marks fade `fade_after` after they are
-/// drawn (never when zero).
-pub fn show(area: Rect, fade_after: Duration) {
+pub(crate) fn announcement(id: u64, mapping: CaptureMapping) -> String {
+    let area = mapping.rect();
+    let (width, height) = mapping.size();
+    serde_json::json!({
+        "id": id,
+        "area": [area.x, area.y, area.width, area.height],
+        "pixels": [width, height],
+        "bounds": mapping.desktop_bounds(),
+    })
+    .to_string()
+}
+
+/// Starts drawing over the mapped recording area; marks never fade when
+/// `fade_after` is zero. Returns false if another drawing session is active.
+pub fn show(mapping: CaptureMapping, fade_after: Duration) -> bool {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     {
         let mut s = state();
         if s.is_some() {
-            return;
+            return false;
         }
         *s = Some(State {
             id,
-            area,
+            mapping,
             tool: Tool::Arrow,
             color: 0,
             marks: Vec::new(),
@@ -252,27 +260,64 @@ pub fn show(area: Rect, fade_after: Duration) {
         });
     }
     if let Some(hooks) = crate::hooks() {
-        (hooks.screen_draw)(
-            serde_json::json!({ "id": id, "area": [area.x, area.y, area.width, area.height] })
-                .to_string(),
-        );
+        (hooks.screen_draw)(announcement(id, mapping));
     }
+    true
 }
 
-pub fn hide() {
-    if state().take().is_some() {
+fn end(session: Option<u64>) -> bool {
+    let removed = {
+        let mut current = state();
+        if current
+            .as_ref()
+            .is_some_and(|s| session.is_none_or(|id| id == s.id))
+        {
+            current.take();
+            true
+        } else {
+            false
+        }
+    };
+    if removed {
         if let Some(hooks) = crate::hooks() {
             (hooks.screen_draw)(String::new());
         }
     }
+    removed
+}
+
+pub fn hide() {
+    end(None);
+}
+
+pub(crate) fn fail(session: u64, message: &str) -> bool {
+    if !end(Some(session)) {
+        return false;
+    }
+    if let Some(hooks) = crate::hooks() {
+        (hooks.notify)("Screen Draw failed", message, true);
+    } else {
+        crate::log(&format!("Screen Draw failed: {message}"));
+    }
+    true
 }
 
 /// Blends the marks into a recorded frame of the area.
-pub fn blend_into(frame: &mut Frame) {
-    let Some(image) = state().as_ref().and_then(|s| s.image.clone()) else {
-        return;
+pub fn blend_into(frame: &mut Frame) -> Result<(), String> {
+    let guard = state();
+    let Some(s) = guard.as_ref() else {
+        return Ok(());
     };
-    blend_image(frame, &image);
+    #[cfg(target_os = "macos")]
+    if s.mapping.size() != (frame.width, frame.height) {
+        return Err("Screen Draw dimensions do not match the recording".to_owned());
+    }
+    let image = s.image.clone();
+    drop(guard);
+    if let Some(image) = image {
+        blend_image(frame, &image);
+    }
+    Ok(())
 }
 
 pub(crate) fn blend_image(frame: &mut Frame, image: &Pixmap) {
@@ -302,6 +347,7 @@ pub(crate) fn blend_image(frame: &mut Frame, image: &Pixmap) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jiffshot_capture::Rect;
 
     #[test]
     fn marks_fade_after_the_delay() {
@@ -319,7 +365,18 @@ mod tests {
 
     #[test]
     fn a_drawn_box_ends_up_in_the_recorded_frame() {
-        show(Rect::new(0, 0, 120, 80), Duration::ZERO);
+        struct End;
+        impl Drop for End {
+            fn drop(&mut self) {
+                hide();
+            }
+        }
+        let _end = End;
+        assert!(show(
+            CaptureMapping::identity(Rect::new(0, 0, 120, 80)).unwrap(),
+            Duration::ZERO
+        ));
+        let id = state().as_ref().unwrap().id;
         if let Some(s) = state().as_mut() {
             s.key(b'S' as u16);
             s.press(Pt::new(20.0, 20.0));
@@ -328,7 +385,22 @@ mod tests {
         }
         let mut frame = Frame::new(120, 80);
         frame.pixels.iter_mut().for_each(|b| *b = 0xFF);
-        blend_into(&mut frame);
+        blend_into(&mut frame).unwrap();
+        let mut preview = vec![0; 120 * 80 * 4];
+        assert_eq!(
+            crate::ui_api::draw_copy(id, &mut preview, 120, 80),
+            Ok(true)
+        );
+        assert!(crate::ui_api::draw_copy(id, &mut preview, 119, 80).is_err());
+        assert!(crate::ui_api::draw_copy(id, &mut preview[..100], 120, 80).is_err());
+        assert_eq!(
+            crate::ui_api::draw_copy(id + 1, &mut preview, 120, 80),
+            Ok(false)
+        );
+        assert!(!crate::ui_api::draw_failed(id + 1, "stale failure".into()));
+        assert!(crate::ui_api::draw_pending(id));
+        #[cfg(target_os = "macos")]
+        assert!(blend_into(&mut Frame::new(119, 80)).is_err());
         hide();
         assert!(!active());
         // On the box's top edge: red (BGRA), not white.
@@ -338,5 +410,46 @@ mod tests {
         // Inside the box: untouched.
         let at = (40 * 120 + 60) * 4;
         assert_eq!(&frame.pixels[at..at + 3], &[0xFF, 0xFF, 0xFF]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn screen_draw_uses_recording_pixels_without_resampling() {
+        let mapping = CaptureMapping::new(Rect::new(-200, 30, 240, 160), 120, 80).unwrap();
+        let mut draw = State {
+            id: 1,
+            mapping,
+            tool: Tool::Box,
+            color: 0,
+            marks: Vec::new(),
+            drawing: None,
+            step: 0,
+            fade_after: Duration::ZERO,
+            image: None,
+            generation: 0,
+        };
+        draw.press(Pt::new(20.0, 20.0));
+        assert!(draw.moved(Pt::new(100.0, 60.0)));
+        draw.release();
+        let image = draw.image.unwrap();
+        assert_eq!((image.width(), image.height()), (120, 80));
+        let mut frame = Frame::new(120, 80);
+        frame.pixels.fill(255);
+        blend_image(&mut frame, &image);
+        assert!(frame
+            .rgb(60, 20)
+            .is_some_and(|(r, g, b)| r > 200 && g < 80 && b < 80));
+        assert_eq!(frame.rgb(60, 40), Some((255, 255, 255)));
+
+        let mut image = Pixmap::new(2, 2).unwrap();
+        let pixel = (1 * 2 + 1) * 4;
+        image.data_mut()[pixel..pixel + 4].copy_from_slice(&[128, 0, 0, 128]);
+        let mut frame = Frame::new(2, 2);
+        for pixel in frame.pixels.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[100, 50, 25, 255]);
+        }
+        blend_image(&mut frame, &image);
+        assert_eq!(&frame.pixels[..4], &[100, 50, 25, 255]);
+        assert_eq!(&frame.pixels[12..16], &[50, 25, 140, 255]);
     }
 }

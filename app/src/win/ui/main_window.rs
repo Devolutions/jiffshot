@@ -21,7 +21,7 @@ use self::main_library::library_panel;
 use self::main_menu::{create_flyout, menu_bar, share_flyout};
 use self::main_panel::side_bar;
 use self::main_tools::{effects_panel, tool_bar};
-use super::UiOnly;
+use super::{shortcut, UiOnly};
 use crate::vm::{MainBinding, MainViewModelSink};
 use rustolonia::{
     AnyEl, AppScope, Border, Button, Dock, DockPanel, DragDropEffects, Effect, El, FileDropEvent, FlyoutBase, FontWeight, Key, MenuFlyout, NodeRef, Orientation, Result, StackPanel, TextBox, ThemeVariant, ToggleButton, Upcast,
@@ -78,6 +78,14 @@ pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
     Ok(window)
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn library_tile_for_selftest(scope: &AppScope, key: u64) -> Result<Window> {
+    let tile = main_library::tile(super::main().sink, Theme::new(), key);
+    let window = Window::el().title("Library drag fixture").width(300.0).height(220.0).content(tile).build(scope)?;
+    scope.mount(window.clone())?;
+    Ok(window)
+}
+
 /// The Editor and Library tabs, Capture, Create ▾, the tool palette, the
 /// Effects toggle, Copy All and Share ▾.
 fn top_bar(ctx: &Ctx) -> El<Border> {
@@ -99,7 +107,7 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
         .orientation(Orientation::Horizontal)
         .spacing(6.0)
         .vertical_alignment(VerticalAlignment::Center)
-        .child(StackPanel::el().orientation(Orientation::Horizontal).spacing(2.0).child(tab("Editor", false, "Edit the current capture")).child(tab("Library", true, "Browse all captures (Ctrl+L)")))
+        .child(StackPanel::el().orientation(Orientation::Horizontal).spacing(2.0).child(tab("Editor", false, "Edit the current capture")).child(tab("Library", true, &shortcut("Browse all captures (Ctrl+L)"))))
         .child(rule(theme, (4.0, 6.0)))
         .child(
             Button::el()
@@ -118,7 +126,7 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
         .vertical_alignment(VerticalAlignment::Center)
         .child(rule(theme, (4.0, 6.0)))
         .child(ToggleButton::el().content("✦ Effects").checked(s.show_effects.two_way()).tool_tip_tip("Show or hide the Effects panel"))
-        .child(Button::el().content("Copy All").tool_tip_tip("Copy the whole image (Ctrl+Shift+C)").command(main_common::command(s.copy_image_enabled, |m| m.copy_image())))
+        .child(Button::el().content("Copy All").tool_tip_tip(shortcut("Copy the whole image (Ctrl+Shift+C)")).command(main_common::command(s.copy_image_enabled, |m| m.copy_image())))
         .child(with_flyout(Button::el().content("Share ▾").tool_tip_tip("Send the capture to another app, a file or a printer"), share_flyout(ctx)));
     Border::el()
         .dock_panel_dock(Dock::Top)

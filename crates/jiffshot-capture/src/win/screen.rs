@@ -59,6 +59,11 @@ impl Monitor {
     pub fn scale(&self) -> f32 {
         self.dpi as f32 / 96.0
     }
+
+    /// Desktop-coordinate pixels per window DIP.
+    pub fn desktop_scale(&self) -> f64 {
+        self.scale() as f64
+    }
 }
 
 fn rect(r: RECT) -> Rect {

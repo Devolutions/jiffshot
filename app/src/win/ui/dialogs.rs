@@ -212,7 +212,7 @@ pub fn keyboard_shortcuts(scope: &AppScope, owner: &Window) -> Result<()> {
     let grid = Grid::new()?.column_definitions("Auto,*")?.row_definitions(vec!["Auto"; SHORTCUTS.len()].join(","))?.row_spacing(4.0)?;
     for (i, (keys, what)) in SHORTCUTS.iter().enumerate() {
         let row = i32::try_from(i).unwrap_or(i32::MAX);
-        grid.children()?.add(TextBlock::new()?.text(keys)?.font_family("Consolas, Cascadia Mono, monospace")?.margin(Thickness::new(0.0, 0.0, 18.0, 0.0))?.grid_row(row)?)?;
+        grid.children()?.add(TextBlock::new()?.text(super::shortcut(keys))?.font_family("Consolas, Cascadia Mono, monospace")?.margin(Thickness::new(0.0, 0.0, 18.0, 0.0))?.grid_row(row)?)?;
         grid.children()?.add(TextBlock::new()?.text(what)?.grid_row(row)?.grid_column(1)?)?;
     }
     let dialog = frame(scope, "Keyboard shortcuts", &grid, None)?;

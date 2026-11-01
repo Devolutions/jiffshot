@@ -334,7 +334,10 @@ pub fn record(dir: &std::path::Path, seconds: f32) -> std::io::Result<()> {
     // app), which the recorder blends into every frame.
     let draw = std::env::var_os("JIFFSHOT_RECORD_DRAW").is_some();
     if draw {
-        crate::screendraw::show(rect, std::time::Duration::ZERO);
+        let mapping = jiffshot_capture::CaptureMapping::identity(rect).ok_or_else(|| std::io::Error::other("invalid Screen Draw dimensions"))?;
+        if !crate::screendraw::show(mapping, std::time::Duration::ZERO) {
+            return Err(std::io::Error::other("another Screen Draw session is active"));
+        }
         if let Some(s) = crate::screendraw::state().as_mut() {
             s.key(b'S' as u16);
             s.press(jiffshot_doc::Pt::new(40.0, 40.0));

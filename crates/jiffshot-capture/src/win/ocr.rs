@@ -2,25 +2,13 @@
 //! the user's profile languages. Runs on its own multithreaded-apartment
 //! thread, so callers on an STA (the UI thread) can block on it safely.
 
+use super::{Line, Word};
 use crate::Rect;
 use windows::Foundation::Rect as WinRect;
 use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
 use windows::Storage::Streams::DataWriter;
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Word {
-    pub rect: Rect,
-    pub text: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Line {
-    pub rect: Rect,
-    pub text: String,
-    pub words: Vec<Word>,
-}
 
 /// Images smaller than this are enlarged first: the engine misses text
 /// below roughly 10 pixels high.

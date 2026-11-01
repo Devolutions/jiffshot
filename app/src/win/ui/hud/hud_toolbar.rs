@@ -15,6 +15,8 @@ use rustolonia::{
 };
 use serde_json::Value;
 use std::cell::{Cell, RefCell};
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 const PILL: Color = Color::rgb(0x1B, 0x1C, 0x1F);
@@ -25,7 +27,7 @@ const LIVE: Color = Color::rgb(0xFF, 0x52, 0x52);
 const HELD: Color = Color::rgb(0xFF, 0xC1, 0x07);
 const WARNING: Color = Color::rgb(0xFF, 0xA0, 0x00);
 const WHITE: Color = Color::rgb(0xFF, 0xFF, 0xFF);
-const ICONS: &str = "Segoe Fluent Icons, Segoe MDL2 Assets";
+const ICONS: &str = super::super::icons::FONT;
 
 /// Gap between the area and the toolbar (DIPs).
 const GAP: f64 = 14.0;
@@ -69,7 +71,7 @@ impl ToolButton {
         click: impl FnMut() + Send + 'static,
     ) -> Result<Self> {
         let glyph = TextBlock::new()?
-            .text(glyph)?
+            .text(super::super::icons::glyph(glyph))?
             .font_family(ICONS)?
             .font_size(size)?
             .foreground(Brush::solid(WHITE))?
@@ -225,7 +227,7 @@ fn menu_item(header: &str, kind: MenuItemToggleType, on: bool, id: u64, action: 
 
 /// Opens a menu above `target`: `(header, toggle kind, checked, action)`
 /// entries, `None` for a separator.
-fn open_menu(target: &Border, id: u64, entries: &[Option<(&str, MenuItemToggleType, bool, String)>]) -> Result<()> {
+fn open_menu(target: &Border, id: u64, entries: &[Option<(&str, MenuItemToggleType, bool, String)>]) -> Result<MenuFlyout> {
     MENU.with(|m| m.borrow_mut().clear());
     let menu = MenuFlyout::new()?.placement(PlacementMode::Top)?;
     let items = menu.items()?;
@@ -235,10 +237,11 @@ fn open_menu(target: &Border, id: u64, entries: &[Option<(&str, MenuItemToggleTy
             None => items.add(Separator::new()?)?,
         }
     }
-    menu.show_at_with_control(target)
+    menu.show_at_with_control(target)?;
+    Ok(menu)
 }
 
-fn cursor_menu(target: &Border, id: u64, state: &State) -> Result<()> {
+fn cursor_menu(target: &Border, id: u64, state: &State) -> Result<MenuFlyout> {
     let s = state.lock().map(|s| s.clone()).unwrap_or_default();
     let check = MenuItemToggleType::CheckBox;
     open_menu(
@@ -252,7 +255,7 @@ fn cursor_menu(target: &Border, id: u64, state: &State) -> Result<()> {
     )
 }
 
-fn webcam_menu(target: &Border, id: u64, state: &State) -> Result<()> {
+fn webcam_menu(target: &Border, id: u64, state: &State) -> Result<MenuFlyout> {
     let s = state.lock().map(|s| s.clone()).unwrap_or_default();
     let corner = s.get("webcam_corner").and_then(Value::as_str).unwrap_or("bottom-right").to_owned();
     let circle = on(&s, "webcam_circle");
@@ -304,7 +307,7 @@ pub struct RecordingToolbar {
 }
 
 impl RecordingToolbar {
-    pub fn new(scope: &AppScope, id: u64, area: Rect) -> Result<Self> {
+    pub fn new(scope: &AppScope, id: u64, area: Rect) -> super::HudResult<Self> {
         let state: State = Arc::default();
         let mut subs = Vec::new();
         let send = |action: &'static str| move || run(format!("hud:{id}:act:{action}"));
@@ -467,9 +470,45 @@ impl RecordingToolbar {
         scope.set_transparent(&window, true)?;
         scope.set_topmost(&window, true)?;
         let placed = window.clone();
-        subs.push(window.subscribe_size_changed(move |e| place_beside(&placed, area, (e.new_size.width, e.new_size.height), GAP, true))?);
-        window.show()?;
-        native::prepare(scope, &window, false);
+        let placement_scope = scope.clone();
+        #[cfg(target_os = "macos")]
+        let placement_ready = Arc::new(AtomicBool::new(false));
+        #[cfg(target_os = "macos")]
+        let event_ready = placement_ready.clone();
+        subs.push(window.subscribe_size_changed(move |e| {
+            #[cfg(target_os = "macos")]
+            if !event_ready.load(Ordering::Acquire) {
+                return;
+            }
+            if let Err(error) = place_beside(&placement_scope, &placed, area, (e.new_size.width, e.new_size.height), GAP, true) {
+                eprintln!("hud: placing a window failed: {error}");
+            }
+        })?);
+        #[cfg(target_os = "macos")]
+        super::native_popup_macos::install(scope, &window)?;
+        #[cfg(windows)]
+        {
+            window.show()?;
+            native::prepare(scope, &window, false);
+        }
+        #[cfg(target_os = "macos")]
+        let positioned = window.clone();
+        #[cfg(target_os = "macos")]
+        let position_scope = scope.clone();
+        #[cfg(target_os = "macos")]
+        super::show_protected(
+            scope,
+            &window,
+            false,
+            move || {
+                placement_ready.store(true, Ordering::Release);
+                if let Some(size) = native::size(&position_scope, &positioned)? {
+                    place_beside(&position_scope, &positioned, area, size, GAP, true).map_err(std::io::Error::other)?;
+                }
+                Ok(())
+            },
+            move |_| run(format!("hud:{id}:act:cancel")),
+        )?;
         Ok(RecordingToolbar {
             window,
             state,
@@ -539,7 +578,7 @@ impl RecordingToolbar {
         let system_silent = is("system_silent");
         let microphone_silent = is("microphone_silent");
         self.system.fill(if system_silent { WARNING } else { switch("system") })?;
-        self.system.glyph.set_text(if is("system") { "\u{E767}" } else { "\u{E74F}" })?;
+        self.system.glyph.set_text(super::super::icons::glyph(if is("system") { "\u{E767}" } else { "\u{E74F}" }))?;
         self.microphone.fill(if microphone_silent { WARNING } else { switch("microphone") })?;
         self.microphone.strike.set_visible(!is("microphone"))?;
         let audio_silence = (system_silent, microphone_silent);
@@ -575,6 +614,18 @@ impl RecordingToolbar {
 
     pub fn close(&self) {
         let _ = self.window.close();
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn tooltip_for_selftest(&self) -> Border {
+        self.draw.border.clone()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn menu_for_selftest(&self, id: u64) -> impl FnOnce() -> Result<MenuFlyout> {
+        let target = self.cursor_menu.border.clone();
+        let state = self.state.clone();
+        move || cursor_menu(&target, id, &state)
     }
 }
 

@@ -54,12 +54,12 @@ pub fn status_bar(ctx: &Ctx, zoom: ZoomView) -> El<Border> {
         .visible(move || !s.library_expanded.get())
         .child(bar(s.document_info).tool_tip_tip("Image size; click to fit it in the window").command(command(s.zoom_fit_enabled, |m| m.zoom_fit())))
         .child(rule(theme, (6.0, 4.0)))
-        .child(bar("−").tool_tip_tip("Zoom out (Ctrl+−)").command(command(s.zoom_out_enabled, |m| m.zoom_out())))
+        .child(bar("−").tool_tip_tip(crate::ui::shortcut("Zoom out (Ctrl+−)")).command(command(s.zoom_out_enabled, |m| m.zoom_out())))
         .child(zoom_slider)
-        .child(bar("+").tool_tip_tip("Zoom in (Ctrl++)").command(command(s.zoom_in_enabled, |m| m.zoom_in())))
+        .child(bar("+").tool_tip_tip(crate::ui::shortcut("Zoom in (Ctrl++)")).command(command(s.zoom_in_enabled, |m| m.zoom_in())))
         .child(TextBlock::el().text(zoom.text).vertical_alignment(VerticalAlignment::Center).width(44.0).text_alignment(TextAlignment::Center).font_size(12.0))
-        .child(bar("Fit").tool_tip_tip("Fit to window (Ctrl+Alt+0)").command(command(s.zoom_fit_enabled, |m| m.zoom_fit())))
-        .child(bar("Actual size").tool_tip_tip("100% (Ctrl+0)").command(command(s.zoom_actual_enabled, |m| m.zoom_actual())))
+        .child(bar("Fit").tool_tip_tip(crate::ui::shortcut("Fit to window (Ctrl+Alt+0)")).command(command(s.zoom_fit_enabled, |m| m.zoom_fit())))
+        .child(bar("Actual size").tool_tip_tip(crate::ui::shortcut("100% (Ctrl+0)")).command(command(s.zoom_actual_enabled, |m| m.zoom_actual())))
         .child(rule(theme, (6.0, 4.0)))
         .child(
             ToggleButton::el()
@@ -75,8 +75,8 @@ pub fn status_bar(ctx: &Ctx, zoom: ZoomView) -> El<Border> {
         .orientation(Orientation::Horizontal)
         .spacing(2.0)
         .vertical_alignment(VerticalAlignment::Center)
-        .child(bar("↶").font_size(14.0).tool_tip_tip("Undo (Ctrl+Z)").command(command(s.undo_enabled, |m| m.undo())))
-        .child(bar("↷").font_size(14.0).tool_tip_tip("Redo (Ctrl+Y)").command(command(s.redo_enabled, |m| m.redo())));
+        .child(bar("↶").font_size(14.0).tool_tip_tip(crate::ui::shortcut("Undo (Ctrl+Z)")).command(command(s.undo_enabled, |m| m.undo())))
+        .child(bar("↷").font_size(14.0).tool_tip_tip(crate::ui::shortcut("Redo (Ctrl+Y)")).command(command(s.redo_enabled, |m| m.redo())));
     Border::el()
         .dock_panel_dock(Dock::Bottom)
         .background(theme.brush(Tone::Panel))
@@ -91,13 +91,13 @@ pub fn status_bar(ctx: &Ctx, zoom: ZoomView) -> El<Border> {
         )
 }
 
-/// Shown while a narrated video is being recorded.
+/// Shown while a narrated video is starting or being recorded.
 pub fn narration_bar(sink: MainViewModelSink) -> El<Border> {
     Border::el().dock_panel_dock(Dock::Bottom).background(solid(RED)).padding((10.0, 6.0)).visible(sink.narrating).child(
         StackPanel::el()
             .orientation(Orientation::Horizontal)
             .spacing(10.0)
-            .child(TextBlock::el().text("● Recording narration").foreground(solid(WHITE)).font_weight(FontWeight::DemiBold).vertical_alignment(VerticalAlignment::Center))
+            .child(TextBlock::el().text("● Narration").foreground(solid(WHITE)).font_weight(FontWeight::DemiBold).vertical_alignment(VerticalAlignment::Center))
             .child(Button::el().content("Next picture ▶").command(command(sink.narrate_next_enabled, |m| m.narrate_next())))
             .child(Button::el().content("Finish").command(command(sink.narrate_finish_enabled, |m| m.narrate_finish()))),
     )

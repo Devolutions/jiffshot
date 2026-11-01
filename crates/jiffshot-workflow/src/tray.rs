@@ -3,30 +3,25 @@
 //! app's Avalonia tray icon sends it commands ([`TrayAction`]) and shows
 //! what it publishes ([`TrayState`], notices).
 
+use crate::geometry::CaptureLayout;
+#[cfg(target_os = "macos")]
+use crate::geometry::{self, saved_area_layout, saved_area_ticket, SavedAreaKind, SavedAreaTicket};
+use crate::keys;
 use crate::overlay::{self, Overlay};
 use crate::settings::Settings;
+use crate::sys::{
+    self, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, PostMessageW, PostQuitMessage,
+    RegisterHotKey, SetTimer, TranslateMessage, UnregisterHotKey, HOT_KEY_MODIFIERS, HWND, LPARAM,
+    LRESULT, MOD_NOREPEAT, MSG, WM_APP, WM_DESTROY, WM_HOTKEY, WM_TIMER, WPARAM,
+};
 use crate::workflow::{self, Capture, Outcome};
 use crate::{log, modes};
 use jiffshot_capture::library::{CaptureKind, Library};
 use jiffshot_capture::screen::{self, CursorSnapshot};
 use jiffshot_capture::targets::Targets;
-use jiffshot_capture::{wide, Rect};
+use jiffshot_capture::Rect;
 use std::cell::RefCell;
 use std::time::Instant;
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
-    MOD_SHIFT, VK_F11, VK_SNAPSHOT,
-};
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW, KillTimer,
-    PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer, TranslateMessage, MSG,
-    SW_SHOWNORMAL, WM_APP, WM_DESTROY, WM_HOTKEY, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW,
-    WS_POPUP,
-};
 
 pub const CLASS: &str = "JiffshotCaptureTray";
 /// Posted by a second instance (or a tray click) to start a capture.
@@ -42,10 +37,16 @@ const WM_APP_COMMAND: u32 = WM_APP + 6;
 /// A closure to run on this thread (lparam = `Box<Box<dyn FnOnce()>>`), from
 /// [`crate::on_capture_thread`].
 pub(crate) const WM_APP_RUN: u32 = WM_APP + 7;
+#[cfg(target_os = "macos")]
+pub(crate) const WM_APP_REQUEST_EXIT: u32 = WM_APP + 8;
+#[cfg(target_os = "macos")]
+const WM_APP_SCROLL_DONE: u32 = WM_APP + 9;
 const TIMER_DELAY: usize = 1;
 const TIMER_HOTKEY_RETRY: usize = 2;
 const TIMER_MENU: usize = 3;
 const TIMER_INITIAL: usize = 4;
+#[cfg(target_os = "macos")]
+const TIMER_STARTUP_STATUS: usize = 9;
 
 /// What a capture produces, passed as WM_APP_CAPTURE's wparam.
 pub const MODE_IMAGE: usize = 0;
@@ -66,6 +67,8 @@ pub const MODE_FULLSCREEN: usize = 13;
 pub const MODE_CLIPBOARD: usize = 14;
 pub const MODE_FILE: usize = 15;
 pub const MODE_VIDEO_FULL: usize = 16;
+#[cfg(target_os = "macos")]
+const MODE_SCHEDULE_AREA: usize = 17;
 /// Not a mode: the command line asks for the Capture window.
 pub const OPEN_CAPTURE_WINDOW: usize = 99;
 const ID_SCROLL_BOTH: usize = 48;
@@ -115,81 +118,126 @@ pub fn mode_named(name: &str) -> Option<usize> {
 
 /// Parses "Ctrl+Shift+1" into hotkey modifiers and a virtual key.
 pub fn parse_hotkey(text: &str) -> Option<(HOT_KEY_MODIFIERS, u16)> {
-    let mut mods = 0;
-    let mut key = None;
-    for part in text.split('+').map(|p| p.trim().to_ascii_lowercase()) {
-        match part.as_str() {
-            "ctrl" | "control" => mods |= MOD_CONTROL,
-            "shift" => mods |= MOD_SHIFT,
-            "alt" => mods |= MOD_ALT,
-            "win" => mods |= windows_sys::Win32::UI::Input::KeyboardAndMouse::MOD_WIN,
-            "prtscn" | "printscreen" => key = Some(VK_SNAPSHOT),
-            k if k.len() == 1 && k.chars().next().unwrap().is_ascii_alphanumeric() => {
-                key = Some(k.to_ascii_uppercase().as_bytes()[0] as u16)
-            }
-            k if k.starts_with('f')
-                && k[1..].parse::<u16>().is_ok_and(|n| (1..=24).contains(&n)) =>
-            {
-                key = Some(0x6F + k[1..].parse::<u16>().unwrap())
-            }
-            _ => return None,
-        }
-    }
-    key.map(|k| (mods, k))
+    keys::parse(text)
 }
 
-/// The Run key entry that starts the tray with Windows.
-const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StartupNotice {
+    #[default]
+    None,
+    NeedsApproval,
+    Legacy,
+    StatusUnknown,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StartupStatus {
+    /// Registration intent, including a login item awaiting user approval.
+    pub requested: bool,
+    pub notice: StartupNotice,
+    pub detail: Option<String>,
+}
+
+pub(crate) fn startup_status() -> StartupStatus {
+    startup::status()
+}
 
 pub(crate) fn runs_at_startup() -> bool {
-    run_value_exists(jiffshot_capture::paths::NAME)
-}
-
-fn run_value_exists(name: &str) -> bool {
-    let mut size = 0u32;
-    // SAFETY: a size query of one registry value.
-    unsafe {
-        windows_sys::Win32::System::Registry::RegGetValueW(
-            HKEY_CURRENT_USER,
-            wide(RUN_KEY).as_ptr(),
-            wide(name).as_ptr(),
-            windows_sys::Win32::System::Registry::RRF_RT_REG_SZ,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &mut size,
-        ) == 0
-    }
+    startup_status().requested
 }
 
 pub(crate) fn set_run_at_startup(on: bool) {
-    use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegCreateKeyW, RegDeleteValueW, RegSetValueExW, HKEY, REG_SZ,
-    };
-    let mut key: HKEY = std::ptr::null_mut();
-    // SAFETY: opens, writes or deletes one value under our own user's Run key.
-    unsafe {
-        if RegCreateKeyW(HKEY_CURRENT_USER, wide(RUN_KEY).as_ptr(), &mut key) != 0 {
-            return;
-        }
-        if on {
-            let exe = std::env::current_exe()
-                .map(|p| format!("\"{}\"", p.display()))
-                .unwrap_or_default();
-            let value = wide(&exe);
-            RegSetValueExW(
-                key,
-                wide(jiffshot_capture::paths::NAME).as_ptr(),
-                0,
-                REG_SZ,
-                value.as_ptr() as *const u8,
-                (value.len() * 2) as u32,
-            );
-        } else {
-            RegDeleteValueW(key, wide(jiffshot_capture::paths::NAME).as_ptr());
-        }
-        RegCloseKey(key);
+    #[cfg(windows)]
+    startup::set_run_at_startup(on);
+    #[cfg(target_os = "macos")]
+    match startup::set_run_at_startup(on) {
+        Ok(Some(message)) => notify(
+            std::ptr::null_mut(),
+            "Open at login needs approval",
+            &message,
+            true,
+        ),
+        Ok(None) => {}
+        Err(error) => notify(
+            std::ptr::null_mut(),
+            "Open at login not changed",
+            &error,
+            true,
+        ),
     }
 }
+
+/// Starting with the session: the Run key on Windows.
+#[cfg(windows)]
+mod startup {
+    use jiffshot_capture::wide;
+    use windows_sys::Win32::System::Registry::HKEY_CURRENT_USER;
+
+    /// The Run key entry that starts the tray with Windows.
+    const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+    pub(crate) fn runs_at_startup() -> bool {
+        run_value_exists(jiffshot_capture::paths::NAME)
+    }
+
+    pub(crate) fn status() -> super::StartupStatus {
+        super::StartupStatus {
+            requested: runs_at_startup(),
+            ..Default::default()
+        }
+    }
+
+    fn run_value_exists(name: &str) -> bool {
+        let mut size = 0u32;
+        // SAFETY: a size query of one registry value.
+        unsafe {
+            windows_sys::Win32::System::Registry::RegGetValueW(
+                HKEY_CURRENT_USER,
+                wide(RUN_KEY).as_ptr(),
+                wide(name).as_ptr(),
+                windows_sys::Win32::System::Registry::RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut size,
+            ) == 0
+        }
+    }
+
+    pub(crate) fn set_run_at_startup(on: bool) {
+        use windows_sys::Win32::System::Registry::{
+            RegCloseKey, RegCreateKeyW, RegDeleteValueW, RegSetValueExW, HKEY, REG_SZ,
+        };
+        let mut key: HKEY = std::ptr::null_mut();
+        // SAFETY: opens, writes or deletes one value under our own user's Run key.
+        unsafe {
+            if RegCreateKeyW(HKEY_CURRENT_USER, wide(RUN_KEY).as_ptr(), &mut key) != 0 {
+                return;
+            }
+            if on {
+                let exe = std::env::current_exe()
+                    .map(|p| format!("\"{}\"", p.display()))
+                    .unwrap_or_default();
+                let value = wide(&exe);
+                RegSetValueExW(
+                    key,
+                    wide(jiffshot_capture::paths::NAME).as_ptr(),
+                    0,
+                    REG_SZ,
+                    value.as_ptr() as *const u8,
+                    (value.len() * 2) as u32,
+                );
+            } else {
+                RegDeleteValueW(key, wide(jiffshot_capture::paths::NAME).as_ptr());
+            }
+            RegCloseKey(key);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[path = "startup_macos.rs"]
+mod startup;
 
 const HOTKEY_CAPTURE: i32 = 1;
 const HOTKEY_SCREEN: i32 = 2;
@@ -210,18 +258,87 @@ const ID_CURSOR: usize = 12;
 const ID_LIBRARY: usize = 20;
 const ID_EXIT: usize = 30;
 
+#[derive(Clone)]
+struct CaptureRegion {
+    rect: Rect,
+    layout: CaptureLayout,
+}
+
+#[derive(Clone)]
+struct TimeLapse {
+    region: CaptureRegion,
+    last_hash: u64,
+}
+
+enum PendingMode {
+    Mode(usize),
+    #[cfg(windows)]
+    Fixed(Rect),
+    #[cfg(target_os = "macos")]
+    Fixed(SavedAreaTicket),
+}
+
+#[cfg(target_os = "macos")]
+struct DeferredScheduledCapture {
+    at: String,
+    area: Option<(i32, i32, i32, i32)>,
+    ticket: Option<SavedAreaTicket>,
+    queued: std::time::Instant,
+}
+
+#[cfg(target_os = "macos")]
+impl DeferredScheduledCapture {
+    const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+    fn new(settings: &Settings, queued: std::time::Instant) -> std::io::Result<Self> {
+        let at = settings
+            .schedule
+            .clone()
+            .ok_or_else(|| std::io::Error::other("the scheduled capture is disabled"))?;
+        let ticket = settings
+            .schedule_area
+            .map(|(x, y, width, height)| {
+                saved_area_ticket(SavedAreaKind::Scheduled, Rect::new(x, y, width, height))
+            })
+            .transpose()?;
+        Ok(Self {
+            at,
+            area: settings.schedule_area,
+            ticket,
+            queued,
+        })
+    }
+
+    fn validate(&self, settings: &Settings, now: std::time::Instant) -> std::io::Result<()> {
+        if settings.schedule.as_deref() != Some(self.at.as_str())
+            || settings.schedule_area != self.area
+        {
+            return Err(std::io::Error::other(
+                "the scheduled time or area changed while the capture was waiting",
+            ));
+        }
+        if now.saturating_duration_since(self.queued) > Self::MAX_WAIT {
+            return Err(std::io::Error::other(
+                "another capture kept the schedule waiting for more than two minutes",
+            ));
+        }
+        if let Some(ticket) = &self.ticket {
+            ticket.validate()?;
+        }
+        Ok(())
+    }
+}
+
 struct App {
     hwnd: HWND,
     settings: Settings,
     busy: bool,
-    last_region: Option<Rect>,
+    last_region: Option<CaptureRegion>,
     /// How the capture hotkey reads in menus, e.g. "PrtScn".
     capture_key: String,
     /// A capture requested on the command line, started once the tray runs.
     pending: Option<usize>,
-    /// Time-lapse area and the last frame's hash (identical frames are
-    /// skipped).
-    timelapse: Option<(Rect, u64)>,
+    timelapse: Option<TimeLapse>,
     /// A preset waiting for its delay.
     pending_preset: Option<usize>,
     /// Overrides for the capture running now (from a preset).
@@ -229,13 +346,19 @@ struct App {
     override_effects: Option<Vec<String>>,
     override_share: Option<String>,
     scheduled_fired: Option<std::time::Instant>,
+    #[cfg(target_os = "macos")]
+    schedule_armed: bool,
+    #[cfg(target_os = "macos")]
+    deferred_schedule: Option<DeferredScheduledCapture>,
     /// A capture from the Capture window waiting for its delay: a mode, or
     /// a fixed rectangle.
-    pending_mode: Option<Result<usize, Rect>>,
+    pending_mode: Option<PendingMode>,
 }
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+    #[cfg(target_os = "macos")]
+    static PUBLISHED_STARTUP: RefCell<Option<StartupStatus>> = const { RefCell::new(None) };
 }
 
 /// Runs `f` with the app state. Never call it across a nested message loop:
@@ -261,8 +384,11 @@ pub struct TrayState {
     pub include_cursor: bool,
     pub show_widget: bool,
     pub run_at_startup: bool,
+    pub startup_notice: StartupNotice,
     pub time_lapse: bool,
     pub schedule: bool,
+    /// The user's schedule remains enabled but is not currently armed.
+    pub schedule_paused: bool,
     /// A region was captured, so Repeat has something to repeat.
     pub can_repeat: bool,
     /// The capture hotkey, as the menu shows it ("PrtScn" or a fallback).
@@ -272,26 +398,74 @@ pub struct TrayState {
 /// Sends the current [`TrayState`] to the app.
 pub(crate) fn publish_state() {
     let Some(hooks) = crate::hooks() else { return };
-    let Some(state) = with_app(|app| TrayState {
-        copy_to_clipboard: app.settings.copy_to_clipboard,
-        open_in_editor: app.settings.open_in_editor,
-        include_cursor: app.settings.include_cursor,
-        show_widget: app.settings.show_widget,
-        run_at_startup: false,
-        time_lapse: app.timelapse.is_some(),
-        schedule: app.settings.schedule.is_some(),
-        can_repeat: app.last_region.is_some(),
-        capture_key: app.capture_key.clone(),
+    let startup = startup_status();
+    #[cfg(target_os = "macos")]
+    remember_startup(&startup);
+    let Some((state, settings)) = with_app(|app| {
+        (
+            TrayState {
+                copy_to_clipboard: app.settings.copy_to_clipboard,
+                open_in_editor: app.settings.open_in_editor,
+                include_cursor: app.settings.include_cursor,
+                show_widget: app.settings.show_widget,
+                run_at_startup: startup.requested,
+                startup_notice: startup.notice,
+                time_lapse: app.timelapse.is_some(),
+                schedule: app.settings.schedule.is_some(),
+                #[cfg(target_os = "macos")]
+                schedule_paused: app.settings.schedule.is_some() && !app.schedule_armed,
+                #[cfg(windows)]
+                schedule_paused: false,
+                can_repeat: app.last_region.is_some(),
+                capture_key: app.capture_key.clone(),
+            },
+            app.settings.clone(),
+        )
     }) else {
         return;
     };
-    if let Some(settings) = with_app(|app| app.settings.clone()) {
+    #[cfg(not(target_os = "macos"))]
+    {
         *crate::SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()) = Some(settings);
     }
-    (hooks.state)(TrayState {
-        run_at_startup: runs_at_startup(),
-        ..state
-    });
+    #[cfg(target_os = "macos")]
+    {
+        *crate::CAPTURE_SNAPSHOT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((settings, state.clone()));
+    }
+    (hooks.state)(state);
+}
+
+#[cfg(target_os = "macos")]
+fn remember_startup(status: &StartupStatus) -> bool {
+    PUBLISHED_STARTUP.with(|published| {
+        let mut published = published.borrow_mut();
+        if published.as_ref() == Some(status) {
+            false
+        } else {
+            *published = Some(status.clone());
+            true
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn refresh_startup_status() {
+    let status = startup_status();
+    if remember_startup(&status) {
+        if let Some((_, state)) = crate::CAPTURE_SNAPSHOT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            state.run_at_startup = status.requested;
+            state.startup_notice = status.notice;
+        }
+        if let Some(hooks) = crate::hooks() {
+            (hooks.startup_status)(status);
+        }
+    }
 }
 
 /// The tray menu's commands, run on the capture side's thread.
@@ -361,16 +535,7 @@ impl TrayAction {
 
     /// Runs the command on the capture side's thread; safe from any thread.
     pub fn post(self) {
-        // SAFETY: posts to our own tray window, found by class.
-        unsafe {
-            let hwnd = windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW(
-                wide(CLASS).as_ptr(),
-                std::ptr::null(),
-            );
-            if !hwnd.is_null() {
-                PostMessageW(hwnd, WM_APP_COMMAND, self.id(), 0);
-            }
-        }
+        sys::post_to_class(CLASS, WM_APP_COMMAND, self.id(), 0);
     }
 }
 
@@ -379,16 +544,12 @@ fn register_hotkey(hwnd: HWND, id: i32, modifiers: HOT_KEY_MODIFIERS, vk: u16) -
     unsafe { RegisterHotKey(hwnd, id, modifiers | MOD_NOREPEAT, vk as u32) != 0 }
 }
 
-/// Capture keys to try when PrtScn is taken, in order.
-const FALLBACK_KEYS: &[(HOT_KEY_MODIFIERS, u16, &str)] = &[
-    (MOD_CONTROL | MOD_SHIFT, b'X' as u16, "Ctrl+Shift+X"),
-    (MOD_CONTROL | MOD_ALT, VK_SNAPSHOT, "Ctrl+Alt+PrtScn"),
-    (MOD_CONTROL | MOD_SHIFT, VK_F11, "Ctrl+Shift+F11"),
-];
-
 /// Whether Windows routes PrtScn to the Snipping Tool (Settings ›
 /// Accessibility › Keyboard).
+#[cfg(windows)]
 fn snipping_owns_print_screen() -> bool {
+    use jiffshot_capture::wide;
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
     let mut value: u32 = 0;
     let mut size = 4u32;
     // SAFETY: reads one DWORD into a correctly sized buffer.
@@ -406,84 +567,169 @@ fn snipping_owns_print_screen() -> bool {
     status == 0 && value != 0
 }
 
-fn print_screen_owner() -> &'static str {
-    if snipping_owns_print_screen() {
+#[cfg(not(windows))]
+fn snipping_owns_print_screen() -> bool {
+    false
+}
+
+fn hotkey_owner(key: &str) -> &'static str {
+    if key == "PrtScn" && snipping_owns_print_screen() {
         "Windows gives it to the Snipping Tool (Settings › Accessibility › Keyboard › Print screen key)"
     } else {
-        "another app holds it (another screen capture tool, if one is running)"
+        "another app or the system holds it"
     }
 }
 
-/// Registers PrtScn, or the first free fallback when another app or the
-/// Snipping Tool owns it, plus the full-screen and repeat keys.
-fn register_hotkeys(hwnd: HWND) -> (String, Vec<String>) {
-    let mut problems = Vec::new();
-    let capture_key = if register_hotkey(hwnd, HOTKEY_CAPTURE, 0, VK_SNAPSHOT) {
-        "PrtScn".to_owned()
-    } else if let Some(&(_, _, name)) = FALLBACK_KEYS
-        .iter()
-        .find(|(modifiers, vk, _)| register_hotkey(hwnd, HOTKEY_CAPTURE, *modifiers, *vk))
+fn configured_key(
+    name: &str,
+    fallback: keys::Key,
+    label: &str,
+    problems: &mut Vec<String>,
+) -> (HOT_KEY_MODIFIERS, u16, String) {
+    match keys::parse(name).filter(|(mods, vk)| keys::supported(*vk) && !keys::reserved(*mods, *vk))
     {
+        Some((mods, vk)) => (mods, vk, name.to_owned()),
+        None => {
+            problems.push(format!(
+                "{name} is not a supported {label} hotkey; using {}",
+                keys::display(fallback.2)
+            ));
+            (fallback.0, fallback.1, fallback.2.to_owned())
+        }
+    }
+}
+
+/// Registers the configured capture key, or a free fallback, plus the
+/// full-screen and repeat keys.
+fn register_hotkeys(hwnd: HWND, settings: &Settings) -> (String, Vec<String>) {
+    let mut problems = Vec::new();
+    let primary = configured_key(
+        settings.capture_key(),
+        keys::CAPTURE,
+        "capture",
+        &mut problems,
+    );
+    let screen = configured_key(
+        settings.screen_key(),
+        keys::SCREEN,
+        "full-screen",
+        &mut problems,
+    );
+    let repeat = configured_key(settings.repeat_key(), keys::REPEAT, "repeat", &mut problems);
+    let reserved: std::collections::HashSet<_> = [(screen.0, screen.1), (repeat.0, repeat.1)]
+        .into_iter()
+        .chain(
+            settings
+                .presets
+                .iter()
+                .filter_map(|preset| preset.hotkey.as_deref().and_then(keys::parse)),
+        )
+        .collect();
+    let capture_key = if register_hotkey(hwnd, HOTKEY_CAPTURE, primary.0, primary.1) {
+        primary.2.clone()
+    } else if let Some(&(_, _, name)) = keys::CAPTURE_FALLBACKS.iter().find(|(modifiers, vk, _)| {
+        !reserved.contains(&(*modifiers, *vk))
+            && register_hotkey(hwnd, HOTKEY_CAPTURE, *modifiers, *vk)
+    }) {
         problems.push(format!(
-            "PrtScn is unavailable because {}; {name} captures until it frees up",
-            print_screen_owner()
+            "{} is unavailable because {}; {} captures until it frees up",
+            keys::display(&primary.2),
+            hotkey_owner(&primary.2),
+            keys::display(name)
         ));
         name.to_owned()
     } else {
         problems.push(format!(
-            "PrtScn is unavailable because {} and no fallback key is free; use the tray icon",
-            print_screen_owner()
+            "{} is unavailable because {} and no fallback key is free; use the tray icon",
+            keys::display(&primary.2),
+            hotkey_owner(&primary.2)
         ));
         "the tray icon".to_owned()
     };
-    if !register_hotkey(hwnd, HOTKEY_SCREEN, MOD_CONTROL, VK_SNAPSHOT) {
-        problems.push("Ctrl+PrtScn (full screen) is taken".to_owned());
+    if !register_hotkey(hwnd, HOTKEY_SCREEN, screen.0, screen.1) {
+        problems.push(format!(
+            "{} (full screen) is taken",
+            keys::display(&screen.2)
+        ));
     }
-    if !register_hotkey(hwnd, HOTKEY_REPEAT, MOD_SHIFT, VK_SNAPSHOT) {
-        problems.push("Shift+PrtScn (repeat last region) is taken".to_owned());
+    if !register_hotkey(hwnd, HOTKEY_REPEAT, repeat.0, repeat.1) {
+        problems.push(format!(
+            "{} (repeat last region) is taken",
+            keys::display(&repeat.2)
+        ));
     }
     (capture_key, problems)
 }
 
-/// Called periodically while a fallback key is in use: takes PrtScn back
-/// once its owner lets go, and tells the user.
-fn retry_print_screen(hwnd: HWND) {
-    if with_app(|app| app.capture_key == "PrtScn").unwrap_or(true) {
+/// Called periodically while a fallback is in use, to reclaim the configured key.
+fn retry_capture_key(hwnd: HWND) {
+    let Some(settings) = with_app(|app| app.settings.clone()) else {
+        return;
+    };
+    let primary = configured_key(
+        settings.capture_key(),
+        keys::CAPTURE,
+        "capture",
+        &mut Vec::new(),
+    );
+    if with_app(|app| app.capture_key == primary.2).unwrap_or(true) {
         // SAFETY: a timer on our own window.
         unsafe { KillTimer(hwnd, TIMER_HOTKEY_RETRY) };
         return;
     }
     // SAFETY: re-registers our own hotkey id.
     unsafe { UnregisterHotKey(hwnd, HOTKEY_CAPTURE) };
-    if register_hotkey(hwnd, HOTKEY_CAPTURE, 0, VK_SNAPSHOT) {
-        with_app(|app| app.capture_key = "PrtScn".to_owned());
-        log("PrtScn became free; capture key is now PrtScn");
+    if register_hotkey(hwnd, HOTKEY_CAPTURE, primary.0, primary.1) {
+        with_app(|app| app.capture_key = primary.2.clone());
+        log(&format!(
+            "{0} became free; capture key is now {0}",
+            primary.2
+        ));
         publish_state();
         notify(
             hwnd,
             "Jiffshot hotkeys",
-            "PrtScn now starts a Jiffshot capture",
+            &format!(
+                "{} now starts a Jiffshot capture",
+                keys::display(&primary.2)
+            ),
             false,
         );
         // SAFETY: as above.
         unsafe { KillTimer(hwnd, TIMER_HOTKEY_RETRY) };
     } else {
         let key = with_app(|app| app.capture_key.clone()).unwrap_or_default();
-        if let Some(&(modifiers, vk, _)) = FALLBACK_KEYS.iter().find(|(_, _, name)| *name == key) {
-            register_hotkey(hwnd, HOTKEY_CAPTURE, modifiers, vk);
+        if let Some(&(modifiers, vk, _)) = keys::CAPTURE_FALLBACKS
+            .iter()
+            .find(|(_, _, name)| *name == key)
+        {
+            if !register_hotkey(hwnd, HOTKEY_CAPTURE, modifiers, vk) {
+                notify(
+                    hwnd,
+                    "Jiffshot hotkeys",
+                    &format!(
+                        "{} is no longer available; use the tray icon",
+                        keys::display(&key)
+                    ),
+                    true,
+                );
+                with_app(|app| app.capture_key = "the tray icon".to_owned());
+                publish_state();
+            }
         }
     }
 }
 
+#[cfg(windows)]
 fn cursor_pos() -> (i32, i32) {
-    let mut point = POINT { x: 0, y: 0 };
-    // SAFETY: out-parameter only.
-    unsafe { GetCursorPos(&mut point) };
-    (point.x, point.y)
+    sys::cursor_pos()
 }
 
 fn spawn_finish(capture: Capture, settings: Settings, owner: HWND) {
     let owner = owner as isize;
+    #[cfg(target_os = "macos")]
+    spawn_finish_after(capture, settings, owner, || Ok(()));
+    #[cfg(not(target_os = "macos"))]
     std::thread::spawn(move || {
         let outcome = workflow::finish(capture, &settings, owner);
         // SAFETY: the window outlives worker threads in practice; if it is
@@ -499,9 +745,80 @@ fn spawn_finish(capture: Capture, settings: Settings, owner: HWND) {
     });
 }
 
+#[cfg(target_os = "macos")]
+fn spawn_finish_after(
+    capture: Capture,
+    settings: Settings,
+    owner: isize,
+    before: impl FnOnce() -> Result<(), String> + Send + 'static,
+) {
+    crate::shutdown_macos::spawn(move || {
+        if let Err(error) = before() {
+            notify(owner as HWND, "Capture finalization failed", &error, true);
+            return Some(error);
+        }
+        report_finished_capture(owner as HWND, workflow::finish(capture, &settings, owner))
+    });
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn start_image_shutdown_selftest(
+    ready: std::sync::mpsc::Sender<Result<(), String>>,
+    release: std::sync::mpsc::Receiver<()>,
+) {
+    let Some(owner) = with_app(|app| app.hwnd as isize) else {
+        let _ = ready.send(Err("the capture service is unavailable".into()));
+        return;
+    };
+    let mut frame = jiffshot_capture::Frame::new(16, 12);
+    for pixel in frame.pixels.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&[14, 38, 207, 255]);
+    }
+    let capture = workflow::from_frame(CaptureKind::Region, Rect::new(0, 0, 16, 12), frame);
+    let settings = Settings {
+        open_in_editor: false,
+        copy_to_clipboard: false,
+        share: "none".into(),
+        ..Default::default()
+    };
+    spawn_finish_after(capture, settings, owner, move || {
+        ready
+            .send(Ok(()))
+            .map_err(|_| "the image shutdown fixture lost its ready receiver".to_owned())?;
+        release
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|error| format!("the image shutdown fixture was not released: {error}"))
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn report_finished_capture(owner: HWND, outcome: Outcome) -> Option<String> {
+    if outcome.is_error || !outcome.opened_editor {
+        let title = if outcome.is_error {
+            "Capture saved with problems"
+        } else {
+            "Capture saved"
+        };
+        notify(owner, title, &outcome.message, outcome.is_error);
+    }
+    outcome.is_error.then_some(outcome.message)
+}
+
+#[cfg(target_os = "macos")]
+struct ReopenCaptureWindow;
+
+#[cfg(target_os = "macos")]
+impl Drop for ReopenCaptureWindow {
+    fn drop(&mut self) {
+        crate::show_capture_window();
+    }
+}
+
 /// Freezes the screen and runs the selection overlay; `mode` says what to
 /// do with the selection.
 fn capture_interactive(mode: usize) {
+    #[cfg(target_os = "macos")]
+    let _reopen = (mode == MODE_SCHEDULE_AREA).then_some(ReopenCaptureWindow);
     let Some((hwnd, settings)) = with_app(|app| {
         if app.busy {
             return None;
@@ -514,20 +831,79 @@ fn capture_interactive(mode: usize) {
     };
 
     let started = Instant::now();
+    #[cfg(target_os = "macos")]
+    let display_layout = match screen::DisplayLayout::current() {
+        Ok(layout) => layout,
+        Err(error) => {
+            with_app(|app| app.busy = false);
+            notify(hwnd, "Capture failed", &error.to_string(), true);
+            return;
+        }
+    };
+    #[cfg(target_os = "macos")]
+    let capture_layout = CaptureLayout::from_display(display_layout.clone());
+    #[cfg(windows)]
+    let capture_layout = match CaptureLayout::current() {
+        Ok(layout) => layout,
+        Err(error) => {
+            with_app(|app| app.busy = false);
+            notify(hwnd, "Capture failed", &error.to_string(), true);
+            return;
+        }
+    };
+    #[cfg(windows)]
     let cursor = CursorSnapshot::take();
+    #[cfg(target_os = "macos")]
+    let cursor = CursorSnapshot::take_in_layout(&display_layout);
+    #[cfg(windows)]
     let pointer = cursor_pos();
+    #[cfg(target_os = "macos")]
+    let pointer = screen::try_cursor_pos_points().and_then(|(x, y)| {
+        let precise = (
+            x * display_layout.desktop_scale(),
+            y * display_layout.desktop_scale(),
+        );
+        Ok((overlay::rounded_desktop_point(precise)?, precise))
+    });
+    #[cfg(windows)]
     let desktop = screen::virtual_screen();
-    let prepared = screen::grab(desktop).and_then(|snapshot| {
+    #[cfg(target_os = "macos")]
+    let desktop = display_layout.virtual_screen();
+    #[cfg(windows)]
+    let snapshot = screen::grab(desktop).map(|frame| (frame, ()));
+    #[cfg(target_os = "macos")]
+    let snapshot = display_layout
+        .freeze()
+        .map(|frozen| (jiffshot_capture::Frame::new(0, 0), frozen));
+    let prepared = snapshot.and_then(|(snapshot, frozen)| {
+        #[cfg(windows)]
+        let _ = frozen;
         let grabbed = started.elapsed();
+        #[cfg(windows)]
         let targets = Targets::enumerate(desktop, &[hwnd as isize]);
+        #[cfg(target_os = "macos")]
+        let targets = Targets::enumerate_in_layout(desktop, &[hwnd as isize], &display_layout)?;
         let enumerated = started.elapsed();
-        let overlay = Overlay::new(
-            snapshot,
-            (desktop.x, desktop.y),
-            targets,
-            screen::monitors(),
-            pointer,
-        )?;
+        #[cfg(windows)]
+        let monitors = screen::monitors();
+        #[cfg(target_os = "macos")]
+        let monitors = {
+            display_layout.validate()?;
+            display_layout.monitors().to_vec()
+        };
+        #[cfg(target_os = "macos")]
+        let (pointer, precise_pointer) = pointer?;
+        #[cfg(target_os = "macos")]
+        overlay::client_point(precise_pointer, (desktop.x, desktop.y))?;
+        let overlay = Overlay::new(snapshot, (desktop.x, desktop.y), targets, monitors, pointer)?;
+        #[cfg(target_os = "macos")]
+        let overlay = {
+            let mut overlay = overlay
+                .with_display_layout(capture_layout.clone())
+                .with_frozen(frozen, desktop);
+            overlay.remember_pointer_position(precise_pointer);
+            overlay
+        };
         log(&format!(
             "overlay ready in {:.0} ms (grab {:.0}, windows {:.0}, setup {:.0}) for {}x{}",
             started.elapsed().as_secs_f64() * 1000.0,
@@ -559,11 +935,31 @@ fn capture_interactive(mode: usize) {
         MODE_VIDEO => overlay::Mode::Video,
         _ => overlay::Mode::Normal,
     };
-    let (overlay, selection) = overlay::run(overlay);
+    let (overlay, selection) = match overlay::run(overlay) {
+        Ok(result) => result,
+        Err(error) => {
+            with_app(|app| app.busy = false);
+            notify(hwnd, "Capture failed", &error.to_string(), true);
+            return;
+        }
+    };
     // For checking the overlay live: the selection is logged, nothing is
     // saved or copied.
     if std::env::var_os("JIFFSHOT_CAPTURE_DRY_RUN").is_some() {
         log(&format!("dry run: selected {selection:?}"));
+        with_app(|app| app.busy = false);
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    if mode == MODE_SCHEDULE_AREA {
+        if let Some(selection) = selection {
+            let (title, message, warning) = scheduled_selection_notice(save_scheduled_selection(
+                hwnd,
+                &selection,
+                capture_layout,
+            ));
+            notify(hwnd, title, &message, warning);
+        }
         with_app(|app| app.busy = false);
         return;
     }
@@ -590,24 +986,55 @@ fn capture_interactive(mode: usize) {
         return;
     };
     let rect = selection.rect();
+    #[cfg(target_os = "macos")]
+    let capture_layout = match capture_layout.for_selection(&selection, &overlay.targets) {
+        Ok(layout) => layout,
+        Err(error) => {
+            with_app(|app| app.busy = false);
+            notify(hwnd, "Capture failed", &error.to_string(), true);
+            return;
+        }
+    };
     let include_cursor = settings.include_cursor
         && matches!(
             mode,
             MODE_ALL | MODE_IMAGE | MODE_WINDOW | MODE_FREEHAND | MODE_MULTI | MODE_FIXED
         );
-    let Some(capture) = workflow::from_overlay(
+    let capture = match workflow::from_overlay(
         &overlay,
         &selection,
         cursor.as_ref(),
         include_cursor,
         settings.cursor_as_object,
-    ) else {
-        with_app(|app| app.busy = false);
-        return;
+    ) {
+        Ok(Some(capture)) => capture,
+        Ok(None) => {
+            with_app(|app| app.busy = false);
+            notify(
+                hwnd,
+                "Capture failed",
+                "The selected area is outside the frozen desktop.",
+                true,
+            );
+            return;
+        }
+        Err(error) => {
+            with_app(|app| app.busy = false);
+            notify(hwnd, "Capture failed", &error.to_string(), true);
+            return;
+        }
     };
     drop(overlay);
-    with_app(|app| app.last_region = Some(rect));
-    publish_state();
+    #[cfg(windows)]
+    {
+        with_app(|app| {
+            app.last_region = Some(CaptureRegion {
+                rect,
+                layout: capture_layout.clone(),
+            })
+        });
+        publish_state();
+    }
     // All-in-One asks what to make of the area once it is selected.
     let mode = if mode == MODE_ALL {
         match crate::hud::run_panel(
@@ -629,28 +1056,79 @@ fn capture_interactive(mode: usize) {
     } else {
         mode
     };
+    if let Err(error) = capture_layout.validate() {
+        with_app(|app| app.busy = false);
+        notify(hwnd, "Capture failed", &error.to_string(), true);
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        with_app(|app| {
+            app.last_region = Some(CaptureRegion {
+                rect,
+                layout: capture_layout.clone(),
+            })
+        });
+        publish_state();
+    }
     match mode {
         MODE_TEXT => match modes::text(&capture.frame) {
             Ok(text) if !text.trim().is_empty() => {
                 let copied = jiffshot_capture::clipboard::copy_text(&text, hwnd as isize);
                 let preview: String = text.chars().take(180).collect();
+                #[cfg(windows)]
                 let title = if copied.is_ok() {
                     "Text copied"
                 } else {
                     "Text found (clipboard busy)"
                 };
                 log(&format!("grab text: {} characters", text.chars().count()));
+                #[cfg(windows)]
                 notify(hwnd, title, &preview, false);
+                #[cfg(target_os = "macos")]
+                match copied {
+                    Ok(()) => notify(hwnd, "Text copied", &preview, false),
+                    Err(error) => notify(
+                        hwnd,
+                        "Grab text",
+                        &format!("Text was found but could not be copied: {error}"),
+                        true,
+                    ),
+                }
                 crate::show_text(&text);
             }
             Ok(_) => notify(hwnd, "Grab text", "No text found in the selection", true),
             Err(error) => notify(hwnd, "Grab text failed", &error, true),
         },
         // These run until done, so they stay busy until then.
-        MODE_SCROLLING => return spawn_scrolling(modes::scrolling, rect, settings, hwnd),
-        MODE_SCROLL_BOTH => return spawn_scrolling(modes::scrolling_both, rect, settings, hwnd),
-        MODE_SCROLL_H => return spawn_scrolling(modes::scrolling_horizontal, rect, settings, hwnd),
-        MODE_PANORAMIC => match modes::panoramic(rect) {
+        MODE_SCROLLING => {
+            return spawn_scrolling(
+                modes::scrolling_in_layout,
+                rect,
+                settings,
+                hwnd,
+                capture_layout,
+            )
+        }
+        MODE_SCROLL_BOTH => {
+            return spawn_scrolling(
+                modes::scrolling_both_in_layout,
+                rect,
+                settings,
+                hwnd,
+                capture_layout,
+            )
+        }
+        MODE_SCROLL_H => {
+            return spawn_scrolling(
+                modes::scrolling_horizontal_in_layout,
+                rect,
+                settings,
+                hwnd,
+                capture_layout,
+            )
+        }
+        MODE_PANORAMIC => match modes::panoramic_in_layout(rect, &capture_layout) {
             Ok(Some(frame)) => spawn_finish(
                 workflow::from_frame(CaptureKind::Panoramic, rect, frame),
                 settings,
@@ -659,10 +1137,14 @@ fn capture_interactive(mode: usize) {
             Ok(None) => {}
             Err(error) => notify(hwnd, "Panoramic capture failed", &error.to_string(), true),
         },
-        MODE_VIDEO => match crate::recorder::record(rect, &settings) {
+        MODE_VIDEO => match crate::recorder::record_in_layout(rect, &settings, capture_layout) {
             Ok(Some(path)) => spawn_video_finish(path, rect, settings, hwnd),
             Ok(None) => {}
-            Err(error) => notify(hwnd, "Recording failed", &error, true),
+            Err(error) => {
+                #[cfg(target_os = "macos")]
+                crate::shutdown_macos::work_failed(&error);
+                notify(hwnd, "Recording failed", &error, true);
+            }
         },
         _ => spawn_finish(capture, settings, hwnd),
     }
@@ -672,15 +1154,51 @@ fn capture_interactive(mode: usize) {
 /// Runs a scrolling capture on a worker thread (it scrolls and grabs for a
 /// while), then finishes it here; busy until then.
 fn spawn_scrolling(
-    scroll: fn(Rect) -> std::io::Result<jiffshot_capture::Frame>,
+    scroll: fn(Rect, &CaptureLayout) -> std::io::Result<jiffshot_capture::Frame>,
     rect: Rect,
     settings: Settings,
     owner: HWND,
+    layout: CaptureLayout,
 ) {
     let owner = owner as isize;
+    #[cfg(target_os = "macos")]
+    crate::shutdown_macos::spawn(move || {
+        let started = Instant::now();
+        let result = scroll(rect, &layout);
+        if !crate::shutdown_macos::requested()
+            && !sys::post_to_class(CLASS, WM_APP_SCROLL_DONE, 0, 0)
+            && !crate::shutdown_macos::requested()
+        {
+            log("could not update the capture service after scrolling");
+        }
+        match result {
+            Ok(frame) => {
+                log(&format!(
+                    "scrolling capture {}x{} in {:.1} s",
+                    frame.width,
+                    frame.height,
+                    started.elapsed().as_secs_f64()
+                ));
+                report_finished_capture(
+                    owner as HWND,
+                    workflow::finish(
+                        workflow::from_frame(CaptureKind::Scrolling, rect, frame),
+                        &settings,
+                        owner,
+                    ),
+                )
+            }
+            Err(error) => {
+                let message = error.to_string();
+                notify(owner as HWND, "Scrolling capture failed", &message, true);
+                Some(format!("Scrolling capture failed: {message}"))
+            }
+        }
+    });
+    #[cfg(not(target_os = "macos"))]
     std::thread::spawn(move || {
         let started = Instant::now();
-        let result = scroll(rect);
+        let result = scroll(rect, &layout);
         crate::on_capture_thread(move || {
             with_app(|app| app.busy = false);
             let hwnd = owner as HWND;
@@ -707,6 +1225,14 @@ fn spawn_scrolling(
 /// Opens a finished recording like a capture (editor or notification).
 fn spawn_video_finish(path: std::path::PathBuf, rect: Rect, settings: Settings, owner: HWND) {
     let owner = owner as isize;
+    #[cfg(target_os = "macos")]
+    crate::shutdown_macos::spawn(move || {
+        report_finished_capture(
+            owner as HWND,
+            workflow::finish_video(&path, rect, &settings, owner),
+        )
+    });
+    #[cfg(not(target_os = "macos"))]
     std::thread::spawn(move || {
         let outcome = workflow::finish_video(&path, rect, &settings, owner);
         // SAFETY: as in `spawn_finish`.
@@ -719,6 +1245,37 @@ fn spawn_video_finish(path: std::path::PathBuf, rect: Rect, settings: Settings, 
             )
         };
     });
+}
+
+fn finish_step_guide(
+    doc: &jiffshot_doc::Document,
+    path: &std::path::Path,
+    count: usize,
+    settings: &Settings,
+) -> Outcome {
+    let editable = path.with_extension(jiffshot_capture::library::EDITS_EXT);
+    let outcome = match jiffshot_doc::io::save_document(doc, &editable) {
+        Err(error) => Outcome {
+            message: format!("The Step Capture image was saved to {}, but its editable guide could not be saved: {error}", path.display()),
+            is_error: true,
+            opened_editor: false,
+        },
+        Ok(()) => {
+            let opened = settings.open_in_editor && workflow::open_editor(settings, path);
+            Outcome { message: format!("Step Capture: {count} steps saved"), is_error: false, opened_editor: opened }
+        }
+    };
+    #[cfg(target_os = "macos")]
+    let outcome = {
+        let mut outcome = outcome;
+        if let Some(notice) =
+            jiffshot_doc::text::describe_font_substitutions(&doc.font_substitutions())
+        {
+            outcome.message = format!("{notice}; {}", outcome.message);
+        }
+        outcome
+    };
+    outcome
 }
 
 /// Records a Step Capture and opens the guide it makes.
@@ -735,41 +1292,52 @@ fn capture_steps() {
     };
     let steps = crate::stepcap::record();
     with_app(|app| app.busy = false);
-    let Some(steps) = steps else { return };
-    let doc = crate::stepcap::guide(&steps);
+    let steps = match steps {
+        Ok(Some(steps)) => steps,
+        Ok(None) => return,
+        Err(error) => {
+            #[cfg(target_os = "macos")]
+            crate::shutdown_macos::work_failed(&format!("Step Capture failed: {error}"));
+            notify(hwnd, "Step Capture failed", &error.to_string(), true);
+            return;
+        }
+    };
+    let doc = match crate::stepcap::guide(&steps) {
+        Ok(doc) => doc,
+        Err(error) => {
+            #[cfg(target_os = "macos")]
+            crate::shutdown_macos::work_failed(&format!("Step Capture failed: {error}"));
+            notify(hwnd, "Step Capture failed", &error.to_string(), true);
+            return;
+        }
+    };
     let owner = hwnd as isize;
-    std::thread::spawn(move || {
+    let finish = move || {
         let library = Library::new(jiffshot_capture::config::library_root());
         let frame = workflow::frame_from_pixmap(&doc.flatten());
         let rect = Rect::new(0, 0, frame.width as i32, frame.height as i32);
         let capture = workflow::from_frame(CaptureKind::Steps, rect, frame);
         let outcome = match library.save(&capture.frame, &capture.meta) {
-            Ok(path) => {
-                // The editable guide next to its image; the editor opens it.
-                let _ = jiffshot_doc::io::save_document(
-                    &doc,
-                    &path.with_extension(jiffshot_capture::library::EDITS_EXT),
-                );
-                let opened = settings.open_in_editor && workflow::open_editor(&settings, &path);
-                Outcome {
-                    message: format!("Step Capture: {} steps saved", steps.len()),
-                    is_error: false,
-                    opened_editor: opened,
-                }
-            }
+            Ok(path) => finish_step_guide(&doc, &path, steps.len(), &settings),
             Err(error) => Outcome {
                 message: format!("Could not save the guide: {error}"),
                 is_error: true,
                 opened_editor: false,
             },
         };
+        outcome
+    };
+    #[cfg(target_os = "macos")]
+    crate::shutdown_macos::spawn(move || report_finished_capture(owner as HWND, finish()));
+    #[cfg(not(target_os = "macos"))]
+    std::thread::spawn(move || {
         // SAFETY: as in `spawn_finish`.
         unsafe {
             PostMessageW(
                 owner as HWND,
                 WM_APP_DONE,
                 0,
-                Box::into_raw(Box::new(outcome)) as LPARAM,
+                Box::into_raw(Box::new(finish())) as LPARAM,
             )
         };
     });
@@ -781,6 +1349,11 @@ fn capture_from_clipboard() {
     let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else {
         return;
     };
+    #[cfg(target_os = "macos")]
+    let frame = jiffshot_capture::clipboard::read(hwnd as isize)
+        .map_err(|error| format!("Could not read the clipboard: {error}"))
+        .and_then(frame_from_clipboard);
+    #[cfg(windows)]
     let frame = match jiffshot_capture::clipboard::read(hwnd as isize) {
         Ok(Some(jiffshot_capture::clipboard::Pasted::Image {
             width,
@@ -800,8 +1373,10 @@ fn capture_from_clipboard() {
             .map(|pm| workflow::frame_from_pixmap(&pm)),
         _ => None,
     };
+    #[cfg(windows)]
+    let frame: Result<Option<jiffshot_capture::Frame>, String> = Ok(frame);
     match frame {
-        Some(frame) => {
+        Ok(Some(frame)) => {
             let rect = Rect::new(0, 0, frame.width as i32, frame.height as i32);
             spawn_finish(
                 workflow::from_frame(CaptureKind::Region, rect, frame),
@@ -809,22 +1384,73 @@ fn capture_from_clipboard() {
                 hwnd,
             );
         }
-        None => notify(
+        Ok(None) => notify(
             hwnd,
             "Capture from clipboard",
             "There is no image on the clipboard",
             true,
         ),
+        Err(error) => notify(hwnd, "Capture from clipboard", &error, true),
     }
 }
 
-/// Asks for image files and adds each to the library as a capture.
-fn capture_from_file() {
+#[cfg(target_os = "macos")]
+fn frame_from_clipboard(
+    pasted: Option<jiffshot_capture::clipboard::Pasted>,
+) -> Result<Option<jiffshot_capture::Frame>, String> {
+    use jiffshot_capture::clipboard::Pasted;
+    match pasted {
+        Some(Pasted::Image {
+            width,
+            height,
+            rgba,
+        }) => {
+            if width > i32::MAX as u32 || height > i32::MAX as u32 {
+                return Err("The clipboard image dimensions are too large".into());
+            }
+            let alpha = rgba.chunks_exact(4).any(|pixel| pixel[3] < 255);
+            let mut frame = jiffshot_capture::Frame {
+                width,
+                height,
+                pixels: rgba,
+                alpha,
+            };
+            frame
+                .validate()
+                .map_err(|error| format!("Invalid clipboard image: {error}"))?;
+            for pixel in frame.pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            Ok(Some(frame))
+        }
+        Some(Pasted::Files(files)) => {
+            let mut errors = Vec::new();
+            for path in files {
+                match jiffshot_doc::io::load_image(&path) {
+                    Ok(image) => return Ok(Some(workflow::frame_from_pixmap(&image))),
+                    Err(error) => errors.push(format!("{}: {error}", path.display())),
+                }
+            }
+            if errors.is_empty() {
+                Ok(None)
+            } else {
+                Err(format!(
+                    "Could not open the clipboard image file(s): {}",
+                    errors.join("; ")
+                ))
+            }
+        }
+        Some(Pasted::Text(_)) | None => Ok(None),
+    }
+}
+
+/// Asks for image files (Windows' Open dialog).
+#[cfg(windows)]
+fn choose_images(hwnd: HWND) -> Vec<std::path::PathBuf> {
+    use jiffshot_capture::wide;
+    use std::path::PathBuf;
     use windows_sys::Win32::UI::Controls::Dialogs::{
         GetOpenFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OPENFILENAMEW,
-    };
-    let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else {
-        return;
     };
     let mut buf = vec![0u16; 32 * 1024];
     let filter: Vec<u16> = "Images\0*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp\0All files\0*.*\0\0"
@@ -842,7 +1468,7 @@ fn capture_from_file() {
     ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_ALLOWMULTISELECT;
     // SAFETY: every pointer in `ofn` outlives the modal call.
     if unsafe { GetOpenFileNameW(&mut ofn) } == 0 {
-        return;
+        return Vec::new();
     }
     // One file: its full path. Several: the folder, then each name.
     let parts: Vec<String> = buf
@@ -850,12 +1476,53 @@ fn capture_from_file() {
         .take_while(|p| !p.is_empty())
         .map(String::from_utf16_lossy)
         .collect();
-    use std::path::PathBuf;
-    let files: Vec<PathBuf> = match parts.as_slice() {
+    match parts.as_slice() {
         [one] => vec![PathBuf::from(one)],
         [dir, names @ ..] => names.iter().map(|n| PathBuf::from(dir).join(n)).collect(),
         [] => Vec::new(),
+    }
+}
+
+/// Asks for image files (the standard Open dialog).
+#[cfg(target_os = "macos")]
+fn choose_images() -> std::io::Result<Vec<std::path::PathBuf>> {
+    jiffshot_capture::os::choose_open_paths(
+        "Capture from file",
+        &["png", "jpg", "jpeg", "bmp", "gif", "webp"],
+        None,
+    )
+}
+
+/// Asks for image files and adds each to the library as a capture.
+fn capture_from_file() {
+    let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else {
+        return;
     };
+    #[cfg(windows)]
+    let files = choose_images(hwnd);
+    #[cfg(windows)]
+    import_files(files, settings, hwnd);
+
+    #[cfg(target_os = "macos")]
+    {
+        let owner = hwnd as isize;
+        crate::shutdown_macos::spawn(move || {
+            let hwnd = owner as HWND;
+            match choose_images() {
+                Ok(files) => import_files(files, settings, hwnd),
+                Err(error) => {
+                    let message = error.to_string();
+                    notify(hwnd, "Capture from file", &message, true);
+                    Some(format!("Capture from file failed: {message}"))
+                }
+            }
+        });
+    }
+}
+
+fn import_files(files: Vec<std::path::PathBuf>, settings: Settings, hwnd: HWND) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    let mut errors = Vec::new();
     for (i, path) in files.iter().enumerate() {
         match jiffshot_doc::io::load_image(path) {
             Ok(pm) => {
@@ -865,43 +1532,206 @@ fn capture_from_file() {
                 // Only the last one opens in the editor.
                 s.open_in_editor &= i + 1 == files.len();
                 s.copy_to_clipboard = false;
-                spawn_finish(
-                    workflow::from_frame(CaptureKind::Region, rect, frame),
-                    s,
-                    hwnd,
-                );
+                let capture = workflow::from_frame(CaptureKind::Region, rect, frame);
+                #[cfg(target_os = "macos")]
+                if let Some(error) =
+                    report_finished_capture(hwnd, workflow::finish(capture, &s, hwnd as isize))
+                {
+                    errors.push(error);
+                }
+                #[cfg(windows)]
+                spawn_finish(capture, s, hwnd);
             }
-            Err(error) => notify(
-                hwnd,
-                "Capture from file",
-                &format!("{}: {error}", path.display()),
-                true,
-            ),
+            Err(error) => {
+                let message = format!("{}: {error}", path.display());
+                notify(hwnd, "Capture from file", &message, true);
+                #[cfg(target_os = "macos")]
+                errors.push(message);
+            }
         }
     }
+    #[cfg(target_os = "macos")]
+    return (!errors.is_empty()).then(|| errors.join("; "));
+    #[cfg(windows)]
+    None
 }
 
 /// Minutes from now until the next `HH:MM` (local time).
 pub(crate) fn minutes_until(at: &str) -> Option<u32> {
     let (h, m) = at.trim().split_once(':')?;
     let target = h.parse::<u32>().ok()?.min(23) * 60 + m.parse::<u32>().ok()?.min(59);
-    // SAFETY: a plain C struct, filled by the call.
-    let mut now = unsafe { std::mem::zeroed::<windows_sys::Win32::Foundation::SYSTEMTIME>() };
-    // SAFETY: out-parameter only.
-    unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut now) };
-    let now = now.wHour as u32 * 60 + now.wMinute as u32;
+    let (_, _, _, hour, minute, _) = jiffshot_capture::os::local_time();
+    let now = hour as u32 * 60 + minute as u32;
     Some((target + 24 * 60 - now) % (24 * 60))
 }
 
 /// Arms (or disarms) the scheduled capture from `settings.schedule`.
-fn arm_schedule(hwnd: HWND, schedule: Option<&str>) {
+fn arm_schedule(hwnd: HWND, schedule: Option<&str>) -> std::io::Result<()> {
     // SAFETY: timers on our own window.
     unsafe {
         KillTimer(hwnd, TIMER_SCHEDULE);
-        if schedule.and_then(minutes_until).is_some() {
-            SetTimer(hwnd, TIMER_SCHEDULE, 20_000, None);
+        if schedule.and_then(minutes_until).is_some()
+            && SetTimer(hwnd, TIMER_SCHEDULE, 20_000, None) == 0
+        {
+            return Err(std::io::Error::other(
+                "could not start the scheduled capture timer",
+            ));
         }
     }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn restore_saved_coordinates(settings: &Settings) {
+    let fixed = settings
+        .capture_window
+        .fixed_at
+        .map(|(x, y)| Rect::new(x, y, settings.fixed_size.0, settings.fixed_size.1));
+    let scheduled = settings
+        .schedule_area
+        .map(|(x, y, width, height)| Rect::new(x, y, width, height));
+    for (kind, rect, confirmation) in [
+        (
+            SavedAreaKind::Fixed,
+            fixed,
+            settings.macos_fixed_area.as_ref(),
+        ),
+        (
+            SavedAreaKind::Scheduled,
+            scheduled,
+            settings.macos_schedule_area.as_ref(),
+        ),
+    ] {
+        let result = match (rect, confirmation) {
+            (Some(rect), Some(confirmation)) => {
+                geometry::restore_saved_area(kind, rect, confirmation)
+            }
+            _ => geometry::clear_saved_area(kind),
+        };
+        if let Err(error) = result {
+            log(&format!("saved capture confirmation needs review: {error}"));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn check_scheduled_area(settings: &Settings) -> std::io::Result<()> {
+    if let Some((x, y, width, height)) = settings.schedule_area {
+        saved_area_layout(SavedAreaKind::Scheduled, Rect::new(x, y, width, height))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct SavedScheduledSelection {
+    session_only: bool,
+    cancelled_pending: bool,
+    paused: Option<std::io::Error>,
+}
+
+#[cfg(target_os = "macos")]
+fn scheduled_selection_notice(
+    result: std::io::Result<SavedScheduledSelection>,
+) -> (&'static str, String, bool) {
+    match result {
+        Ok(saved) => {
+            let (title, mut message) = match saved.paused {
+                Some(ref error) => ("Scheduled area saved; capture paused", error.to_string()),
+                None => (
+                    "Scheduled area saved",
+                    "The selected area is ready for scheduled capture.".to_owned(),
+                ),
+            };
+            if saved.cancelled_pending {
+                message.push_str(" A scheduled capture waiting for the previous area was skipped.");
+            }
+            if saved.session_only {
+                message.push(' ');
+                message.push_str(geometry::SESSION_ONLY_AREA_WARNING);
+            }
+            (
+                title,
+                message,
+                saved.paused.is_some() || saved.cancelled_pending || saved.session_only,
+            )
+        }
+        Err(error) => ("Scheduled area not saved", error.to_string(), true),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn save_scheduled_selection(
+    hwnd: HWND,
+    selection: &overlay::Selection,
+    layout: CaptureLayout,
+) -> std::io::Result<SavedScheduledSelection> {
+    save_scheduled_selection_with(hwnd, selection, layout, Settings::try_save)
+}
+
+#[cfg(target_os = "macos")]
+fn save_scheduled_selection_with(
+    hwnd: HWND,
+    selection: &overlay::Selection,
+    layout: CaptureLayout,
+    save: impl FnOnce(&Settings) -> std::io::Result<()>,
+) -> std::io::Result<SavedScheduledSelection> {
+    let mut settings = with_app(|app| app.settings.clone())
+        .ok_or_else(|| std::io::Error::other("the capture service is unavailable"))?;
+    let rect = selection.rect();
+    let confirmation = geometry::confirm_saved_area_in_layout_after(
+        SavedAreaKind::Scheduled,
+        rect,
+        layout,
+        |confirmation| {
+            settings.schedule_area = Some((rect.x, rect.y, rect.width, rect.height));
+            settings.macos_schedule_area = Some(confirmation.clone());
+            save(&settings).map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("could not save the selected area: {error}"),
+                )
+            })
+        },
+    )?;
+    let cancelled_pending = with_app(|app| {
+        app.settings = settings.clone();
+        app.deferred_schedule.take().is_some()
+    })
+    .ok_or_else(|| std::io::Error::other("the capture service is unavailable"))?;
+    let validation = saved_area_ticket(SavedAreaKind::Scheduled, rect).err();
+    let scheduling = synchronize_schedule(hwnd, &settings).err();
+    publish_state();
+    Ok(SavedScheduledSelection {
+        session_only: confirmation.session_only,
+        cancelled_pending,
+        paused: validation.or(scheduling),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn synchronize_schedule(hwnd: HWND, settings: &Settings) -> std::io::Result<()> {
+    let validation = match settings.schedule.as_deref() {
+        Some(at) if minutes_until(at).is_none() => Err(std::io::Error::other(
+            "Review the scheduled time in Capture > Time delay.",
+        )),
+        Some(_) => check_scheduled_area(settings),
+        None => Ok(()),
+    };
+    let should_arm = settings.schedule.is_some() && validation.is_ok();
+    let was_armed = with_app(|app| app.schedule_armed).unwrap_or(false);
+    if should_arm != was_armed {
+        arm_schedule(
+            hwnd,
+            if should_arm {
+                settings.schedule.as_deref()
+            } else {
+                None
+            },
+        )?;
+        with_app(|app| app.schedule_armed = should_arm);
+    }
+    validation
 }
 
 fn schedule_tick() {
@@ -913,27 +1743,168 @@ fn schedule_tick() {
     let Some(at) = settings.schedule.as_deref() else {
         return;
     };
-    if minutes_until(at) != Some(0)
-        || last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(120))
-    {
+    #[cfg(target_os = "macos")]
+    if let Err(error) = synchronize_schedule(hwnd, &settings) {
+        with_app(|app| app.deferred_schedule = None);
+        notify(hwnd, "Scheduled capture paused", &error.to_string(), true);
+        publish_state();
         return;
     }
-    with_app(|app| app.scheduled_fired = Some(std::time::Instant::now()));
-    let (x, y) = cursor_pos();
-    let rect = settings
-        .schedule_area
-        .map(|(x, y, w, h)| Rect::new(x, y, w, h))
-        .or_else(|| screen::monitor_at(x, y).map(|m| m.rect))
-        .unwrap_or_else(screen::virtual_screen);
-    if let Ok(capture) = workflow::immediate(CaptureKind::Region, rect, false) {
-        let mut quiet = settings;
-        quiet.open_in_editor = false;
-        quiet.copy_to_clipboard = false;
-        spawn_finish(capture, quiet, hwnd);
+    let due = minutes_until(at) == Some(0)
+        && !last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(120));
+    #[cfg(target_os = "macos")]
+    if defer_busy_schedule(hwnd, &settings, due) {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(pending) = with_app(|app| app.deferred_schedule.take()).flatten() {
+        match pending.validate(&settings, std::time::Instant::now()) {
+            Ok(()) => capture_scheduled_checked(hwnd, settings, pending.ticket),
+            Err(error) => notify(hwnd, "Scheduled capture skipped", &error.to_string(), true),
+        }
+        return;
+    }
+    if !due {
+        return;
+    }
+    capture_scheduled(hwnd, settings);
+}
+
+#[cfg(target_os = "macos")]
+fn defer_busy_schedule(hwnd: HWND, settings: &Settings, due: bool) -> bool {
+    if with_app(|app| app.busy).unwrap_or(true) {
+        let expired = with_app(|app| {
+            if app.deferred_schedule.as_ref().is_some_and(|pending| {
+                pending.queued.elapsed() > DeferredScheduledCapture::MAX_WAIT
+            }) {
+                app.deferred_schedule.take()
+            } else {
+                None
+            }
+        })
+        .flatten();
+        if expired.is_some() {
+            notify(
+                hwnd,
+                "Scheduled capture skipped",
+                "Another capture kept it waiting for more than two minutes.",
+                true,
+            );
+        }
+        if due && with_app(|app| app.deferred_schedule.is_none()).unwrap_or(false) {
+            let now = std::time::Instant::now();
+            match DeferredScheduledCapture::new(&settings, now) {
+                Ok(pending) => {
+                    with_app(|app| {
+                        app.scheduled_fired = Some(now);
+                        app.deferred_schedule = Some(pending);
+                    });
+                    notify(
+                        hwnd,
+                        "Scheduled capture delayed",
+                        "It will run after the current capture finishes, for up to two minutes.",
+                        false,
+                    );
+                }
+                Err(error) => {
+                    unsafe { KillTimer(hwnd, TIMER_SCHEDULE) };
+                    with_app(|app| app.schedule_armed = false);
+                    notify(hwnd, "Scheduled capture paused", &error.to_string(), true);
+                    publish_state();
+                }
+            }
+        }
+        true
+    } else {
+        false
     }
 }
 
-/// Starts or stops time-lapse capture of the last area (or the screen).
+fn capture_scheduled(hwnd: HWND, settings: Settings) {
+    #[cfg(target_os = "macos")]
+    let scheduled_ticket = match settings
+        .schedule_area
+        .map(|(x, y, width, height)| {
+            saved_area_ticket(SavedAreaKind::Scheduled, Rect::new(x, y, width, height))
+        })
+        .transpose()
+    {
+        Ok(ticket) => ticket,
+        Err(error) => {
+            unsafe { KillTimer(hwnd, TIMER_SCHEDULE) };
+            with_app(|app| app.schedule_armed = false);
+            notify(hwnd, "Scheduled capture paused", &error.to_string(), true);
+            publish_state();
+            return;
+        }
+    };
+    #[cfg(target_os = "macos")]
+    capture_scheduled_checked(hwnd, settings, scheduled_ticket);
+    #[cfg(windows)]
+    capture_scheduled_checked(hwnd, settings);
+}
+
+fn capture_scheduled_checked(
+    hwnd: HWND,
+    settings: Settings,
+    #[cfg(target_os = "macos")] scheduled_ticket: Option<SavedAreaTicket>,
+) {
+    with_app(|app| app.scheduled_fired = Some(std::time::Instant::now()));
+    #[cfg(target_os = "macos")]
+    let capture = scheduled_capture(&settings, scheduled_ticket.as_ref());
+    #[cfg(windows)]
+    let capture = scheduled_capture(&settings);
+    match capture {
+        Ok(capture) => {
+            let mut quiet = settings;
+            quiet.open_in_editor = false;
+            quiet.copy_to_clipboard = false;
+            spawn_finish(capture, quiet, hwnd);
+        }
+        Err(error) => {
+            #[cfg(target_os = "macos")]
+            {
+                if check_scheduled_area(&settings).is_err() {
+                    unsafe { KillTimer(hwnd, TIMER_SCHEDULE) };
+                    with_app(|app| app.schedule_armed = false);
+                    publish_state();
+                }
+                notify(hwnd, "Scheduled capture failed", &error.to_string(), true);
+            }
+            #[cfg(windows)]
+            let _ = error;
+        }
+    }
+}
+
+pub(crate) fn scheduled_capture(
+    settings: &Settings,
+    #[cfg(target_os = "macos")] scheduled_ticket: Option<&SavedAreaTicket>,
+) -> std::io::Result<workflow::Capture> {
+    let layout = CaptureLayout::current()?;
+    let (rect, layout) = if let Some((x, y, w, h)) = settings.schedule_area {
+        #[cfg(target_os = "macos")]
+        let layout = {
+            let ticket = scheduled_ticket.ok_or_else(|| {
+                std::io::Error::other("the scheduled capture confirmation is missing")
+            })?;
+            if ticket.rect() != Rect::new(x, y, w, h) {
+                return Err(std::io::Error::other(
+                    "the scheduled capture area changed while the capture was waiting",
+                ));
+            }
+            ticket.validate()?;
+            ticket.layout().clone()
+        };
+        (Rect::new(x, y, w, h), layout)
+    } else if let Some(monitor) = layout.monitor_under_cursor()? {
+        (monitor.rect, layout.with_monitor(&monitor)?)
+    } else {
+        (layout.virtual_screen(), layout)
+    };
+    workflow::immediate_in_layout(CaptureKind::Region, rect, false, &layout)
+}
+
 /// Starts or stops the time-lapse (an interval capture of the last area,
 /// or the screen under the pointer).
 pub fn toggle_timelapse() {
@@ -942,7 +1913,7 @@ pub fn toggle_timelapse() {
             app.hwnd,
             app.timelapse.is_some(),
             app.settings.interval_seconds.max(1),
-            app.last_region,
+            app.last_region.clone(),
         )
     }) else {
         return;
@@ -952,13 +1923,53 @@ pub fn toggle_timelapse() {
         // SAFETY: a timer on our own window.
         unsafe { KillTimer(hwnd, TIMER_TIMELAPSE) };
         notify(hwnd, "Time-lapse", "Stopped", false);
+        publish_state();
         return;
     }
-    let (x, y) = cursor_pos();
-    let rect = last
-        .or_else(|| screen::monitor_at(x, y).map(|m| m.rect))
-        .unwrap_or_else(screen::virtual_screen);
-    with_app(|app| app.timelapse = Some((rect, 0)));
+    let region = match last {
+        Some(region) => region,
+        None => {
+            let layout = match CaptureLayout::current() {
+                Ok(layout) => layout,
+                Err(error) => {
+                    notify(hwnd, "Time-lapse failed", &error.to_string(), true);
+                    return;
+                }
+            };
+            let monitor = match layout.monitor_under_cursor() {
+                Ok(monitor) => monitor,
+                Err(error) => {
+                    notify(hwnd, "Time-lapse failed", &error.to_string(), true);
+                    return;
+                }
+            };
+            let (rect, layout) = if let Some(monitor) = monitor {
+                let selected = match layout.with_monitor(&monitor) {
+                    Ok(layout) => layout,
+                    Err(error) => {
+                        notify(hwnd, "Time-lapse failed", &error.to_string(), true);
+                        return;
+                    }
+                };
+                (monitor.rect, selected)
+            } else {
+                (layout.virtual_screen(), layout)
+            };
+            CaptureRegion { rect, layout }
+        }
+    };
+    if let Err(error) = region.layout.validate() {
+        with_app(|app| app.last_region = None);
+        notify(hwnd, "Time-lapse failed", &error.to_string(), true);
+        publish_state();
+        return;
+    }
+    with_app(|app| {
+        app.timelapse = Some(TimeLapse {
+            region,
+            last_hash: 0,
+        })
+    });
     notify(
         hwnd,
         "Time-lapse",
@@ -967,26 +1978,53 @@ pub fn toggle_timelapse() {
     );
     // SAFETY: as above.
     unsafe { SetTimer(hwnd, TIMER_TIMELAPSE, seconds * 1000, None) };
+    publish_state();
     timelapse_tick();
 }
 
 fn timelapse_tick() {
-    let Some((hwnd, settings, Some((rect, last)))) =
-        with_app(|app| (app.hwnd, app.settings.clone(), app.timelapse))
+    let Some((hwnd, settings, Some(timelapse))) =
+        with_app(|app| (app.hwnd, app.settings.clone(), app.timelapse.clone()))
     else {
         return;
     };
-    let Ok(capture) = workflow::immediate(CaptureKind::Region, rect, false) else {
-        return;
+    let capture = match workflow::immediate_in_layout(
+        CaptureKind::Region,
+        timelapse.region.rect,
+        false,
+        &timelapse.region.layout,
+    ) {
+        Ok(capture) => capture,
+        Err(error) => {
+            #[cfg(target_os = "macos")]
+            {
+                with_app(|app| {
+                    app.timelapse = None;
+                    if timelapse.region.layout.validate().is_err() {
+                        app.last_region = None;
+                    }
+                });
+                unsafe { KillTimer(hwnd, TIMER_TIMELAPSE) };
+                notify(hwnd, "Time-lapse failed", &error.to_string(), true);
+                publish_state();
+            }
+            #[cfg(windows)]
+            let _ = error;
+            return;
+        }
     };
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in capture.frame.pixels.iter().step_by(7) {
         h = (h ^ *b as u64).wrapping_mul(0x100_0000_01b3);
     }
-    if h == last && settings.interval_skip_identical {
+    if h == timelapse.last_hash && settings.interval_skip_identical {
         return;
     }
-    with_app(|app| app.timelapse = Some((rect, h)));
+    with_app(|app| {
+        if let Some(timelapse) = app.timelapse.as_mut() {
+            timelapse.last_hash = h;
+        }
+    });
     let mut quiet = settings;
     quiet.open_in_editor = false;
     quiet.copy_to_clipboard = false;
@@ -1032,19 +2070,245 @@ pub fn start_from_panel(s: Settings) {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn start_from_current_panel() {
+    let Some(settings) = with_app(|app| app.settings.clone()) else {
+        log("Capture not started: the capture service is unavailable");
+        return;
+    };
+    start_from_panel(settings);
+}
+
+#[cfg(target_os = "macos")]
+fn commit_window_settings_with(
+    settings: Settings,
+    changes: geometry::SavedAreaChanges,
+    save: impl FnOnce(&Settings) -> std::io::Result<()>,
+) -> Result<Vec<String>, String> {
+    let (hwnd, previous_schedule) = with_app(|app| {
+        (
+            app.hwnd,
+            (
+                app.settings.schedule.clone(),
+                app.settings.schedule_area,
+                app.schedule_armed,
+            ),
+        )
+    })
+    .ok_or_else(|| "The capture service is unavailable.".to_owned())?;
+    let changes_areas = !changes.is_empty();
+    let mut warnings = match changes.commit_after(|| save(&settings)) {
+        Ok(()) => Vec::new(),
+        Err(error) if !changes_areas => vec![format!(
+            "Capture settings were not saved and apply only until Jiffshot quits: {error}"
+        )],
+        Err(error) => return Err(format!("Could not save Capture settings: {error}")),
+    };
+    let cancelled_pending = with_app(|app| {
+        let cancelled = app.deferred_schedule.as_ref().is_some_and(|pending| {
+            settings.schedule.as_deref() != Some(pending.at.as_str())
+                || settings.schedule_area != pending.area
+        });
+        if cancelled {
+            app.deferred_schedule = None;
+        }
+        app.settings = settings.clone();
+        cancelled && app.settings.schedule.is_some()
+    })
+    .ok_or_else(|| "The capture service stopped while applying settings.".to_owned())?;
+    if cancelled_pending {
+        warnings
+            .push("A scheduled capture waiting for the previous time or area was skipped.".into());
+    }
+    if let Err(error) = synchronize_schedule(hwnd, &settings) {
+        let (schedule, area, armed) = previous_schedule;
+        if armed || schedule != settings.schedule || area != settings.schedule_area {
+            warnings.push(format!("Scheduled capture paused: {error}"));
+        }
+    }
+    publish_state();
+    Ok(warnings)
+}
+
+#[cfg(target_os = "macos")]
+fn commit_window_settings(
+    settings: Settings,
+    changes: geometry::SavedAreaChanges,
+) -> Result<Vec<String>, String> {
+    commit_window_settings_with(settings, changes, Settings::try_save)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn edit_window(
+    edit: crate::capture::WindowEdit,
+) -> Result<crate::capture::WindowEditResult, String> {
+    use crate::capture::{WindowEdit, WindowEditResult, WindowEffect};
+    use crate::panel::{Applied, Pick};
+
+    let mut settings = with_app(|app| app.settings.clone())
+        .ok_or_else(|| "The capture service is unavailable.".to_owned())?;
+    let (effect, warnings) = match edit {
+        WindowEdit::Pick(id) => {
+            let previous_fixed = settings.capture_window.fixed_at;
+            let result = crate::panel::pick(&mut settings, &id);
+            let warnings = match &result {
+                Pick::Changed => {
+                    let mut changes = geometry::SavedAreaChanges::default();
+                    if settings.capture_window.fixed_at.is_none()
+                        && (previous_fixed.is_some() || settings.macos_fixed_area.is_some())
+                    {
+                        settings.macos_fixed_area = None;
+                        changes.clear(SavedAreaKind::Fixed);
+                    }
+                    commit_window_settings(settings, changes)?
+                }
+                Pick::Presets(presets) => {
+                    settings.presets = presets.clone();
+                    crate::prefs::validate_hotkeys(&settings)?;
+                    set_window_hotkeys(settings)?
+                }
+                _ => Vec::new(),
+            };
+            (WindowEffect::Pick(result), warnings)
+        }
+        WindowEdit::Flip(switch) => {
+            crate::panel::flip(&mut settings, switch);
+            let warnings = commit_window_settings(settings, geometry::SavedAreaChanges::default())?;
+            (WindowEffect::Changed, warnings)
+        }
+        WindowEdit::Apply { id, values } => {
+            let (result, changes) =
+                crate::panel::prepare_apply(&mut settings, &id, &values, runs_at_startup());
+            let warnings = match &result {
+                Applied::Problem(_) => Vec::new(),
+                Applied::Presets(presets) => {
+                    settings.presets = presets.clone();
+                    crate::prefs::validate_hotkeys(&settings)?;
+                    set_window_hotkeys(settings)?
+                }
+                _ => {
+                    match &result {
+                        Applied::MoveSchedule(at) | Applied::MoveScheduleWithWarning(at, _) => {
+                            settings.schedule = Some(at.clone())
+                        }
+                        _ => {}
+                    }
+                    commit_window_settings(settings, changes)?
+                }
+            };
+            (WindowEffect::Applied(result), warnings)
+        }
+        WindowEdit::ReplacePresets(presets) => {
+            settings.presets = presets;
+            crate::prefs::validate_hotkeys(&settings)?;
+            let warnings = set_window_hotkeys(settings)?;
+            (WindowEffect::Changed, warnings)
+        }
+        WindowEdit::Preferences {
+            values,
+            hotkeys,
+            startup_initial,
+        } => {
+            let mut warnings = Vec::new();
+            if !values.is_empty() {
+                let startup = crate::prefs::apply_capture(&mut settings, &values, startup_initial);
+                warnings.extend(commit_window_settings(
+                    settings.clone(),
+                    geometry::SavedAreaChanges::default(),
+                )?);
+                if let Some(on) = startup {
+                    set_run_at_startup(on);
+                    publish_state();
+                }
+            }
+            if !hotkeys.is_empty() {
+                let mut current = with_app(|app| app.settings.clone())
+                    .ok_or_else(|| "The capture service is unavailable.".to_owned())?;
+                match crate::prefs::apply_hotkeys(&mut current, &hotkeys) {
+                    Ok(()) => warnings.extend(set_window_hotkeys(current)?),
+                    Err(error) => warnings.push(format!("Hotkeys not changed: {error}")),
+                }
+            }
+            (WindowEffect::Changed, warnings)
+        }
+    };
+    Ok(WindowEditResult { effect, warnings })
+}
+
 /// Turns the daily scheduled capture on at "HH:MM", or off.
 pub fn set_schedule(at: Option<String>) {
-    let Some(hwnd) = with_app(|app| {
+    #[cfg(target_os = "macos")]
+    if at.is_some() {
+        let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else {
+            return;
+        };
+        let validation = if at.as_deref().and_then(minutes_until).is_none() {
+            Err(std::io::Error::other(
+                "Review the scheduled time in Capture > Time delay.",
+            ))
+        } else {
+            check_scheduled_area(&settings)
+        };
+        if let Err(error) = validation {
+            notify(
+                hwnd,
+                "Scheduled capture not started",
+                &error.to_string(),
+                true,
+            );
+            return;
+        }
+    }
+    let Some((hwnd, save_error, cancelled_pending)) = with_app(|app| {
+        #[cfg(target_os = "macos")]
+        let cancelled_pending =
+            app.settings.schedule != at && app.deferred_schedule.take().is_some();
+        #[cfg(windows)]
+        let cancelled_pending = false;
         app.settings.schedule = at.clone();
         if at.is_some() {
             app.settings.schedule_default = at.clone();
         }
+        #[cfg(windows)]
         app.settings.save();
-        app.hwnd
+        #[cfg(windows)]
+        let error = None::<std::io::Error>;
+        #[cfg(target_os = "macos")]
+        let error = app.settings.try_save().err();
+        (app.hwnd, error, cancelled_pending)
     }) else {
         return;
     };
-    arm_schedule(hwnd, at.as_deref());
+    if let Some(error) = save_error {
+        notify(
+            hwnd,
+            "Scheduled capture settings not saved",
+            &format!("The change applies only until Jiffshot quits: {error}"),
+            true,
+        );
+    }
+    if cancelled_pending && at.is_some() {
+        notify(
+            hwnd,
+            "Scheduled capture skipped",
+            "The scheduled time changed while the capture was waiting.",
+            true,
+        );
+    }
+    #[cfg(windows)]
+    if let Err(error) = arm_schedule(hwnd, at.as_deref()) {
+        notify(hwnd, "Scheduled capture failed", &error.to_string(), true);
+        publish_state();
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(settings) = with_app(|app| app.settings.clone()) {
+        if let Err(error) = synchronize_schedule(hwnd, &settings) {
+            notify(hwnd, "Scheduled capture paused", &error.to_string(), true);
+            publish_state();
+            return;
+        }
+    }
     if let Some(at) = at {
         notify(
             hwnd,
@@ -1062,6 +2326,35 @@ pub fn current_settings() -> Settings {
 
 /// Keeps and saves settings edited in the Capture window.
 pub fn apply_settings(settings: Settings) {
+    #[cfg(target_os = "macos")]
+    let previous_schedule = with_app(|app| {
+        (
+            app.settings.schedule.clone(),
+            app.settings.schedule_area,
+            app.schedule_armed,
+        )
+    });
+    #[cfg(target_os = "macos")]
+    let save_error = with_app(|app| {
+        let cancelled_pending = app.deferred_schedule.as_ref().is_some_and(|pending| {
+            settings.schedule.as_deref() != Some(pending.at.as_str())
+                || settings.schedule_area != pending.area
+        });
+        if cancelled_pending {
+            app.deferred_schedule = None;
+        }
+        let presets = std::mem::take(&mut app.settings.presets);
+        app.settings = Settings {
+            presets,
+            ..settings
+        };
+        (
+            app.hwnd,
+            app.settings.try_save().err(),
+            cancelled_pending && app.settings.schedule.is_some(),
+        )
+    });
+    #[cfg(windows)]
     with_app(|app| {
         let presets = std::mem::take(&mut app.settings.presets);
         app.settings = Settings {
@@ -1070,6 +2363,35 @@ pub fn apply_settings(settings: Settings) {
         };
         app.settings.save();
     });
+    #[cfg(target_os = "macos")]
+    if let Some((hwnd, error, cancelled_pending)) = save_error {
+        if let Some(error) = error {
+            notify(
+                hwnd,
+                "Capture settings not saved",
+                &format!("The changes apply only until Jiffshot quits: {error}"),
+                true,
+            );
+        }
+        if cancelled_pending {
+            notify(
+                hwnd,
+                "Scheduled capture skipped",
+                "The scheduled time or area changed while the capture was waiting.",
+                true,
+            );
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) {
+        if let Err(error) = synchronize_schedule(hwnd, &settings) {
+            if previous_schedule.is_some_and(|(schedule, area, armed)| {
+                armed || schedule != settings.schedule || area != settings.schedule_area
+            }) {
+                notify(hwnd, "Scheduled capture paused", &error.to_string(), true);
+            }
+        }
+    }
     publish_state();
 }
 
@@ -1108,19 +2430,118 @@ pub(crate) fn remember_recording(control: &crate::recorder::Control) {
 
 /// Replaces the presets and their hotkeys.
 pub fn set_presets(presets: Vec<crate::settings::Preset>) {
-    let Some((hwnd, old)) = with_app(|app| (app.hwnd, app.settings.presets.len())) else {
+    let Some(mut settings) = with_app(|app| app.settings.clone()) else {
         return;
     };
-    for i in 0..old.max(presets.len()) {
-        // SAFETY: hotkeys of our own window (unregistering a missing one
-        // fails harmlessly).
-        unsafe { UnregisterHotKey(hwnd, HOTKEY_PRESET + i as i32) };
+    settings.presets = presets;
+    if let Err(error) = crate::prefs::validate_hotkeys(&settings) {
+        if let Some(hwnd) = with_app(|app| app.hwnd) {
+            notify(hwnd, "Jiffshot hotkeys", &error, true);
+        }
+        return;
     }
-    register_preset_hotkeys(hwnd, &presets);
-    with_app(|app| {
-        app.settings.presets = presets;
-        app.settings.save();
-    });
+    set_hotkeys(settings);
+}
+
+struct HotkeyUpdate {
+    hwnd: HWND,
+    problems: Vec<String>,
+    save_error: Option<std::io::Error>,
+}
+
+fn update_hotkeys(settings: Settings) -> Result<HotkeyUpdate, String> {
+    let (hwnd, old_count) = with_app(|app| (app.hwnd, app.settings.presets.len()))
+        .ok_or_else(|| "The capture service is unavailable.".to_owned())?;
+    unsafe {
+        KillTimer(hwnd, TIMER_HOTKEY_RETRY);
+        for id in [HOTKEY_CAPTURE, HOTKEY_SCREEN, HOTKEY_REPEAT] {
+            UnregisterHotKey(hwnd, id);
+        }
+        for i in 0..old_count {
+            UnregisterHotKey(hwnd, HOTKEY_PRESET + i as i32);
+        }
+    }
+    let desired_capture = settings.capture_key().to_owned();
+    let (capture_key, mut problems) = register_hotkeys(hwnd, &settings);
+    problems.extend(register_preset_hotkeys(hwnd, &settings.presets));
+    let save_error = with_app(|app| {
+        app.settings.capture_hotkey = settings.capture_hotkey;
+        app.settings.screen_hotkey = settings.screen_hotkey;
+        app.settings.repeat_hotkey = settings.repeat_hotkey;
+        app.settings.presets = settings.presets;
+        app.capture_key = capture_key.clone();
+        #[cfg(target_os = "macos")]
+        {
+            app.settings.try_save().err()
+        }
+        #[cfg(windows)]
+        {
+            app.settings.save();
+            None::<std::io::Error>
+        }
+    })
+    .ok_or_else(|| "The capture service stopped while changing hotkeys.".to_owned())?;
+    if capture_key != desired_capture {
+        unsafe { SetTimer(hwnd, TIMER_HOTKEY_RETRY, 30_000, None) };
+    }
+    Ok(HotkeyUpdate {
+        hwnd,
+        problems,
+        save_error,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn set_window_hotkeys(settings: Settings) -> Result<Vec<String>, String> {
+    let update = update_hotkeys(settings)?;
+    let mut warnings = Vec::new();
+    if let Some(error) = update.save_error {
+        warnings.push(format!(
+            "Hotkeys were not saved and apply only until Jiffshot quits: {error}"
+        ));
+    }
+    if !update.problems.is_empty() {
+        for problem in &update.problems {
+            log(problem);
+        }
+        warnings.push(update.problems.join(". "));
+    }
+    publish_state();
+    Ok(warnings)
+}
+
+/// Replaces all global and preset hotkeys together on the capture thread.
+pub fn set_hotkeys(settings: Settings) {
+    let update = match update_hotkeys(settings) {
+        Ok(update) => update,
+        Err(error) => {
+            log(&format!("Hotkeys not changed: {error}"));
+            return;
+        }
+    };
+    #[cfg(target_os = "macos")]
+    if let Some(error) = update.save_error {
+        notify(
+            update.hwnd,
+            "Hotkeys not saved",
+            &format!("The changes apply only until Jiffshot quits: {error}"),
+            true,
+        );
+    }
+    #[cfg(windows)]
+    let _ = update.save_error;
+    if !update.problems.is_empty() {
+        for problem in &update.problems {
+            log(problem);
+        }
+        notify(
+            update.hwnd,
+            "Jiffshot hotkeys",
+            &update.problems.join(". "),
+            true,
+        );
+    }
+    publish_state();
 }
 
 pub fn run_preset_now(index: usize) {
@@ -1154,10 +2575,6 @@ fn dispatch_mode(mode: usize) {
 
 /// Records the whole screen under the pointer, without selecting.
 fn record_screen_under_cursor() {
-    let (x, y) = cursor_pos();
-    let Some(monitor) = screen::monitor_at(x, y) else {
-        return;
-    };
     let Some((hwnd, settings)) = with_app(|app| {
         if app.busy {
             return None;
@@ -1168,10 +2585,27 @@ fn record_screen_under_cursor() {
     .flatten() else {
         return;
     };
-    match crate::recorder::record(monitor.rect, &settings) {
-        Ok(Some(path)) => spawn_video_finish(path, monitor.rect, settings, hwnd),
-        Ok(None) => {}
-        Err(error) => notify(hwnd, "Recording failed", &error, true),
+    let result = (|| {
+        let layout = CaptureLayout::current().map_err(|error| error.to_string())?;
+        let monitor = layout
+            .monitor_under_cursor()
+            .map_err(|error| error.to_string())?
+            .ok_or("no display is available for recording")?;
+        let rect = monitor.rect;
+        let layout = layout
+            .with_monitor(&monitor)
+            .map_err(|error| error.to_string())?;
+        let path = crate::recorder::record_in_layout(rect, &settings, layout)?;
+        Ok::<_, String>((path, rect))
+    })();
+    match result {
+        Ok((Some(path), rect)) => spawn_video_finish(path, rect, settings, hwnd),
+        Ok((None, _)) => {}
+        Err(error) => {
+            #[cfg(target_os = "macos")]
+            crate::shutdown_macos::work_failed(&error);
+            notify(hwnd, "Recording failed", &error, true);
+        }
     }
     with_app(|app| app.busy = false);
 }
@@ -1189,12 +2623,12 @@ pub fn start_mode_after_delay(name: &str) {
     };
     if delay == 0 || mode == MODE_VIDEO {
         // Let the Capture window disappear from the screen first.
-        with_app(|app| app.pending_mode = Some(Ok(mode)));
+        with_app(|app| app.pending_mode = Some(PendingMode::Mode(mode)));
         // SAFETY: a timer on our own window.
         unsafe { SetTimer(hwnd, TIMER_MODE, 150, None) };
         return;
     }
-    with_app(|app| app.pending_mode = Some(Ok(mode)));
+    with_app(|app| app.pending_mode = Some(PendingMode::Mode(mode)));
     notify(
         hwnd,
         "Jiffshot",
@@ -1205,12 +2639,55 @@ pub fn start_mode_after_delay(name: &str) {
     unsafe { SetTimer(hwnd, TIMER_MODE, delay * 1000, None) };
 }
 
+#[cfg(target_os = "macos")]
+pub fn select_scheduled_area() {
+    let Some((hwnd, available)) =
+        with_app(|app| (app.hwnd, !app.busy && app.pending_mode.is_none()))
+    else {
+        crate::show_capture_window();
+        return;
+    };
+    if !available {
+        notify(
+            hwnd,
+            "Scheduled area not selected",
+            "Another capture is already in progress or waiting to start.",
+            true,
+        );
+        crate::show_capture_window();
+        return;
+    }
+    with_app(|app| app.pending_mode = Some(PendingMode::Mode(MODE_SCHEDULE_AREA)));
+    if unsafe { SetTimer(hwnd, TIMER_MODE, 150, None) } == 0 {
+        with_app(|app| app.pending_mode = None);
+        notify(
+            hwnd,
+            "Scheduled area not selected",
+            "Could not start the selection overlay.",
+            true,
+        );
+        crate::show_capture_window();
+    }
+}
+
 /// Captures exactly `rect` after the delay setting.
 pub fn capture_rect_after_delay(rect: Rect) {
     let Some((hwnd, delay)) = with_app(|app| (app.hwnd, app.settings.delay_seconds)) else {
         return;
     };
-    with_app(|app| app.pending_mode = Some(Err(rect)));
+    #[cfg(target_os = "macos")]
+    {
+        let ticket = match saved_area_ticket(SavedAreaKind::Fixed, rect) {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                notify(hwnd, "Capture failed", &error.to_string(), true);
+                return;
+            }
+        };
+        with_app(|app| app.pending_mode = Some(PendingMode::Fixed(ticket)));
+    }
+    #[cfg(windows)]
+    with_app(|app| app.pending_mode = Some(PendingMode::Fixed(rect)));
     // SAFETY: a timer on our own window.
     unsafe { SetTimer(hwnd, TIMER_MODE, (delay * 1000).max(150), None) };
 }
@@ -1221,16 +2698,58 @@ fn run_pending_mode() {
     else {
         return;
     };
-    match pending {
-        Some(Ok(mode)) => dispatch_mode(mode),
-        Some(Err(rect)) => {
-            match workflow::immediate(CaptureKind::Region, rect, settings.include_cursor) {
-                Ok(capture) => spawn_finish(capture, settings, hwnd),
-                Err(error) => notify(hwnd, "Capture failed", &error.to_string(), true),
-            }
-        }
-        None => {}
+    let capture = match pending {
+        Some(PendingMode::Mode(mode)) => return dispatch_mode(mode),
+        #[cfg(target_os = "macos")]
+        Some(PendingMode::Fixed(ticket)) => capture_fixed_rect(&settings, &ticket),
+        #[cfg(windows)]
+        Some(PendingMode::Fixed(rect)) => capture_fixed_rect(rect, settings.include_cursor),
+        None => return,
+    };
+    match capture {
+        Ok(capture) => spawn_finish(capture, settings, hwnd),
+        Err(error) => notify(hwnd, "Capture failed", &error.to_string(), true),
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn capture_fixed_rect(
+    settings: &Settings,
+    ticket: &SavedAreaTicket,
+) -> std::io::Result<workflow::Capture> {
+    let rect = ticket.rect();
+    if rect.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid fixed capture dimensions",
+        ));
+    }
+    let current = settings
+        .capture_window
+        .fixed_at
+        .map(|(x, y)| Rect::new(x, y, settings.fixed_size.0, settings.fixed_size.1));
+    if current != Some(rect) {
+        return Err(std::io::Error::other(
+            "The fixed capture position changed while the capture was waiting.",
+        ));
+    }
+    ticket.validate()?;
+    let (area, layout) =
+        ticket
+            .layout()
+            .fixed_at(rect.x, rect.y, rect.width as u32, rect.height as u32)?;
+    workflow::immediate_in_layout_with_cursor(
+        CaptureKind::Region,
+        area,
+        settings.include_cursor,
+        settings.cursor_as_object,
+        &layout,
+    )
+}
+
+#[cfg(windows)]
+fn capture_fixed_rect(rect: Rect, include_cursor: bool) -> std::io::Result<workflow::Capture> {
+    workflow::immediate(CaptureKind::Region, rect, include_cursor)
 }
 
 fn run_preset(index: usize) {
@@ -1259,18 +2778,28 @@ fn run_preset(index: usize) {
     dispatch_mode(mode_named(&preset.mode).unwrap_or(MODE_IMAGE));
 }
 
-fn register_preset_hotkeys(hwnd: HWND, presets: &[crate::settings::Preset]) {
+fn register_preset_hotkeys(hwnd: HWND, presets: &[crate::settings::Preset]) -> Vec<String> {
+    let mut problems = Vec::new();
     for (i, p) in presets.iter().enumerate() {
-        if let Some((mods, vk)) = p.hotkey.as_deref().and_then(parse_hotkey) {
-            if !register_hotkey(hwnd, HOTKEY_PRESET + i as i32, mods, vk) {
-                log(&format!(
-                    "preset hotkey {} for {} is taken",
-                    p.hotkey.as_deref().unwrap_or(""),
+        if let Some(key) = p.hotkey.as_deref() {
+            match parse_hotkey(key)
+                .filter(|(mods, vk)| keys::supported(*vk) && !keys::reserved(*mods, *vk))
+            {
+                Some((mods, vk)) if register_hotkey(hwnd, HOTKEY_PRESET + i as i32, mods, vk) => {}
+                Some(_) => problems.push(format!(
+                    "{} (preset {}) is taken",
+                    keys::display(key),
                     p.name
-                ));
+                )),
+                None => problems.push(format!(
+                    "{} (preset {}) is not a supported hotkey",
+                    keys::display(key),
+                    p.name
+                )),
             }
         }
     }
+    problems
 }
 
 /// Captures the menus open right now.
@@ -1311,13 +2840,24 @@ fn start_menu_capture() {
 }
 
 /// Captures a rectangle without the overlay.
-fn capture_now(kind: CaptureKind, rect: Rect) {
+fn capture_now(kind: CaptureKind, region: CaptureRegion) {
     let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else {
         return;
     };
-    match workflow::immediate(kind, rect, settings.include_cursor) {
+    #[cfg(target_os = "macos")]
+    let capture = workflow::immediate_in_layout_with_cursor(
+        kind,
+        region.rect,
+        settings.include_cursor,
+        settings.cursor_as_object,
+        &region.layout,
+    );
+    #[cfg(windows)]
+    let capture =
+        workflow::immediate_in_layout(kind, region.rect, settings.include_cursor, &region.layout);
+    match capture {
         Ok(capture) => {
-            with_app(|app| app.last_region = Some(rect));
+            with_app(|app| app.last_region = Some(region));
             spawn_finish(capture, settings, hwnd);
         }
         Err(error) => notify(hwnd, "Capture failed", &error.to_string(), true),
@@ -1325,16 +2865,45 @@ fn capture_now(kind: CaptureKind, rect: Rect) {
 }
 
 fn capture_screen_under_cursor() {
-    let (x, y) = cursor_pos();
-    if let Some(monitor) = screen::monitor_at(x, y) {
-        capture_now(CaptureKind::Monitor, monitor.rect);
+    let Some(hwnd) = with_app(|app| app.hwnd) else {
+        return;
+    };
+    let layout = match CaptureLayout::current() {
+        Ok(layout) => layout,
+        Err(error) => {
+            notify(hwnd, "Capture failed", &error.to_string(), true);
+            return;
+        }
+    };
+    match layout.monitor_under_cursor() {
+        Ok(Some(monitor)) => match layout.with_monitor(&monitor) {
+            Ok(layout) => capture_now(
+                CaptureKind::Monitor,
+                CaptureRegion {
+                    rect: monitor.rect,
+                    layout,
+                },
+            ),
+            Err(error) => notify(hwnd, "Capture failed", &error.to_string(), true),
+        },
+        Ok(None) => {}
+        Err(error) => notify(hwnd, "Capture failed", &error.to_string(), true),
     }
 }
 
 fn repeat_last_region() {
-    match with_app(|app| app.last_region).flatten() {
-        Some(rect) => capture_now(CaptureKind::Region, rect),
-        None => capture_interactive(MODE_IMAGE),
+    match with_app(|app| (app.hwnd, app.last_region.clone())) {
+        Some((hwnd, Some(region))) => {
+            if let Err(error) = region.layout.validate() {
+                with_app(|app| app.last_region = None);
+                notify(hwnd, "Repeat capture failed", &error.to_string(), true);
+                publish_state();
+                return;
+            }
+            capture_now(CaptureKind::Region, region);
+        }
+        Some((_, None)) => capture_interactive(MODE_IMAGE),
+        None => {}
     }
 }
 
@@ -1354,18 +2923,26 @@ fn start_delayed() {
 pub(crate) fn open_library() {
     let root = jiffshot_capture::config::library_root();
     let _ = std::fs::create_dir_all(&root);
-    let path = wide(&root.to_string_lossy());
-    // SAFETY: opens a folder in Explorer; all strings are NUL-terminated.
-    unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            wide("open").as_ptr(),
-            path.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            SW_SHOWNORMAL,
-        );
+    #[cfg(windows)]
+    {
+        use jiffshot_capture::wide;
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let path = wide(&root.to_string_lossy());
+        // SAFETY: opens a folder in Explorer; all strings are NUL-terminated.
+        unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                wide("open").as_ptr(),
+                path.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            );
+        }
     }
+    #[cfg(target_os = "macos")]
+    let _ = jiffshot_capture::os::open_path(&root);
 }
 
 /// Runs a tray menu command (an `ID_*`), as the Avalonia tray menu asks
@@ -1420,28 +2997,52 @@ fn run_menu_command(hwnd: HWND, command: usize) {
         ID_FROM_FILE => capture_from_file(),
         ID_SCHEDULE => {
             // Turns it off, or on at `schedule_default` (09:00 unless set).
-            let schedule = with_app(|app| {
-                app.settings.schedule = match app.settings.schedule.take() {
-                    Some(_) => None,
-                    None => Some(
-                        app.settings
-                            .schedule_default
-                            .clone()
-                            .unwrap_or_else(|| "09:00".to_owned()),
-                    ),
+            #[cfg(target_os = "macos")]
+            {
+                let Some(schedule) = with_app(|app| {
+                    if app.settings.schedule.is_some() {
+                        None
+                    } else {
+                        Some(
+                            app.settings
+                                .schedule_default
+                                .clone()
+                                .unwrap_or_else(|| "09:00".to_owned()),
+                        )
+                    }
+                }) else {
+                    return;
                 };
-                app.settings.save();
-                app.settings.schedule.clone()
-            })
-            .flatten();
-            arm_schedule(hwnd, schedule.as_deref());
-            if let Some(at) = schedule {
-                notify(
-                    hwnd,
-                    "Scheduled capture",
-                    &format!("The screen will be captured every day at {at}"),
-                    false,
-                );
+                set_schedule(schedule);
+            }
+            #[cfg(windows)]
+            {
+                let schedule = with_app(|app| {
+                    app.settings.schedule = match app.settings.schedule.take() {
+                        Some(_) => None,
+                        None => Some(
+                            app.settings
+                                .schedule_default
+                                .clone()
+                                .unwrap_or_else(|| "09:00".to_owned()),
+                        ),
+                    };
+                    app.settings.save();
+                    app.settings.schedule.clone()
+                })
+                .flatten();
+                if let Err(error) = arm_schedule(hwnd, schedule.as_deref()) {
+                    notify(hwnd, "Scheduled capture failed", &error.to_string(), true);
+                    return;
+                }
+                if let Some(at) = schedule {
+                    notify(
+                        hwnd,
+                        "Scheduled capture",
+                        &format!("The screen will be captured every day at {at}"),
+                        false,
+                    );
+                }
             }
         }
         ID_STARTUP => set_run_at_startup(!runs_at_startup()),
@@ -1454,13 +3055,21 @@ fn run_menu_command(hwnd: HWND, command: usize) {
         ID_EDITOR => toggle(|s| &mut s.open_in_editor),
         ID_CURSOR => toggle(|s| &mut s.include_cursor),
         ID_LIBRARY => open_library(),
+        #[cfg(windows)]
         ID_EXIT => unsafe { PostQuitMessage(0) },
+        #[cfg(target_os = "macos")]
+        ID_EXIT => request_exit(),
         _ => {}
     }
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
+        #[cfg(target_os = "macos")]
+        WM_APP_REQUEST_EXIT => {
+            request_exit();
+            0
+        }
         WM_HOTKEY => {
             match wparam as i32 {
                 HOTKEY_CAPTURE => capture_interactive(MODE_IMAGE),
@@ -1475,6 +3084,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // SAFETY: posted by `on_capture_thread` with a leaked box.
             let run = Box::from_raw(lparam as *mut Box<dyn FnOnce() + Send>);
             run();
+            0
+        }
+        #[cfg(target_os = "macos")]
+        WM_APP_SCROLL_DONE => {
+            with_app(|app| app.busy = false);
             0
         }
         WM_APP_COMMAND => {
@@ -1557,7 +3171,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             0
         }
         WM_TIMER if wparam == TIMER_HOTKEY_RETRY => {
-            retry_print_screen(hwnd);
+            retry_capture_key(hwnd);
+            0
+        }
+        #[cfg(target_os = "macos")]
+        WM_TIMER if wparam == TIMER_STARTUP_STATUS => {
+            refresh_startup_status();
             0
         }
         WM_DESTROY => {
@@ -1568,43 +3187,42 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
+#[cfg(target_os = "macos")]
+fn request_exit() {
+    if let Some(hooks) = crate::hooks() {
+        (hooks.quit)();
+    } else {
+        log("could not quit: the application is unavailable");
+    }
+}
+
 /// Runs the tray app until Exit, first starting the capture `initial` asks
 /// for (a mode, or `usize::MAX` for menus). Returns the exit code.
-pub fn run(initial: Option<usize>) -> i32 {
-    let class = wide(CLASS);
-    // SAFETY: standard window class and hidden window setup; the class name
-    // outlives the window because `class` lives until the end of `run`.
-    let hwnd = unsafe {
-        let instance = GetModuleHandleW(std::ptr::null());
-        let wc = WNDCLASSEXW {
-            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-            lpfnWndProc: Some(wndproc),
-            hInstance: instance,
-            lpszClassName: class.as_ptr(),
-            ..std::mem::zeroed()
-        };
-        RegisterClassExW(&wc);
-        CreateWindowExW(
-            WS_EX_TOOLWINDOW,
-            class.as_ptr(),
-            wide("Jiffshot Capture").as_ptr(),
-            WS_POPUP,
-            0,
-            0,
-            0,
-            0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            instance,
-            std::ptr::null(),
-        )
-    };
+pub fn run(
+    initial: Option<usize>,
+    #[cfg(target_os = "macos")] control: &mut Option<jiffshot_control::Server>,
+) -> i32 {
+    let hwnd = sys::create_message_window(CLASS, "Jiffshot Capture", wndproc);
     if hwnd.is_null() {
         log("could not create the tray window");
         return 1;
     }
 
-    let (capture_key, problems) = register_hotkeys(hwnd);
+    #[cfg(windows)]
+    sys::serve_instance(CLASS);
+    #[cfg(target_os = "macos")]
+    if let Err(error) = sys::serve_instance(CLASS) {
+        log(&format!(
+            "could not start the capture instance listener: {error}"
+        ));
+        eprintln!("could not start the capture instance listener: {error}");
+        return 1;
+    }
+    let settings = Settings::load();
+    #[cfg(target_os = "macos")]
+    restore_saved_coordinates(&settings);
+    let (capture_key, mut problems) = register_hotkeys(hwnd, &settings);
+    problems.extend(register_preset_hotkeys(hwnd, &settings.presets));
     // Which pause and stop keys recordings will use, for the windows that
     // show them.
     crate::recorder::check_keys();
@@ -1615,14 +3233,14 @@ pub fn run(initial: Option<usize>) -> i32 {
     if !problems.is_empty() {
         notify(hwnd, "Jiffshot hotkeys", &problems.join(". "), true);
     }
-    if capture_key != "PrtScn" {
+    if capture_key != settings.capture_key() {
         // SAFETY: a timer on our own window.
         unsafe { SetTimer(hwnd, TIMER_HOTKEY_RETRY, 30_000, None) };
     }
     APP.with(|app| {
         *app.borrow_mut() = Some(App {
             hwnd,
-            settings: Settings::load(),
+            settings,
             busy: false,
             last_region: None,
             capture_key,
@@ -1633,17 +3251,40 @@ pub fn run(initial: Option<usize>) -> i32 {
             override_effects: None,
             override_share: None,
             scheduled_fired: None,
+            #[cfg(target_os = "macos")]
+            schedule_armed: false,
+            #[cfg(target_os = "macos")]
+            deferred_schedule: None,
             pending_mode: None,
         })
     });
-    publish_state();
     let settings_now = with_app(|app| app.settings.clone()).unwrap_or_default();
-    register_preset_hotkeys(hwnd, &settings_now.presets);
-    arm_schedule(hwnd, settings_now.schedule.as_deref());
+    #[cfg(windows)]
+    if let Err(error) = arm_schedule(hwnd, settings_now.schedule.as_deref()) {
+        notify(hwnd, "Scheduled capture failed", &error.to_string(), true);
+    }
+    #[cfg(target_os = "macos")]
+    if let Err(error) = synchronize_schedule(hwnd, &settings_now) {
+        notify(hwnd, "Scheduled capture paused", &error.to_string(), true);
+    }
+    publish_state();
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: a timer on our own capture window refreshes user-controlled login-item state.
+        if unsafe { SetTimer(hwnd, TIMER_STARTUP_STATUS, 10_000, None) } == 0 {
+            notify(hwnd, "Open at login status", "Could not refresh the login-item status automatically. Reopen Preferences to check it.", true);
+        }
+    }
     if initial.is_some() {
         // Give the window that asked (the editor) time to get out of the way.
         // SAFETY: a timer on our own window.
         unsafe { SetTimer(hwnd, TIMER_INITIAL, 350, None) };
+    }
+
+    #[cfg(target_os = "macos")]
+    match crate::control_macos::start() {
+        Ok(server) => *control = Some(server),
+        Err(error) => log(&format!("control: not available: {error}")),
     }
 
     // SAFETY: the standard message loop for this thread, then cleanup of the
@@ -1666,8 +3307,102 @@ pub fn run(initial: Option<usize>) -> i32 {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn clipboard_capture_validates_pixels_and_preserves_alpha() {
+        use jiffshot_capture::clipboard::Pasted;
+        assert!(frame_from_clipboard(None).unwrap().is_none());
+        assert!(frame_from_clipboard(Some(Pasted::Text("text".into())))
+            .unwrap()
+            .is_none());
+        let frame = frame_from_clipboard(Some(Pasted::Image {
+            width: 2,
+            height: 1,
+            rgba: vec![255, 0, 0, 128, 0, 0, 255, 255],
+        }))
+        .unwrap()
+        .unwrap();
+        assert!(frame.alpha);
+        assert_eq!(frame.pixels, [0, 0, 255, 128, 255, 0, 0, 255]);
+        let invalid = frame_from_clipboard(Some(Pasted::Image {
+            width: 2,
+            height: 1,
+            rgba: vec![0; 4],
+        }));
+        assert!(invalid.err().unwrap().contains("Invalid clipboard image"));
+        let oversized = frame_from_clipboard(Some(Pasted::Image {
+            width: u32::MAX,
+            height: 1,
+            rgba: Vec::new(),
+        }));
+        assert!(oversized.err().unwrap().contains("too large"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn clipboard_capture_reports_bad_files_and_uses_the_first_valid_image() {
+        use jiffshot_capture::clipboard::Pasted;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("jiffshot-clipboard-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let missing = root.join("missing.png");
+        let path = root.join("valid.png");
+        let mut source = jiffshot_capture::Frame::new(1, 1);
+        source.alpha = true;
+        source.pixels.copy_from_slice(&[0, 0, 255, 128]);
+        source.save_png(&path).unwrap();
+
+        let result = frame_from_clipboard(Some(Pasted::Files(vec![missing.clone(), path.clone()])))
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.pixels, [0, 0, 255, 128]);
+        assert!(result.alpha);
+        let error = frame_from_clipboard(Some(Pasted::Files(vec![missing.clone()])))
+            .err()
+            .unwrap();
+        assert!(error.contains("Could not open") && error.contains("missing.png"));
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    unsafe extern "system" fn test_wndproc(
+        _hwnd: HWND,
+        _msg: u32,
+        _wparam: WPARAM,
+        _lparam: LPARAM,
+    ) -> LRESULT {
+        0
+    }
+
+    #[cfg(target_os = "macos")]
+    fn test_app(hwnd: HWND, settings: Settings) -> App {
+        App {
+            hwnd,
+            settings,
+            busy: false,
+            last_region: None,
+            capture_key: String::new(),
+            pending: None,
+            timelapse: None,
+            pending_preset: None,
+            override_cursor: None,
+            override_effects: None,
+            override_share: None,
+            scheduled_fired: None,
+            schedule_armed: false,
+            deferred_schedule: None,
+            pending_mode: None,
+        }
+    }
+
     #[test]
     fn hotkeys_parse() {
+        use crate::sys::{MOD_ALT, MOD_CONTROL, MOD_SHIFT, VK_SNAPSHOT};
         assert_eq!(
             parse_hotkey("Ctrl+Shift+1"),
             Some((MOD_CONTROL | MOD_SHIFT, b'1' as u16))
@@ -1684,5 +3419,825 @@ mod tests {
             assert!(mode_named(&p.mode).is_some(), "{}", p.mode);
         }
         assert_eq!(mode_named("steps"), Some(MODE_STEPS));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn startup_refresh_only_publishes_changes() {
+        PUBLISHED_STARTUP.with(|published| *published.borrow_mut() = None);
+        let disabled = StartupStatus::default();
+        let approval = StartupStatus {
+            requested: true,
+            notice: StartupNotice::NeedsApproval,
+            detail: Some("approval".into()),
+        };
+        assert!(remember_startup(&disabled));
+        assert!(!remember_startup(&disabled));
+        assert!(remember_startup(&approval));
+        assert!(!remember_startup(&approval));
+        PUBLISHED_STARTUP.with(|published| *published.borrow_mut() = None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn delayed_fixed_capture_rejects_reconfirmation_and_layout_changes() {
+        let _guard = geometry::SAVED_AREAS_TEST_LOCK.lock().unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Fixed).unwrap();
+        let layout = CaptureLayout::current().unwrap();
+        let monitor = layout
+            .monitors()
+            .into_iter()
+            .find(|monitor| monitor.primary)
+            .unwrap();
+        let rect = Rect::new(monitor.rect.x, monitor.rect.y, 100, 80);
+        geometry::confirm_saved_area(SavedAreaKind::Fixed, rect).unwrap();
+        let ticket = saved_area_ticket(SavedAreaKind::Fixed, rect).unwrap();
+        let mut settings = Settings::default();
+        settings.capture_window.fixed_at = Some((rect.x, rect.y));
+        settings.fixed_size = (rect.width, rect.height);
+        let changed = ticket.clone().invalidated_for_test();
+        assert!(capture_fixed_rect(&settings, &changed)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("display configuration changed"));
+        settings.capture_window.fixed_at = None;
+        assert!(capture_fixed_rect(&settings, &ticket)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("position changed"));
+        settings.capture_window.fixed_at = Some((rect.x, rect.y));
+        geometry::confirm_saved_area(SavedAreaKind::Fixed, rect).unwrap();
+        assert!(capture_fixed_rect(&settings, &ticket)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("confirmation"));
+        geometry::clear_saved_area(SavedAreaKind::Fixed).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn panel_confirmation_and_settings_stay_together_when_saving_fails() {
+        let _guard = geometry::SAVED_AREAS_TEST_LOCK.lock().unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Fixed).unwrap();
+        let layout = CaptureLayout::current().unwrap();
+        let monitor = layout
+            .monitors()
+            .into_iter()
+            .find(|monitor| monitor.primary)
+            .unwrap();
+        let old = Rect::new(monitor.rect.x, monitor.rect.y, 100, 80);
+        let next = Rect::new(old.x + 1, old.y + 1, 101, 81);
+        let mut settings = Settings::default();
+        settings.capture_window.fixed = true;
+        settings.capture_window.fixed_at = Some((old.x, old.y));
+        settings.fixed_size = (old.width, old.height);
+        settings.macos_fixed_area =
+            Some(geometry::confirm_saved_area(SavedAreaKind::Fixed, old).unwrap());
+        let old_ticket = saved_area_ticket(SavedAreaKind::Fixed, old).unwrap();
+        let hwnd = sys::create_message_window("JiffshotPanelCommitTest", "", test_wndproc);
+        APP.with(|app| *app.borrow_mut() = Some(test_app(hwnd, settings.clone())));
+        let values = [
+            true.into(),
+            next.width.into(),
+            next.height.into(),
+            true.into(),
+            next.x.into(),
+            next.y.into(),
+            false.into(),
+        ];
+
+        let mut candidate = settings.clone();
+        let (result, changes) =
+            crate::panel::prepare_apply(&mut candidate, "selection", &values, false);
+        assert_eq!(result, crate::panel::Applied::Changed);
+        assert!(
+            old_ticket.validate().is_ok(),
+            "preparing the panel must not install a confirmation"
+        );
+        assert!(saved_area_ticket(SavedAreaKind::Fixed, next).is_err());
+        let error = commit_window_settings_with(candidate, changes, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "read-only settings",
+            ))
+        })
+        .unwrap_err();
+        assert!(error.contains("read-only settings"));
+        assert_eq!(
+            serde_json::to_value(current_settings()).unwrap(),
+            serde_json::to_value(&settings).unwrap()
+        );
+        assert!(old_ticket.validate().is_ok());
+        assert!(saved_area_ticket(SavedAreaKind::Fixed, next).is_err());
+
+        let mut candidate = settings;
+        let (result, changes) =
+            crate::panel::prepare_apply(&mut candidate, "selection", &values, false);
+        assert_eq!(result, crate::panel::Applied::Changed);
+        let mut persisted = None;
+        assert!(
+            commit_window_settings_with(candidate.clone(), changes, |value| {
+                persisted = Some(value.clone());
+                Ok(())
+            })
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(
+            serde_json::to_value(persisted.unwrap()).unwrap(),
+            serde_json::to_value(current_settings()).unwrap()
+        );
+        assert_eq!(
+            current_settings().macos_fixed_area,
+            candidate.macos_fixed_area
+        );
+        assert!(old_ticket.validate().is_err());
+        assert!(saved_area_ticket(SavedAreaKind::Fixed, next).is_ok());
+        APP.with(|app| *app.borrow_mut() = None);
+        unsafe { DefWindowProcW(hwnd, sys::WM_CLOSE, 0, 0) };
+        geometry::clear_saved_area(SavedAreaKind::Fixed).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unrelated_capture_options_remain_usable_when_the_settings_file_is_read_only() {
+        let hwnd = sys::create_message_window("JiffshotPanelSessionOnlyTest", "", test_wndproc);
+        APP.with(|app| *app.borrow_mut() = Some(test_app(hwnd, Settings::default())));
+        let mut candidate = current_settings();
+        candidate.capture_window.tab = 2;
+        let warnings =
+            commit_window_settings_with(candidate, geometry::SavedAreaChanges::default(), |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "read-only settings",
+                ))
+            })
+            .unwrap();
+        assert_eq!(current_settings().capture_window.tab, 2);
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("only until Jiffshot quits")
+                && warning.contains("read-only settings")));
+        APP.with(|app| *app.borrow_mut() = None);
+        unsafe { DefWindowProcW(hwnd, sys::WM_CLOSE, 0, 0) };
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn saved_schedule_restores_only_for_its_matching_persisted_grid() {
+        let _guard = geometry::SAVED_AREAS_TEST_LOCK.lock().unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Fixed).unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+        let layout = CaptureLayout::current().unwrap();
+        let monitor = layout
+            .monitors()
+            .into_iter()
+            .find(|monitor| monitor.primary)
+            .unwrap();
+        let rect = Rect::new(monitor.rect.x, monitor.rect.y, 100, 80);
+        let mut settings = Settings::default();
+        settings.schedule = Some("09:00".into());
+        settings.schedule_area = Some((rect.x, rect.y, rect.width, rect.height));
+        settings.macos_schedule_area =
+            Some(geometry::confirm_saved_area(SavedAreaKind::Scheduled, rect).unwrap());
+        let json = serde_json::to_string(&settings).unwrap();
+        let mut restored: Settings = serde_json::from_str(&json).unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+        assert!(check_scheduled_area(&restored).is_err());
+        restore_saved_coordinates(&restored);
+        assert!(check_scheduled_area(&restored).is_ok());
+
+        restored
+            .macos_schedule_area
+            .as_mut()
+            .unwrap()
+            .coordinate_space[0] ^= 1;
+        restore_saved_coordinates(&restored);
+        assert!(check_scheduled_area(&restored).is_err());
+        restored.schedule_area = None;
+        assert!(check_scheduled_area(&restored).is_ok());
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn selected_schedule_area_uses_the_overlay_layout_and_replaces_the_old_ticket() {
+        let _guard = geometry::SAVED_AREAS_TEST_LOCK.lock().unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+        let layout = CaptureLayout::current().unwrap();
+        let monitor = layout
+            .monitors()
+            .into_iter()
+            .find(|monitor| monitor.primary)
+            .unwrap();
+        let old = Rect::new(monitor.rect.x, monitor.rect.y, 100, 80);
+        let selected = Rect::new(monitor.rect.x + 1, monitor.rect.y + 1, 90, 70);
+        let confirmation = geometry::confirm_saved_area(SavedAreaKind::Scheduled, old).unwrap();
+        let old_ticket = saved_area_ticket(SavedAreaKind::Scheduled, old).unwrap();
+        let mut settings = Settings::default();
+        settings.copy_to_clipboard = false;
+        settings.schedule = Some("09:00".into());
+        settings.schedule_area = Some((old.x, old.y, old.width, old.height));
+        settings.macos_schedule_area = Some(confirmation);
+        let hwnd = sys::create_message_window("JiffshotScheduleSelectionTest", "", test_wndproc);
+        APP.with(|app| *app.borrow_mut() = Some(test_app(hwnd, settings)));
+        synchronize_schedule(hwnd, &with_app(|app| app.settings.clone()).unwrap()).unwrap();
+        with_app(|app| {
+            app.deferred_schedule = Some(
+                DeferredScheduledCapture::new(&app.settings, std::time::Instant::now()).unwrap(),
+            );
+        });
+
+        let selection = overlay::Selection::Region(selected);
+        let error =
+            save_scheduled_selection(hwnd, &selection, layout.clone().invalidated_for_test())
+                .unwrap_err();
+        assert!(error.to_string().contains("display configuration changed"));
+        assert!(old_ticket.validate().is_ok());
+        assert_eq!(
+            with_app(|app| app.settings.schedule_area).flatten(),
+            Some((old.x, old.y, old.width, old.height))
+        );
+
+        let error = save_scheduled_selection_with(hwnd, &selection, layout.clone(), |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "settings are read-only",
+            ))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("settings are read-only"));
+        assert!(old_ticket.validate().is_ok());
+        assert_eq!(
+            with_app(|app| app.settings.schedule_area).flatten(),
+            Some((old.x, old.y, old.width, old.height))
+        );
+        assert!(with_app(|app| app.deferred_schedule.is_some()).unwrap());
+
+        let result = save_scheduled_selection(hwnd, &selection, layout).unwrap();
+        assert!(result.paused.is_none());
+        assert!(!result.session_only);
+        assert!(result.cancelled_pending);
+        assert!(old_ticket.validate().is_err());
+        assert!(with_app(|app| app.deferred_schedule.is_none()).unwrap());
+        assert!(saved_area_ticket(SavedAreaKind::Scheduled, selected).is_ok());
+        assert!(with_app(|app| app.schedule_armed).unwrap());
+        let persisted = Settings::load();
+        assert!(!persisted.copy_to_clipboard);
+        assert_eq!(
+            persisted.schedule_area,
+            Some((selected.x, selected.y, selected.width, selected.height))
+        );
+        assert_eq!(
+            persisted
+                .macos_schedule_area
+                .as_ref()
+                .map(|proof| proof.rect),
+            Some(selected)
+        );
+        unsafe { KillTimer(hwnd, TIMER_SCHEDULE) };
+        APP.with(|app| *app.borrow_mut() = None);
+        unsafe { DefWindowProcW(hwnd, sys::WM_CLOSE, 0, 0) };
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn selected_schedule_area_warns_when_display_identity_is_session_only() {
+        let _guard = geometry::SAVED_AREAS_TEST_LOCK.lock().unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+        let layout = CaptureLayout::current().unwrap();
+        let monitor = layout
+            .monitors()
+            .into_iter()
+            .find(|monitor| monitor.primary)
+            .unwrap();
+        let old = Rect::new(monitor.rect.x, monitor.rect.y, 100, 80);
+        let selected = Rect::new(monitor.rect.x + 1, monitor.rect.y + 1, 90, 70);
+        let mut settings = Settings::default();
+        settings.schedule = Some("09:00".into());
+        settings.schedule_area = Some((old.x, old.y, old.width, old.height));
+        settings.macos_schedule_area =
+            Some(geometry::confirm_saved_area(SavedAreaKind::Scheduled, old).unwrap());
+        let old_ticket = saved_area_ticket(SavedAreaKind::Scheduled, old).unwrap();
+        let hwnd =
+            sys::create_message_window("JiffshotSessionScheduleSelectionTest", "", test_wndproc);
+        APP.with(|app| *app.borrow_mut() = Some(test_app(hwnd, settings)));
+        synchronize_schedule(hwnd, &with_app(|app| app.settings.clone()).unwrap()).unwrap();
+        with_app(|app| {
+            app.deferred_schedule = Some(
+                DeferredScheduledCapture::new(&app.settings, std::time::Instant::now()).unwrap(),
+            )
+        });
+        let selection = overlay::Selection::Region(selected);
+
+        let failed = geometry::with_missing_uuid_for_test(|| {
+            save_scheduled_selection_with(hwnd, &selection, layout.clone(), |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "settings are read-only",
+                ))
+            })
+        });
+        let (title, message, warning) = scheduled_selection_notice(failed);
+        assert_eq!(title, "Scheduled area not saved");
+        assert!(warning && message.contains("settings are read-only"));
+        assert!(!message.contains(geometry::SESSION_ONLY_AREA_WARNING));
+        assert!(old_ticket.validate().is_ok());
+        assert_eq!(
+            with_app(|app| app.settings.schedule_area).flatten(),
+            Some((old.x, old.y, old.width, old.height))
+        );
+        assert!(with_app(|app| app.deferred_schedule.is_some()).unwrap());
+
+        let mut persisted = None;
+        let result = geometry::with_missing_uuid_for_test(|| {
+            save_scheduled_selection_with(hwnd, &selection, layout, |settings| {
+                persisted = Some(settings.clone());
+                Ok(())
+            })
+        })
+        .unwrap();
+        assert!(result.session_only && result.cancelled_pending && result.paused.is_none());
+        let (title, message, warning) = scheduled_selection_notice(Ok(result));
+        assert_eq!(title, "Scheduled area saved");
+        assert!(
+            warning
+                && message.contains(geometry::SESSION_ONLY_AREA_WARNING)
+                && message.contains("skipped")
+        );
+        assert!(old_ticket.validate().is_err());
+        assert!(saved_area_ticket(SavedAreaKind::Scheduled, selected).is_ok());
+        assert!(with_app(|app| app.schedule_armed).unwrap());
+        let settings = persisted.unwrap();
+        assert!(settings.macos_schedule_area.as_ref().unwrap().session_only);
+        assert_eq!(
+            settings.schedule_area,
+            Some((selected.x, selected.y, selected.width, selected.height))
+        );
+
+        let (title, message, warning) = scheduled_selection_notice(Ok(SavedScheduledSelection {
+            session_only: true,
+            cancelled_pending: false,
+            paused: Some(std::io::Error::other("display changed")),
+        }));
+        assert_eq!(title, "Scheduled area saved; capture paused");
+        assert!(
+            warning
+                && message.contains("display changed")
+                && message.contains(geometry::SESSION_ONLY_AREA_WARNING)
+        );
+        restore_saved_coordinates(&settings);
+        assert!(check_scheduled_area(&settings).is_err());
+        unsafe { KillTimer(hwnd, TIMER_SCHEDULE) };
+        APP.with(|app| *app.borrow_mut() = None);
+        unsafe { DefWindowProcW(hwnd, sys::WM_CLOSE, 0, 0) };
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn schedule_area_picker_does_not_replace_a_pending_capture() {
+        let hwnd = sys::create_message_window("JiffshotSchedulePickerTest", "", test_wndproc);
+        APP.with(|app| *app.borrow_mut() = Some(test_app(hwnd, Settings::default())));
+        with_app(|app| app.pending_mode = Some(PendingMode::Mode(MODE_IMAGE)));
+        select_scheduled_area();
+        assert!(
+            with_app(|app| matches!(app.pending_mode, Some(PendingMode::Mode(MODE_IMAGE))))
+                .unwrap()
+        );
+        with_app(|app| app.pending_mode = None);
+        select_scheduled_area();
+        assert!(with_app(|app| matches!(
+            app.pending_mode,
+            Some(PendingMode::Mode(MODE_SCHEDULE_AREA))
+        ))
+        .unwrap());
+        assert_eq!(unsafe { KillTimer(hwnd, TIMER_MODE) }, 1);
+        APP.with(|app| *app.borrow_mut() = None);
+        unsafe { DefWindowProcW(hwnd, sys::WM_CLOSE, 0, 0) };
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn saved_schedule_confirmation_survives_process_restart() {
+        const CHILD: &str = "JIFFSHOT_TEST_SAVED_AREA_CHILD";
+        const CHILD_BINARY: &str = "JIFFSHOT_TEST_SAVED_AREA_CHILD_BINARY";
+        const CHILD_HOST: &str = "JIFFSHOT_TEST_SAVED_AREA_CHILD_HOST";
+        if let Ok(expected) = std::env::var(CHILD) {
+            let settings = Settings::load();
+            assert!(!settings.copy_to_clipboard);
+            assert_eq!(settings.fixed_size, (641, 481));
+            assert_eq!(
+                settings.macos_schedule_area.is_none(),
+                matches!(expected.as_str(), "malformed" | "malformed-flag")
+            );
+            if expected == "tampered-missing" {
+                geometry::with_missing_uuid_for_test(|| restore_saved_coordinates(&settings));
+            } else {
+                restore_saved_coordinates(&settings);
+            }
+            let scheduled_ok = matches!(
+                expected.as_str(),
+                "matching" | "legacy-v2" | "fixed-session-only"
+            );
+            assert_eq!(check_scheduled_area(&settings).is_ok(), scheduled_ok);
+            let (x, y) = settings.capture_window.fixed_at.unwrap();
+            let fixed = Rect::new(x, y, settings.fixed_size.0, settings.fixed_size.1);
+            let fixed_ok = !matches!(
+                expected.as_str(),
+                "session-only"
+                    | "fixed-session-only"
+                    | "tampered-flag"
+                    | "tampered-missing"
+                    | "missing-flag"
+            );
+            assert_eq!(
+                saved_area_ticket(SavedAreaKind::Fixed, fixed).is_ok(),
+                fixed_ok
+            );
+            return;
+        }
+
+        let _guard = geometry::SAVED_AREAS_TEST_LOCK.lock().unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Fixed).unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+        let layout = CaptureLayout::current().unwrap();
+        let monitor = layout
+            .monitors()
+            .into_iter()
+            .find(|monitor| monitor.primary)
+            .unwrap();
+        let rect = Rect::new(monitor.rect.x, monitor.rect.y, 100, 80);
+        let fixed = Rect::new(monitor.rect.x, monitor.rect.y, 641, 481);
+        let mut settings = Settings::default();
+        settings.copy_to_clipboard = false;
+        settings.fixed_size = (641, 481);
+        settings.capture_window.fixed = true;
+        settings.capture_window.fixed_at = Some((fixed.x, fixed.y));
+        settings.macos_fixed_area =
+            Some(geometry::confirm_saved_area(SavedAreaKind::Fixed, fixed).unwrap());
+        settings.schedule = Some("09:00".into());
+        settings.schedule_area = Some((rect.x, rect.y, rect.width, rect.height));
+        settings.macos_schedule_area =
+            Some(geometry::confirm_saved_area(SavedAreaKind::Scheduled, rect).unwrap());
+        let (session_fixed, session_schedule) = geometry::with_missing_uuid_for_test(|| {
+            (
+                geometry::confirm_saved_area(SavedAreaKind::Fixed, fixed).unwrap(),
+                geometry::confirm_saved_area(SavedAreaKind::Scheduled, rect).unwrap(),
+            )
+        });
+        let root = std::env::temp_dir().join(format!(
+            "jiffshot-saved-area-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        for expected in [
+            "matching",
+            "legacy-v2",
+            "mismatched",
+            "mismatched-uuid",
+            "old-version",
+            "malformed",
+            "malformed-flag",
+            "session-only",
+            "fixed-session-only",
+            "scheduled-session-only",
+            "tampered-flag",
+            "tampered-missing",
+            "missing-flag",
+        ] {
+            let mut candidate = settings.clone();
+            match expected {
+                "mismatched" => {
+                    candidate
+                        .macos_schedule_area
+                        .as_mut()
+                        .unwrap()
+                        .coordinate_space[0] ^= 1
+                }
+                "mismatched-uuid" => {
+                    candidate
+                        .macos_schedule_area
+                        .as_mut()
+                        .unwrap()
+                        .coordinate_space[3] ^= 1
+                }
+                "old-version" => candidate.macos_schedule_area.as_mut().unwrap().version = 1,
+                "session-only" | "tampered-flag" | "tampered-missing" | "missing-flag" => {
+                    candidate.macos_fixed_area = Some(session_fixed.clone());
+                    candidate.macos_schedule_area = Some(session_schedule.clone());
+                    if expected != "session-only" {
+                        candidate.macos_fixed_area.as_mut().unwrap().session_only = false;
+                        candidate.macos_schedule_area.as_mut().unwrap().session_only = false;
+                    }
+                }
+                "fixed-session-only" => candidate.macos_fixed_area = Some(session_fixed.clone()),
+                "scheduled-session-only" => {
+                    candidate.macos_schedule_area = Some(session_schedule.clone())
+                }
+                _ => {}
+            }
+            let mut root_value = serde_json::json!({ "capture": candidate });
+            if expected == "malformed" {
+                root_value["capture"]["macos_schedule_area"] = serde_json::json!("invalid");
+            }
+            if expected == "malformed-flag" {
+                root_value["capture"]["macos_schedule_area"]["session_only"] =
+                    serde_json::json!("false");
+            }
+            if matches!(expected, "legacy-v2" | "missing-flag") {
+                root_value["capture"]["macos_fixed_area"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("session_only");
+                root_value["capture"]["macos_schedule_area"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("session_only");
+            }
+            let json = serde_json::to_vec(&root_value).unwrap();
+            std::fs::write(root.join(jiffshot_capture::config::FILE), json).unwrap();
+            let binary = std::env::var_os(CHILD_BINARY)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_exe().unwrap());
+            let mut child = std::process::Command::new(binary);
+            child
+                .args([
+                    "--exact",
+                    "tray::tests::saved_schedule_confirmation_survives_process_restart",
+                    "--nocapture",
+                ])
+                .env(CHILD, expected)
+                .env("JIFFSHOT_CONFIG_DIR", &root)
+                .env("JIFFSHOT_LOCAL_DIR", &root)
+                .env("JIFFSHOT_LIBRARY", &root)
+                .env("APPDATA", &root)
+                .env("LOCALAPPDATA", &root);
+            if let Some(host) = std::env::var_os(CHILD_HOST) {
+                child.env("RUSTOLONIA_HOST_LIB", host);
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "child {expected} failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if matches!(expected, "malformed" | "malformed-flag") {
+                assert!(String::from_utf8_lossy(&output.stderr)
+                    .contains("Malformed macOS scheduled saved-area confirmation"));
+            }
+        }
+        std::fs::remove_file(root.join(jiffshot_capture::config::FILE)).unwrap();
+        let log = root.join("capture.log");
+        if log.exists() {
+            std::fs::remove_file(log).unwrap();
+        }
+        std::fs::remove_dir(root).unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Fixed).unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scheduled_capture_pauses_and_rearms_after_explicit_confirmation() {
+        let _guard = geometry::SAVED_AREAS_TEST_LOCK.lock().unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+        let layout = CaptureLayout::current().unwrap();
+        let monitor = layout
+            .monitors()
+            .into_iter()
+            .find(|monitor| monitor.primary)
+            .unwrap();
+        let rect = Rect::new(monitor.rect.x, monitor.rect.y, 100, 80);
+        let mut settings = Settings::default();
+        settings.schedule_area = Some((rect.x, rect.y, rect.width, rect.height));
+        let hwnd = sys::create_message_window("JiffshotScheduleTest", "", test_wndproc);
+        APP.with(|app| *app.borrow_mut() = Some(test_app(hwnd, settings)));
+
+        set_schedule(Some("09:00".into()));
+        assert_eq!(
+            with_app(|app| app.settings.schedule.clone()).flatten(),
+            None
+        );
+        assert!(!with_app(|app| app.schedule_armed).unwrap());
+        assert_eq!(unsafe { KillTimer(hwnd, TIMER_SCHEDULE) }, 0);
+
+        let confirmation = geometry::confirm_saved_area(SavedAreaKind::Scheduled, rect).unwrap();
+        with_app(|app| app.settings.macos_schedule_area = Some(confirmation));
+        let mut candidate = with_app(|app| app.settings.clone()).unwrap();
+        candidate.schedule = Some("09:00".into());
+        assert!(synchronize_schedule(std::ptr::null_mut(), &candidate).is_err());
+        assert!(!with_app(|app| app.schedule_armed).unwrap());
+        set_schedule(Some("09:00".into()));
+        assert!(with_app(|app| app.schedule_armed).unwrap());
+        assert_eq!(unsafe { KillTimer(hwnd, TIMER_SCHEDULE) }, 1);
+        arm_schedule(hwnd, Some("09:00")).unwrap();
+
+        geometry::invalidate_saved_area_for_test(SavedAreaKind::Scheduled).unwrap();
+        schedule_tick();
+        assert!(!with_app(|app| app.schedule_armed).unwrap());
+        assert_eq!(unsafe { KillTimer(hwnd, TIMER_SCHEDULE) }, 0);
+        assert_eq!(
+            with_app(|app| app.settings.schedule.clone())
+                .flatten()
+                .as_deref(),
+            Some("09:00")
+        );
+
+        let mut settings = with_app(|app| app.settings.clone()).unwrap();
+        settings.macos_schedule_area =
+            Some(geometry::confirm_saved_area(SavedAreaKind::Scheduled, rect).unwrap());
+        apply_settings(settings);
+        assert!(with_app(|app| app.schedule_armed).unwrap());
+        geometry::invalidate_saved_area_for_test(SavedAreaKind::Scheduled).unwrap();
+        capture_scheduled(hwnd, with_app(|app| app.settings.clone()).unwrap());
+        assert!(!with_app(|app| app.schedule_armed).unwrap());
+        assert!(with_app(|app| app.scheduled_fired).flatten().is_none());
+        assert_eq!(unsafe { KillTimer(hwnd, TIMER_SCHEDULE) }, 0);
+        assert_eq!(
+            with_app(|app| app.settings.schedule.clone())
+                .flatten()
+                .as_deref(),
+            Some("09:00")
+        );
+
+        let mut settings = with_app(|app| app.settings.clone()).unwrap();
+        settings.macos_schedule_area =
+            Some(geometry::confirm_saved_area(SavedAreaKind::Scheduled, rect).unwrap());
+        apply_settings(settings);
+        assert!(with_app(|app| app.schedule_armed).unwrap());
+        assert_eq!(unsafe { KillTimer(hwnd, TIMER_SCHEDULE) }, 1);
+        arm_schedule(hwnd, Some("09:00")).unwrap();
+        set_schedule(None);
+        assert!(!with_app(|app| app.schedule_armed).unwrap());
+        assert_eq!(unsafe { KillTimer(hwnd, TIMER_SCHEDULE) }, 0);
+
+        APP.with(|app| *app.borrow_mut() = None);
+        unsafe { DefWindowProcW(hwnd, sys::WM_CLOSE, 0, 0) };
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn deferred_schedule_keeps_its_original_area_and_expires() {
+        let _guard = geometry::SAVED_AREAS_TEST_LOCK.lock().unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+        let layout = CaptureLayout::current().unwrap();
+        let monitor = layout
+            .monitors()
+            .into_iter()
+            .find(|monitor| monitor.primary)
+            .unwrap();
+        let rect = Rect::new(monitor.rect.x, monitor.rect.y, 100, 80);
+        let mut settings = Settings::default();
+        settings.schedule = Some("09:00".into());
+        settings.schedule_area = Some((rect.x, rect.y, rect.width, rect.height));
+        settings.macos_schedule_area =
+            Some(geometry::confirm_saved_area(SavedAreaKind::Scheduled, rect).unwrap());
+
+        let now = std::time::Instant::now();
+        let pending = DeferredScheduledCapture::new(&settings, now).unwrap();
+        assert!(pending.validate(&settings, now).is_ok());
+        assert!(pending
+            .validate(&settings, now + std::time::Duration::from_secs(121))
+            .unwrap_err()
+            .to_string()
+            .contains("two minutes"));
+        let mut changed = settings.clone();
+        changed.schedule = Some("09:01".into());
+        assert!(pending.validate(&changed, now).is_err());
+        changed = settings.clone();
+        changed.schedule_area = None;
+        assert!(pending.validate(&changed, now).is_err());
+        geometry::confirm_saved_area(SavedAreaKind::Scheduled, rect).unwrap();
+        assert!(pending
+            .validate(&settings, now)
+            .unwrap_err()
+            .to_string()
+            .contains("confirmation"));
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scheduled_tick_defers_once_while_busy_and_disabling_cancels_it() {
+        let _guard = geometry::SAVED_AREAS_TEST_LOCK.lock().unwrap();
+        let mut settings = Settings::default();
+        settings.schedule = Some("09:00".into());
+        let hwnd = sys::create_message_window("JiffshotDeferredScheduleTest", "", test_wndproc);
+        let mut app = test_app(hwnd, settings);
+        app.busy = true;
+        APP.with(|slot| *slot.borrow_mut() = Some(app));
+        synchronize_schedule(hwnd, &with_app(|app| app.settings.clone()).unwrap()).unwrap();
+
+        let settings = with_app(|app| app.settings.clone()).unwrap();
+        assert!(defer_busy_schedule(hwnd, &settings, true));
+        let queued = with_app(|app| app.deferred_schedule.as_ref().map(|pending| pending.queued))
+            .flatten()
+            .expect("a due capture must wait");
+        assert_eq!(with_app(|app| app.scheduled_fired).flatten(), Some(queued));
+        assert!(defer_busy_schedule(hwnd, &settings, true));
+        assert_eq!(
+            with_app(|app| app.deferred_schedule.as_ref().map(|pending| pending.queued)).flatten(),
+            Some(queued)
+        );
+        with_app(|app| {
+            app.deferred_schedule.as_mut().unwrap().queued =
+                std::time::Instant::now() - std::time::Duration::from_secs(121);
+        });
+        assert!(defer_busy_schedule(hwnd, &settings, false));
+        assert!(with_app(|app| app.deferred_schedule.is_none()).unwrap());
+        assert!(defer_busy_schedule(hwnd, &settings, true));
+        assert!(with_app(|app| app.deferred_schedule.is_some()).unwrap());
+        let mut changed = settings.clone();
+        changed.schedule = Some("09:01".into());
+        apply_settings(changed);
+        assert!(with_app(|app| app.deferred_schedule.is_none()).unwrap());
+        apply_settings(settings.clone());
+        assert!(
+            with_app(|app| app.deferred_schedule.is_none()).unwrap(),
+            "restoring settings must not revive the old capture"
+        );
+        assert!(defer_busy_schedule(hwnd, &settings, true));
+        set_schedule(None);
+        assert!(with_app(|app| app.deferred_schedule.is_none()).unwrap());
+        assert!(!with_app(|app| app.schedule_armed).unwrap());
+
+        APP.with(|app| *app.borrow_mut() = None);
+        unsafe { DefWindowProcW(hwnd, sys::WM_CLOSE, 0, 0) };
+    }
+
+    #[test]
+    fn step_guide_saves_editable_content_and_reports_write_failure() {
+        use jiffshot_doc::object::Kind;
+        let frame = jiffshot_capture::Frame::new(100, 100);
+        let doc = crate::stepcap::guide(&[crate::stepcap::Step {
+            frame,
+            area: Rect::new(0, 0, 100, 100),
+            mapping: None,
+            click: (50, 50),
+            #[cfg(target_os = "macos")]
+            click_precise: None,
+            right: false,
+            description: "Click the test button.".into(),
+        }])
+        .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "jiffshot-step-guide-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let settings = Settings {
+            open_in_editor: false,
+            ..Settings::default()
+        };
+        let path = root.join("guide.png");
+        let outcome = finish_step_guide(&doc, &path, 1, &settings);
+        assert!(!outcome.is_error, "{}", outcome.message);
+        let editable = path.with_extension(jiffshot_capture::library::EDITS_EXT);
+        let loaded = jiffshot_doc::io::load_document(&editable).unwrap();
+        assert!(loaded.objects.iter().any(|object| matches!(&object.kind, Kind::Text { text, .. } if text == "Click the test button.")));
+        #[cfg(target_os = "macos")]
+        {
+            let mut missing = doc.clone();
+            for object in &mut missing.objects {
+                object.walk_mut(&mut |object| {
+                    object.style.font = "Jiffshot unavailable guide face 80ed6b".into()
+                });
+            }
+            let warned_path = root.join("warned.png");
+            let warned = finish_step_guide(&missing, &warned_path, 1, &settings);
+            assert!(!warned.is_error);
+            assert!(warned
+                .message
+                .contains("Jiffshot unavailable guide face 80ed6b"));
+            assert!(warned.message.contains("using Helvetica Neue"));
+            assert!(warned.message.contains("1 steps saved"));
+            std::fs::remove_file(warned_path.with_extension(jiffshot_capture::library::EDITS_EXT))
+                .unwrap();
+        }
+        let blocked = root.join("not-a-directory");
+        std::fs::write(&blocked, b"").unwrap();
+        let outcome = finish_step_guide(&doc, &blocked.join("guide.png"), 1, &settings);
+        assert!(outcome.is_error);
+        assert!(outcome
+            .message
+            .contains("editable guide could not be saved"));
+        std::fs::remove_file(editable).unwrap();
+        std::fs::remove_file(blocked).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 }

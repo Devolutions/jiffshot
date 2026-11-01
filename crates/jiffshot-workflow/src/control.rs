@@ -733,7 +733,7 @@ fn record_clear(a: &Args) -> Reply {
     let mut slot = RECORDING.lock().expect("recording lock poisoned");
     let r = current_recording(&mut slot, a)?;
     require_live_recording(r)?;
-    recorder::clear_annotations(&r.control);
+    recorder::clear_annotations(&r.control).map_err(internal)?;
     Ok(json!({"id": r.id, "cleared": true}))
 }
 
@@ -829,7 +829,7 @@ fn add_step(at: (i32, i32), right: bool, description: Option<String>) -> Result<
     let description = description.filter(|d| !d.trim().is_empty()).unwrap_or_else(|| find::describe_click(at, right));
     let mut guide = GUIDE.lock().unwrap();
     let g = guide.as_mut().ok_or_else(|| not_found("the guide was cancelled"))?;
-    g.steps.push(stepcap::Step { frame, area, click: at, right, description: description.clone() });
+    g.steps.push(stepcap::Step { frame, area, mapping: None, click: at, right, description: description.clone() });
     Ok(json!({ "index": g.steps.len(), "description": description, "at": point_json(at) }))
 }
 
@@ -848,7 +848,13 @@ fn steps_finish(a: &Args) -> Reply {
         return Err(Error::new(ErrorCode::Conflict, "the guide has no steps yet"));
     }
     let title = a.string("title")?.unwrap_or_else(|| guide.title.clone());
-    let doc = stepcap::guide_titled(&guide.steps, &title);
+    let doc = match stepcap::guide_titled(&guide.steps, &title) {
+        Ok(doc) => doc,
+        Err(error) => {
+            *GUIDE.lock().unwrap() = Some(guide);
+            return Err(internal(error));
+        }
+    };
     let frame = workflow::frame_from_pixmap(&doc.flatten());
     let rect = Rect::new(0, 0, frame.width as i32, frame.height as i32);
     let capture = workflow::from_frame(CaptureKind::Steps, rect, frame);

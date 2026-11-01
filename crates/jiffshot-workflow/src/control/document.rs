@@ -12,6 +12,29 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
+/// Families substituted while rendering the document's text; macOS only.
+fn font_substitutions(doc: &Document) -> Value {
+    #[cfg(target_os = "macos")]
+    return json!(doc.font_substitutions());
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = doc;
+        json!([])
+    }
+}
+
+fn object_font_substitutions<'a>(
+    objects: impl IntoIterator<Item = &'a jiffshot_doc::object::Object>,
+) -> Value {
+    #[cfg(target_os = "macos")]
+    return json!(jiffshot_doc::text::object_font_substitutions(objects));
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = objects;
+        json!([])
+    }
+}
+
 const MAX_DOCUMENTS: usize = 8;
 const MAX_OBJECTS: usize = 4096;
 const MAX_POINTS: usize = 10_000;
@@ -186,6 +209,7 @@ fn info(id: &str, session: &Session) -> Value {
         "id": id, "path": session.path, "width": e.document().width(), "height": e.document().height(),
         "modified": e.is_modified(), "objects": e.document().objects, "selected": e.selected_ids(),
         "undo": e.undo_label(), "redo": e.redo_label(),
+        "font_substitutions": font_substitutions(e.document()),
     })
 }
 
@@ -309,7 +333,9 @@ pub(super) fn dispatch(command: &str, a: &Args) -> Reply {
             let k = kind(a.0.get("kind").ok_or_else(|| invalid("kind is required"))?)?;
             let st = style(a.0.get("style"), Style::default())?;
             let object_id = e.add_object("Agent annotation", k, st);
-            return Ok(json!({"id": id, "object_id": object_id}));
+            return Ok(
+                json!({"id": id, "object_id": object_id, "font_substitutions": font_substitutions(e.document())}),
+            );
         }
         "doc.update" => {
             a.only(&["id", "object_id", "kind", "style", "rotation"])?;
@@ -349,7 +375,8 @@ pub(super) fn dispatch(command: &str, a: &Args) -> Reply {
             a.only(&["id"])?;
             let lines = recognize(&e.document().flatten())?;
             return Ok(
-                json!({"id":id,"lines":lines.iter().map(|l| json!({"text":l.text,"rect":l.area})).collect::<Vec<_>>()}),
+                json!({"id":id,"lines":lines.iter().map(|l| json!({"text":l.text,"rect":l.area})).collect::<Vec<_>>(),
+                    "font_substitutions": font_substitutions(e.document())}),
             );
         }
         "doc.simplify" => {
@@ -419,7 +446,22 @@ pub(super) fn dispatch(command: &str, a: &Args) -> Reply {
             }
             e.set_selection(ids);
         }
-        "doc.action" => action(e, a)?,
+        "doc.action" => {
+            if a.string("name")?.as_deref() == Some("flatten") {
+                let selected = e.selected_ids();
+                let substitutions = object_font_substitutions(
+                    e.document()
+                        .objects
+                        .iter()
+                        .filter(|object| selected.contains(&object.id)),
+                );
+                action(e, a)?;
+                let mut result = info(&id, session);
+                result["flattened_font_substitutions"] = json!(substitutions);
+                return Ok(result);
+            }
+            action(e, a)?;
+        }
         "doc.crop" => {
             a.only(&["id", "x", "y", "width", "height"])?;
             let x = a
@@ -498,7 +540,8 @@ pub(super) fn dispatch(command: &str, a: &Args) -> Reply {
                 io::export(e.document(), &path).map_err(internal)?;
             }
             return Ok(
-                json!({"id": id, "path": path, "width": e.document().width(), "height": e.document().height(), "size_bytes": std::fs::metadata(&path).map_err(internal)?.len()}),
+                json!({"id": id, "path": path, "width": e.document().width(), "height": e.document().height(),
+                    "size_bytes": std::fs::metadata(&path).map_err(internal)?.len(), "font_substitutions": font_substitutions(e.document())}),
             );
         }
         _ => {
@@ -532,16 +575,22 @@ fn combine_documents(a: &Args) -> Reply {
     if ids.is_empty() || ids.len() > MAX_DOCUMENTS {
         return Err(invalid("combine needs 1..8 document ids"));
     }
-    let images = {
+    let (images, source_substitutions) = {
         let sessions = DOCUMENTS.lock().expect("document sessions lock poisoned");
-        ids.iter()
-            .map(|id| {
-                sessions
-                    .get(id)
-                    .map(|s| s.editor.document().flatten())
-                    .ok_or_else(|| not_found(format!("no document {id}")))
-            })
-            .collect::<Result<Vec<_>, _>>()?
+        let mut images = Vec::with_capacity(ids.len());
+        let mut substitutions = Vec::new();
+        for id in &ids {
+            let session = sessions
+                .get(id)
+                .ok_or_else(|| not_found(format!("no document {id}")))?;
+            let doc = session.editor.document();
+            let fonts = font_substitutions(doc);
+            if fonts.as_array().is_some_and(|fonts| !fonts.is_empty()) {
+                substitutions.push(json!({"id": id, "font_substitutions": fonts}));
+            }
+            images.push(doc.flatten());
+        }
+        (images, substitutions)
     };
     let doc = if let Some(template) = a.string("template")? {
         if !combine::TEMPLATES.contains(&template.as_str()) {
@@ -604,7 +653,9 @@ fn combine_documents(a: &Args) -> Reply {
         combine::combine(&images, arrangement, gap, color(a, "color", Rgba::WHITE)?)
             .ok_or_else(|| invalid("cannot combine images"))?
     };
-    insert(doc, None)
+    let mut result = insert(doc, None)?;
+    result["source_font_substitutions"] = json!(source_substitutions);
+    Ok(result)
 }
 
 fn draw(e: &mut Editor, a: &Args) -> Result<(), Error> {
@@ -879,5 +930,109 @@ mod tests {
         let loaded = io::document_from_bytes(bytes).expect("load");
         assert_eq!(loaded.objects, e.document().objects);
         assert_eq!(loaded.flatten().data(), e.document().flatten().data());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn document_commands_report_substitutions_before_rasterization() {
+        struct Scratch(PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        let root = Scratch(std::env::temp_dir().join(format!(
+            "jiffshot-font-control-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        )));
+        std::fs::create_dir(&root.0).unwrap();
+        let requested = "Jiffshot deliberately unavailable control face 86c8bc";
+        let other = "Jiffshot deliberately unavailable second face 6f2a0a";
+        let created = dispatch("doc.new", &args(json!({"width":120,"height":80}))).unwrap();
+        let id = created["id"].as_str().unwrap();
+        assert_eq!(created["font_substitutions"], json!([]));
+
+        let first = dispatch(
+            "doc.add",
+            &args(json!({
+                "id":id,
+                "kind":{"type":"Text","rect":{"x0":2,"y0":2,"x1":110,"y1":35},"text":"First"},
+                "style":{"font":requested,"italic":true}
+            })),
+        )
+        .unwrap();
+        let first_id = first["object_id"].as_u64().unwrap();
+        let first_warning = serde_json::to_value(
+            jiffshot_doc::text::font_substitution(requested, false, true).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first_warning["reason"], "family");
+        assert_eq!(first_warning["replacement"]["family"], "Helvetica Neue");
+        assert_eq!(first["font_substitutions"], json!([first_warning]));
+        let second = dispatch(
+            "doc.add",
+            &args(json!({
+                "id":id,
+                "kind":{"type":"Text","rect":{"x0":2,"y0":40,"x1":110,"y1":75},"text":"Second"},
+                "style":{"font":other,"bold":true}
+            })),
+        )
+        .unwrap();
+        let second_warning = serde_json::to_value(
+            jiffshot_doc::text::font_substitution(other, true, false).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(second_warning["reason"], "family");
+        assert_eq!(second_warning["replacement"]["family"], "Helvetica Neue");
+        assert_eq!(
+            second["font_substitutions"],
+            json!([first_warning, second_warning])
+        );
+
+        let saved_path = root.0.join("edited.jsd");
+        let export_path = root.0.join("export.png");
+        for (command, path) in [("doc.save", &saved_path), ("doc.export", &export_path)] {
+            let result = dispatch(command, &args(json!({"id":id,"out":path}))).unwrap();
+            assert_eq!(
+                result["font_substitutions"],
+                json!([first_warning, second_warning])
+            );
+        }
+        let loaded = io::load_document(&saved_path).unwrap();
+        assert_eq!(loaded.objects[0].style.font, requested);
+        assert_eq!(loaded.objects[1].style.font, other);
+        assert!(export_path.exists());
+
+        let combined = dispatch("doc.combine", &args(json!({"document_ids":[id]}))).unwrap();
+        let combined_id = combined["id"].as_str().unwrap();
+        assert_eq!(combined["font_substitutions"], json!([]));
+        assert_eq!(
+            combined["source_font_substitutions"],
+            json!([
+                {"id":id,"font_substitutions":[first_warning, second_warning]}
+            ])
+        );
+
+        dispatch(
+            "doc.select",
+            &args(json!({"id":id,"object_ids":[first_id]})),
+        )
+        .unwrap();
+        let flattened = dispatch("doc.action", &args(json!({"id":id,"name":"flatten"}))).unwrap();
+        assert_eq!(
+            flattened["flattened_font_substitutions"],
+            json!([first_warning])
+        );
+        assert_eq!(flattened["font_substitutions"], json!([second_warning]));
+        let opened = dispatch("doc.open", &args(json!({"path":saved_path}))).unwrap();
+        let opened_id = opened["id"].as_str().unwrap();
+        assert_eq!(
+            opened["font_substitutions"],
+            json!([first_warning, second_warning])
+        );
+        for id in [id, combined_id, opened_id] {
+            dispatch("doc.close", &args(json!({"id":id}))).unwrap();
+        }
     }
 }

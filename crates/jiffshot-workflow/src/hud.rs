@@ -8,6 +8,11 @@
 //! through [`answer`]; a toolbar's (the recording toolbar, [`run_toolbar`])
 //! send named actions through [`act`].
 
+use crate::sys::{
+    DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, PostQuitMessage, RegisterHotKey,
+    TranslateMessage, UnregisterHotKey, MOD_NOREPEAT, MSG, PM_REMOVE, QS_ALLINPUT, VK_ESCAPE,
+    WM_HOTKEY, WM_QUIT,
+};
 use jiffshot_capture::Rect;
 use serde::Serialize;
 use serde_json::Value;
@@ -15,13 +20,6 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, VK_ESCAPE,
-};
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, PostQuitMessage, TranslateMessage,
-    MSG, PM_REMOVE, QS_ALLINPUT, WM_HOTKEY, WM_QUIT,
-};
 
 /// A control panel next to `area` (desktop pixels).
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -55,6 +53,18 @@ static HUD: Mutex<Hud> = Mutex::new(Hud {
     borders: Vec::new(),
 });
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(target_os = "macos")]
+pub(crate) fn recording_frames_for_selftest() -> Result<Option<u64>, String> {
+    let hud = HUD
+        .lock()
+        .map_err(|_| "the capture HUD state is poisoned".to_owned())?;
+    Ok(hud
+        .panels
+        .iter()
+        .filter_map(|panel| panel.toolbar.as_ref()?.get("frames")?.as_u64())
+        .max())
+}
 
 fn xywh(r: Rect) -> [i32; 4] {
     [r.x, r.y, r.width, r.height]
@@ -188,8 +198,39 @@ pub fn run_panel_with_keys(
     buttons: &[&str],
     keys: &[Key],
     tick_ms: u32,
-    mut tick: impl FnMut() -> Option<String>,
+    tick: impl FnMut() -> Option<String>,
 ) -> Option<usize> {
+    match run_panel_with_keys_result(area, status, buttons, keys, tick_ms, tick) {
+        PanelResult::Answer(answer) => answer,
+        PanelResult::Quit => None,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PanelResult {
+    Answer(Option<usize>),
+    Quit,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn run_panel_until_quit(
+    area: Rect,
+    status: &str,
+    buttons: &[&str],
+    tick_ms: u32,
+    tick: impl FnMut() -> Option<String>,
+) -> PanelResult {
+    run_panel_with_keys_result(area, status, buttons, &[], tick_ms, tick)
+}
+
+fn run_panel_with_keys_result(
+    area: Rect,
+    status: &str,
+    buttons: &[&str],
+    keys: &[Key],
+    tick_ms: u32,
+    mut tick: impl FnMut() -> Option<String>,
+) -> PanelResult {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let depth = open(id);
     change(|hud| {
@@ -227,10 +268,10 @@ pub fn run_panel_with_keys(
                 .find(|p| p.id == id)
                 .and_then(|p| p.answer)
         }) {
-            break result;
+            break PanelResult::Answer(result);
         }
         if quit {
-            break None;
+            break PanelResult::Quit;
         }
         let now = Instant::now();
         if now >= next {
@@ -310,7 +351,8 @@ fn close(id: u64) {
 /// toolbar. `keys` send actions too, from anywhere (`MOD_*`, virtual key,
 /// action); Esc sends "cancel". `state` (JSON, drawn by the app) is taken
 /// again every `tick_ms` and after each action; a call of [`finish_panel`]
-/// from it ends the toolbar with "stop". Returns the action that ended it.
+/// from it ends the toolbar with "stop". On macOS, engine shutdown also ends
+/// it with "stop" so the recording can be finalized. Returns the ending action.
 pub fn run_toolbar(
     area: Rect,
     keys: &[(u32, u16, &'static str)],
@@ -358,6 +400,10 @@ pub fn run_toolbar(
     let mut next = Instant::now() + every;
     let mut quit = false;
     let ended = 'run: loop {
+        #[cfg(target_os = "macos")]
+        if quit {
+            break "stop".to_owned();
+        }
         let actions = OPEN.with(|open| {
             open.borrow_mut()
                 .iter_mut()
@@ -381,6 +427,7 @@ pub fn run_toolbar(
         }) {
             break "stop".to_owned();
         }
+        #[cfg(not(target_os = "macos"))]
         if quit {
             break "cancel".to_owned();
         }
@@ -457,6 +504,7 @@ mod tests {
     fn a_toolbar_handles_actions_until_one_ends_it() {
         let mut seen = Vec::new();
         let mut ticks = 0;
+        let mut toolbar_id = None;
         let ended = run_toolbar(
             Rect::new(0, 0, 100, 100),
             &[],
@@ -466,6 +514,7 @@ mod tests {
                 // The app's buttons, as they would arrive.
                 if ticks == 2 {
                     let id = OPEN.with(|o| o.borrow().last().map(|p| p.id)).unwrap();
+                    toolbar_id = Some(id);
                     push_action(id, "toggle:mic".into());
                     push_action(id, "stop".into());
                     push_action(id, "never".into());
@@ -479,13 +528,58 @@ mod tests {
         );
         assert_eq!(ended, "stop");
         assert_eq!(seen, ["toggle:mic", "stop"]);
-        // (Other tests' panels may be up at the same time.)
+        let id = toolbar_id.expect("the test toolbar was not opened");
         assert!(HUD
             .lock()
             .unwrap()
             .panels
             .iter()
-            .all(|p| p.toolbar.is_none()));
+            .all(|panel| panel.id != id));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_quit_stops_the_toolbar_and_reposts_the_quit() {
+        let mut requested = false;
+        let ended = run_toolbar(
+            Rect::new(0, 0, 100, 100),
+            &[],
+            5,
+            || {
+                if !std::mem::replace(&mut requested, true) {
+                    unsafe { PostQuitMessage(0) };
+                }
+                serde_json::json!({})
+            },
+            |_| false,
+        );
+        assert_eq!(ended, "stop");
+        let mut message: MSG = unsafe { std::mem::zeroed() };
+        assert_ne!(
+            unsafe { PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) },
+            0
+        );
+        assert_eq!(message.message, WM_QUIT);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn panel_distinguishes_cancellation_from_quit() {
+        let cancelled = run_panel_until_quit(Rect::new(0, 0, 100, 100), "Cancel", &[], 5, || {
+            finish_panel(None);
+            unsafe { PostQuitMessage(0) };
+            None
+        });
+        assert_eq!(cancelled, PanelResult::Answer(None));
+
+        let quit = run_panel_until_quit(Rect::new(0, 0, 100, 100), "Quit", &[], 5, || None);
+        assert_eq!(quit, PanelResult::Quit);
+        let mut message: MSG = unsafe { std::mem::zeroed() };
+        assert_ne!(
+            unsafe { PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) },
+            0
+        );
+        assert_eq!(message.message, WM_QUIT);
     }
 
     #[test]

@@ -40,3 +40,18 @@ png.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 tempfile = "3"
 zbus = { version = "5", default-features = false, features = ["async-io"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# Preserve existing development host discovery outside macOS.
+rustolonia = { workspace = true, features = ["dev-host-path"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+jiffshot-capture = { path = "../crates/jiffshot-capture" }
+jiffshot-workflow = { path = "../crates/jiffshot-workflow" }
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
+objc2-core-foundation.workspace = true
+block2.workspace = true
+dispatch2.workspace = true
+libc.workspace = true

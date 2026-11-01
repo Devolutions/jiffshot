@@ -1,13 +1,14 @@
-//! Video with Media Foundation and WASAPI: an MP4 writer (H.264 video, AAC
+//! Windows media backend: Media Foundation and WASAPI: an MP4 writer (H.264 video, AAC
 //! audio), an MP4 reader that decodes to top-down BGRA frames and 16-bit
 //! PCM, and capture of system audio (loopback) or the microphone.
 //!
 //! Times are in 100-nanosecond units ("hns"), as Media Foundation uses.
 
+use super::{AudioBlock, AudioSpec, Result, VideoFrame, VideoSpec, HNS_PER_SECOND};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use windows::core::{GUID, HSTRING};
 use windows::Win32::Media::Audio::{
@@ -21,15 +22,9 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
 
-pub mod post;
-
-pub type Result<T> = std::result::Result<T, String>;
-
 fn e(error: windows::core::Error) -> String {
     format!("{} (0x{:08X})", error.message(), error.code().0 as u32)
 }
-
-pub const HNS_PER_SECOND: i64 = 10_000_000;
 
 /// `CODECAPI_AVEncMPVGOPSize`: frames between keyframes.
 const CODECAPI_AVENC_MPV_GOP_SIZE: GUID = GUID::from_u128(0x95f31b26_95a4_41aa_9303_246a7fc6eef1);
@@ -54,36 +49,6 @@ fn pack(hi: u32, lo: u32) -> u64 {
 
 fn unpack(v: u64) -> (u32, u32) {
     ((v >> 32) as u32, v as u32)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct VideoSpec {
-    /// Even width and height (H.264 needs them).
-    pub width: u32,
-    pub height: u32,
-    pub fps: u32,
-    pub bitrate: u32,
-}
-
-impl VideoSpec {
-    /// A spec for `width` x `height` (rounded down to even) with a bitrate
-    /// that keeps screen text sharp.
-    pub fn for_size(width: u32, height: u32, fps: u32) -> VideoSpec {
-        let (w, h) = (width & !1, height & !1);
-        let bitrate = ((w as u64 * h as u64 * fps as u64) / 6).clamp(1_500_000, 40_000_000) as u32;
-        VideoSpec {
-            width: w,
-            height: h,
-            fps,
-            bitrate,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AudioSpec {
-    pub sample_rate: u32,
-    pub channels: u32,
 }
 
 /// Writes an MP4 file. Frames are top-down BGRA (the fourth byte unused).
@@ -281,15 +246,6 @@ impl Writer {
         // SAFETY: completes the file; the writer is dropped afterwards.
         unsafe { self.writer.Finalize().map_err(e) }
     }
-}
-
-/// A decoded video frame.
-pub struct VideoFrame {
-    pub time: i64,
-    pub width: u32,
-    pub height: u32,
-    /// Top-down BGRA, `width * 4` bytes per row.
-    pub bgra: Vec<u8>,
 }
 
 /// Reads an MP4 (or anything Media Foundation can open).
@@ -567,9 +523,19 @@ impl Reader {
 /// `samples`; dropping the handle stops capture.
 pub struct AudioCapture {
     pub spec: AudioSpec,
-    pub samples: Receiver<Vec<i16>>,
+    pub samples: Receiver<AudioBlock>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+    failure: Arc<Mutex<Option<String>>>,
+}
+
+impl AudioCapture {
+    pub fn failure(&self) -> Option<String> {
+        self.failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
 }
 
 impl Drop for AudioCapture {
@@ -588,10 +554,24 @@ const SUBTYPE_IEEE_FLOAT: GUID = GUID::from_u128(0x00000003_0000_0010_8000_00aa0
 /// Starts capturing what the speakers play (`microphone` false) or the
 /// default microphone, converted to 16-bit stereo at the device rate.
 pub fn capture_audio(microphone: bool) -> Result<AudioCapture> {
+    capture_audio_cancellable(microphone, Arc::new(AtomicBool::new(false)))
+}
+
+/// Starts an audio source unless `cancel` is set, including while its device
+/// is opening. Dropping the returned capture also stops it.
+pub fn capture_audio_cancellable(
+    microphone: bool,
+    cancel: Arc<AtomicBool>,
+) -> Result<AudioCapture> {
+    if cancel.load(Ordering::Acquire) {
+        return Err("audio capture was cancelled".into());
+    }
     let (tx, rx) = mpsc::channel();
     let (ready_tx, ready_rx) = mpsc::channel::<Result<AudioSpec>>();
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
+    let failure = Arc::new(Mutex::new(None));
+    let worker_failure = failure.clone();
     let thread = std::thread::Builder::new()
         .name("audio-capture".into())
         .spawn(move || {
@@ -631,11 +611,21 @@ pub fn capture_audio(microphone: bool) -> Result<AudioCapture> {
                     ));
                 }
                 let capture: IAudioCaptureClient = client.GetService().map_err(e)?;
+                if flag.load(Ordering::Acquire) {
+                    return Ok(());
+                }
                 client.Start().map_err(e)?;
-                let _ = ready_tx.send(Ok(AudioSpec {
-                    sample_rate: rate,
-                    channels: 2,
-                }));
+                if flag.load(Ordering::Acquire)
+                    || ready_tx
+                        .send(Ok(AudioSpec {
+                            sample_rate: rate,
+                            channels: 2,
+                        }))
+                        .is_err()
+                {
+                    let _ = client.Stop();
+                    return Ok(());
+                }
                 while !flag.load(Ordering::Acquire) {
                     std::thread::sleep(Duration::from_millis(10));
                     while capture.GetNextPacketSize().map_err(e)? > 0 {
@@ -659,7 +649,14 @@ pub fn capture_audio(microphone: bool) -> Result<AudioCapture> {
                             }
                         }
                         capture.ReleaseBuffer(frames).map_err(e)?;
-                        if tx.send(out).is_err() {
+                        if tx
+                            .send(AudioBlock {
+                                samples: out,
+                                captured_at: None,
+                            })
+                            .is_err()
+                        {
+                            flag.store(true, Ordering::Release);
                             break;
                         }
                     }
@@ -668,190 +665,17 @@ pub fn capture_audio(microphone: bool) -> Result<AudioCapture> {
                 Ok(())
             };
             if let Err(error) = run() {
+                *worker_failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.clone());
                 let _ = ready_tx.send(Err(error));
             }
         })
         .map_err(|e| e.to_string())?;
-    let spec = ready_rx
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|_| "audio device did not start".to_owned())??;
+    let spec = super::wait_audio_start(&ready_rx, &cancel, &stop, Duration::from_secs(5))?;
     Ok(AudioCapture {
         spec,
         samples: rx,
         stop,
         thread: Some(thread),
+        failure,
     })
-}
-
-/// Silence for `frames` stereo frames.
-pub fn silence(frames: usize) -> Vec<i16> {
-    vec![0; frames * 2]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn writes_and_reads_back_an_mp4() {
-        let dir = std::env::temp_dir().join(format!("jiffshot-media-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.mp4");
-        let spec = VideoSpec::for_size(320, 240, 10);
-        let audio = AudioSpec {
-            sample_rate: 48_000,
-            channels: 2,
-        };
-        let mut w = Writer::create(&path, spec, Some(audio)).unwrap();
-        let step = HNS_PER_SECOND / 10;
-        for i in 0..20i64 {
-            // A bar that moves right, on gray; top half red, bottom half blue.
-            let mut frame = vec![0u8; 320 * 240 * 4];
-            for y in 0..240usize {
-                for x in 0..320usize {
-                    let p = &mut frame[(y * 320 + x) * 4..(y * 320 + x) * 4 + 4];
-                    let bar = (x as i64 / 16) == i;
-                    let c = if bar {
-                        [255, 255, 255, 0]
-                    } else if y < 120 {
-                        [40, 40, 220, 0]
-                    } else {
-                        [220, 60, 40, 0]
-                    };
-                    p.copy_from_slice(&c);
-                }
-            }
-            w.write_frame(&frame, i * step, step).unwrap();
-            let tone: Vec<i16> = (0..4800)
-                .flat_map(|n| {
-                    let v = ((n as f32 / 48_000.0 * 440.0 * std::f32::consts::TAU).sin() * 8000.0)
-                        as i16;
-                    [v, v]
-                })
-                .collect();
-            w.write_audio(&tone, i * step, step).unwrap();
-        }
-        w.finish().unwrap();
-
-        let mut r = Reader::open(&path).unwrap();
-        assert_eq!((r.width, r.height), (320, 240));
-        assert!(
-            (r.duration - 2 * HNS_PER_SECOND).abs() < HNS_PER_SECOND / 5,
-            "duration {}",
-            r.duration
-        );
-        assert_eq!(r.audio, Some(audio));
-        let f = r.frame_at(HNS_PER_SECOND).unwrap().unwrap();
-        // Orientation and colors survive: red on top, blue at the bottom
-        // (BGRA), and the bar of frame 10 at x = 160..176.
-        let px = |x: usize, y: usize| &f.bgra[(y * 320 + x) * 4..(y * 320 + x) * 4 + 3];
-        assert!(
-            px(40, 30)[2] > 150 && px(40, 30)[0] < 100,
-            "top is red: {:?}",
-            px(40, 30)
-        );
-        assert!(
-            px(40, 200)[0] > 150 && px(40, 200)[2] < 100,
-            "bottom is blue: {:?}",
-            px(40, 200)
-        );
-        assert!(
-            px(168, 60).iter().all(|c| *c > 200),
-            "bar at frame 10: {:?}",
-            px(168, 60)
-        );
-        r.select_audio(true).unwrap();
-        r.seek(0).unwrap();
-        let (_, pcm) = r.next_audio().unwrap().unwrap();
-        assert!(pcm.iter().any(|s| s.abs() > 2000), "audio came back");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn rows_stay_aligned_at_sizes_not_a_multiple_of_16() {
-        // A region recording's size is whatever was dragged; the encoder
-        // pads to 16, and the padding must not shear the picture.
-        let dir = std::env::temp_dir().join(format!("jiffshot-media-odd-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("odd.mp4");
-        let spec = VideoSpec::for_size(1430, 718, 10);
-        let (w, h) = (spec.width as usize, spec.height as usize);
-        let mut writer = Writer::create(&path, spec, None).unwrap();
-        // A white column at x = 700..740 on dark gray, every row.
-        let frame: Vec<u8> = (0..w * h)
-            .flat_map(|i| {
-                if (700..740).contains(&(i % w)) {
-                    [255u8; 4]
-                } else {
-                    [40, 40, 40, 0]
-                }
-            })
-            .collect();
-        let step = HNS_PER_SECOND / 10;
-        for i in 0..10i64 {
-            writer.write_frame(&frame, i * step, step).unwrap();
-        }
-        writer.finish().unwrap();
-
-        let mut r = Reader::open(&path).unwrap();
-        assert_eq!((r.width as usize, r.height as usize), (w, h));
-        let f = r.frame_at(HNS_PER_SECOND / 2).unwrap().unwrap();
-        for y in [5, h / 2, h - 5] {
-            let px = |x: usize| f.bgra[(y * w + x) * 4];
-            assert!(
-                px(720) > 200 && px(650) < 90 && px(790) < 90,
-                "column at row {y}: {} {} {}",
-                px(650),
-                px(720),
-                px(790)
-            );
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
-#[cfg(test)]
-mod probe {
-    /// `JIFFSHOT_PROBE=<file.mp4> cargo test probe -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn probe_file() {
-        let path = std::env::var("JIFFSHOT_PROBE").unwrap();
-        let mut r = super::Reader::open(std::path::Path::new(&path)).unwrap();
-        println!(
-            "{}x{} {:.2}s fps {} audio {:?}",
-            r.width,
-            r.height,
-            r.duration as f64 / 1e7,
-            r.fps,
-            r.audio
-        );
-        let mut n = 0;
-        loop {
-            match r.next_video() {
-                Ok(Some(f)) => {
-                    n += 1;
-                    if n % 20 == 0 {
-                        println!("  frame {n} at {}", f.time);
-                    }
-                }
-                Ok(None) => {
-                    println!("end after {n} frames");
-                    break;
-                }
-                Err(err) => {
-                    println!("error after {n} frames: {err}");
-                    break;
-                }
-            }
-        }
-        for t in [0i64, 1, 5_000_000, 25_000_000] {
-            let mut r = super::Reader::open(std::path::Path::new(&path)).unwrap();
-            println!("seek {t}: {:?}", r.seek(t));
-            match r.next_video() {
-                Ok(Some(f)) => println!("  frame at {}", f.time),
-                other => println!("  {:?}", other.map(|f| f.map(|f| f.time))),
-            }
-        }
-    }
 }

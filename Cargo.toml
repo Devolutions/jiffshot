@@ -8,9 +8,9 @@ edition = "2021"
 publish = false
 
 [workspace.dependencies]
-# Rustolonia's release: its prebuilt host is downloaded and checked against
-# the checksums pinned at the tag.
-rustolonia = { git = "https://github.com/Devolutions/rustolonia", tag = "v12.1.2" }
+# The pinned crates verify their default downloaded host. macOS requires a
+# separately verified compatible host staged before building.
+rustolonia = { git = "https://github.com/Devolutions/rustolonia", tag = "v12.1.2", default-features = false }
 rustolonia-sys = { git = "https://github.com/Devolutions/rustolonia", tag = "v12.1.2", default-features = false }
 ab_glyph = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif", "webp"] }
@@ -63,6 +63,22 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# macOS: AppKit and the capture, media and vision frameworks.
+libc = "0.2"
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-core-media = "0.3"
+objc2-core-video = "0.3"
+objc2-av-foundation = "0.3"
+objc2-screen-capture-kit = "0.3"
+objc2-vision = "0.3"
+objc2-uniform-type-identifiers = "0.3"
 
 [profile.release]
 debug = "line-tables-only"

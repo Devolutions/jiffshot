@@ -33,7 +33,10 @@ struct Toast {
     dark: Signal<bool>,
     /// Bumped for each notice, so that an older one's timer leaves it up.
     shown: u64,
+    #[cfg(windows)]
     prepared: bool,
+    #[cfg(target_os = "macos")]
+    pending: bool,
 }
 
 thread_local! {
@@ -64,11 +67,11 @@ fn show(scope: &AppScope, title: String, text: String, problem: bool) -> Result<
         let toast = build(scope)?;
         TOAST.with(|t| *t.borrow_mut() = Some(toast));
     }
-    let Some((window, signals, shown, prepare)) = TOAST.with(|t| {
+    let Some((window, signals, shown)) = TOAST.with(|t| {
         t.borrow_mut().as_mut().map(|toast| {
             toast.shown += 1;
             let signals = (toast.title, toast.text, toast.problem, toast.dark);
-            (toast.window.clone(), signals, toast.shown, !std::mem::replace(&mut toast.prepared, true))
+            (toast.window.clone(), signals, toast.shown)
         })
     }) else {
         return Ok(());
@@ -81,35 +84,112 @@ fn show(scope: &AppScope, title: String, text: String, problem: bool) -> Result<
     text_signal.set_if_changed(text);
     problem_signal.set_if_changed(problem);
     if !window.get_is_visible()? {
-        // Shown off screen first: its size is only known once it is shown.
-        window.set_position((-32000, -32000))?;
-        window.show()?;
+        #[cfg(windows)]
+        {
+            // Shown off screen first: its size is only known once it is shown.
+            window.set_position((-32000, -32000))?;
+            window.show()?;
+            let prepare = TOAST.with(|t| t.borrow_mut().as_mut().is_some_and(|toast| !std::mem::replace(&mut toast.prepared, true)));
+            if prepare {
+                parts::make_tool_window(scope, &window);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            TOAST.with(|t| {
+                if let Some(toast) = t.borrow_mut().as_mut() {
+                    toast.pending = true;
+                }
+            });
+            let protected = match super::hud::native::show_protected(scope, &window, false) {
+                Ok(protected) => protected,
+                Err(error) => {
+                    toast_failed(format!("could not protect the notification: {error}"));
+                    return Ok(());
+                }
+            };
+            let position_scope = scope.clone();
+            let positioned = window.clone();
+            let ready_scope = scope.clone();
+            if let Err(error) = super::hud::native::reveal_when_excluded(
+                scope, &window, protected, false,
+                move || place(&position_scope, &positioned),
+                move || {
+                    let shown = TOAST.with(|t| t.borrow_mut().as_mut().map(|toast| {
+                        toast.pending = false;
+                        toast.shown
+                    }));
+                    if let Some(shown) = shown {
+                        dismiss_after(&ready_scope, shown);
+                    }
+                    Ok(())
+                },
+                toast_failed,
+            ) {
+                if let Err(hide_error) = window.hide() {
+                    eprintln!("toast: could not hide a failed notification: {hide_error:?}");
+                }
+                toast_failed(format!("could not schedule the notification: {error}"));
+            }
+            return Ok(());
+        }
     }
-    if prepare {
-        parts::make_tool_window(scope, &window);
+    #[cfg(target_os = "macos")]
+    if TOAST.with(|t| t.borrow().as_ref().is_some_and(|toast| toast.pending)) {
+        return Ok(());
     }
-    place(scope, &window);
+    if let Err(error) = place(scope, &window) {
+        eprintln!("toast: could not place the notification: {error}");
+    }
+    dismiss_after(scope, shown);
+    Ok(())
+}
+
+fn dismiss_after(scope: &AppScope, shown: u64) {
     parts::after(scope, SHOWN_FOR, move || {
         if TOAST.with(|t| t.borrow().as_ref().is_some_and(|toast| toast.shown == shown)) {
             hide();
         }
     });
-    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn toast_failed(message: String) {
+    TOAST.with(|t| {
+        if let Some(toast) = t.borrow_mut().as_mut() {
+            toast.pending = false;
+        }
+    });
+    eprintln!("toast: {message}");
 }
 
 fn hide() {
-    if let Some(window) = TOAST.with(|t| t.borrow().as_ref().map(|toast| toast.window.clone())) {
+    if let Some(window) = TOAST.with(|t| t.borrow_mut().as_mut().map(|toast| {
+        #[cfg(target_os = "macos")]
+        { toast.pending = false; }
+        toast.window.clone()
+    })) {
         let _ = window.hide();
     }
 }
 
 /// The bottom-right corner of the primary screen's work area, 16 px in.
-fn place(scope: &AppScope, window: &Window) {
-    let Some(hwnd) = parts::hwnd(scope, window) else { return };
-    let Some((width, height)) = parts::outer_size(hwnd) else { return };
+fn place(scope: &AppScope, window: &Window) -> std::result::Result<(), String> {
+    let hwnd = parts::hwnd(scope, window).ok_or("the native notification window is unavailable")?;
+    let (width, height) = parts::outer_size(hwnd).ok_or("the notification window has no size")?;
     let area = parts::primary_work_area();
+    if width <= 0 || height <= 0 || area.is_empty() {
+        return Err("the notification window or primary display has invalid bounds".into());
+    }
     let margin = (16.0 * parts::scale(hwnd)).round() as i32;
-    parts::move_topmost(hwnd, area.right - width - margin, area.bottom - height - margin);
+    #[cfg(windows)]
+    {
+        parts::move_topmost(hwnd, area.right() - width - margin, area.bottom() - height - margin);
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    super::hud::native::position(scope, window, area.right() - width - margin, area.bottom() - height - margin)
+        .map_err(|error| error.to_string())
 }
 
 fn build(scope: &AppScope) -> Result<Toast> {
@@ -132,9 +212,15 @@ fn build(scope: &AppScope) -> Result<Toast> {
         .on_tapped(|_| hide())
         // A longer notice replacing a shorter one keeps the corner.
         .on_size_changed(move |_| {
-            if let Some(window) = TOAST.with(|t| t.borrow().as_ref().map(|toast| toast.window.clone())) {
+            if let Some(window) = TOAST.with(|t| t.borrow().as_ref().and_then(|toast| {
+                #[cfg(target_os = "macos")]
+                if toast.pending { return None; }
+                Some(toast.window.clone())
+            })) {
                 if window.get_is_visible().unwrap_or(false) {
-                    place(&resize_scope, &window);
+                    if let Err(error) = place(&resize_scope, &window) {
+                        eprintln!("toast: could not place the notification: {error}");
+                    }
                 }
             }
         })
@@ -175,5 +261,11 @@ fn build(scope: &AppScope) -> Result<Toast> {
         .build(scope)?;
     scope.set_transparent(&window, true)?;
     scope.set_topmost(&window, true)?;
-    Ok(Toast { window, title, text, problem, dark, shown: 0, prepared: false })
+    Ok(Toast {
+        window, title, text, problem, dark, shown: 0,
+        #[cfg(windows)]
+        prepared: false,
+        #[cfg(target_os = "macos")]
+        pending: false,
+    })
 }

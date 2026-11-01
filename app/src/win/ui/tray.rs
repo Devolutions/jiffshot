@@ -4,6 +4,7 @@
 //! opens the Capture window.
 
 use crate::vm::{TrayBinding, TrayViewModel, TrayViewModelSink};
+use jiffshot_workflow::StartupNotice;
 use rustolonia::{AppScope, Effect, Result, ShellTray, TrayEvent, TrayMenuItem};
 
 // Menu item ids. Recent captures are RECENT + their index.
@@ -38,24 +39,43 @@ const PREFERENCES: u32 = 28;
 const EXIT: u32 = 29;
 const RECENT: u32 = 100;
 
+fn schedule_header(paused: bool) -> &'static str {
+    if paused {
+        "Scheduled capture (_daily) — paused; review Time delay"
+    } else {
+        "Scheduled capture (_daily)"
+    }
+}
+
+fn startup_header(notice: StartupNotice) -> &'static str {
+    if cfg!(windows) {
+        return "Run when Windows _starts";
+    }
+    match notice {
+        StartupNotice::None => "Open at _login",
+        StartupNotice::NeedsApproval => "Open at _login — needs approval",
+        StartupNotice::Legacy => "Open at _login — review older login item",
+        StartupNotice::StatusUnknown => "Open at _login — status unknown",
+        StartupNotice::Unavailable => "Open at _login — unavailable",
+    }
+}
+
 /// The switches: menu id, header, and the sink value it shows.
 fn switches(sink: &TrayViewModelSink) -> [(u32, &'static str, rustolonia::Signal<bool>); 7] {
     [
         (TIME_LAPSE, "_Time-lapse", sink.time_lapse),
-        (SCHEDULE, "Scheduled capture (_daily)", sink.schedule),
+        (SCHEDULE, schedule_header(sink.schedule_paused.get_untracked()), sink.schedule),
         (COPY_TO_CLIPBOARD, "Copy to clip_board", sink.copy_to_clipboard),
         (OPEN_IN_EDITOR, "Open in the edit_or", sink.open_in_editor),
         (INCLUDE_CURSOR, "Include the c_ursor", sink.include_cursor),
         (SHOW_WIDGET, "Show the Capture Wid_get", sink.show_widget),
-        (RUN_AT_STARTUP, "Run when Windows _starts", sink.run_at_startup),
+        (RUN_AT_STARTUP, startup_header(sink.startup_notice.get_untracked()), sink.run_at_startup),
     ]
 }
 
 /// A recent capture's menu header: its file name.
 fn recent_header(uri: &str) -> String {
-    let path = uri.strip_prefix("file:///").unwrap_or(uri);
-    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    crate::ui::percent_decode(name)
+    crate::ui::recent_file_name(uri)
 }
 
 fn menu(sink: &TrayViewModelSink) -> Vec<TrayMenuItem> {
@@ -183,6 +203,11 @@ fn clicked(binding: &TrayBinding, event: TrayEvent) {
     });
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn select_recent_for_selftest(binding: &TrayBinding, index: u32) {
+    clicked(binding, TrayEvent::MenuItem(RECENT + index));
+}
+
 /// Shows the tray icon for `model`; it stays until the application exits.
 pub fn mount(scope: &AppScope, model: impl TrayViewModel) -> Result<TrayBinding> {
     let binding = TrayBinding::new(model)?;
@@ -192,18 +217,47 @@ pub fn mount(scope: &AppScope, model: impl TrayViewModel) -> Result<TrayBinding>
     let tray: ShellTray = scope.create_tray(move |event| {
         clicked(handler_binding.get(), event);
         Ok(())
-    })?;
-    tray.set_icon(&crate::ui::icon_file())?;
-    tray.set_tool_tip("Jiffshot")?;
+    }).inspect_err(|error| eprintln!("could not create the tray icon: {error}"))?;
+    tray.set_icon(&crate::ui::icon_file()).inspect_err(|error| eprintln!("could not set the tray image: {error}"))?;
+    tray.set_tool_tip("Jiffshot").inspect_err(|error| eprintln!("could not set the tray tooltip: {error}"))?;
     let sink = binding.sink;
     // Every value the menu shows: a change rebuilds it.
     Effect::new(move || {
         sink.recent_captures.with(|_| ());
         sink.can_repeat.get();
+        sink.schedule_paused.get();
+        sink.startup_notice.get();
         for (_, _, signal) in switches(&sink) {
             signal.get();
         }
-        tray.set_menu(&menu(&sink))
+        tray.set_menu(&menu(&sink)).inspect_err(|error| eprintln!("could not update the tray menu: {error}"))
     })?;
     Ok(binding)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schedule_header_distinguishes_paused_from_active() {
+        assert!(!schedule_header(false).contains("paused"));
+        assert!(schedule_header(true).contains("paused"));
+        assert!(schedule_header(true).contains("Time delay"));
+    }
+
+    #[test]
+    fn recent_header_preserves_encoded_filename_characters() {
+        assert_eq!(recent_header("file:///tmp/caf%C3%A9%20%5C%20100%25.png"), "café \\ 100%.png");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn startup_header_explains_non_running_and_legacy_items() {
+        assert!(startup_header(StartupNotice::NeedsApproval).contains("needs approval"));
+        assert!(startup_header(StartupNotice::Legacy).contains("older login item"));
+        assert!(startup_header(StartupNotice::StatusUnknown).contains("status unknown"));
+        assert!(startup_header(StartupNotice::Unavailable).contains("unavailable"));
+        assert_eq!(startup_header(StartupNotice::None), "Open at _login");
+    }
 }

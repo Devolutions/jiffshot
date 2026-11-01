@@ -1,4 +1,4 @@
-//! Tag input shared by the Windows and Linux capture libraries.
+//! Tag input shared by the Windows, macOS and Linux capture libraries.
 
 pub(crate) fn parse_tags(text: &str) -> Vec<String> {
     let mut tags: Vec<String> = Vec::new();

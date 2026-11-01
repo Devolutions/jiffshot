@@ -2,10 +2,11 @@
 //! pointer, rings where it clicks, the webcam in a corner, a microphone
 //! noise gate and the mix of system audio with the microphone.
 
+use crate::sys::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 use jiffshot_capture::Frame;
+#[cfg(any(windows, test))]
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 
 /// Blends `color` (BGR) at `alpha` (0..1) into a pixel.
 fn blend(px: &mut [u8], color: [u8; 3], alpha: f32) {
@@ -67,6 +68,10 @@ impl Clicks {
                 GetAsyncKeyState(VK_RBUTTON as i32) as u16 & 0x8000 != 0,
             )
         };
+        self.update_buttons(at, left, right);
+    }
+
+    pub(crate) fn update_buttons(&mut self, at: (i32, i32), left: bool, right: bool) {
         if left && !self.down.0 {
             self.rings.push((at, false, Instant::now()));
         }
@@ -232,12 +237,19 @@ impl NoiseGate {
 /// that falls behind (loopback sends nothing during silence) is padded
 /// with silence.
 #[derive(Default)]
+#[cfg(any(windows, test))]
 pub struct Mixer {
     a: VecDeque<i16>,
     b: VecDeque<i16>,
 }
 
+#[cfg(any(windows, test))]
 impl Mixer {
+    pub fn clear(&mut self) {
+        self.a.clear();
+        self.b.clear();
+    }
+
     pub fn push_a(&mut self, pcm: &[i16]) {
         self.a.extend(pcm);
     }
@@ -269,6 +281,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn click_rings_are_created_once_per_button_press() {
+        let mut clicks = Clicks::default();
+        clicks.update_buttons((10, 20), true, false);
+        clicks.update_buttons((11, 20), true, false);
+        assert_eq!(clicks.rings.len(), 1);
+        assert_eq!((clicks.rings[0].0, clicks.rings[0].1), ((10, 20), false));
+        clicks.update_buttons((12, 21), false, true);
+        clicks.update_buttons((13, 21), true, true);
+        assert_eq!(clicks.rings.len(), 3);
+        assert_eq!((clicks.rings[1].0, clicks.rings[1].1), ((12, 21), true));
+        assert_eq!((clicks.rings[2].0, clicks.rings[2].1), ((13, 21), false));
+    }
+
+    #[test]
     fn mixer_pads_the_silent_stream() {
         let mut m = Mixer::default();
         m.push_a(&[100; 2000]);
@@ -279,6 +305,17 @@ mod tests {
         m.push_a(&[20_000; 4]);
         m.push_b(&[20_000; 4]);
         assert_eq!(m.take(100), vec![i16::MAX; 4], "clips instead of wrapping");
+    }
+
+    #[test]
+    fn clearing_the_mixer_discards_unmatched_pre_pause_samples() {
+        let mut mixer = Mixer::default();
+        mixer.push_a(&[100; 4]);
+        assert!(mixer.take(100).is_empty());
+        mixer.clear();
+        mixer.push_a(&[3; 4]);
+        mixer.push_b(&[4; 4]);
+        assert_eq!(mixer.take(100), vec![7; 4]);
     }
 
     #[test]

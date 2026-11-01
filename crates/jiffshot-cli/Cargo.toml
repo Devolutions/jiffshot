@@ -9,7 +9,9 @@ publish.workspace = true
 name = "jiffshot-cli"
 path = "src/main.rs"
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 serde_json.workspace = true
 jiffshot-control = { path = "../jiffshot-control" }
+
+[target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true

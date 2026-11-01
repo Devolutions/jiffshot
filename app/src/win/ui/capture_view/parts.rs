@@ -14,8 +14,11 @@ use serde_json::Value;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{HWND, RECT};
+#[cfg(windows)]
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+#[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, SystemParametersInfoW, GWL_EXSTYLE, HWND_TOPMOST, SM_CXSCREEN,
     GWL_STYLE, SPI_GETWORKAREA, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
@@ -23,10 +26,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 /// The icon font of the glyphs on buttons.
-pub const GLYPHS: &str = "Segoe Fluent Icons, Segoe MDL2 Assets";
-
-/// Avalonia's `KeyModifiers.Control`.
-pub const CTRL: i32 = 2;
+pub const GLYPHS: &str = super::super::icons::FONT;
 
 /// Avalonia's `SizeToContent.WidthAndHeight`.
 pub const SIZE_TO_CONTENT: i32 = 3;
@@ -314,15 +314,20 @@ fn pick_folder(scope: &AppScope, owner: NodeRef<Window>, title: &str, target: &T
 // ---- Win32 ------------------------------------------------------------------
 
 /// The window's handle, once it has been shown.
-pub fn hwnd(scope: &AppScope, window: &Window) -> Option<HWND> {
-    scope.platform_handle(window).ok().filter(|&handle| handle != 0).map(|handle| handle as HWND)
+pub fn hwnd(scope: &AppScope, window: &Window) -> Option<isize> {
+    let handle = scope.platform_handle(window).ok().filter(|&handle| handle != 0)?;
+    #[cfg(target_os = "macos")]
+    crate::mac_window::window(handle)?;
+    Some(handle)
 }
 
 /// Never activated by a click, not in Alt+Tab, and left out of screen
 /// captures (unless `JIFFSHOT_HUD_CAPTURABLE` is set, to check it on
 /// screen). Call once the window has been shown.
+#[cfg(windows)]
 pub fn make_tool_window(scope: &AppScope, window: &Window) {
     let Some(hwnd) = hwnd(scope, window) else { return };
+    let hwnd = hwnd as HWND;
     // SAFETY: plain Win32 calls on our own window.
     unsafe {
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) | (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) as isize;
@@ -335,7 +340,9 @@ pub fn make_tool_window(scope: &AppScope, window: &Window) {
 
 /// Makes a borderless window a popup, which Windows lets be smaller than
 /// the minimum size of a top-level window (about 38 px high at 100%).
-pub fn make_popup(hwnd: HWND) {
+#[cfg(windows)]
+pub fn make_popup(hwnd: isize) {
+    let hwnd = hwnd as HWND;
     // SAFETY: plain Win32 calls on our own window.
     unsafe {
         let style = (GetWindowLongPtrW(hwnd, GWL_STYLE) & !((WS_CAPTION | WS_THICKFRAME) as isize)) | WS_POPUP as isize;
@@ -344,46 +351,83 @@ pub fn make_popup(hwnd: HWND) {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub fn make_popup(handle: isize) {
+    if let Some(window) = crate::mac_window::window(handle) {
+        window.setMinSize(objc2_foundation::NSSize::new(0.0, 0.0));
+    }
+}
+
 /// The window's outer size in physical pixels.
-pub fn outer_size(hwnd: HWND) -> Option<(i32, i32)> {
+#[cfg(windows)]
+pub fn outer_size(hwnd: isize) -> Option<(i32, i32)> {
     let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     // SAFETY: `rect` is a valid out pointer.
-    let ok = unsafe { GetWindowRect(hwnd, &mut rect) } != 0;
+    let ok = unsafe { GetWindowRect(hwnd as HWND, &mut rect) } != 0;
     ok.then(|| (rect.right - rect.left, rect.bottom - rect.top))
 }
 
+#[cfg(target_os = "macos")]
+pub fn outer_size(handle: isize) -> Option<(i32, i32)> {
+    let frame = crate::mac_window::window(handle)?.frame();
+    let scale = jiffshot_capture::screen::scale_factor();
+    Some(((frame.size.width * scale).round() as i32, (frame.size.height * scale).round() as i32))
+}
+
 /// The primary screen's work area (without the taskbar), in physical pixels.
-pub fn primary_work_area() -> RECT {
+#[cfg(windows)]
+pub fn primary_work_area() -> jiffshot_capture::Rect {
     let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     // SAFETY: SPI_GETWORKAREA writes one RECT.
     unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, (&mut rect as *mut RECT).cast(), 0) };
-    rect
+    jiffshot_capture::Rect::from_ltrb(rect.left, rect.top, rect.right, rect.bottom)
+}
+
+#[cfg(target_os = "macos")]
+pub fn primary_work_area() -> jiffshot_capture::Rect {
+    jiffshot_capture::screen::monitors().into_iter().find(|monitor| monitor.primary).map(|monitor| monitor.work).unwrap_or_default()
 }
 
 /// The primary screen's width in physical pixels (it starts at x = 0).
+#[cfg(windows)]
 pub fn primary_screen_width() -> i32 {
     // SAFETY: a plain Win32 query.
     unsafe { GetSystemMetrics(SM_CXSCREEN) }
 }
 
 /// The window's display scale (1 at 96 DPI).
-pub fn scale(hwnd: HWND) -> f64 {
+#[cfg(windows)]
+pub fn scale(hwnd: isize) -> f64 {
     // SAFETY: a plain Win32 query on our own window.
-    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    let dpi = unsafe { GetDpiForWindow(hwnd as HWND) };
     if dpi == 0 { 1.0 } else { f64::from(dpi) / 96.0 }
+}
+
+#[cfg(target_os = "macos")]
+pub fn scale(_handle: isize) -> f64 {
+    jiffshot_capture::screen::scale_factor()
 }
 
 /// Moves the window's top-left corner to (`x`, `y`), topmost, without
 /// activating it.
-pub fn move_topmost(hwnd: HWND, x: i32, y: i32) {
+#[cfg(windows)]
+pub fn move_topmost(hwnd: isize, x: i32, y: i32) {
     // SAFETY: a plain Win32 call on our own window.
-    unsafe { SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE) };
+    unsafe { SetWindowPos(hwnd as HWND, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE) };
 }
 
 /// Sets the native window's title (the taskbar's and Alt+Tab's) without
 /// changing the one Avalonia draws.
-pub fn set_native_title(hwnd: HWND, title: &str) {
+#[cfg(windows)]
+pub fn set_native_title(hwnd: isize, title: &str) {
     let title = jiffshot_capture::wide(title);
     // SAFETY: a NUL-terminated string that outlives the call.
-    unsafe { SetWindowTextW(hwnd, title.as_ptr()) };
+    unsafe { SetWindowTextW(hwnd as HWND, title.as_ptr()) };
+}
+
+#[cfg(target_os = "macos")]
+pub fn set_native_title(handle: isize, title: &str) {
+    if let Some(window) = crate::mac_window::window(handle) {
+        window.setTitle(&objc2_foundation::NSString::from_str(title));
+    }
 }

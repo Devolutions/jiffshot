@@ -12,6 +12,7 @@ mod capture_view;
 pub mod dialogs;
 mod extras;
 mod hud;
+mod icons;
 mod main_window;
 mod overlay;
 mod prefs_window;
@@ -26,6 +27,32 @@ use crate::vm::{
 use rustolonia::{AppScope, Result, Window};
 use std::cell::RefCell;
 use std::path::PathBuf;
+
+pub(crate) fn selftest_failed() -> bool {
+    selftest::failed()
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn check_native_popup_gate() -> std::io::Result<()> {
+    hud::native_popup_macos::check_host_gate()
+}
+
+/// Translates the editor's shortcut vocabulary to the platform's command key.
+pub(crate) fn shortcut(text: &str) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        text.replace("Ctrl+Y", "Cmd+Shift+Z").replace("Ctrl+", "Cmd+")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        text.to_owned()
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) const COMMAND_MODIFIER: i32 = rustolonia::key_modifiers::META;
+#[cfg(not(target_os = "macos"))]
+pub(crate) const COMMAND_MODIFIER: i32 = rustolonia::key_modifiers::CONTROL;
 
 thread_local! {
     static MAIN: RefCell<Option<MainBinding>> = const { RefCell::new(None) };
@@ -45,9 +72,14 @@ fn scope() -> Option<AppScope> {
 }
 
 /// The editor window's native handle (0 until first shown).
-fn main_window_handle() -> Option<isize> {
+pub(crate) fn main_window_handle() -> Option<isize> {
     let (scope, window) = MAIN_WINDOW.with(|m| m.borrow().clone())?;
     scope.platform_handle(&window).ok().filter(|h| *h != 0)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn forget_native_window(handle: isize) {
+    hud::native::forget_cloak(handle);
 }
 
 /// The editor canvas, once the editor window is built. On the UI thread.
@@ -92,23 +124,17 @@ pub fn icon_file() -> String {
     .clone()
 }
 
-/// Decodes `%XX` escapes (file URIs).
-pub fn percent_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() + 0 && i + 2 <= bytes.len() - 1 + 0 {
-            if let Ok(byte) = u8::from_str_radix(&text[i + 1..i + 3], 16) {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
+/// The display name for a recent file URI or plain path.
+pub(crate) fn recent_file_name(uri: &str) -> String {
+    if uri.starts_with("file:") {
+        let name = uri.rsplit('/').next().unwrap_or(uri);
+        match crate::app::decode_uri_path(name) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(_) => name.to_owned(),
         }
-        out.push(bytes[i]);
-        i += 1;
+    } else {
+        std::path::Path::new(uri).file_name().unwrap_or_else(|| std::ffi::OsStr::new(uri)).to_string_lossy().into_owned()
     }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Mounts the editor window, shown or hidden. It is the application's main
@@ -153,16 +179,54 @@ pub fn mount_tray(scope: &AppScope, model: impl TrayViewModel) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn selftest_before_native_termination() -> std::result::Result<(), String> {
+    selftest::before_native_termination()
+}
+
 /// Detaches every view model (the editor saves its work), once the
 /// application has stopped running, however it stopped.
 pub fn detach_all() {
+    #[cfg(target_os = "macos")]
+    // The editor's final autosave can refresh the tray after the runtime stops.
+    if let Some(tray) = TRAY.with(|t| t.borrow_mut().take()) {
+        tray.model.run(|m| m.detach());
+    }
     if let Some(main) = MAIN.with(|m| m.borrow_mut().take()) {
         main.model.run(|m| m.detach());
     }
     if let Some(capture) = CAPTURE.with(|c| c.borrow_mut().take()) {
         capture.model.run(|m| m.detach());
     }
+    #[cfg(not(target_os = "macos"))]
     if let Some(tray) = TRAY.with(|t| t.borrow_mut().take()) {
         tray.model.run(|m| m.detach());
     }
+    #[cfg(target_os = "macos")]
+    {
+        hud::native_popup_macos::after_run();
+        selftest::after_run();
+    }
+}
+
+/// Stops native popup protection before the application's platform is disposed.
+pub(crate) fn shutdown(scope: &AppScope) -> std::result::Result<(), String> {
+    #[cfg(target_os = "macos")]
+    hud::native_popup_macos::prepare_shutdown(scope).map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    if let Err(error) = crate::termination_macos::uninstall() {
+        hud::native_popup_macos::cancel_shutdown();
+        return Err(error.to_string());
+    }
+    if let Err(error) = scope.shutdown() {
+        #[cfg(target_os = "macos")]
+        {
+            hud::native_popup_macos::cancel_shutdown();
+            if let Err(restore) = crate::termination_macos::install(scope) {
+                return Err(format!("{error}; could not restore macOS termination coordination: {restore}"));
+            }
+        }
+        return Err(error.to_string());
+    }
+    Ok(())
 }

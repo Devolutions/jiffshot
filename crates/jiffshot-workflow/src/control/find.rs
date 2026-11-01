@@ -319,7 +319,7 @@ pub fn find_elements(all: Vec<Element>, name: &str, control_type: Option<&str>) 
 
 /// UI Automation's "Click the Save button" for the control at `p`.
 pub fn describe_click(p: (i32, i32), right: bool) -> String {
-    crate::stepcap::describe(automation().ok().as_ref(), p, right)
+    crate::stepcap::describe_with(automation().ok().as_ref(), p, right)
 }
 
 #[cfg(test)]

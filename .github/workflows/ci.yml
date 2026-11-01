@@ -558,6 +558,150 @@ jobs:
               test -e /root/.config/Jiffshot/package-removal-sentinel
             ' -- "${{ matrix.format }}" "${{ matrix.machine }}" "${{ matrix.package_arch }}" "${{ matrix.arch }}"
 
+  macos:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    environment:
+      name: ${{ inputs.signing_environment || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            arch: x86_64
+            target: x86_64-apple-darwin
+    env:
+      CARGO_TERM_COLOR: always
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+      JIFFSHOT_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Rust
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
+
+      - name: Cache Cargo and the Rustolonia host
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/Library/Caches/rustolonia/host
+            target
+          key: macos-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: macos-${{ matrix.arch }}-
+
+      - name: Test
+        run: |
+          cargo test --release --locked --workspace --target ${{ matrix.target }}
+
+      - name: Test macOS PowerShell scripts
+        shell: pwsh
+        env:
+          PESTER_VERSION: 5.9.1
+          PESTER_SHA256: 8dd4060fc3bc895f05bd655e4ab82abe346de54a4e6415dfb727cc8378672b69
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:PESTER_VERSION
+          $package = Join-Path $env:RUNNER_TEMP "pester.$version.nupkg"
+          Invoke-WebRequest -Uri "https://www.powershellgallery.com/api/v2/package/Pester/$version" -OutFile $package
+          $actual = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -cne $env:PESTER_SHA256) { throw "Pester $version package hash mismatch: $actual" }
+          $moduleRoot = Join-Path $env:RUNNER_TEMP 'PesterModules'
+          $destination = Join-Path $moduleRoot "Pester/$version"
+          [IO.Compression.ZipFile]::ExtractToDirectory($package, $destination)
+          $env:PSModulePath = "$moduleRoot$([IO.Path]::PathSeparator)$env:PSModulePath"
+          Import-Module Pester -RequiredVersion $version
+          & ./package/macos/run-tests.ps1
+
+      - name: Build
+        run: cargo build --release --locked -p jiffshot -p jiffshot-cli --target ${{ matrix.target }}
+
+      - name: Configure optional Apple signing
+        id: signing
+        env:
+          CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$CERTIFICATE$CERTIFICATE_PASSWORD$IDENTITY$APPLE_ID$TEAM_ID$APP_PASSWORD" ]]; then
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo 'notarize=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -z "$CERTIFICATE" || -z "$CERTIFICATE_PASSWORD" || -z "$IDENTITY" ]]; then
+            echo 'Apple signing requires APPLE_CERTIFICATE_BASE64, APPLE_CERTIFICATE_PASSWORD, and APPLE_DEVELOPER_ID.' >&2
+            exit 1
+          fi
+          if [[ -n "$APPLE_ID$TEAM_ID$APP_PASSWORD" && ( -z "$APPLE_ID" || -z "$TEAM_ID" || -z "$APP_PASSWORD" ) ]]; then
+            echo 'Notarization requires APPLE_ID, APPLE_TEAM_ID, and APPLE_APP_PASSWORD.' >&2
+            exit 1
+          fi
+          keychain="$RUNNER_TEMP/jiffshot-signing.keychain-db"
+          certificate="$RUNNER_TEMP/jiffshot-signing.p12"
+          trap 'rm -f "$certificate"' EXIT
+          password="$(openssl rand -base64 32)"
+          echo "::add-mask::$password"
+          printf '%s' "$CERTIFICATE" | base64 --decode > "$certificate"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          if [[ -n "$APPLE_ID" ]]; then
+            xcrun notarytool store-credentials jiffshot-ci --keychain "$keychain" --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_PASSWORD"
+            echo 'notarize=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'notarize=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package and verify
+        env:
+          IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID }}
+          SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
+          NOTARIZE: ${{ steps.signing.outputs.notarize }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(-Binary "target/${{ matrix.target }}/release/jiffshot" -Output macos-package -Arch "${{ matrix.arch }}" -RequireNativePopupGate -RequireNativeTermination -RequireNativeFileDrag)
+          status=adhoc
+          if [[ "$SIGNING_ENABLED" == true ]]; then
+            args+=(-Identity "$IDENTITY" -Keychain "$RUNNER_TEMP/jiffshot-signing.keychain-db")
+            status=signed
+          fi
+          if [[ "$NOTARIZE" == true ]]; then
+            args+=(-NotaryProfile jiffshot-ci)
+            status=notarized
+          fi
+          pwsh -NoLogo -NoProfile -File package/macos/build.ps1 "${args[@]}"
+          codesign --verify --deep --strict macos-package/Jiffshot.app
+          hdiutil verify macos-package/*.dmg
+          printf '%s\n' "$status" > macos-package/signing.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jiffshot-macos-${{ matrix.arch }}
+          path: |
+            macos-package/*.dmg
+            macos-package/signing.txt
+          if-no-files-found: error
+
+      - name: Remove temporary signing keychain
+        if: always() && steps.signing.outputs.enabled == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/jiffshot-signing.keychain-db"
+
   msi:
     name: ${{ matrix.rid }} MSI
     environment:

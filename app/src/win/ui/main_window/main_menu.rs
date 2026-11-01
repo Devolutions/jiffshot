@@ -45,7 +45,10 @@ fn header(text: &str) -> String {
 fn item(text: &str, command: Command, gesture: Option<&str>) -> El<MenuItem> {
     let el = MenuItem::el().header(header(text)).command(command);
     match gesture {
-        Some(gesture) => el.input_gesture(gesture.to_owned()).hot_key(gesture.to_owned()),
+        Some(gesture) => {
+            let gesture = crate::ui::shortcut(gesture);
+            el.input_gesture(gesture.clone()).hot_key(gesture)
+        }
         None => el,
     }
 }
@@ -269,8 +272,8 @@ fn view_menu(ctx: &Ctx) -> El<MenuItem> {
         .header(header("Pixel _grid"))
         .toggle_type(MenuItemToggleType::CheckBox)
         .checked(grid)
-        .input_gesture("Ctrl+G")
-        .hot_key("Ctrl+G")
+        .input_gesture(crate::ui::shortcut("Ctrl+G"))
+        .hot_key(crate::ui::shortcut("Ctrl+G"))
         .command(act(move || {
             let canvas = canvas.get();
             canvas.set_show_pixel_grid(!canvas.show_pixel_grid());
