@@ -471,6 +471,28 @@ pub struct View {
     pub fields: Vec<FieldRow>,
     pub capture: Action,
     pub widget: bool,
+    /// Quick on/off switches shown as one row (the merged window only).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub toggles: Vec<Toggle>,
+}
+
+/// An icon toggle: the id it picks, its accessible label, and its state.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Toggle {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub on: bool,
+    pub enabled: bool,
+}
+
+/// The video area matching the image area, if it can be recorded.
+fn video_area_for_image(s: &Settings) -> Option<&'static str> {
+    match s.capture_window.selection.as_str() {
+        "image" | "fixed" => Some("region"),
+        "window" => Some("window"),
+        "fullscreen" => Some("fullscreen"),
+        _ => None,
+    }
 }
 
 pub fn view(s: &Settings, capture_key: &str, timelapse_running: bool) -> View {
@@ -487,7 +509,47 @@ pub fn view(s: &Settings, capture_key: &str, timelapse_running: bool) -> View {
             .collect(),
         capture: capture_button(s, tab, capture_key, timelapse_running),
         widget: s.show_widget,
+        toggles: Vec::new(),
     }
+}
+
+/// One set of controls for images and video: a shared area, one Send to
+/// menu, image effects and a row of toggles. Ids are scoped "image:" or
+/// "video:" when they only affect one; unscoped ones affect both.
+pub fn unified_view(s: &Settings, capture_key: &str, timelapse_running: bool) -> View {
+    let image_tab = 1;
+    let mut view = view(s, capture_key, timelapse_running);
+    view.tab = image_tab;
+    view.timing = capture_timing(s, image_tab);
+    view.capture = capture_button(s, image_tab, capture_key, timelapse_running);
+    let video_area = field_text(s, 2, Field::Selection);
+    if view.timing == CaptureTiming::Manual {
+        let mut notes = Vec::new();
+        if s.delay_seconds > 0 {
+            notes.push(format!("Image in {} s", s.delay_seconds));
+        }
+        if video_area_for_image(s) != Some(s.capture_window.video_selection.as_str()) {
+            notes.push(format!("Video: {video_area}"));
+        }
+        view.capture.detail = notes.join("\n");
+    }
+    let (image_share, video_share) = (field_text(s, 1, Field::Share), field_text(s, 2, Field::Share));
+    let share = if image_share == video_share { image_share } else { format!("{image_share} · Video: {video_share}") };
+    view.fields = vec![
+        FieldRow { id: "area", label: "Area", text: field_text(s, 1, Field::Selection), gear: Some("image:selection") },
+        FieldRow { id: "send", label: "Send to", text: share, gear: None },
+        FieldRow { id: "image:effects", label: "Effects", text: field_text(s, 1, Field::Effects), gear: None },
+    ];
+    let manual = view.timing == CaptureTiming::Manual;
+    let (system, mic) = audio(s);
+    view.toggles = vec![
+        Toggle { id: "cursor-both", label: "Capture cursor", on: s.include_cursor && s.record_cursor, enabled: true },
+        Toggle { id: "image:switch:clipboard", label: "Copy images to clipboard", on: s.copy_to_clipboard, enabled: manual },
+        Toggle { id: "video:switch:microphone", label: "Record microphone", on: mic, enabled: true },
+        Toggle { id: "video:switch:system-audio", label: "Record system audio", on: system, enabled: true },
+        Toggle { id: "video:switch:webcam", label: "Show webcam in recordings", on: s.webcam.is_some(), enabled: true },
+    ];
+    view
 }
 
 // ---- menus ----------------------------------------------------------------
@@ -751,6 +813,67 @@ pub fn menu(s: &Settings, which: &str) -> Vec<MenuItem> {
     }
 }
 
+/// Prefixes every id in `items` (and their submenus) with `scope:`.
+pub fn scoped_items(scope: &str, items: Vec<MenuItem>) -> Vec<MenuItem> {
+    items
+        .into_iter()
+        .map(|mut item| {
+            if !item.id.is_empty() {
+                item.id = format!("{scope}:{}", item.id);
+            }
+            item.items = scoped_items(scope, std::mem::take(&mut item.items));
+            item
+        })
+        .collect()
+}
+
+/// The merged Capture window's own menus ("area", "send", "more"), scoped
+/// like `unified_view`'s ids.
+pub fn unified_menu(s: &Settings, which: &str) -> Option<Vec<MenuItem>> {
+    let header = |label: &str| MenuItem { enabled: false, ..item("", label) };
+    let for_tab = |tab: usize| {
+        let mut s = s.clone();
+        s.capture_window.tab = tab;
+        s
+    };
+    let items = match which {
+        "area" => {
+            let shared = video_area_for_image(s);
+            let mut items: Vec<MenuItem> =
+                VIDEO_SELECTIONS.iter().map(|(l, v)| check(format!("area:{v}"), *l, shared == Some(*v))).collect();
+            items.push(separator());
+            items.push(header("Images only"));
+            let mut only = menu(&for_tab(1), "selection");
+            only.retain(|i| !matches!(i.id.as_str(), "sel:image" | "sel:window" | "sel:fullscreen"));
+            items.extend(scoped_items("image", only));
+            items
+        }
+        "send" => {
+            let mut items = vec![header("Images")];
+            items.extend(scoped_items("image", menu(&for_tab(1), "share")));
+            items.push(separator());
+            items.push(header("Videos"));
+            items.extend(scoped_items("video", menu(&for_tab(2), "share")));
+            items
+        }
+        "more" => vec![
+            check("switch:preview", "Preview in Editor", s.open_in_editor),
+            check("image:switch:delay", switch_label(s, Switch::Delay), switch_on(s, Switch::Delay)),
+            item("image:panel:delay", "Image timing…"),
+            separator(),
+            check("video:switch:draw", "Screen Draw while recording", s.screen_draw),
+            separator(),
+            item("video:panel:selection", "Recording settings…"),
+            item("video:panel:microphone", "Microphone settings…"),
+            item("video:panel:webcam", "Webcam settings…"),
+            item("video:panel:cursor", "Cursor settings…"),
+            item("video:panel:draw", "Screen Draw settings…"),
+        ],
+        _ => return None,
+    };
+    Some(items)
+}
+
 /// What a pick asks for beyond changing the settings.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pick {
@@ -772,6 +895,47 @@ pub enum Pick {
     Exit,
 }
 
+/// Splits a Capture-window action into its optional image or video scope.
+pub fn capture_context(id: &str) -> (Option<usize>, &str) {
+    match id.split_once(':') {
+        Some(("image", name)) => (Some(1), name),
+        Some(("video", name)) => (Some(2), name),
+        _ => (None, id),
+    }
+}
+
+/// Retains the target scope when a pick opens another panel.
+pub fn scope_capture_id(tab: Option<usize>, id: &str) -> String {
+    match tab {
+        Some(1) => format!("image:{id}"),
+        Some(2) => format!("video:{id}"),
+        _ => id.to_owned(),
+    }
+}
+
+/// Applies a unified Capture-window pick while preserving its target context.
+pub fn pick_unified(s: &mut Settings, id: &str) -> Pick {
+    let (tab, name) = capture_context(id);
+    let previous = s.capture_window.tab;
+    if tab.is_none() && name == "reset" {
+        reset(s, 1);
+        reset(s, 2);
+        return Pick::Changed;
+    }
+    if let Some(tab) = tab {
+        s.capture_window.tab = tab;
+    }
+    let result = pick(s, name);
+    s.capture_window.tab = match (tab, name) {
+        (Some(1), name) if name.starts_with("sel:") => 1,
+        _ => previous,
+    };
+    match result {
+        Pick::Panel(id) => Pick::Panel(scope_capture_id(tab, &id)),
+        result => result,
+    }
+}
+
 /// Applies a picked menu id to `s`.
 pub fn pick(s: &mut Settings, id: &str) -> Pick {
     let (verb, arg) = id.split_once(':').unwrap_or((id, ""));
@@ -785,6 +949,21 @@ pub fn pick(s: &mut Settings, id: &str) -> Pick {
         }
         "vsel" => {
             s.capture_window.video_selection = arg.into();
+            Pick::Changed
+        }
+        // An area both images and video can use; independent of the saved tab.
+        "area" if VIDEO_SELECTIONS.iter().any(|(_, v)| *v == arg) => {
+            s.capture_window.video_selection = arg.into();
+            if s.capture_window.selection == "fixed" {
+                s.capture_window.fixed = true;
+            }
+            s.capture_window.selection = if arg == "region" { "image" } else { arg }.into();
+            Pick::Changed
+        }
+        "cursor-both" => {
+            let on = !(s.include_cursor && s.record_cursor);
+            s.include_cursor = on;
+            s.record_cursor = on;
             Pick::Changed
         }
         "share" => {
@@ -1182,7 +1361,11 @@ pub fn panel(s: &Settings, id: &str, runs_at_startup: bool, capture_key: &str) -
                         "While selecting: arrow keys nudge; Shift, Ctrl, Ctrl+Shift lock square, 16:9, 4:3; M hides the magnifier; F1 shows all keys; Enter captures; Esc cancels"
                     }.into(),
                     format!("While recording: {}", crate::recorder::keys_text("; ")),
-                    format!("In this window: Enter captures; {}, 2, 3 switch tabs; Esc closes", key_name(&format!("{}+1", crate::keys::COMMAND))),
+                    format!(
+                        "In the Capture window: Enter or {} captures an image; {} records video; Esc closes",
+                        key_name(&format!("{}+2", crate::keys::COMMAND)),
+                        key_name(&format!("{}+3", crate::keys::COMMAND))
+                    ),
                 ]
                 .into_iter()
                 .map(note)

@@ -2103,11 +2103,12 @@ pub fn start_from_panel(s: Settings) {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn start_from_current_panel() {
-    let Some(settings) = with_app(|app| app.settings.clone()) else {
+pub(crate) fn start_from_current_panel(tab: usize) {
+    let Some(mut settings) = with_app(|app| app.settings.clone()) else {
         log("Capture not started: the capture service is unavailable");
         return;
     };
+    settings.capture_window.tab = tab.min(2);
     start_from_panel(settings);
 }
 
@@ -2188,7 +2189,7 @@ pub(crate) fn edit_window(
     let (effect, warnings) = match edit {
         WindowEdit::Pick(id) => {
             let previous_fixed = settings.capture_window.fixed_at;
-            let result = crate::panel::pick(&mut settings, &id);
+            let result = crate::panel::pick_unified(&mut settings, &id);
             let warnings = match &result {
                 Pick::Changed => {
                     let mut changes = geometry::SavedAreaChanges::default();
@@ -2215,8 +2216,12 @@ pub(crate) fn edit_window(
             (WindowEffect::Changed, warnings)
         }
         WindowEdit::Apply { id, values } => {
+            let (tab, name) = crate::panel::capture_context(&id);
+            let previous = settings.capture_window.tab;
+            settings.capture_window.tab = tab.unwrap_or(1);
             let (result, changes) =
-                crate::panel::prepare_apply(&mut settings, &id, &values, runs_at_startup());
+                crate::panel::prepare_apply(&mut settings, name, &values, runs_at_startup());
+            settings.capture_window.tab = previous;
             let warnings = match &result {
                 Applied::Problem(_) => Vec::new(),
                 Applied::Presets(presets) => {

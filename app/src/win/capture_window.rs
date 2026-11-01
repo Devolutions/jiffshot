@@ -9,7 +9,7 @@
 
 use crate::app;
 use crate::vm::{CaptureViewModel, CaptureViewModelSink};
-use jiffshot_workflow::panel::{self, Applied, Pick};
+use jiffshot_workflow::panel::{self, capture_context as context, Applied, Pick};
 use jiffshot_workflow::settings::Settings;
 use jiffshot_workflow::{capture, TrayAction, TrayState};
 use rustolonia::{AppScope, Result};
@@ -161,7 +161,7 @@ pub fn refresh(state: &TrayState, settings: jiffshot_workflow::settings::Setting
 
 fn publish_view() {
     let (sink, json) = with(|s| {
-        let view = panel::view(&s.settings, &s.capture_key, s.timelapse);
+        let view = panel::unified_view(&s.settings, &s.capture_key, s.timelapse);
         (s.sink.clone(), serde_json::to_string(&view).unwrap_or_default())
     });
     if let Some(sink) = sink {
@@ -234,9 +234,14 @@ fn open_panel(id: &str) {
         crate::app::post(|app| app.open_prefs("capture"));
         return;
     }
-    let (settings, key) = with(|s| (s.settings.clone(), s.capture_key.clone()));
-    match panel::panel(&settings, id, capture::runs_at_startup(), &key) {
-        Some(p) => send(|k, v| k.set_panel(v), serde_json::to_string(&p).unwrap_or_default()),
+    let (tab, name) = context(id);
+    let (mut settings, key) = with(|s| (s.settings.clone(), s.capture_key.clone()));
+    settings.capture_window.tab = tab.unwrap_or(1);
+    match panel::panel(&settings, name, capture::runs_at_startup(), &key) {
+        Some(mut p) => {
+            p.id = id.to_owned();
+            send(|k, v| k.set_panel(v), serde_json::to_string(&p).unwrap_or_default());
+        }
         None => problem("Nothing to set here."),
     }
 }
@@ -246,7 +251,7 @@ fn picked(id: &str) {
     submit_edit(WindowEdit::Pick(id.to_owned()), false, EditDestination::Capture);
     #[cfg(windows)]
     {
-        let result = with(|s| panel::pick(&mut s.settings, id));
+        let result = with(|s| panel::pick_unified(&mut s.settings, id));
         handle_pick(result);
     }
 }
@@ -314,7 +319,14 @@ fn applied(id: &str, values: &str) {
     {
         let values: Vec<serde_json::Value> = serde_json::from_str(values).unwrap_or_default();
         let startup = capture::runs_at_startup();
-        let result = with(|s| panel::apply(&mut s.settings, id, &values, startup));
+        let (tab, name) = context(id);
+        let result = with(|s| {
+            let previous = s.settings.capture_window.tab;
+            s.settings.capture_window.tab = tab.unwrap_or(1);
+            let result = panel::apply(&mut s.settings, name, &values, startup);
+            s.settings.capture_window.tab = previous;
+            result
+        });
         match result {
             Applied::Changed => changed(),
             Applied::MoveSchedule(at) => {
@@ -571,6 +583,40 @@ fn schedule_action(settings: &Settings) -> Option<capture::ScheduleAction> {
     Some(if settings.schedule.is_some() { capture::ScheduleAction::Stop } else { capture::ScheduleAction::Start })
 }
 
+fn capture_settings(settings: &Settings, target: &str) -> Settings {
+    let mut settings = settings.clone();
+    settings.capture_window.tab = if target == "video" { 2 } else { 1 };
+    settings
+}
+
+fn form_values(arg: &str) -> Option<(&str, &str)> {
+    let boundary = arg.find(":[")?;
+    Some((&arg[..boundary], &arg[boundary + 1..]))
+}
+
+fn capture_menu(settings: &Settings, id: &str) -> Vec<panel::MenuItem> {
+    if let Some(items) = panel::unified_menu(settings, id) {
+        return items;
+    }
+    let (tab, name) = context(id);
+    let mut settings = settings.clone();
+    settings.capture_window.tab = tab.unwrap_or(1);
+    let mut items = panel::menu(&settings, name);
+    if let Some(tab) = tab {
+        items = panel::scoped_items(if tab == 2 { "video" } else { "image" }, items);
+    }
+    match name {
+        "view" => items.retain(|item| !item.id.starts_with("tab:") && !item.separator),
+        "edit" => {
+            for item in items.iter_mut().filter(|item| item.id == "reset") {
+                item.label = "Reset capture options".into();
+            }
+        }
+        _ => {}
+    }
+    items
+}
+
 fn act(action: &str) {
     #[cfg(target_os = "macos")]
     if with(|s| {
@@ -598,20 +644,23 @@ fn act(action: &str) {
             }
         }
         "menu" => {
-            let items = with(|s| panel::menu(&s.settings, arg));
+            let items = with(|s| s.settings.clone());
+            let items = capture_menu(&items, arg);
             send(|k, v| k.set_menu(v), serde_json::to_string(&items).unwrap_or_default());
         }
         "pick" => picked(arg),
         "panel" => open_panel(arg),
         "apply" => {
-            if let Some((id, values)) = arg.split_once(':') {
+            if let Some((id, values)) = form_values(arg) {
                 applied(id, values);
+            } else {
+                problem("Could not apply these options. Reopen the options and try again.");
             }
         }
         #[cfg(target_os = "macos")]
         "select-scheduled-area" => select_scheduled_area(arg),
         "capture" => {
-            let (settings, running) = with(|s| (s.settings.clone(), s.timelapse));
+            let (settings, running) = with(|s| (capture_settings(&s.settings, arg), s.timelapse));
             #[cfg(target_os = "macos")]
             {
                 let posted = if let Some(action) = interval_action(&settings, running) {
@@ -619,7 +668,7 @@ fn act(action: &str) {
                 } else if let Some(action) = schedule_action(&settings) {
                     capture::set_schedule_current(action)
                 } else {
-                    capture::start_current()
+                    capture::start_current(settings.capture_window.tab)
                 };
                 if posted {
                     hide();
@@ -683,6 +732,130 @@ impl CaptureViewModel for CaptureModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_actions_use_independent_modes_and_keep_video_manual() {
+        let mut settings = Settings::default();
+        settings.capture_window.selection = "scrolling".into();
+        settings.capture_window.video_selection = "fullscreen".into();
+        settings.capture_window.timer = true;
+        settings.capture_window.timing = "interval".into();
+        settings.record_audio = "both".into();
+        for tab in 0..=2 {
+            settings.capture_window.tab = tab;
+            let image = capture_settings(&settings, "image");
+            let video = capture_settings(&settings, "video");
+            assert_eq!(panel::mode_of(&image, image.capture_window.tab), "scrolling");
+            assert_eq!(panel::mode_of(&video, video.capture_window.tab), "video-fullscreen");
+            assert_eq!(interval_action(&image, false), Some(capture::IntervalAction::Start));
+            assert_eq!(interval_action(&video, true), None, "video must not stop an interval");
+            assert_eq!(video.record_audio, "both");
+            settings.capture_window.timing = "schedule".into();
+            settings.schedule = Some("12:45".into());
+            assert_eq!(schedule_action(&capture_settings(&settings, "video")), None, "video must not cancel a schedule");
+            assert_eq!(schedule_action(&capture_settings(&settings, "image")), Some(capture::ScheduleAction::Stop));
+            settings.capture_window.timing = "interval".into();
+        }
+    }
+
+    #[test]
+    fn unified_view_shows_one_set_of_controls_for_every_saved_tab() {
+        let mut settings = Settings { delay_seconds: 0, ..Settings::default() };
+        settings.capture_window.selection = "window".into();
+        settings.capture_window.video_selection = "window".into();
+        for tab in 0..=2 {
+            settings.capture_window.tab = tab;
+            let view = panel::unified_view(&settings, "", false);
+            assert_eq!(view.fields.iter().map(|row| row.id).collect::<Vec<_>>(), ["area", "send", "image:effects"]);
+            assert_eq!(view.fields[0].text, "Window");
+            assert_eq!(view.capture.verb, "Capture");
+            assert_eq!(view.capture.detail, "", "a shared area needs no note");
+            assert_eq!(view.toggles.len(), 5);
+        }
+        settings.capture_window.selection = "scrolling".into();
+        assert_eq!(panel::unified_view(&settings, "", false).capture.detail, "Video: Window");
+    }
+
+    #[test]
+    fn shared_area_updates_both_targets_for_every_saved_tab() {
+        for tab in 0..=2 {
+            let mut settings = Settings::default();
+            settings.capture_window.tab = tab;
+            settings.capture_window.selection = "scrolling".into();
+            settings.capture_window.video_selection = "region".into();
+            with(|s| s.settings = settings);
+            act("pick:area:window");
+            with(|s| {
+                let w = &s.settings.capture_window;
+                assert_eq!((w.selection.as_str(), w.video_selection.as_str(), w.tab), ("window", "window", tab), "saved tab {tab}");
+            });
+            act("pick:area:region");
+            with(|s| {
+                let w = &s.settings.capture_window;
+                assert_eq!((w.selection.as_str(), w.video_selection.as_str(), w.tab), ("image", "region", tab), "saved tab {tab}");
+            });
+        }
+    }
+
+    #[test]
+    fn shared_area_and_cursor_apply_to_images_and_video() {
+        with(|s| s.settings = Settings::default());
+        act("pick:area:fullscreen");
+        with(|s| {
+            assert_eq!(s.settings.capture_window.selection, "fullscreen");
+            assert_eq!(s.settings.capture_window.video_selection, "fullscreen");
+        });
+        act("pick:area:region");
+        with(|s| assert_eq!((s.settings.capture_window.selection.as_str(), s.settings.capture_window.video_selection.as_str()), ("image", "region")));
+        act("pick:image:sel:scrolling");
+        with(|s| assert_eq!((s.settings.capture_window.selection.as_str(), s.settings.capture_window.video_selection.as_str()), ("scrolling", "region")));
+        let before = with(|s| s.settings.include_cursor && s.settings.record_cursor);
+        act("pick:cursor-both");
+        with(|s| {
+            assert_eq!(s.settings.include_cursor, !before);
+            assert_eq!(s.settings.record_cursor, !before);
+        });
+    }
+
+    #[test]
+    fn unified_menus_route_selection_sharing_and_panels_to_their_target() {
+        let settings = Settings::default();
+        let area = capture_menu(&settings, "area");
+        assert!(area.iter().any(|item| item.id == "area:region" && item.checked));
+        assert!(area.iter().any(|item| item.id == "image:sel:scrolling"));
+        assert!(!area.iter().any(|item| item.id == "image:sel:image"), "Region is listed once");
+        let send = capture_menu(&settings, "send");
+        assert!(send.iter().any(|item| item.id.starts_with("image:share:")));
+        assert!(send.iter().any(|item| item.id.starts_with("video:vshare:")));
+        assert!(capture_menu(&settings, "image:effects").iter().any(|item| item.id.starts_with("image:fx:")));
+        for item in capture_menu(&settings, "more").iter().filter(|item| item.id.contains("panel:")) {
+            let (tab, id) = context(&item.id);
+            let mut scoped_settings = settings.clone();
+            scoped_settings.capture_window.tab = tab.unwrap_or(1);
+            let Pick::Panel(id) = panel::pick(&mut scoped_settings, id) else { panic!("not a panel: {}", item.id) };
+            assert!(panel::panel(&scoped_settings, &id, false, "").is_some(), "missing {}", item.id);
+        }
+        assert!(capture_menu(&settings, "view").iter().all(|item| !item.id.starts_with("tab:")));
+    }
+
+    #[test]
+    fn scoped_form_submission_applies_video_settings_without_touching_image_settings() {
+        let mut settings = Settings::default();
+        settings.capture_window.tab = 0;
+        settings.fixed_size = (800, 600);
+        with(|s| s.settings = settings);
+        act("apply:video:selection:[3,7]");
+        with(|s| {
+            assert_eq!(s.settings.record_fps, 60);
+            assert_eq!(s.settings.countdown, 7);
+            assert_eq!(s.settings.fixed_size, (800, 600));
+            assert_eq!(s.settings.capture_window.tab, 0);
+        });
+        assert_eq!(form_values("image:selection:[true,800,600]"),
+            Some(("image:selection", "[true,800,600]")));
+        assert_eq!(form_values("video:new-preset:[\"Meeting: demo\",\"\"]"),
+            Some(("video:new-preset", "[\"Meeting: demo\",\"\"]")));
+    }
 
     #[test]
     fn primary_action_preserves_the_displayed_interval_intent() {

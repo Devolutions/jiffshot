@@ -1,4 +1,4 @@
-//! The Capture window: tabs, selection and effects, compact share/options
+//! The Capture window: image and video settings, compact share/options
 //! actions, the Capture button and its details, and the window menus.
 //!
 //! Rust decides what it shows (`crate::capture_window`, in
@@ -33,7 +33,7 @@ struct Palette {
     frame: Color,
     text: Color,
     muted: Color,
-    tab_on: Color,
+    accent: Color,
 }
 
 const LIGHT: Palette = Palette {
@@ -43,7 +43,7 @@ const LIGHT: Palette = Palette {
     frame: parts::rgb(0xC8C8C8),
     text: parts::rgb(0x1F1F1F),
     muted: parts::rgb(0x606060),
-    tab_on: parts::rgb(0x1971C7),
+    accent: parts::rgb(0x1971C7),
 };
 
 const DARK: Palette = Palette {
@@ -53,7 +53,7 @@ const DARK: Palette = Palette {
     frame: parts::rgb(0x4A4D52),
     text: parts::rgb(0xEDEEF0),
     muted: parts::rgb(0xA9ADB4),
-    tab_on: parts::rgb(0x2F7FD6),
+    accent: parts::rgb(0x2F7FD6),
 };
 
 const TITLE: &str = "Jiffshot Capture";
@@ -67,17 +67,6 @@ const CAPTURE_RING: Color = parts::rgb(0xF5B0A8);
 fn palette(dark: Signal<bool>) -> &'static Palette {
     if dark.get() { &DARK } else { &LIGHT }
 }
-
-/// The tabs: tooltip, glyph and label.
-const TABS: [(&str, &str, &str); 3] = [
-    (
-        "Choose (Ctrl+1): choose Image, Video, Scrolling or Panoramic after selecting an area",
-        "\u{E7A8}",
-        jiffshot_workflow::panel::TABS[0],
-    ),
-    ("Image (Ctrl+2)", "\u{E722}", "Image"),
-    ("Video (Ctrl+3)", "\u{E714}", "Video"),
-];
 
 // ---- the JSON (jiffshot_workflow::panel) -----------------------------------
 
@@ -95,6 +84,24 @@ struct View {
     fields: Vec<FieldRow>,
     #[serde(default)]
     capture: Action,
+    #[serde(default)]
+    toggles: Vec<Toggle>,
+}
+
+/// An icon toggle (`panel::Toggle`).
+#[derive(Deserialize)]
+struct Toggle {
+    id: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    on: bool,
+    #[serde(default = "enabled")]
+    enabled: bool,
+}
+
+fn enabled() -> bool {
+    true
 }
 
 /// The Capture button (`panel::Action`).
@@ -244,19 +251,14 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                 .child(menu_button("Help", "help")),
         );
 
-    let tabs = StackPanel::el()
-        .spacing(4.0)
-        .margin((4.0, 0.0, 4.0, 0.0))
-        .children_iter(TABS.iter().enumerate().map(|(i, &(tip, glyph, label))| tab_button(dark, tab, &subs, i, tip, glyph, label)));
-
     let capture_button = {
         let hover = scope.signal(false);
         let button = Button::el()
-            .width(112.0)
-            .height(112.0)
-            .corner_radius(56.0)
+            .width(132.0)
+            .height(66.0)
+            .corner_radius((66.0, 66.0, 0.0, 0.0))
             .padding(0.0)
-            .border_thickness(3.0)
+            .border_thickness((3.0, 3.0, 3.0, 1.0))
             .border_brush(CAPTURE_RING)
             .horizontal_alignment(HorizontalAlignment::Center)
             .horizontal_content_alignment(HorizontalAlignment::Center)
@@ -266,17 +268,43 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
             .on_pointer_exited(move |_| hover.set(false))
             .tool_tip_tip(move || {
                 let (verb, detail, _) = action.get();
-                format!("{verb}: {detail}")
+                format!("Image — {verb}: {detail}")
             })
-            .content(TextBlock::el().text(move || action.get().0).font_size(17.0).font_weight(FontWeight::DemiBold).foreground(WHITE));
-        on_click(button, &subs, |_| run("capture".into()))
+            .content(TextBlock::el().text(move || {
+                match action.get().0.as_str() {
+                    "Capture" => "Image".to_owned(),
+                    "Start" => "Start images".to_owned(),
+                    "Stop" => "Stop images".to_owned(),
+                    verb => verb.to_owned(),
+                }
+            }).font_size(16.0).font_weight(FontWeight::DemiBold).foreground(WHITE));
+        on_click(button, &subs, |_| run("capture:image".into()))
+    };
+    let video_button = {
+        let hover = scope.signal(false);
+        let button = Button::el()
+            .width(132.0)
+            .height(66.0)
+            .corner_radius((0.0, 0.0, 66.0, 66.0))
+            .padding(0.0)
+            .border_thickness((3.0, 1.0, 3.0, 3.0))
+            .border_brush(CAPTURE_RING)
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .horizontal_content_alignment(HorizontalAlignment::Center)
+            .vertical_content_alignment(VerticalAlignment::Center)
+            .background(move || if hover.get() { CAPTURE_RED_HOVER } else { CAPTURE_RED })
+            .on_pointer_entered(move |_| hover.set(true))
+            .on_pointer_exited(move |_| hover.set(false))
+            .tool_tip_tip("Record video (Ctrl+3). Image timing does not affect recording.")
+            .content(TextBlock::el().text("Video").font_size(16.0).font_weight(FontWeight::DemiBold).foreground(WHITE));
+        on_click(button, &subs, |_| run("capture:video".into()))
     };
     let reset = on_click(
         flat(dark)
             .horizontal_alignment(HorizontalAlignment::Right)
             .vertical_alignment(VerticalAlignment::Top)
             .margin((0.0, 4.0, 4.0, 0.0))
-            .tool_tip_tip("Reset this tab's options")
+            .tool_tip_tip("Reset image and video options")
             .content(glyph("\u{E72C}", 15.0)),
         &subs,
         |_| run("pick:reset".into()),
@@ -284,60 +312,24 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
     let stop_interval = status_button(dark, &subs, "Stop", "Stop interval capture", "stop-interval");
     let cancel_schedule = status_button(dark, &subs, "Cancel", "Cancel daily scheduled capture", "cancel-schedule");
     let card = Border::el()
-        .grid_column(1)
         .background(move || palette(dark).card)
         .border_brush(move || palette(dark).edge)
         .border_thickness(1.0)
         .corner_radius(8.0)
         .child(
             Grid::el()
-                .column_definitions("*,150")
+                .column_definitions("*,152")
                 .child(
                     StackPanel::el()
                         .spacing(8.0)
-                        .margin((14.0, 12.0, 0.0, 0.0))
-                        .child(
-                            TextBlock::el()
-                                .visible(move || tab.get() == 0 && timing.get() == CaptureTiming::Manual)
-                                .text("Select an area, then choose what to create")
-                                .font_size(13.5),
-                        )
-                        .child(
-                            StackPanel::el()
-                                .spacing(3.0)
-                                .visible(move || tab.get() == 0 && timing.get() != CaptureTiming::Manual)
-                                .child(TextBlock::el().text("Automatic image capture").font_size(13.5).font_weight(FontWeight::DemiBold))
-                                .child(
-                                    TextBlock::el()
-                                        .text(move || {
-                                            match timing.get() {
-                                                CaptureTiming::Interval => "Uses the last area, or the screen under the pointer.",
-                                                CaptureTiming::Schedule => "Uses the saved area, or the screen under the pointer.",
-                                                CaptureTiming::Manual => "",
-                                            }
-                                            .to_owned()
-                                        })
-                                        .font_size(12.0)
-                                        .text_wrapping(TextWrapping::Wrap)
-                                        .foreground(move || palette(dark).muted),
-                                ),
-                        )
+                        .margin((14.0, 14.0, 0.0, 0.0))
                         .child(StackPanel::el().spacing(8.0).node_ref(fields))
-                        .child(
-                            TextBlock::el()
-                                .visible(move || tab.get() == 0 && timing.get() == CaptureTiming::Manual && !interval_running.get() && active_schedule.get().is_none())
-                                .text("Video uses the Video tab's recording and share settings.")
-                                .font_size(12.0)
-                                .text_wrapping(TextWrapping::Wrap)
-                                .foreground(move || palette(dark).muted),
-                        )
                         .child(
                             StackPanel::el()
                                 .spacing(2.0)
                                 .visible(move || {
-                                    tab.get() == 0
-                                        && ((interval_running.get() && timing.get() != CaptureTiming::Interval)
-                                            || (active_schedule.get().is_some() && timing.get() != CaptureTiming::Schedule))
+                                    (interval_running.get() && timing.get() != CaptureTiming::Interval)
+                                            || (active_schedule.get().is_some() && timing.get() != CaptureTiming::Schedule)
                                 })
                                 .child(
                                     StackPanel::el()
@@ -367,14 +359,6 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                                         )
                                         .child(cancel_schedule),
                                 ),
-                        )
-                        .child(
-                            TextBlock::el()
-                                .visible(move || tab.get() != 2 && timing.get() != CaptureTiming::Manual)
-                                .text("Preview, copy and cursor options don't apply to automatic captures.")
-                                .font_size(12.0)
-                                .text_wrapping(TextWrapping::Wrap)
-                                .foreground(move || palette(dark).muted),
                         ),
                 )
                 .child(
@@ -382,11 +366,12 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                         StackPanel::el()
                             .vertical_alignment(VerticalAlignment::Top)
                             .horizontal_alignment(HorizontalAlignment::Center)
-                            .margin((0.0, 12.0, 0.0, 0.0))
-                            .spacing(3.0)
-                            .child(capture_button)
+                            .margin((0.0, 20.0, 0.0, 0.0))
+                            .spacing(8.0)
+                            .child(StackPanel::el().spacing(0.0).child(capture_button).child(video_button))
                             .child(
                                 TextBlock::el()
+                                    .visible(move || !action.get().1.is_empty())
                                     .text(move || action.get().1)
                                     .width(144.0)
                                     .horizontal_alignment(HorizontalAlignment::Center)
@@ -397,7 +382,8 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                             )
                             .child(
                                 TextBlock::el()
-                                    .text(move || action.get().2)
+                                    .text("Enter: image\nCtrl+3: video")
+                                    .text_alignment(TextAlignment::Center)
                                     .horizontal_alignment(HorizontalAlignment::Center)
                                     .font_size(12.0)
                                     .foreground(move || palette(dark).muted),
@@ -412,7 +398,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                 .orientation(Orientation::Horizontal)
                 .spacing(8.0)
                 .child(glyph("\u{E8A7}", 14.0).foreground(move || palette(dark).muted))
-                .child(TextBlock::el().text("Open Jiffshot Editor").vertical_alignment(VerticalAlignment::Center)),
+                .child(TextBlock::el().text("Editor").vertical_alignment(VerticalAlignment::Center)),
         ),
         &subs,
         |_| run("editor".into()),
@@ -454,8 +440,8 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
             }
         })
         .icon(super::icon_file())
-        .width(760.0)
-        .height(270.0)
+        .width(560.0)
+        .height(320.0)
         .can_resize(false)
         .can_maximize(false)
         .window_startup_location(WindowStartupLocation::CenterScreen)
@@ -480,7 +466,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
             Grid::el()
                 .row_definitions("40,*,44")
                 .child(title_bar)
-                .child(Grid::el().grid_row(1).column_definitions("112,*").margin((0.0, 0.0, 8.0, 0.0)).child(tabs).child(card))
+                .child(Grid::el().grid_row(1).margin((8.0, 0.0, 8.0, 0.0)).child(card))
                 .child(bottom_bar),
         )
         .node_ref(window_ref)
@@ -593,33 +579,6 @@ fn glyph(text: &str, size: f64) -> El<TextBlock> {
         .vertical_alignment(VerticalAlignment::Center)
 }
 
-/// One of the tabs on the left; the current one has its glyph on the accent.
-fn tab_button(dark: Signal<bool>, tab: Signal<usize>, subs: &Subscriptions, i: usize, tip: &str, icon: &str, label: &str) -> El<Grid> {
-    let on = move || tab.get() == i;
-    // Keep text as the button's accessible name and paint the icon beneath it.
-    let icon = Border::el()
-        .width(32.0)
-        .height(28.0)
-        .corner_radius(5.0)
-        .horizontal_alignment(HorizontalAlignment::Center)
-        .vertical_alignment(VerticalAlignment::Top)
-        .background(move || if on() { palette(dark).tab_on } else { parts::TRANSPARENT })
-        .child(glyph(icon, 18.0).foreground(move || if on() { WHITE } else { palette(dark).text }));
-    let button = Button::el()
-        .background(parts::TRANSPARENT)
-        .foreground(move || palette(dark).text)
-        .width(104.0)
-        .height(58.0)
-        .padding((0.0, 0.0, 0.0, 9.0))
-        .corner_radius(6.0)
-        .font_size(12.0)
-        .horizontal_content_alignment(HorizontalAlignment::Center)
-        .vertical_content_alignment(VerticalAlignment::Bottom)
-        .tool_tip_tip(super::shortcut(tip))
-        .content(label.to_owned());
-    Grid::el().width(104.0).height(58.0).child(icon).child(on_click(button, subs, move |_| run(format!("tab:{i}"))))
-}
-
 // ---- the view ----------------------------------------------------------------
 
 fn apply_view(json: &str) -> Result<()> {
@@ -643,25 +602,66 @@ fn apply_view(json: &str) -> Result<()> {
     for field in &view.fields {
         list.add(field_row(dark, &rows, field).build(&scope)?)?;
     }
+    if !view.toggles.is_empty() {
+        list.add(toggle_row(dark, &rows, &view.toggles).build(&scope)?)?;
+    }
     Ok(())
+}
+
+/// The quick switches (cursor and copy for images; microphone, system audio
+/// and webcam for video) and the More menu.
+fn toggle_row(dark: Signal<bool>, subs: &Subscriptions, toggles: &[Toggle]) -> El<Grid> {
+    let chips = StackPanel::el().orientation(Orientation::Horizontal).spacing(4.0).children_iter(toggles.iter().enumerate().map(|(i, toggle)| {
+        // A gap between the image switches and the video ones.
+        let gap = if i == 2 { 10.0 } else { 0.0 };
+        toggle_chip(dark, subs, toggle).margin((gap, 0.0, 0.0, 0.0))
+    }));
+    Grid::el()
+        .column_definitions("*,Auto")
+        .height(34.0)
+        .margin((64.0, 2.0, 34.0, 0.0))
+        .child(chips)
+        .child(icon_action_button(dark, subs, 76.0, "More", "\u{E712}", "Preview, timing, Screen Draw and recording settings", "more").grid_column(1))
+}
+
+fn toggle_chip(dark: Signal<bool>, subs: &Subscriptions, toggle: &Toggle) -> El<Button> {
+    let icon = match toggle.id.as_str() {
+        "cursor-both" => "\u{E962}",
+        "image:switch:clipboard" => "\u{E8C8}",
+        "video:switch:microphone" => "\u{E720}",
+        "video:switch:system-audio" => "\u{E767}",
+        "video:switch:webcam" => "\u{E8B8}",
+        _ => "\u{E713}",
+    };
+    let on = toggle.on;
+    let id = toggle.id.clone();
+    let state = if on { "on" } else { "off" };
+    on_click(
+        Button::el()
+            .width(34.0)
+            .height(32.0)
+            .padding(0.0)
+            .corner_radius(6.0)
+            .enabled(toggle.enabled)
+            .opacity(if toggle.enabled { 1.0 } else { 0.45 })
+            .horizontal_content_alignment(HorizontalAlignment::Center)
+            .vertical_content_alignment(VerticalAlignment::Center)
+            .background(move || if on { palette(dark).accent } else { parts::TRANSPARENT })
+            .border_brush(move || if on { palette(dark).accent } else { palette(dark).frame })
+            .border_thickness(1.0)
+            .tool_tip_tip(format!("{}: {state}", toggle.label))
+            .content(glyph(icon, 16.0).foreground(move || if on { WHITE } else { palette(dark).text })),
+        subs,
+        move |_| run(format!("pick:{id}")),
+    )
 }
 
 /// A dropdown row: label, the dropdown (a menu) and maybe a gear (a panel).
 fn field_row(dark: Signal<bool>, subs: &Subscriptions, field: &FieldRow) -> El<Grid> {
-    if field.id == "share" {
-        return Grid::el()
-            .column_definitions("Auto,Auto,*")
-            .height(34.0)
-            .child(icon_action_button(dark, subs, 84.0, "Share", "\u{E72D}", &format!("Share destination: {}", field.text), "share"))
-            .child(
-                icon_action_button(dark, subs, 98.0, "Options", "\u{E712}", "Preview, copy, cursor and timing options", "options").grid_column(1),
-            );
-    }
-
     let id = field.id.clone();
     let drop = Button::el()
         .grid_column(1)
-        .width(200.0)
+        .horizontal_alignment(HorizontalAlignment::Stretch)
         .height(30.0)
         .background(move || palette(dark).card)
         .border_brush(move || palette(dark).frame)
@@ -677,13 +677,13 @@ fn field_row(dark: Signal<bool>, subs: &Subscriptions, field: &FieldRow) -> El<G
                 .child(TextBlock::el().text(field.text.clone()).text_trimming("CharacterEllipsis").vertical_alignment(VerticalAlignment::Center).font_size(13.0)),
         );
     let grid = Grid::el()
-        .column_definitions("88,*,Auto")
+        .column_definitions("64,*,34")
         .height(30.0)
         .child(TextBlock::el().text(field.label.clone()).vertical_alignment(VerticalAlignment::Center).font_size(13.5))
         .child(on_click(drop, subs, move |button: &Button| request("menu", &id, button.upcast())));
     match field.gear.clone() {
         Some(panel) => grid.child(on_click(
-            flat(dark).grid_column(2).padding((6.0, 4.0)).margin((4.0, 0.0, 0.0, 0.0)).tool_tip_tip("Options").content(glyph("\u{E713}", 14.0)),
+            flat(dark).grid_column(2).padding((6.0, 4.0)).horizontal_alignment(HorizontalAlignment::Right).tool_tip_tip("Region size and position").content(glyph("\u{E713}", 14.0)),
             subs,
             move |button: &Button| request("panel", &panel, button.upcast()),
         )),
@@ -725,16 +725,17 @@ fn icon_action_button(
 
 // ---- keys and closing ------------------------------------------------------
 
-/// Enter captures, Escape closes, and the command key plus 1…3 picks a tab.
+/// Enter captures an image; the command key plus 3 records; Escape closes.
 fn on_key(e: &mut rustolonia::ControlKeyDownEventArgs) {
     if e.handled {
         return;
     }
     let command = e.key_modifiers & super::COMMAND_MODIFIER != 0;
     match Key::try_from(e.key) {
-        Ok(Key::Return) => run("capture".into()),
+        Ok(Key::Return) => run("capture:image".into()),
         Ok(Key::Escape) => close_to_tray(),
-        Ok(key @ (Key::D1 | Key::D2 | Key::D3)) if command => run(format!("tab:{}", key as i32 - Key::D1 as i32)),
+        Ok(Key::D1 | Key::D2) if command => run("capture:image".into()),
+        Ok(Key::D3) if command => run("capture:video".into()),
         _ => return,
     }
     e.handled = true;
@@ -969,8 +970,8 @@ mod tests {
                 let ratio = contrast(foreground, background);
                 assert!(ratio >= 4.5, "{theme} {name} contrast {ratio:.2} is below 4.5:1");
             }
-            let ratio = contrast(WHITE, palette.tab_on);
-            assert!(ratio >= 3.0, "{theme} selected tab icon contrast {ratio:.2} is below 3:1");
+            let ratio = contrast(WHITE, palette.accent);
+            assert!(ratio >= 3.0, "{theme} toggle icon contrast {ratio:.2} is below 3:1");
         }
         for (name, background) in [("capture", CAPTURE_RED), ("capture hover", CAPTURE_RED_HOVER)] {
             let ratio = contrast(WHITE, background);

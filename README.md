@@ -85,10 +85,10 @@ The detailed feature list below describes the Windows application. The Linux bui
 ### Flexible Screen Capture
 
 <p align="center">
-  <img src="docs/images/capture-window.png" alt="Jiffshot Capture Window" width="760" />
+  <img src="docs/images/capture-window.png" alt="Jiffshot Capture Window" width="560" />
 </p>
 
-- **Choose, Image & Video Tabs:** Use the compact Capture window (or Capture Widget) to configure selection modes and effects. The main window keeps capture actions in focus; Share and capture options are available from compact menus. On Choose, select an area first, then choose Image, Video, Scrolling, or Panoramic, or cancel. Image sharing and clipboard settings apply to image outputs; video uses the Video tab's recording and sharing settings.
+- **One Capture Window:** One Area, one Send to menu (with Images and Videos sections), image Effects, and one row of toggles: Cursor (images and video), Copy (images), and Microphone, System audio and Webcam (video). Picking Region, Window or Fullscreen sets both image and video; image-only modes like Scrolling keep video on its last area, which shows next to the button. The upper half of the round red button captures an image; the lower half records video. Press **Enter** for an image or **Ctrl+3** for video. The Capture Widget and tray workflows remain available.
 - **Smart Selection Overlay:** Captures from an instant frozen desktop snapshot so transient UI states never move while you aim. Includes a live pixel magnifier with coordinates and `#RRGGBB` color readout, dimension labels, and on-screen help (`F1`).
 - **Specialized Capture Modes:**
   - **Scrolling Capture:** Automatically scrolls and stitches vertical, horizontal, or two-axis scrolling windows and web pages.
@@ -97,7 +97,7 @@ The detailed feature list below describes the Windows application. The Linux bui
   - **Open Menus:** Delayed capture mode designed to grab open context menus and dropdowns.
   - **Grab Text (Windows OCR):** Select any area on screen to extract selectable, copyable text instantly.
   - **Step Capture:** Record a numbered click-by-click guide automatically—every click captures a screenshot and places a sequential step badge at the cursor.
-- **Timers, Schedules & Presets:** Delay captures by seconds, run an automatic **time-lapse** (skipping identical frames), schedule a daily capture at a set time (`HH:MM`), or save custom **Presets** with their own global hotkeys. Interval captures use the last area or the screen under the pointer; scheduled captures use the saved area or the screen under the pointer. They bypass the chooser and ignore the preview, clipboard, and cursor switches; the selected image share destination still applies. Choose shows active intervals and schedules and lets you stop or cancel them after changing timer modes. Changing the interval updates a running time-lapse.
+- **Timers, Schedules & Presets:** Delay captures by seconds, run an automatic **time-lapse** (skipping identical frames), schedule a daily capture at a set time (`HH:MM`), or save custom **Presets** with their own global hotkeys. Interval captures use the last area or the screen under the pointer; scheduled captures use the saved area or the screen under the pointer. They bypass the chooser and ignore the preview, clipboard, and cursor switches; the selected image share destination still applies. The image half of the red button starts or stops automatic captures; video remains independently available. The window shows active intervals and schedules and lets you stop or cancel them after changing timer modes. Changing the interval updates a running time-lapse.
 - **Post-Capture Sharing:** Send captures automatically to the clipboard, the editor, a file, email, Microsoft Word, PowerPoint, Excel, OneNote, Paint, any configured external program, an FTP server (using Windows Credential Manager), or a printer.
 
 <p align="center">

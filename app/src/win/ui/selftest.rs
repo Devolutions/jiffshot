@@ -3706,7 +3706,7 @@ fn show_capture_tab_fixture(t: &mut Test, tab: usize, timing: &str, running: boo
     settings.delay_seconds = 0;
     settings.schedule_area = Some((10, 20, 640, 360));
     settings.schedule = schedule.map(str::to_owned);
-    let view = jiffshot_workflow::panel::view(&settings, "PrtScn", running);
+    let view = jiffshot_workflow::panel::unified_view(&settings, "PrtScn", running);
     match serde_json::to_string(&view) {
         Ok(json) => set(super::capture().sink.view, json),
         Err(error) => t.line(format!("capture fixture: {error}")),

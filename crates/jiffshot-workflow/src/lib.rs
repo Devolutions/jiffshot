@@ -356,8 +356,8 @@ pub mod capture {
 
     /// Starts with the capture thread's committed settings, rather than a UI snapshot.
     #[cfg(target_os = "macos")]
-    pub fn start_current() -> bool {
-        super::post_capture_thread(tray::start_from_current_panel)
+    pub fn start_current(tab: usize) -> bool {
+        super::post_capture_thread(move || tray::start_from_current_panel(tab))
     }
 
     #[cfg(target_os = "macos")]
