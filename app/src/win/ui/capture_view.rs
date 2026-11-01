@@ -64,7 +64,11 @@ const MODES: [(&str, &str); 3] = [
     ("Video", "Record video (Ctrl+3)"),
 ];
 
+const MODE_GLYPHS: [&str; 3] = ["\u{E8B3}", "\u{E722}", "\u{E714}"];
+
 const WHITE: Color = parts::rgb(0xFFFFFF);
+const SELECTED_MODE_DARK: Color = parts::rgb(0x284662);
+const SELECTED_MODE_ICON_DARK: Color = parts::rgb(0x73BAFF);
 const CAPTURE_RED: Color = parts::rgb(0xD13438);
 const CAPTURE_RED_HOVER: Color = parts::rgb(0xB82B2F);
 const CAPTURE_RING: Color = parts::rgb(0xF5B0A8);
@@ -259,10 +263,28 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
 
     let capture_button = {
         let hover = scope.signal(false);
+        let verb = TextBlock::el()
+            .text(move || match (tab.get(), action.get().0.as_str()) {
+                (1, "Start") | (0, "Start") => "Start images".to_owned(),
+                (1, "Stop") | (0, "Stop") => "Stop images".to_owned(),
+                (_, verb) => verb.to_owned(),
+            })
+            .text_alignment(TextAlignment::Center)
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .text_wrapping(TextWrapping::Wrap)
+            .width(92.0)
+            .font_size(17.0)
+            .font_weight(FontWeight::DemiBold)
+            .foreground(WHITE);
+        let content = StackPanel::el()
+            .spacing(5.0)
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .child(glyph(MODE_GLYPHS[0], 28.0).text(move || MODE_GLYPHS[tab.get().min(2)].to_owned()).horizontal_alignment(HorizontalAlignment::Center).foreground(WHITE))
+            .child(verb);
         let button = Button::el()
-            .width(116.0)
-            .height(116.0)
-            .corner_radius(58.0)
+            .width(112.0)
+            .height(112.0)
+            .corner_radius(56.0)
             .padding(0.0)
             .border_thickness(3.0)
             .border_brush(CAPTURE_RING)
@@ -276,32 +298,39 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                 let (verb, detail, _) = action.get();
                 if detail.is_empty() { verb } else { format!("{verb}: {}", detail.replace('\n', " · ")) }
             })
-            .content(
-                TextBlock::el()
-                    .text(move || match (tab.get(), action.get().0.as_str()) {
-                        (1, "Start") | (0, "Start") => "Start images".to_owned(),
-                        (1, "Stop") | (0, "Stop") => "Stop images".to_owned(),
-                        (_, verb) => verb.to_owned(),
-                    })
-                    .text_alignment(TextAlignment::Center)
-                    .text_wrapping(TextWrapping::Wrap)
-                    .width(92.0)
-                    .font_size(17.0)
-                    .font_weight(FontWeight::DemiBold)
-                    .foreground(WHITE),
-            );
+            .content(content);
         on_click(button, &subs, |_| run("capture".into()))
     };
-    let modes = Border::el()
-        .width(164.0)
-        .height(34.0)
-        .padding(2.0)
-        .corner_radius(17.0)
+    let detail = TextBlock::el()
+        .visible(move || !action.get().1.is_empty())
+        .text(move || action.get().1)
+        .width(144.0)
+        .horizontal_alignment(HorizontalAlignment::Center)
+        .text_alignment(TextAlignment::Center)
+        .text_wrapping(TextWrapping::Wrap)
+        .font_size(12.0)
+        .foreground(move || palette(dark).text);
+    let mode_dock = Border::el()
+        .width(172.0)
+        .height(200.0)
+        .padding(5.0)
+        .corner_radius(16.0)
         .background(move || palette(dark).edge)
+        .border_brush(move || palette(dark).frame)
+        .border_thickness(1.0)
         .child(
-            Grid::el()
-                .column_definitions("*,*,*")
-                .children_iter(MODES.iter().enumerate().map(|(i, &(label, tip))| mode_button(dark, tab, &subs, i, label, tip))),
+            StackPanel::el()
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .child(
+                    Grid::el()
+                        .width(160.0)
+                        .height(44.0)
+                        .column_definitions("*,*,*")
+                        .children_iter(MODES.iter().enumerate().map(|(i, &(label, tip))| mode_button(dark, tab, &subs, i, label, tip))),
+                )
+                .child(Border::el().width(160.0).height(1.0).margin((0.0, 1.0, 0.0, 0.0)).background(move || palette(dark).frame))
+                .child(capture_button.margin((0.0, 4.0, 0.0, 0.0)))
+                .child(detail.margin((0.0, 2.0, 0.0, 0.0))),
         );
     let reset = on_click(
         flat(dark)
@@ -367,24 +396,11 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                 )
                 .child(
                     Grid::el().grid_column(1).child(reset).child(
-                        StackPanel::el()
+                        Border::el()
                             .vertical_alignment(VerticalAlignment::Top)
                             .horizontal_alignment(HorizontalAlignment::Center)
-                            .margin((0.0, 34.0, 0.0, 0.0))
-                            .spacing(10.0)
-                            .child(modes)
-                            .child(capture_button)
-                            .child(
-                                TextBlock::el()
-                                    .visible(move || !action.get().1.is_empty())
-                                    .text(move || action.get().1)
-                                    .width(144.0)
-                                    .horizontal_alignment(HorizontalAlignment::Center)
-                                    .text_alignment(TextAlignment::Center)
-                                    .text_wrapping(TextWrapping::Wrap)
-                                    .font_size(12.0)
-                                    .foreground(move || palette(dark).text),
-                            ),
+                            .margin((0.0, 38.0, 0.0, 0.0))
+                            .child(mode_dock),
                     ),
                 ),
         );
@@ -653,25 +669,41 @@ fn toggle_chip(dark: Signal<bool>, subs: &Subscriptions, toggle: &Toggle) -> El<
     )
 }
 
-/// One segment of the Select | Image | Video mode switch.
+/// One mode selector in the joined action dock.
 fn mode_button(dark: Signal<bool>, tab: Signal<usize>, subs: &Subscriptions, i: usize, label: &str, tip: &str) -> El<Button> {
     let on = move || tab.get() == i;
+    let selected_background = move || if dark.get() { SELECTED_MODE_DARK } else { palette(dark).accent };
+    let selected_foreground = move || if dark.get() { SELECTED_MODE_ICON_DARK } else { WHITE };
     on_click(
         Button::el()
             .grid_column(i as i32)
-            .height(30.0)
+            .height(42.0)
             .padding((4.0, 0.0, 4.0, 0.0))
-            .corner_radius(15.0)
+            .corner_radius(8.0)
             .border_thickness(0.0)
             .horizontal_alignment(HorizontalAlignment::Stretch)
+            .vertical_alignment(VerticalAlignment::Stretch)
             .horizontal_content_alignment(HorizontalAlignment::Center)
             .vertical_content_alignment(VerticalAlignment::Center)
-            .background(move || if on() { palette(dark).card } else { parts::TRANSPARENT })
-            .foreground(move || if on() { palette(dark).text } else { palette(dark).muted })
-            .font_size(12.5)
-            .font_weight(move || if on() { FontWeight::DemiBold } else { FontWeight::Normal })
+            .background(move || if on() { selected_background() } else { parts::TRANSPARENT })
             .tool_tip_tip(super::shortcut(tip))
-            .content(label.to_owned()),
+            .content(
+                StackPanel::el()
+                    .spacing(2.0)
+                    .child(
+                        glyph(MODE_GLYPHS[i], 17.0)
+                            .horizontal_alignment(HorizontalAlignment::Center)
+                            .foreground(move || if on() { selected_foreground() } else { palette(dark).muted }),
+                    )
+                    .child(
+                        TextBlock::el()
+                            .text(label.to_owned())
+                            .horizontal_alignment(HorizontalAlignment::Center)
+                            .font_size(11.5)
+                            .font_weight(move || if on() { FontWeight::DemiBold } else { FontWeight::Normal })
+                            .foreground(move || if on() { WHITE } else { palette(dark).muted }),
+                    ),
+            ),
         subs,
         move |_| run(format!("tab:{i}")),
     )
