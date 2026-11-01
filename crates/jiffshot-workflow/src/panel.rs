@@ -513,42 +513,61 @@ pub fn view(s: &Settings, capture_key: &str, timelapse_running: bool) -> View {
     }
 }
 
-/// One set of controls for images and video: a shared area, one Send to
-/// menu, image effects and a row of toggles. Ids are scoped "image:" or
-/// "video:" when they only affect one; unscoped ones affect both.
+/// One set of controls whose saved mode decides what the main button does:
+/// select then choose (0), capture an image (1), or record video (2). Ids are
+/// scoped "image:" or "video:" when they only affect one target.
 pub fn unified_view(s: &Settings, capture_key: &str, timelapse_running: bool) -> View {
-    let image_tab = 1;
+    let mode = s.capture_window.tab.min(2);
     let mut view = view(s, capture_key, timelapse_running);
-    view.tab = image_tab;
-    view.timing = capture_timing(s, image_tab);
-    view.capture = capture_button(s, image_tab, capture_key, timelapse_running);
+    view.capture = capture_button(s, mode, capture_key, timelapse_running);
     let video_area = field_text(s, 2, Field::Selection);
     if view.timing == CaptureTiming::Manual {
         let mut notes = Vec::new();
-        if s.delay_seconds > 0 {
-            notes.push(format!("Image in {} s", s.delay_seconds));
+        if mode == 0 {
+            view.capture.verb = "Select".into();
+            notes.push("Then choose".into());
         }
-        if video_area_for_image(s) != Some(s.capture_window.video_selection.as_str()) {
-            notes.push(format!("Video: {video_area}"));
+        if mode != 2 && s.delay_seconds > 0 {
+            notes.push(format!("In {} s", s.delay_seconds));
+        }
+        if mode == 2 && video_area_for_image(s) != Some(s.capture_window.video_selection.as_str()) {
+            notes.push(format!("Records {video_area}"));
         }
         view.capture.detail = notes.join("\n");
     }
     let (image_share, video_share) = (field_text(s, 1, Field::Share), field_text(s, 2, Field::Share));
-    let share = if image_share == video_share { image_share } else { format!("{image_share} · Video: {video_share}") };
+    let share = match mode {
+        1 => image_share,
+        2 => video_share,
+        _ if image_share == video_share => image_share,
+        _ => format!("{image_share} · Video: {video_share}"),
+    };
+    let area = if mode == 2 { video_area } else { field_text(s, 1, Field::Selection) };
     view.fields = vec![
-        FieldRow { id: "area", label: "Area", text: field_text(s, 1, Field::Selection), gear: Some("image:selection") },
+        FieldRow { id: if mode == 2 { "video:selection" } else { "area" }, label: "Area", text: area, gear: Some(if mode == 2 { "video:selection" } else { "image:selection" }) },
         FieldRow { id: "send", label: "Send to", text: share, gear: None },
-        FieldRow { id: "image:effects", label: "Effects", text: field_text(s, 1, Field::Effects), gear: None },
     ];
+    if mode != 2 {
+        view.fields.push(FieldRow { id: "image:effects", label: "Effects", text: field_text(s, 1, Field::Effects), gear: None });
+    }
     let manual = view.timing == CaptureTiming::Manual;
     let (system, mic) = audio(s);
-    view.toggles = vec![
-        Toggle { id: "cursor-both", label: "Capture cursor", on: s.include_cursor && s.record_cursor, enabled: true },
-        Toggle { id: "image:switch:clipboard", label: "Copy images to clipboard", on: s.copy_to_clipboard, enabled: manual },
-        Toggle { id: "video:switch:microphone", label: "Record microphone", on: mic, enabled: true },
-        Toggle { id: "video:switch:system-audio", label: "Record system audio", on: system, enabled: true },
-        Toggle { id: "video:switch:webcam", label: "Show webcam in recordings", on: s.webcam.is_some(), enabled: true },
-    ];
+    let cursor = match mode {
+        1 => Toggle { id: "image:switch:cursor", label: "Capture cursor", on: s.include_cursor, enabled: true },
+        2 => Toggle { id: "video:switch:record-cursor", label: "Record cursor", on: s.record_cursor, enabled: true },
+        _ => Toggle { id: "cursor-both", label: "Capture cursor", on: s.include_cursor && s.record_cursor, enabled: true },
+    };
+    view.toggles = vec![cursor];
+    if mode != 2 {
+        view.toggles.push(Toggle { id: "image:switch:clipboard", label: "Copy images to clipboard", on: s.copy_to_clipboard, enabled: manual });
+    }
+    if mode != 1 {
+        view.toggles.extend([
+            Toggle { id: "video:switch:microphone", label: "Record microphone", on: mic, enabled: true },
+            Toggle { id: "video:switch:system-audio", label: "Record system audio", on: system, enabled: true },
+            Toggle { id: "video:switch:webcam", label: "Show webcam in recordings", on: s.webcam.is_some(), enabled: true },
+        ]);
+    }
     view
 }
 
@@ -848,6 +867,8 @@ pub fn unified_menu(s: &Settings, which: &str) -> Option<Vec<MenuItem>> {
             items.extend(scoped_items("image", only));
             items
         }
+        "send" if s.capture_window.tab == 1 => scoped_items("image", menu(&for_tab(1), "share")),
+        "send" if s.capture_window.tab == 2 => scoped_items("video", menu(&for_tab(2), "share")),
         "send" => {
             let mut items = vec![header("Images")];
             items.extend(scoped_items("image", menu(&for_tab(1), "share")));
@@ -926,10 +947,9 @@ pub fn pick_unified(s: &mut Settings, id: &str) -> Pick {
         s.capture_window.tab = tab;
     }
     let result = pick(s, name);
-    s.capture_window.tab = match (tab, name) {
-        (Some(1), name) if name.starts_with("sel:") => 1,
-        _ => previous,
-    };
+    if tab.is_some() {
+        s.capture_window.tab = previous;
+    }
     match result {
         Pick::Panel(id) => Pick::Panel(scope_capture_id(tab, &id)),
         result => result,
@@ -1362,9 +1382,8 @@ pub fn panel(s: &Settings, id: &str, runs_at_startup: bool, capture_key: &str) -
                     }.into(),
                     format!("While recording: {}", crate::recorder::keys_text("; ")),
                     format!(
-                        "In the Capture window: Enter or {} captures an image; {} records video; Esc closes",
-                        key_name(&format!("{}+2", crate::keys::COMMAND)),
-                        key_name(&format!("{}+3", crate::keys::COMMAND))
+                        "In the Capture window: Enter runs the selected mode; {}, 2, 3 switch modes; Esc closes",
+                        key_name(&format!("{}+1", crate::keys::COMMAND))
                     ),
                 ]
                 .into_iter()

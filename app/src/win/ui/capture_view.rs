@@ -58,6 +58,12 @@ const DARK: Palette = Palette {
 
 const TITLE: &str = "Jiffshot Capture";
 
+const MODES: [(&str, &str); 3] = [
+    ("Select", "Select an area, then choose what to create (Ctrl+1)"),
+    ("Image", "Capture an image (Ctrl+2)"),
+    ("Video", "Record video (Ctrl+3)"),
+];
+
 const WHITE: Color = parts::rgb(0xFFFFFF);
 const CAPTURE_RED: Color = parts::rgb(0xD13438);
 const CAPTURE_RED_HOVER: Color = parts::rgb(0xB82B2F);
@@ -254,11 +260,11 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
     let capture_button = {
         let hover = scope.signal(false);
         let button = Button::el()
-            .width(132.0)
-            .height(66.0)
-            .corner_radius((66.0, 66.0, 0.0, 0.0))
+            .width(116.0)
+            .height(116.0)
+            .corner_radius(58.0)
             .padding(0.0)
-            .border_thickness((3.0, 3.0, 3.0, 1.0))
+            .border_thickness(3.0)
             .border_brush(CAPTURE_RING)
             .horizontal_alignment(HorizontalAlignment::Center)
             .horizontal_content_alignment(HorizontalAlignment::Center)
@@ -268,37 +274,35 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
             .on_pointer_exited(move |_| hover.set(false))
             .tool_tip_tip(move || {
                 let (verb, detail, _) = action.get();
-                format!("Image — {verb}: {detail}")
+                if detail.is_empty() { verb } else { format!("{verb}: {}", detail.replace('\n', " · ")) }
             })
-            .content(TextBlock::el().text(move || {
-                match action.get().0.as_str() {
-                    "Capture" => "Image".to_owned(),
-                    "Start" => "Start images".to_owned(),
-                    "Stop" => "Stop images".to_owned(),
-                    verb => verb.to_owned(),
-                }
-            }).font_size(16.0).font_weight(FontWeight::DemiBold).foreground(WHITE));
-        on_click(button, &subs, |_| run("capture:image".into()))
+            .content(
+                TextBlock::el()
+                    .text(move || match (tab.get(), action.get().0.as_str()) {
+                        (1, "Start") | (0, "Start") => "Start images".to_owned(),
+                        (1, "Stop") | (0, "Stop") => "Stop images".to_owned(),
+                        (_, verb) => verb.to_owned(),
+                    })
+                    .text_alignment(TextAlignment::Center)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .width(92.0)
+                    .font_size(17.0)
+                    .font_weight(FontWeight::DemiBold)
+                    .foreground(WHITE),
+            );
+        on_click(button, &subs, |_| run("capture".into()))
     };
-    let video_button = {
-        let hover = scope.signal(false);
-        let button = Button::el()
-            .width(132.0)
-            .height(66.0)
-            .corner_radius((0.0, 0.0, 66.0, 66.0))
-            .padding(0.0)
-            .border_thickness((3.0, 1.0, 3.0, 3.0))
-            .border_brush(CAPTURE_RING)
-            .horizontal_alignment(HorizontalAlignment::Center)
-            .horizontal_content_alignment(HorizontalAlignment::Center)
-            .vertical_content_alignment(VerticalAlignment::Center)
-            .background(move || if hover.get() { CAPTURE_RED_HOVER } else { CAPTURE_RED })
-            .on_pointer_entered(move |_| hover.set(true))
-            .on_pointer_exited(move |_| hover.set(false))
-            .tool_tip_tip("Record video (Ctrl+3). Image timing does not affect recording.")
-            .content(TextBlock::el().text("Video").font_size(16.0).font_weight(FontWeight::DemiBold).foreground(WHITE));
-        on_click(button, &subs, |_| run("capture:video".into()))
-    };
+    let modes = Border::el()
+        .width(164.0)
+        .height(34.0)
+        .padding(2.0)
+        .corner_radius(17.0)
+        .background(move || palette(dark).edge)
+        .child(
+            Grid::el()
+                .column_definitions("*,*,*")
+                .children_iter(MODES.iter().enumerate().map(|(i, &(label, tip))| mode_button(dark, tab, &subs, i, label, tip))),
+        );
     let reset = on_click(
         flat(dark)
             .horizontal_alignment(HorizontalAlignment::Right)
@@ -318,7 +322,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         .corner_radius(8.0)
         .child(
             Grid::el()
-                .column_definitions("*,152")
+                .column_definitions("*,176")
                 .child(
                     StackPanel::el()
                         .spacing(8.0)
@@ -366,9 +370,10 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                         StackPanel::el()
                             .vertical_alignment(VerticalAlignment::Top)
                             .horizontal_alignment(HorizontalAlignment::Center)
-                            .margin((0.0, 20.0, 0.0, 0.0))
-                            .spacing(8.0)
-                            .child(StackPanel::el().spacing(0.0).child(capture_button).child(video_button))
+                            .margin((0.0, 34.0, 0.0, 0.0))
+                            .spacing(10.0)
+                            .child(modes)
+                            .child(capture_button)
                             .child(
                                 TextBlock::el()
                                     .visible(move || !action.get().1.is_empty())
@@ -379,14 +384,6 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                                     .text_wrapping(TextWrapping::Wrap)
                                     .font_size(12.0)
                                     .foreground(move || palette(dark).text),
-                            )
-                            .child(
-                                TextBlock::el()
-                                    .text("Enter: image\nCtrl+3: video")
-                                    .text_alignment(TextAlignment::Center)
-                                    .horizontal_alignment(HorizontalAlignment::Center)
-                                    .font_size(12.0)
-                                    .foreground(move || palette(dark).muted),
                             ),
                     ),
                 ),
@@ -562,7 +559,7 @@ fn status_button(dark: Signal<bool>, subs: &Subscriptions, label: &str, tip: &st
             .padding((8.0, 2.0))
             .border_brush(move || palette(dark).frame)
             .border_thickness(1.0)
-            .tool_tip_tip(tip.to_owned())
+            .tool_tip_tip(super::shortcut(tip))
             .content(label.to_owned()),
         subs,
         move |_| run(action.into()),
@@ -612,21 +609,21 @@ fn apply_view(json: &str) -> Result<()> {
 /// and webcam for video) and the More menu.
 fn toggle_row(dark: Signal<bool>, subs: &Subscriptions, toggles: &[Toggle]) -> El<Grid> {
     let chips = StackPanel::el().orientation(Orientation::Horizontal).spacing(4.0).children_iter(toggles.iter().enumerate().map(|(i, toggle)| {
-        // A gap between the image switches and the video ones.
-        let gap = if i == 2 { 10.0 } else { 0.0 };
+        // A gap between the image switches and the video ones in Select mode.
+        let gap = if i == 2 && toggles.len() == 5 { 10.0 } else { 0.0 };
         toggle_chip(dark, subs, toggle).margin((gap, 0.0, 0.0, 0.0))
     }));
     Grid::el()
         .column_definitions("*,Auto")
         .height(34.0)
-        .margin((64.0, 2.0, 34.0, 0.0))
+        .margin((64.0, 2.0, 0.0, 0.0))
         .child(chips)
         .child(icon_action_button(dark, subs, 76.0, "More", "\u{E712}", "Preview, timing, Screen Draw and recording settings", "more").grid_column(1))
 }
 
 fn toggle_chip(dark: Signal<bool>, subs: &Subscriptions, toggle: &Toggle) -> El<Button> {
     let icon = match toggle.id.as_str() {
-        "cursor-both" => "\u{E962}",
+        "cursor-both" | "image:switch:cursor" | "video:switch:record-cursor" => "\u{E962}",
         "image:switch:clipboard" => "\u{E8C8}",
         "video:switch:microphone" => "\u{E720}",
         "video:switch:system-audio" => "\u{E767}",
@@ -653,6 +650,30 @@ fn toggle_chip(dark: Signal<bool>, subs: &Subscriptions, toggle: &Toggle) -> El<
             .content(glyph(icon, 16.0).foreground(move || if on { WHITE } else { palette(dark).text })),
         subs,
         move |_| run(format!("pick:{id}")),
+    )
+}
+
+/// One segment of the Select | Image | Video mode switch.
+fn mode_button(dark: Signal<bool>, tab: Signal<usize>, subs: &Subscriptions, i: usize, label: &str, tip: &str) -> El<Button> {
+    let on = move || tab.get() == i;
+    on_click(
+        Button::el()
+            .grid_column(i as i32)
+            .height(30.0)
+            .padding((4.0, 0.0, 4.0, 0.0))
+            .corner_radius(15.0)
+            .border_thickness(0.0)
+            .horizontal_alignment(HorizontalAlignment::Stretch)
+            .horizontal_content_alignment(HorizontalAlignment::Center)
+            .vertical_content_alignment(VerticalAlignment::Center)
+            .background(move || if on() { palette(dark).card } else { parts::TRANSPARENT })
+            .foreground(move || if on() { palette(dark).text } else { palette(dark).muted })
+            .font_size(12.5)
+            .font_weight(move || if on() { FontWeight::DemiBold } else { FontWeight::Normal })
+            .tool_tip_tip(super::shortcut(tip))
+            .content(label.to_owned()),
+        subs,
+        move |_| run(format!("tab:{i}")),
     )
 }
 
@@ -732,10 +753,9 @@ fn on_key(e: &mut rustolonia::ControlKeyDownEventArgs) {
     }
     let command = e.key_modifiers & super::COMMAND_MODIFIER != 0;
     match Key::try_from(e.key) {
-        Ok(Key::Return) => run("capture:image".into()),
+        Ok(Key::Return) => run("capture".into()),
         Ok(Key::Escape) => close_to_tray(),
-        Ok(Key::D1 | Key::D2) if command => run("capture:image".into()),
-        Ok(Key::D3) if command => run("capture:video".into()),
+        Ok(key @ (Key::D1 | Key::D2 | Key::D3)) if command => run(format!("tab:{}", key as i32 - Key::D1 as i32)),
         _ => return,
     }
     e.handled = true;

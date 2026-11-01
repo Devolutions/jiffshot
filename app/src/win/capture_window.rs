@@ -585,7 +585,12 @@ fn schedule_action(settings: &Settings) -> Option<capture::ScheduleAction> {
 
 fn capture_settings(settings: &Settings, target: &str) -> Settings {
     let mut settings = settings.clone();
-    settings.capture_window.tab = if target == "video" { 2 } else { 1 };
+    settings.capture_window.tab = match target {
+        "select" => 0,
+        "image" => 1,
+        "video" => 2,
+        _ => settings.capture_window.tab.min(2),
+    };
     settings
 }
 
@@ -759,21 +764,29 @@ mod tests {
     }
 
     #[test]
-    fn unified_view_shows_one_set_of_controls_for_every_saved_tab() {
+    fn mode_switch_changes_the_main_action_and_relevant_controls() {
         let mut settings = Settings { delay_seconds: 0, ..Settings::default() };
         settings.capture_window.selection = "window".into();
         settings.capture_window.video_selection = "window".into();
-        for tab in 0..=2 {
+        let expected = [
+            ("Select", vec!["area", "send", "image:effects"], 5, "Then choose"),
+            ("Capture", vec!["area", "send", "image:effects"], 2, ""),
+            ("Record", vec!["video:selection", "send"], 4, ""),
+        ];
+        for (tab, (verb, fields, toggles, detail)) in expected.into_iter().enumerate() {
             settings.capture_window.tab = tab;
             let view = panel::unified_view(&settings, "", false);
-            assert_eq!(view.fields.iter().map(|row| row.id).collect::<Vec<_>>(), ["area", "send", "image:effects"]);
+            assert_eq!(view.tab, tab);
+            assert_eq!(view.fields.iter().map(|row| row.id).collect::<Vec<_>>(), fields);
             assert_eq!(view.fields[0].text, "Window");
-            assert_eq!(view.capture.verb, "Capture");
-            assert_eq!(view.capture.detail, "", "a shared area needs no note");
-            assert_eq!(view.toggles.len(), 5);
+            assert_eq!(view.capture.verb, verb);
+            assert_eq!(view.capture.detail, detail);
+            assert_eq!(view.toggles.len(), toggles);
+            assert_eq!(panel::mode_of(&capture_settings(&settings, "current"), tab), ["all", "window", "video"][tab]);
         }
+        settings.capture_window.tab = 2;
         settings.capture_window.selection = "scrolling".into();
-        assert_eq!(panel::unified_view(&settings, "", false).capture.detail, "Video: Window");
+        assert_eq!(panel::unified_view(&settings, "", false).capture.detail, "Records Window");
     }
 
     #[test]
@@ -819,14 +832,19 @@ mod tests {
 
     #[test]
     fn unified_menus_route_selection_sharing_and_panels_to_their_target() {
-        let settings = Settings::default();
+        let mut settings = Settings::default();
+        settings.capture_window.tab = 0;
         let area = capture_menu(&settings, "area");
-        assert!(area.iter().any(|item| item.id == "area:region" && item.checked));
         assert!(area.iter().any(|item| item.id == "image:sel:scrolling"));
         assert!(!area.iter().any(|item| item.id == "image:sel:image"), "Region is listed once");
         let send = capture_menu(&settings, "send");
         assert!(send.iter().any(|item| item.id.starts_with("image:share:")));
         assert!(send.iter().any(|item| item.id.starts_with("video:vshare:")));
+        settings.capture_window.tab = 1;
+        assert!(capture_menu(&settings, "send").iter().all(|item| !item.id.starts_with("video:")));
+        settings.capture_window.tab = 2;
+        assert!(capture_menu(&settings, "send").iter().all(|item| !item.id.starts_with("image:")));
+        settings.capture_window.tab = 0;
         assert!(capture_menu(&settings, "image:effects").iter().any(|item| item.id.starts_with("image:fx:")));
         for item in capture_menu(&settings, "more").iter().filter(|item| item.id.contains("panel:")) {
             let (tab, id) = context(&item.id);
