@@ -46,8 +46,10 @@ Prebuilt, Authenticode-signed packages for **Windows 10 and Windows 11** (`x64` 
 | **`Devolutions.Jiffshot-arm64-<version>.msix`** | Windows ARM64 | Signed MSIX package for Windows on ARM devices. |
 | **`Devolutions.Jiffshot-x64-<version>.zip`** | Windows x64 (Intel / AMD) | Portable archive—unzip anywhere and run `jiffshot.exe`. Nothing is installed in the system. |
 | **`Devolutions.Jiffshot-arm64-<version>.zip`** | Windows ARM64 | Portable archive for Windows on ARM devices. |
+| **`Devolutions.Jiffshot-macos-arm64-<version>.dmg`** | macOS Apple Silicon | Disk image for Macs with Apple Silicon. |
+| **`Devolutions.Jiffshot-macos-x86_64-<version>.dmg`** | macOS Intel | Disk image for Intel-based Macs. |
 
-The release workflow also builds `Devolutions.Jiffshot-macos-arm64-<version>.dmg` for Apple Silicon and `Devolutions.Jiffshot-macos-x86_64-<version>.dmg` for Intel, targeting macOS 13 or later. These DMGs are published only after Developer ID signing and notarization; older releases may not include them.
+The macOS builds target macOS 13 or later and are experimental; feature parity and behavior across supported Macs are still being verified. Open the matching DMG and drag **Jiffshot** to **Applications**. On first launch, grant Screen Recording (called Screen & System Audio Recording on newer macOS versions) and Accessibility permissions in System Settings when prompted. Camera and Microphone permissions are needed only when those recording sources are used. The DMGs are published after Developer ID signing and notarization; older releases may not include them. See [macOS builds](#macos-builds) for details and current limitations.
 
 Linux x64 and ARM64 release builds are configured to produce a portable `.tar.gz`
 and Ubuntu 24.04 `.deb`, plus a separately built native Fedora 43 `.rpm` for each
