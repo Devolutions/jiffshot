@@ -886,6 +886,17 @@ pub(super) async fn record_monitor_with_audio(
     state_changed: impl FnMut(RecordingState),
 ) -> Result<Option<PathBuf>, String> {
     gst::init().map_err(|error| format!("could not initialize GStreamer: {error}"))?;
+    // Fail before the desktop asks what to share, not after.
+    let missing: Vec<&str> = ["pipewiresrc", "videoconvert", "x264enc", "h264parse", "mp4mux"]
+        .into_iter()
+        .filter(|name| gst::ElementFactory::find(name).is_none())
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "recording needs the GStreamer plugins {} (install gstreamer1.0-pipewire and gstreamer1.0-plugins-ugly, or your distribution's equivalents)",
+            missing.join(", ")
+        ));
+    }
     let layout = match &webcam {
         RecordingWebcam::Disabled => WebcamLayout::default(),
         RecordingWebcam::Enabled(configuration) => configuration.layout,
