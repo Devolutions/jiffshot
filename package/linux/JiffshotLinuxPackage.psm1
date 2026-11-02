@@ -1,6 +1,6 @@
 #Requires -Version 7.4
 # Shared Linux packaging logic for build.ps1, assemble-release.ps1,
-# validate-installed.ps1, smoke.ps1, and the Pester regression tests.
+# validate-installed.ps1 and the Pester regression tests.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'

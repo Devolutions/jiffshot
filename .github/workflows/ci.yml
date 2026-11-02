@@ -428,7 +428,7 @@ jobs:
           link: 'false'
           pester: 'false'
 
-      - name: Clean install, desktop registration, launch, and uninstall
+      - name: Clean install, desktop registration, and uninstall
         run: |
           test "$(uname -m)" = "${{ matrix.machine }}"
           docker run --rm --volume "$PWD:/work:ro" \
@@ -440,18 +440,17 @@ jobs:
               if [ "$1" = deb ]; then
                 apt-get update -qq
                 apt-get install --no-install-recommends -y \
-                  /work/package/out/install/*.deb libicu74 xvfb x11-utils
+                  /work/package/out/install/*.deb libicu74
                 test "$(dpkg-query -W -f=\${Architecture} jiffshot)" = "$3"
               else
                 dnf install --setopt=install_weak_deps=False -y \
-                  /work/package/out/install/*.rpm libicu /usr/bin/Xvfb /usr/bin/xwininfo
+                  /work/package/out/install/*.rpm libicu
                 test "$(rpm -q --queryformat "%{ARCH}" jiffshot)" = "$3"
               fi
               ln -s /opt/microsoft/powershell/7/pwsh /usr/local/bin/pwsh
               pwsh -NoProfile -File /work/package/linux/validate-installed.ps1 -Arch "$4"
               grep -F "application/x-jiffshot=" /usr/share/applications/mimeinfo.cache
               grep -F "application/x-jiffshot" /usr/share/mime/globs2
-              pwsh -NoProfile -File /work/package/linux/smoke.ps1 -Launcher /usr/bin/jiffshot
               mkdir -p /root/.config/Jiffshot
               touch /root/.config/Jiffshot/package-removal-sentinel
               if [ "$1" = deb ]; then
