@@ -13,6 +13,20 @@
 use crate::vm_support::{publish, publish_update, watch, Element, ElementSink, ModelCell};
 use rustolonia::{Result, Signal};
 
+/// Linux has no workflow crate; this stands in for the one name used from it.
+#[cfg(target_os = "linux")]
+mod jiffshot_workflow {
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub enum StartupNotice {
+        #[default]
+        None,
+        NeedsApproval,
+        Legacy,
+        StatusUnknown,
+        Unavailable,
+    }
+}
+
 // ---- MainViewModel -----------------------------------------------------
 
 pub trait MainViewModel: Send + 'static {

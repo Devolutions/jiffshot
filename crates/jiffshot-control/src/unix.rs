@@ -1,6 +1,9 @@
+#[cfg(target_os = "linux")]
+use super::linux_ipc as ipc;
 use super::{
     read_frame, response_for, write_frame, Error, ErrorCode, Request, Response, Value, PROTOCOL,
 };
+#[cfg(target_os = "macos")]
 use jiffshot_capture::ipc;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -311,7 +314,10 @@ fn connect_at(path: &std::path::Path, timeout: Duration) -> io::Result<UnixStrea
         ));
     }
     let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
-    address.sun_len = length as u8;
+    #[cfg(target_os = "macos")]
+    {
+        address.sun_len = length as u8;
+    }
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
     // SAFETY: the source and destination do not overlap and the path was
     // checked to fit, including the zeroed trailing NUL.
@@ -335,19 +341,22 @@ fn connect_at(path: &std::path::Path, timeout: Duration) -> io::Result<UnixStrea
     {
         return Err(io::Error::last_os_error());
     }
-    let no_sigpipe: libc::c_int = 1;
-    // SAFETY: the option points to a c_int for the duration of the call.
-    if unsafe {
-        libc::setsockopt(
-            descriptor,
-            libc::SOL_SOCKET,
-            libc::SO_NOSIGPIPE,
-            (&no_sigpipe as *const libc::c_int).cast(),
-            std::mem::size_of_val(&no_sigpipe) as libc::socklen_t,
-        )
-    } < 0
+    #[cfg(target_os = "macos")]
     {
-        return Err(io::Error::last_os_error());
+        let no_sigpipe: libc::c_int = 1;
+        // SAFETY: the option points to a c_int for the duration of the call.
+        if unsafe {
+            libc::setsockopt(
+                descriptor,
+                libc::SOL_SOCKET,
+                libc::SO_NOSIGPIPE,
+                (&no_sigpipe as *const libc::c_int).cast(),
+                std::mem::size_of_val(&no_sigpipe) as libc::socklen_t,
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
     }
     stream.set_nonblocking(true)?;
     // SAFETY: address is initialized and length covers the path and NUL.
@@ -756,14 +765,19 @@ mod tests {
             .mode(0o700)
             .create(&directory)
             .unwrap();
+        let (variable, private) = if cfg!(target_os = "linux") {
+            ("XDG_RUNTIME_DIR", "jiffshot")
+        } else {
+            ("JIFFSHOT_LOCAL_DIR", "ipc")
+        };
         let result = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "macos::tests::isolated_server_child",
+                "unix::tests::isolated_server_child",
                 "--ignored",
                 "--nocapture",
             ])
-            .env("JIFFSHOT_LOCAL_DIR", &directory)
+            .env(variable, &directory)
             .output()
             .unwrap();
         assert!(
@@ -772,8 +786,8 @@ mod tests {
             String::from_utf8_lossy(&result.stdout),
             String::from_utf8_lossy(&result.stderr)
         );
-        fs::remove_file(directory.join("ipc/control.lock")).unwrap();
-        fs::remove_dir(directory.join("ipc")).unwrap();
+        fs::remove_file(directory.join(private).join("control.lock")).unwrap();
+        fs::remove_dir(directory.join(private)).unwrap();
         fs::remove_dir(directory).unwrap();
     }
 }

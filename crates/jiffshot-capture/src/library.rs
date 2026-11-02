@@ -306,6 +306,25 @@ fn rename_library_exclusively(source: &Path, destination: &Path) -> io::Result<(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn rename_library_exclusively(source: &Path, destination: &Path) -> io::Result<()> {
+    // `hard_link` fails if the destination exists, so nothing is overwritten.
+    std::fs::hard_link(source, destination)?;
+    if let Err(error) = std::fs::remove_file(source) {
+        return match std::fs::remove_file(destination) {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; could not remove {}: {cleanup}",
+                    destination.display()
+                ),
+            )),
+        };
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 fn rename_library_exclusively(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;

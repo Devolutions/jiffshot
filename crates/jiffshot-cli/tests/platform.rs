@@ -1,4 +1,4 @@
-#![cfg(not(any(windows, target_os = "macos")))]
+#![cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 
 use std::process::Command;
 

@@ -1,4 +1,7 @@
+#[cfg(any(windows, target_os = "macos"))]
 use super::{app, capture_window, ocr, settings, tray, video, vm, vm_support};
+#[cfg(target_os = "linux")]
+use crate::{app, ocr, settings, video, vm, vm_support};
 #[cfg(windows)]
 use super::{drag_out, winutil};
 use crate::{canvas, ui};
@@ -487,6 +490,41 @@ impl MainViewModel for Model {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn run() -> rustolonia::Result<()> {
+    let files: Vec<std::path::PathBuf> = std::env::args()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .map(std::path::PathBuf::from)
+        .collect();
+    crate::linux::shared::install_capture_handler();
+    let _tray = crate::linux::shared::start_tray();
+    let mut editor = Editor::new(Document::blank(1280, 720, Rgba::WHITE));
+    editor.analyzer = Some(Box::new(ocr::Recognizer));
+    *canvas::EDITOR.lock() = Some(editor);
+    let result = App::load_from_env()?.run(move |scope| {
+        let opening = files.first().cloned().or_else(|| {
+            scope
+                .activation_items()
+                .ok()?
+                .iter()
+                .find_map(|item| item.local_path().map(|p| p.to_path_buf()))
+        });
+        vm_support::install(scope);
+        app::install(scope.clone(), opening);
+        ui::mount_main_window(scope, Model, true)?;
+        let window = ui::mount_capture_window(scope, crate::linux::capture_window::CaptureModel)?;
+        crate::linux::capture_window::set_window(window);
+        if let Some(flag) = std::env::args().nth(1) {
+            crate::linux::shared::run_launch_action(&flag);
+        }
+        Ok(())
+    });
+    ui::detach_all();
+    result
+}
+
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) fn run() -> rustolonia::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(target_os = "macos")]

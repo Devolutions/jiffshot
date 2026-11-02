@@ -8,33 +8,44 @@
 
 #[path = "../../ui/canvas_view.rs"]
 pub mod canvas_view;
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod capture_view;
 mod dark_blue;
 #[cfg(windows)]
 mod editor_placement;
 pub mod dialogs;
+#[cfg(any(windows, target_os = "macos"))]
 mod extras;
+#[cfg(any(windows, target_os = "macos"))]
 mod hud;
 mod icons;
 mod main_window;
 #[cfg(windows)]
 mod native_theme;
+#[cfg(any(windows, target_os = "macos"))]
 mod overlay;
+#[cfg(any(windows, target_os = "macos"))]
 mod prefs_window;
 #[cfg(target_os = "macos")]
 mod permissions_macos;
+#[cfg(any(windows, target_os = "macos"))]
 mod selftest;
+#[cfg(any(windows, target_os = "macos"))]
 mod toast;
+#[cfg(any(windows, target_os = "macos"))]
 mod tray;
 
 pub use crate::ui_only::UiOnly;
-use crate::vm::{
-    CaptureBinding, CaptureViewModel, MainBinding, MainViewModel, TrayBinding, TrayViewModel,
-};
+#[cfg(any(windows, target_os = "macos"))]
+use crate::vm::TrayViewModel;
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+use crate::vm::CaptureViewModel;
+use crate::vm::{CaptureBinding, MainBinding, MainViewModel, TrayBinding};
 use rustolonia::{AppScope, Result, Window};
 use std::cell::RefCell;
 use std::path::PathBuf;
 
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) fn selftest_failed() -> bool {
     selftest::failed()
 }
@@ -135,7 +146,7 @@ pub fn icon_file() -> String {
 pub(crate) fn recent_file_name(uri: &str) -> String {
     if uri.starts_with("file:") {
         let name = uri.rsplit('/').next().unwrap_or(uri);
-        match crate::app::decode_uri_path(name) {
+        match jiffshot_capture::paths::decode_uri_path(name) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
             Err(_) => name.to_owned(),
         }
@@ -161,14 +172,18 @@ pub fn mount_main_window(scope: &AppScope, model: impl MainViewModel, show: bool
         scope.mount_hidden(window)?;
     }
     // The windows the main view model asks for.
-    toast::install(scope)?;
-    extras::install(scope)?;
-    prefs_window::install(scope)?;
-    overlay::install(scope)?;
-    hud::install(scope)?;
-    #[cfg(target_os = "macos")]
-    permissions_macos::install(scope);
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        toast::install(scope)?;
+        extras::install(scope)?;
+        prefs_window::install(scope)?;
+        overlay::install(scope)?;
+        hud::install(scope)?;
+        #[cfg(target_os = "macos")]
+        permissions_macos::install(scope);
+    }
     // JIFFSHOT_UITEST=DIR: the editor drives itself (see `selftest`).
+    #[cfg(any(windows, target_os = "macos"))]
     if let Some(dir) = std::env::var_os("JIFFSHOT_UITEST").filter(|d| !d.is_empty()) {
         let test_scope = scope.clone();
         scope.post(move || selftest::start(&test_scope, std::path::Path::new(&dir)))?;
@@ -177,6 +192,7 @@ pub fn mount_main_window(scope: &AppScope, model: impl MainViewModel, show: bool
 }
 
 /// Mounts the Capture window, hidden.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub fn mount_capture_window(scope: &AppScope, model: impl CaptureViewModel) -> Result<Window> {
     let binding = CaptureBinding::new(model)?;
     CAPTURE.with(|m| *m.borrow_mut() = Some(binding.clone()));
@@ -186,6 +202,7 @@ pub fn mount_capture_window(scope: &AppScope, model: impl CaptureViewModel) -> R
 }
 
 /// Shows the tray icon.
+#[cfg(any(windows, target_os = "macos"))]
 pub fn mount_tray(scope: &AppScope, model: impl TrayViewModel) -> Result<()> {
     let binding = tray::mount(scope, model)?;
     TRAY.with(|t| *t.borrow_mut() = Some(binding));
@@ -208,6 +225,7 @@ pub fn detach_all() {
     if let Some(main) = MAIN.with(|m| m.borrow_mut().take()) {
         main.model.run(|m| m.detach());
     }
+    #[cfg(any(windows, target_os = "macos"))]
     if let Some(capture) = CAPTURE.with(|c| c.borrow_mut().take()) {
         capture.model.run(|m| m.detach());
     }

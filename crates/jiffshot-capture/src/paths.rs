@@ -61,6 +61,12 @@ pub fn config_dir() -> Option<PathBuf> {
                 .join(NAME),
         )
     }
+    #[cfg(target_os = "linux")]
+    {
+        let base = overridden("XDG_CONFIG_HOME")
+            .or_else(|| crate::os::home_dir().map(|home| home.join(".config")))?;
+        Some(base.join(NAME))
+    }
 }
 
 /// Logs and caches, which start fresh: `%LOCALAPPDATA%\Jiffshot` on
@@ -75,6 +81,9 @@ pub fn local_dir() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
     #[cfg(target_os = "macos")]
     let base = crate::os::home_dir().map(|home| home.join("Library/Caches"));
+    #[cfg(target_os = "linux")]
+    let base = overridden("XDG_CACHE_HOME")
+        .or_else(|| crate::os::home_dir().map(|home| home.join(".cache")));
     base.unwrap_or_else(std::env::temp_dir).join(NAME)
 }
 

@@ -84,7 +84,7 @@ current Rustolonia host.
 
 ## Features
 
-The detailed feature list below describes the Windows application. The Linux build currently supports the subset described in [Building from Source](#building-from-source).
+The detailed feature list below describes the Windows application. The Linux build currently supports the subset described in [Building from Source](#building-from-source). On Linux, a plain launch or opening a file now uses the same editor window as Windows and macOS (GStreamer media backend); it includes the Capture window (Image/Record tabs, cursor, delay and audio options over the desktop portal) and the opt-in tray; preferences, shortcuts, the capture overlay and region/window/interval/schedule modes are not yet available. Set `JIFFSHOT_CLASSIC_UI=1` to use the earlier Linux-specific UI, which is also used for capture, scrolling and text-grab launch modes.
 
 ### Flexible Screen Capture
 
@@ -279,6 +279,8 @@ jiffshot.exe --quit                         # Stop the running Jiffshot instance
 ```
 
 ### Automation and AI agents: `jiffshot-cli` (Windows)
+
+On Linux, `jiffshot-cli` supports `status`, `screenshot`, `open`, `ocr --path`, `library list`, and `record start|status|pause|stop|cancel`, served by the running Jiffshot over a private per-user Unix socket in `$XDG_RUNTIME_DIR/jiffshot`. Portal-based screenshots and recordings may require desktop consent. `open PATH` loads a file into the running editor; the editing commands are not yet available. The rest of this section describes Windows.
 
 `jiffshot-cli.exe`, installed beside `jiffshot.exe`, drives the running Jiffshot (starting it if needed) so a script or an AI agent can screenshot, record and annotate a desktop software demo without anyone clicking through it by hand. Every command prints one JSON object and returns a meaningful exit code. It can click, type, press keys, find text by OCR and controls by UI Automation, and wait for windows or text.
 

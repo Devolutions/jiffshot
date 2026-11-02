@@ -823,7 +823,7 @@ impl Output {
                     Err(e) => return Err(e.into()),
                 }
             }
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             {
                 let staging = parent.join(format!(
                     ".jiffshot-export-{}-{id}.{extension}",
@@ -853,7 +853,7 @@ impl Output {
             .write(true)
             .open(&self.staging)?
             .sync_all()?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         fs::rename(&self.staging, &self.destination)?;
         #[cfg(windows)]
         {

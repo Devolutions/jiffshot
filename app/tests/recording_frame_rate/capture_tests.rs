@@ -441,8 +441,13 @@ fn check_encoded_rate(rate: RecordingFrameRate, expected_fps: u64) {
             "Source must preserve every input frame in its original order"
         );
     } else if expected_fps < INPUT_FPS {
+        // Newer videorate releases repeat the final frame to fill the duration at EOS.
+        let body = match steps.split_last() {
+            Some((0, rest)) => rest,
+            _ => &steps[..],
+        };
         assert!(
-            steps.contains(&2) && steps.iter().all(|step| matches!(step, 1 | 2)),
+            body.contains(&2) && body.iter().all(|step| matches!(step, 1 | 2)),
             "15 fps must actually drop some of the changing 20 fps frames: {steps:?}"
         );
     } else {

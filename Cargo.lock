@@ -1388,6 +1388,7 @@ dependencies = [
  "gstreamer-video",
  "image",
  "jiffshot-capture",
+ "jiffshot-control",
  "jiffshot-doc",
  "jiffshot-workflow",
  "ksni",
@@ -1413,8 +1414,13 @@ dependencies = [
 name = "jiffshot-capture"
 version = "0.2.0"
 dependencies = [
+ "arboard",
  "block2",
  "dispatch2",
+ "gstreamer",
+ "gstreamer-app",
+ "gstreamer-pbutils",
+ "gstreamer-video",
  "image",
  "jiffshot-doc",
  "libc",

@@ -4,13 +4,15 @@
 pub const FONT: &str = "Segoe Fluent Icons, Segoe MDL2 Assets, Segoe UI Symbol";
 #[cfg(target_os = "macos")]
 pub const FONT: &str = "Apple Symbols, Helvetica Neue";
+#[cfg(target_os = "linux")]
+pub const FONT: &str = "Noto Sans Symbols 2, Noto Sans Symbols, DejaVu Sans, Symbola";
 
 #[cfg(windows)]
 pub fn glyph(text: &str) -> &str {
     text
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(not(windows))]
 pub fn glyph(text: &str) -> &str {
     match text {
         "\u{E7C9}" | "\u{E8B0}" | "\u{E962}" => "↖",
@@ -52,7 +54,7 @@ pub fn glyph(text: &str) -> &str {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, not(windows)))]
 mod tests {
     #[test]
     fn windows_icons_have_visible_mac_substitutes() {

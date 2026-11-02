@@ -45,7 +45,7 @@ fn write_checked(dir: &Path, root: &Map<String, Value>) -> io::Result<()> {
     std::fs::rename(tmp, dir.join(FILE))
 }
 
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(any(not(unix), test))]
 fn write(dir: &Path, root: &Map<String, Value>) {
     let _ = write_checked(dir, root);
 }
@@ -93,11 +93,11 @@ pub fn section(name: &str) -> Value {
 
 /// Replaces one side's section, keeping everything else.
 pub fn set_section(name: &str, value: Value) {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     if let Err(error) = try_set_section(name, value) {
         eprintln!("Could not save {name} settings: {error}");
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(unix))]
     with_dir(|dir| {
         let mut root = read(dir);
         root.insert(name.to_owned(), value);
@@ -114,7 +114,7 @@ pub fn try_set_section(name: &str, value: Value) -> io::Result<()> {
 }
 
 /// Checks that existing settings can be read without changing them.
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 pub fn try_validate() -> io::Result<()> {
     let dir = crate::paths::config_dir()
         .ok_or_else(|| io::Error::other("the settings directory is unavailable"))?;
@@ -123,7 +123,7 @@ pub fn try_validate() -> io::Result<()> {
 }
 
 /// Replaces several top-level values together without discarding unreadable settings.
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 pub fn try_set_values(values: Map<String, Value>) -> io::Result<()> {
     let dir = crate::paths::config_dir()
         .ok_or_else(|| io::Error::other("the settings directory is unavailable"))?;
@@ -142,7 +142,7 @@ fn top(key: &str) -> Option<String> {
 }
 
 fn set_top(key: &str, value: Option<&str>) {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     {
         let result = with_dir(|dir| {
             try_update(dir, |root| {
@@ -157,7 +157,7 @@ fn set_top(key: &str, value: Option<&str>) {
             eprintln!("Could not save {key} setting: {error}");
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(unix))]
     with_dir(|dir| {
         let mut root = read(dir);
         match value {
