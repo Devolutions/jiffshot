@@ -185,6 +185,9 @@ Describe 'macOS packaging' {
                 Mock Invoke-MacCommand { $result }
                 { Get-MacDiscoveredHost '/fixture/jiffshot' '/fixture' } | Should -Throw '*host discovery probe failed*'
             }
+            Mock Invoke-MacCommand { [pscustomobject]@{ ExitCode = 137; Stdout = ''; Stderr = '' } }
+            { Get-MacDiscoveredHost '/fixture/jiffshot' '/fixture' } |
+                Should -Throw "*host discovery probe failed for '/fixture/jiffshot': exit status 137*"
             Mock Invoke-MacCommand { throw 'timed out' }
             { Get-MacDiscoveredHost '/fixture/jiffshot' '/fixture' } | Should -Throw '*Could not check Rustolonia host discovery*'
         }
@@ -207,6 +210,7 @@ Describe 'macOS packaging' {
                     [Environment]::SetEnvironmentVariable($name, '/must-not-leak')
                 }
                 Mock Resolve-MacPhysicalPath { $Path }
+                Mock Sign-MacPath {}
                 $script:ProbeCount = 0
                 Mock Invoke-MacCommand {
                     $script:ProbeCount++
@@ -238,6 +242,9 @@ Describe 'macOS packaging' {
                     $TimeoutSeconds -eq 30 -and
                     @($variables | Where-Object { $Environment.ContainsKey($_) }).Count -eq 0
                 }
+                Should -Invoke Sign-MacPath -Times 1 -Exactly -ParameterFilter {
+                    $Path -ceq $unbundled -and $Identity -ceq '-' -and -not $Keychain -and -not $Entitlements
+                }
                 [IO.File]::ReadAllText($unbundled) | Should -BeExactly 'fixture'
             }
             finally {
@@ -253,6 +260,7 @@ Describe 'macOS packaging' {
             [IO.File]::WriteAllText($binary, 'fixture')
             [IO.File]::WriteAllText($hostPath, 'host')
             Mock Resolve-MacPhysicalPath { $Path }
+            Mock Sign-MacPath {}
             $script:ProbeCount = 0
             Mock Get-MacDiscoveredHost {
                 $script:ProbeCount++
@@ -269,6 +277,52 @@ Describe 'macOS packaging' {
                 if ($script:ProbeCount -eq 1) { $hostPath } else { '/developer/host.dylib' }
             }
             { Confirm-MacHostDiscovery $binary $hostPath $script:Work } | Should -Throw '*unstaged Rustolonia host*'
+        }
+
+        It 'fails before the isolated probe if the copied executable cannot be signed' {
+            $binary = Join-Path $script:Work 'jiffshot'
+            $hostPath = Join-Path $script:Work 'host.dylib'
+            [IO.File]::WriteAllText($binary, 'fixture')
+            [IO.File]::WriteAllText($hostPath, 'host')
+            Mock Resolve-MacPhysicalPath { $Path }
+            Mock Get-MacDiscoveredHost { $hostPath }
+            Mock Sign-MacPath { throw 'fixture signing failed' }
+
+            { Confirm-MacHostDiscovery $binary $hostPath $script:Work } | Should -Throw '*fixture signing failed*'
+            Should -Invoke Get-MacDiscoveredHost -Times 1 -Exactly
+            Should -Invoke Sign-MacPath -Times 1 -Exactly
+        }
+
+        It 'keeps the isolated copy of a signed bundle executable valid' {
+            $app = Join-Path $script:Work 'Fixture.app'
+            $macos = Join-Path $app 'Contents/MacOS'
+            $frameworks = Join-Path $app 'Contents/Frameworks'
+            [void][IO.Directory]::CreateDirectory($macos)
+            [void][IO.Directory]::CreateDirectory($frameworks)
+            $script:SignedFixtureBinary = Join-Path $macos 'jiffshot'
+            $script:SignedFixtureHost = Join-Path $frameworks 'librustolonia_host.dylib'
+            [IO.File]::Copy('/usr/bin/true', $script:SignedFixtureBinary)
+            [IO.File]::Copy('/usr/bin/true', $script:SignedFixtureHost)
+            Invoke-MacRun '/usr/bin/codesign' @('--force', '--sign', '-', $script:SignedFixtureHost)
+            Write-MacPlist (Join-Path $app 'Contents/Info.plist') ([ordered]@{
+                CFBundleIdentifier = 'com.devolutions.jiffshot.package-test'
+                CFBundleExecutable = 'jiffshot'
+                CFBundlePackageType = 'APPL'
+            })
+            Invoke-MacRun '/usr/bin/codesign' @('--force', '--sign', '-', '--options', 'runtime', $app)
+            Invoke-MacRun '/usr/bin/codesign' @('--verify', '--deep', '--strict', $app)
+
+            $script:VerifiedIsolatedCopy = $false
+            Mock Get-MacDiscoveredHost {
+                if ($Binary -ceq $script:SignedFixtureBinary) { return $script:SignedFixtureHost }
+                [void](Invoke-MacCommand -File '/usr/bin/codesign' -Arguments @('--verify', '--strict', $Binary))
+                [void](Invoke-MacCommand -File $Binary)
+                $script:VerifiedIsolatedCopy = $true
+            }
+            Confirm-MacHostDiscovery $script:SignedFixtureBinary $script:SignedFixtureHost $script:Work
+
+            $script:VerifiedIsolatedCopy | Should -BeTrue
+            Invoke-MacRun '/usr/bin/codesign' @('--verify', '--deep', '--strict', $app)
         }
 
         It 'rejects existing package output' {

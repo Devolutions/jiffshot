@@ -319,7 +319,7 @@ function Get-MacDiscoveredHost([string]$Binary, [string]$WorkingDirectory) {
         return $null
     }
     $detail = if ($result.Stderr.Trim()) { $result.Stderr.Trim() } else { "exit status $($result.ExitCode)" }
-    throw "The Rustolonia host discovery probe failed: $detail"
+    throw "The Rustolonia host discovery probe failed for '$Binary': $detail"
 }
 
 function Confirm-MacHostDiscovery([string]$Binary, [string]$HostPath, [string]$Temporary) {
@@ -331,6 +331,8 @@ function Confirm-MacHostDiscovery([string]$Binary, [string]$HostPath, [string]$T
     [void][IO.Directory]::CreateDirectory($isolated)
     $unbundled = Join-Path $isolated 'jiffshot'
     [IO.File]::Copy($Binary, $unbundled)
+    # The bundle signature seals Info.plist, which is absent beside this copy.
+    Sign-MacPath $unbundled '-' $null $null
     $found = Get-MacDiscoveredHost $unbundled $isolated
     if ($null -ne $found) { throw "The application can discover an unstaged Rustolonia host: $found" }
 }
