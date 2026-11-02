@@ -10,7 +10,6 @@ use crate::geometry::{self, SavedAreaChanges, SavedAreaKind};
 use crate::settings::SavedAreaConfirmation;
 use crate::settings::{Preset, Settings};
 use crate::workflow::{SHARES, VIDEO_SHARES};
-#[cfg(target_os = "macos")]
 use jiffshot_capture::Rect;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -98,6 +97,11 @@ const CORNER_NAMES: [&str; 4] = ["Top Left", "Top Right", "Bottom Left", "Bottom
 const CORNERS: [&str; 4] = ["top-left", "top-right", "bottom-left", "bottom-right"];
 const TIMINGS: [&str; 3] = ["delay", "interval", "schedule"];
 pub(crate) const FPS: [u32; 4] = [15, 24, 30, 60];
+/// The largest fixed recording side; MP4 post-production stops at 8192.
+const VIDEO_MAX_SIDE: i64 = 8192;
+/// The Video Region options' rows before the recording rows: Fixed region,
+/// Width, Height and, where positions can be saved, Set position, X, Y.
+const VIDEO_REGION_ROWS: usize = if cfg!(windows) { 6 } else { 3 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Field {
@@ -241,6 +245,9 @@ fn label_of<'a>(list: &[(&'a str, &str)], value: &str) -> &'a str {
 /// What a dropdown shows.
 pub fn field_text(s: &Settings, tab: usize, field: Field) -> String {
     match field {
+        Field::Selection if tab == 2 && video_fixed(s) => {
+            format!("Region ({} × {})", s.video_fixed_size.0, s.video_fixed_size.1)
+        }
         Field::Selection if tab == 2 => {
             label_of(VIDEO_SELECTIONS, &s.capture_window.video_selection).into()
         }
@@ -267,6 +274,50 @@ pub fn fixed(s: &Settings) -> bool {
         "image" => s.capture_window.fixed,
         _ => false,
     }
+}
+
+/// A Video Region selection is a fixed size.
+pub fn video_fixed(s: &Settings) -> bool {
+    s.capture_window.video_selection == "region" && s.capture_window.video_fixed
+}
+
+fn video_side(pixels: i32) -> i32 {
+    pixels.clamp(16, VIDEO_MAX_SIDE as i32)
+}
+
+/// The Video Region size, within what a recording can be.
+pub fn video_fixed_size(s: &Settings) -> (i32, i32) {
+    (video_side(s.video_fixed_size.0), video_side(s.video_fixed_size.1))
+}
+
+/// Makes `rect` the Image (or, with `video`, the Video) Region's fixed
+/// region (Select region on screen…): its size, and its position when the
+/// region has one.
+pub fn set_fixed_region(s: &mut Settings, video: bool, rect: Rect) {
+    if video {
+        s.capture_window.video_selection = "region".into();
+        s.capture_window.video_fixed = true;
+        s.video_fixed_size = (video_side(rect.width), video_side(rect.height));
+        if s.capture_window.video_fixed_at.is_some() {
+            s.capture_window.video_fixed_at = Some((rect.x, rect.y));
+        }
+    } else {
+        s.capture_window.selection = "image".into();
+        s.capture_window.fixed = true;
+        s.fixed_size = (rect.width.clamp(16, 16384), rect.height.clamp(16, 16384));
+        if s.capture_window.fixed_at.is_some() {
+            s.capture_window.fixed_at = Some((rect.x, rect.y));
+        }
+    }
+}
+
+/// The Video tab's frame rate and countdown rows.
+fn recording_rows(s: &Settings) -> [Row; 2] {
+    let fps = FPS.iter().position(|&f| f == s.record_fps).unwrap_or(2);
+    [
+        choice("Frames a second", &["15", "24", "30", "60"], fps),
+        number("Countdown (seconds)", s.countdown as i64, 0, 10),
+    ]
 }
 
 fn audio(s: &Settings) -> (bool, bool) {
@@ -353,6 +404,9 @@ pub fn reset(s: &mut Settings, tab: usize) {
         s.draw_fade_seconds = d.draw_fade_seconds;
         s.video_share = d.video_share;
         s.capture_window.video_selection = d.capture_window.video_selection;
+        s.video_fixed_size = d.video_fixed_size;
+        s.capture_window.video_fixed = false;
+        s.capture_window.video_fixed_at = None;
     } else {
         s.copy_to_clipboard = d.copy_to_clipboard;
         s.include_cursor = d.include_cursor;
@@ -376,6 +430,7 @@ pub fn mode_of(s: &Settings, tab: usize) -> String {
         1 if fixed(s) => "fixed".into(),
         1 => s.capture_window.selection.clone(),
         _ if s.capture_window.video_selection == "fullscreen" => "video-fullscreen".into(),
+        _ if video_fixed(s) => "video-fixed".into(),
         _ => "video".into(),
     }
 }
@@ -1204,7 +1259,43 @@ pub fn panel(s: &Settings, id: &str, runs_at_startup: bool, capture_key: &str) -
                 }
                 rows
             };
-            panel_of(id, "Region options", rows)
+            let panel = panel_of(id, "Region options", rows)?;
+            #[cfg(windows)]
+            let panel = Panel {
+                action: Some(PanelAction {
+                    id: "select-image-region",
+                    label: "Select region on screen…",
+                }),
+                ..panel
+            };
+            Some(panel)
+        }
+        "selection" if tab == 2 && s.capture_window.video_selection == "region" => {
+            let mut rows = vec![
+                check_row("Fixed region", video_fixed(s)),
+                number("Width", s.video_fixed_size.0 as i64, 16, VIDEO_MAX_SIDE),
+                number("Height", s.video_fixed_size.1 as i64, 16, VIDEO_MAX_SIDE),
+            ];
+            // macOS keeps saved positions in a reviewed display grid that
+            // recordings do not have yet, so only the size is offered there.
+            #[cfg(windows)]
+            {
+                let (x, y) = s.capture_window.video_fixed_at.unwrap_or((0, 0));
+                rows.push(check_row("Set position", s.capture_window.video_fixed_at.is_some()));
+                rows.push(coordinate_number("X", x as i64));
+                rows.push(coordinate_number("Y", y as i64));
+            }
+            rows.extend(recording_rows(s));
+            let panel = panel_of(id, "Region options", rows)?;
+            #[cfg(windows)]
+            let panel = Panel {
+                action: Some(PanelAction {
+                    id: "select-video-region",
+                    label: "Select region on screen…",
+                }),
+                ..panel
+            };
+            Some(panel)
         }
         "selection" if tab == 1 => panel_of(
             id,
@@ -1214,17 +1305,7 @@ pub fn panel(s: &Settings, id: &str, runs_at_startup: bool, capture_key: &str) -
                 s.cursor_as_object,
             )],
         ),
-        "selection" => {
-            let fps = FPS.iter().position(|&f| f == s.record_fps).unwrap_or(2);
-            panel_of(
-                id,
-                "Recording options",
-                vec![
-                    choice("Frames a second", &["15", "24", "30", "60"], fps),
-                    number("Countdown (seconds)", s.countdown as i64, 0, 10),
-                ],
-            )
-        }
+        "selection" => panel_of(id, "Recording options", recording_rows(s).to_vec()),
         "delay" => {
             let kind = TIMINGS.iter().position(|t| *t == timing(s)).unwrap_or(0);
             let seconds = if s.delay_seconds > 0 {
@@ -1641,8 +1722,30 @@ fn apply_inner(
             Applied::Changed
         }
         "selection" => {
-            s.record_fps = FPS[clamp(0, 0, 3) as usize];
-            s.countdown = clamp(1, 0, 10) as u32;
+            // Region options lead with the region rows; the recording rows
+            // are always last.
+            let first = if values.len() == VIDEO_REGION_ROWS + 2 {
+                s.capture_window.video_selection = "region".into();
+                s.capture_window.video_fixed = on(values, 0);
+                s.video_fixed_size = (
+                    clamp(1, 16, VIDEO_MAX_SIDE) as i32,
+                    clamp(2, 16, VIDEO_MAX_SIDE) as i32,
+                );
+                #[cfg(windows)]
+                {
+                    s.capture_window.video_fixed_at = on(values, 3).then(|| {
+                        (
+                            clamp(4, -32768, 32767) as i32,
+                            clamp(5, -32768, 32767) as i32,
+                        )
+                    });
+                }
+                VIDEO_REGION_ROWS
+            } else {
+                0
+            };
+            s.record_fps = FPS[clamp(first, 0, 3) as usize];
+            s.countdown = clamp(first + 1, 0, 10) as u32;
             Applied::Changed
         }
         "delay" => {
@@ -2001,6 +2104,81 @@ mod tests {
         assert_eq!((s.delay_seconds, s.capture_window.delay), (0, 4));
         flip(&mut s, Switch::Delay);
         assert_eq!(s.delay_seconds, 4, "the delay comes back");
+    }
+
+    #[test]
+    fn video_region_options_fix_the_size_and_keep_the_recording_rows_last() {
+        let mut s = settings();
+        s.capture_window.tab = 2;
+        let p = panel(&s, "selection", false, "PrtScn").unwrap();
+        assert_eq!((p.title.as_str(), p.rows.len()), ("Region options", VIDEO_REGION_ROWS + 2));
+        assert!(matches!(&p.rows[VIDEO_REGION_ROWS], Row::Choice { label, .. } if label == "Frames a second"));
+        assert_eq!(p.action.as_ref().map(|action| action.id), cfg!(windows).then_some("select-video-region"));
+
+        let mut values: Vec<Value> = vec![true.into(), 1280.into(), 720.into()];
+        #[cfg(windows)]
+        values.extend([true.into(), (-100).into(), 50.into()]);
+        values.extend([3.into(), 5.into()]);
+        assert_eq!(apply(&mut s, "selection", &values, false), Applied::Changed);
+        assert_eq!((s.video_fixed_size, s.record_fps, s.countdown), ((1280, 720), 60, 5));
+        assert_eq!(s.fixed_size, (800, 600), "the image region is separate");
+        #[cfg(windows)]
+        assert_eq!(s.capture_window.video_fixed_at, Some((-100, 50)));
+        assert_eq!(field_text(&s, 2, Field::Selection), "Region (1280 × 720)");
+        assert_eq!(capture_button(&s, 2, "PrtScn", false).detail, "Region (1280 × 720)");
+        assert_eq!(mode_of(&s, 2), "video-fixed");
+
+        // The recording rows alone (as Window and Fullscreen show them)
+        // leave the region as it is.
+        assert_eq!(apply(&mut s, "selection", &[0.into(), 0.into()], false), Applied::Changed);
+        assert_eq!((s.video_fixed_size, s.record_fps, s.countdown), ((1280, 720), 15, 0));
+        s.capture_window.video_selection = "window".into();
+        let p = panel(&s, "selection", false, "PrtScn").unwrap();
+        assert_eq!((p.title.as_str(), p.rows.len(), p.action), ("Recording options", 2, None));
+        assert_eq!(mode_of(&s, 2), "video");
+
+        s.capture_window.video_selection = "region".into();
+        values[1] = 100_000.into();
+        values[2] = 1.into();
+        assert_eq!(apply(&mut s, "selection", &values, false), Applied::Changed);
+        assert_eq!(s.video_fixed_size, (8192, 16));
+
+        reset(&mut s, 2);
+        assert_eq!(
+            (s.capture_window.video_fixed, s.capture_window.video_fixed_at, s.video_fixed_size),
+            (false, None, (1920, 1080))
+        );
+        assert_eq!(mode_of(&s, 2), "video");
+    }
+
+    #[test]
+    fn a_region_selected_on_screen_becomes_the_fixed_region() {
+        let mut s = settings();
+        s.capture_window.tab = 1;
+        let image = panel(&s, "selection", false, "PrtScn").unwrap();
+        assert_eq!(image.action.as_ref().map(|action| action.id), cfg!(windows).then_some("select-image-region"));
+
+        set_fixed_region(&mut s, true, Rect::new(10, 20, 1000, 9000));
+        assert_eq!(
+            (s.capture_window.video_fixed, s.video_fixed_size, s.capture_window.video_fixed_at),
+            (true, (1000, 8192), None),
+            "without Set position only the size is taken"
+        );
+        s.capture_window.video_fixed_at = Some((0, 0));
+        set_fixed_region(&mut s, true, Rect::new(-30, 40, 640, 480));
+        assert_eq!((s.video_fixed_size, s.capture_window.video_fixed_at), ((640, 480), Some((-30, 40))));
+        assert_eq!(s.fixed_size, (800, 600), "the video region leaves the image region alone");
+
+        s.capture_window.selection = "window".into();
+        set_fixed_region(&mut s, false, Rect::new(5, 6, 8, 300));
+        assert_eq!(
+            (s.capture_window.selection.as_str(), fixed(&s), s.fixed_size, s.capture_window.fixed_at),
+            ("image", true, (16, 300), None)
+        );
+        s.capture_window.fixed_at = Some((1, 1));
+        set_fixed_region(&mut s, false, Rect::new(5, 6, 400, 300));
+        assert_eq!((s.fixed_size, s.capture_window.fixed_at), ((400, 300), Some((5, 6))));
+        assert_eq!(s.video_fixed_size, (640, 480));
     }
 
     #[test]

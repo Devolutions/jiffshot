@@ -97,7 +97,7 @@ The detailed feature list below describes the Windows application. The Linux bui
 - **Specialized Capture Modes:**
   - **Scrolling Capture:** Automatically scrolls and stitches vertical, horizontal, or two-axis scrolling windows and web pages.
   - **Panoramic Capture:** Pan across a scrollable area at your own pace and stitch it live.
-  - **Freehand, Multi-Area & Fixed Size:** Lasso an arbitrary shape (transparent outside), select multiple distinct rectangles in one shot, or stamp a fixed-pixel rectangle.
+  - **Freehand, Multi-Area & Fixed Size:** Lasso an arbitrary shape (transparent outside), select multiple distinct rectangles in one shot, or stamp a fixed-pixel rectangle. Set the fixed size and an optional exact position in the Region options (the gear beside **Area**); on Windows, **Select region on screen…** takes them from a rectangle you drag.
   - **Open Menus:** Delayed capture mode designed to grab open context menus and dropdowns.
   - **Grab Text (Windows OCR):** Select any area on screen to extract selectable, copyable text instantly.
   - **Step Capture:** Record a numbered click-by-click guide automatically—every click captures a screenshot and places a sequential step badge at the cursor.
@@ -147,7 +147,7 @@ The detailed feature list below describes the Windows application. The Linux bui
   <img src="docs/images/recording-toolbar.png" alt="Jiffshot Floating Recording Toolbar" width="680" />
 </p>
 
-- **Area, Window & Fullscreen Recording:** Record MP4 video at 15, 24, 30, or 60 FPS. Press `G` while selecting to snap to standard `1920×1080`, `1280×720`, `640×480`, or `320×240` guides.
+- **Area, Window & Fullscreen Recording:** Record MP4 video at 15, 24, 30, or 60 FPS. Press `G` while selecting to snap to standard `1920×1080`, `1280×720`, `640×480`, or `320×240` guides, or `1`–`4` to place a rectangle of one of those sizes. For another size, turn on **Fixed region** in the Video Region options (the gear beside **Area**) and set its width and height, from 16 to 8192 pixels; the overlay then offers a rectangle of that size to place. On Windows, **Set position** records that rectangle at a saved X and Y without the overlay, and **Select region on screen…** takes the size (and, with Set position, the position) from a rectangle you drag. The video region is kept separately from the image one.
 - **System Audio, Microphone & Webcam:** Record system audio ("what the computer plays"), your microphone (with an optional between-words noise gate), or both mixed together. Add a live circular or rectangular **webcam picture-in-picture** overlay in any corner.
 - **Pointer Effects & Live Screen Draw:** Highlight the cursor with a halo, show animated click rings, and draw live arrows, boxes, highlights, and freehand marks directly over the screen while recording (with configurable auto-fade).
 - **Live Recording Toolbar:** Pause, resume, restart, minimize, or cancel the recording, and toggle cursor effects, webcam, microphone, system sound, and Screen Draw on the fly—all from a floating toolbar that stays invisible to the recording itself.

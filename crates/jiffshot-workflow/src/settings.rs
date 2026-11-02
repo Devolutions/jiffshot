@@ -75,6 +75,8 @@ pub struct Settings {
     pub draw_fade_seconds: u32,
     /// Size of a fixed-size capture.
     pub fixed_size: (i32, i32),
+    /// Size of a fixed-size recording.
+    pub video_fixed_size: (i32, i32),
     /// Seconds between time-lapse captures.
     pub interval_seconds: u32,
     /// Time-lapse skips a capture identical to the one before.
@@ -130,6 +132,11 @@ pub struct CaptureWindow {
     pub fixed: bool,
     /// Where a fixed-size capture goes, when it is placed exactly.
     pub fixed_at: Option<(i32, i32)>,
+    /// A Video Region selection is a fixed-size rectangle
+    /// (`Settings::video_fixed_size`).
+    pub video_fixed: bool,
+    /// Where a fixed-size recording goes, when it is placed exactly.
+    pub video_fixed_at: Option<(i32, i32)>,
     /// The Time Delay switch is on.
     pub timer: bool,
     /// What it does: "delay", "interval" (time-lapse) or "schedule".
@@ -148,6 +155,8 @@ impl Default for CaptureWindow {
             video_selection: "region".to_owned(),
             fixed: false,
             fixed_at: None,
+            video_fixed: false,
+            video_fixed_at: None,
             timer: false,
             timing: "delay".to_owned(),
             delay: 5,
@@ -163,7 +172,7 @@ pub struct Preset {
     pub name: String,
     /// all (Choose), image, window, fullscreen, scrolling, horizontal,
     /// both, panoramic, freehand, multi, fixed, menu, text, clipboard,
-    /// file, video, video-fullscreen or steps.
+    /// file, video, video-fixed, video-fullscreen or steps.
     pub mode: String,
     pub delay: u32,
     pub cursor: bool,
@@ -194,6 +203,7 @@ impl Default for Settings {
             webcam_size: 0.25,
             draw_fade_seconds: 3,
             fixed_size: (1280, 720),
+            video_fixed_size: (1920, 1080),
             interval_seconds: 10,
             interval_skip_identical: true,
             record_cursor: true,

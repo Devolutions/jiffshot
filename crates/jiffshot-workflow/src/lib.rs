@@ -423,6 +423,13 @@ pub mod capture {
         super::post_capture_thread(tray::select_scheduled_area)
     }
 
+    /// Opens the selection overlay to choose the Image (or, with `video`,
+    /// the Video) Region options' fixed region.
+    #[cfg(windows)]
+    pub fn select_fixed_region(video: bool) {
+        on_capture_thread(move || tray::select_fixed_region(video));
+    }
+
     pub fn set_run_at_startup(on: bool) {
         if !super::post_capture_thread(move || {
             tray::set_run_at_startup(on);

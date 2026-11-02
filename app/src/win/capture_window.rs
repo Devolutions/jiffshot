@@ -4,8 +4,9 @@
 //! which owns the settings.
 //!
 //! Actions: `tab:N`, `switch:ID`, `menu:NAME`, `pick:ID`, `panel:ID`,
-//! `apply:ID:[values]`, `capture`, `stop-interval`, `cancel-schedule`,
-//! `editor`, `closed`.
+//! `apply:ID:[values]`, `select-image-region:[values]`,
+//! `select-video-region:[values]`, `capture`, `stop-interval`,
+//! `cancel-schedule`, `editor`, `closed`.
 
 use crate::app;
 use crate::vm::{CaptureViewModel, CaptureViewModelSink};
@@ -28,6 +29,10 @@ struct State {
     timelapse: bool,
     window: Option<rustolonia::Window>,
     serial: u64,
+    /// The options panel to open again when the window is next shown
+    /// (after Select region on screen…).
+    #[cfg(windows)]
+    reopen_panel: Option<&'static str>,
     #[cfg(target_os = "macos")]
     scope: Option<AppScope>,
     #[cfg(target_os = "macos")]
@@ -68,6 +73,8 @@ thread_local! {
         timelapse: false,
         window: None,
         serial: 0,
+        #[cfg(windows)]
+        reopen_panel: None,
         #[cfg(target_os = "macos")]
         scope: None,
         #[cfg(target_os = "macos")]
@@ -120,6 +127,10 @@ pub fn show(scope: &AppScope) {
     let _ = window.show();
     if let Ok(hwnd) = scope.platform_handle(&window) {
         crate::winutil::bring_forward(hwnd);
+    }
+    #[cfg(windows)]
+    if let Some(id) = with(|s| s.reopen_panel.take()) {
+        open_panel(id);
     }
 }
 
@@ -341,6 +352,18 @@ fn applied(id: &str, values: &str) {
             Applied::Problem(text) => problem(&text),
         }
     }
+}
+
+/// Select region on screen…: keeps the Region options as they stand, then
+/// hides the window for the overlay; the capture side shows it again, with
+/// the options.
+#[cfg(windows)]
+fn select_fixed_region(video: bool, values: &str) {
+    let panel = if video { "video:selection" } else { "image:selection" };
+    applied(panel, values);
+    with(|s| s.reopen_panel = Some(panel));
+    hide();
+    capture::select_fixed_region(video);
 }
 
 #[cfg(target_os = "macos")]
@@ -664,6 +687,8 @@ fn act(action: &str) {
         }
         #[cfg(target_os = "macos")]
         "select-scheduled-area" => select_scheduled_area(arg),
+        #[cfg(windows)]
+        "select-image-region" | "select-video-region" => select_fixed_region(verb == "select-video-region", arg),
         "capture" => {
             let (settings, running) = with(|s| (capture_settings(&s.settings, arg), s.timelapse));
             #[cfg(target_os = "macos")]
@@ -946,6 +971,28 @@ mod tests {
             assert_eq!(s.settings.countdown, 7);
             assert_eq!(s.settings.fixed_size, (800, 600));
             assert_eq!(s.settings.capture_window.tab, 0);
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn selecting_a_region_on_screen_keeps_the_options_and_reopens_them() {
+        let mut settings = Settings::default();
+        settings.capture_window.tab = 1;
+        with(|s| s.settings = settings);
+        act("select-video-region:[true,1280,720,true,40,30,0,5]");
+        with(|s| {
+            assert!(s.settings.capture_window.video_fixed);
+            assert_eq!(s.settings.video_fixed_size, (1280, 720));
+            assert_eq!(s.settings.capture_window.video_fixed_at, Some((40, 30)));
+            assert_eq!((s.settings.record_fps, s.settings.countdown), (15, 5));
+            assert_eq!(s.settings.capture_window.tab, 1, "the saved mode stays");
+            assert_eq!(s.reopen_panel.take(), Some("video:selection"));
+        });
+        act("select-image-region:[true,640,480,false,0,0,true]");
+        with(|s| {
+            assert_eq!((s.settings.fixed_size, s.settings.capture_window.fixed), ((640, 480), true));
+            assert_eq!(s.reopen_panel.take(), Some("image:selection"));
         });
     }
 
