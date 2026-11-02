@@ -849,10 +849,24 @@ fn lock_settings(path: &Path) -> Result<std::fs::File, String> {
         .write(true)
         .open(&lock_path)
         .map_err(|error| format!("could not open {}: {error}", lock_path.display()))?;
-    file.try_lock()
-        .map_err(|error| format!("could not lock {}: {error}", lock_path.display()))?;
-    Ok(file)
+    // A concurrently spawned child briefly shares this process's open file
+    // descriptions between fork and exec, so a released flock can still
+    // appear held. Retry briefly before reporting real contention.
+    let deadline = std::time::Instant::now() + SETTINGS_LOCK_GRACE;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => {
+                return Err(format!("could not lock {}: {error}", lock_path.display()));
+            }
+        }
+    }
 }
+
+const SETTINGS_LOCK_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 
 fn cursor_from(path: &Path, key: &str) -> Result<CaptureCursor, String> {
     let settings = read_settings(path)?;
