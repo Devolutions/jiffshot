@@ -42,7 +42,7 @@ try {
         'avalonia-src/native/Avalonia.Native/src/OSX/Avalonia.Native.OSX.xcodeproj',
         '-configuration', 'Release', 'ARCHS=arm64 x86_64', 'ONLY_ACTIVE_ARCH=NO',
         'MACOSX_DEPLOYMENT_TARGET=13.0',
-        "CONFIGURATION_BUILD_DIR=$sourcePath/avalonia-src/Build/Products/Release", '-quiet')
+        "CONFIGURATION_BUILD_DIR=$sourcePath/avalonia-src/artifacts/native/Release", '-quiet')
     Invoke-HostBuild dotnet @('publish', 'host/Avalonia.Host.csproj', '-c', 'Release', '-r', $rid,
         '-p:AvaloniaRustHostPlatform=OSX', '-p:BuildAvaloniaNativeXcodeProject=false',
         '--artifacts-path', $artifacts)
