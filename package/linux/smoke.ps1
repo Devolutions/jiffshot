@@ -16,6 +16,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
+Import-Module (Join-Path $PSScriptRoot 'JiffshotLinuxSmoke.psm1') -Force
+
 # A 2x2 RGBA PNG; the path contains spaces to exercise launcher argument quoting.
 $png = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGP4z8DwH4QZYAwAR8oH+WdZbrcAAAAASUVORK5CYII='
 $libraries = @('librustolonia_host.so', 'libSkiaSharp.so', 'libHarfBuzzSharp.so')
@@ -65,6 +67,26 @@ function Read-LogTail([string]$Path) {
     if (-not [System.IO.File]::Exists($Path)) { return '' }
     $text = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($Path))
     if ($text.Length -gt 16384) { $text.Substring($text.Length - 16384) } else { $text }
+}
+
+function Get-XWindowInfo([string]$Display, [string[]]$Arguments) {
+    $info = [System.Diagnostics.ProcessStartInfo]::new('xwininfo')
+    foreach ($argument in $Arguments) { $info.ArgumentList.Add($argument) }
+    $info.UseShellExecute = $false
+    $info.RedirectStandardOutput = $true
+    $info.Environment['DISPLAY'] = $Display
+    $query = [System.Diagnostics.Process]::Start($info)
+    try {
+        $output = $query.StandardOutput.ReadToEnd()
+        $query.WaitForExit()
+        if ($query.ExitCode -ne 0) {
+            throw "xwininfo $($Arguments -join ' ') returned non-zero exit status $($query.ExitCode)."
+        }
+        $output
+    }
+    finally {
+        $query.Dispose()
+    }
 }
 
 foreach ($tool in 'Xvfb', 'xwininfo') {
@@ -123,36 +145,33 @@ try {
         $app = Start-ShellProcess 'log=$1; shift; exec "$@" </dev/null >"$log" 2>&1' @($appLog, $Launcher, $image) $work $environment
         $deadline = [DateTime]::UtcNow.AddSeconds(30)
         $ready = $false
+        $windows = $windowInfo = ''
+        $missingLibraries = @($libraries)
+        $imageName = [System.IO.Path]::GetFileName($image)
         while ([DateTime]::UtcNow -lt $deadline) {
             if ($app.HasExited) {
                 throw "packaged app exited during startup ($($app.ExitCode))"
             }
-            $xwininfo = [System.Diagnostics.ProcessStartInfo]::new('xwininfo')
-            foreach ($argument in '-root', '-tree') { $xwininfo.ArgumentList.Add($argument) }
-            $xwininfo.UseShellExecute = $false
-            $xwininfo.RedirectStandardOutput = $true
-            $xwininfo.Environment['DISPLAY'] = ":$display"
-            $query = [System.Diagnostics.Process]::Start($xwininfo)
-            try {
-                $windows = $query.StandardOutput.ReadToEnd()
-                $query.WaitForExit()
-                if ($query.ExitCode -ne 0) {
-                    throw "Command '[xwininfo, -root, -tree]' returned non-zero exit status $($query.ExitCode)."
-                }
-            }
-            finally {
-                $query.Dispose()
-            }
+            $windows = Get-XWindowInfo ":$display" @('-root', '-tree')
+            $windowId = Find-JiffshotSmokeWindowId -WindowTree $windows -ImageName $imageName
+            $windowInfo = if ($windowId) { Get-XWindowInfo ":$display" @('-id', $windowId) } else { '' }
             $maps = [System.IO.File]::ReadAllText("/proc/$($app.Id)/maps")
-            if ($windows.Contains('"Jiffshot"') -and -not ($libraries | Where-Object { -not $maps.Contains($_) })) {
-                "Packaged app displayed its window and loaded all private runtimes: $Launcher"
+            $missingLibraries = @($libraries | Where-Object { -not $maps.Contains($_) })
+            if ($windowId -and $windowInfo -match '(?m)^\s*Map State:\s+IsViewable\s*$' -and $missingLibraries.Count -eq 0) {
+                "Packaged app opened the image in a visible editor and loaded all private runtimes: $Launcher"
                 $ready = $true
                 break
             }
             Start-Sleep -Milliseconds 200
         }
         if (-not $ready) {
-            throw 'packaged app did not display its window and load all private runtimes'
+            $missing = if ($missingLibraries.Count) { $missingLibraries -join ', ' } else { 'none' }
+            [Console]::Error.WriteLine("Missing private runtimes: $missing")
+            [Console]::Error.WriteLine("Last window tree:`n$windows")
+            if ($windowInfo) {
+                [Console]::Error.WriteLine("Last editor window info:`n$windowInfo")
+            }
+            throw "packaged app did not show '$imageName' in a viewable editor and load all private runtimes"
         }
     }
     catch {

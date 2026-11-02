@@ -354,9 +354,9 @@ Package tests (Pester 5):
   sudo apt install xvfb x11-utils
   pwsh package/linux/smoke.ps1 -Launcher /path/to/extracted/bin/jiffshot
 The smoke test uses a private Xvfb display, temporary settings, and a generated
-image. It requires a visible app window and all three private runtimes loaded,
-then stops its own processes. CI also verifies clean installation/removal and
-desktop/MIME registration on Ubuntu 24.04 and Fedora 43.
+image. It requires the image to be open in a visible editor window and all three
+private runtimes loaded, then stops its own processes. CI also verifies clean
+installation/removal and desktop/MIME registration on Ubuntu 24.04 and Fedora 43.
 WSLg may expose a read-only /tmp/.X11-unix; in that case run the smoke test
 in an isolated container/rootfs instead of changing WSLg's socket directory.
 
