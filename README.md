@@ -433,7 +433,8 @@ While hidden, capture and recording results, scheduled-capture problems, and sho
 - [x] Save named screen/window presets with independent delay and cursor choices.
 - [x] Daily scheduled capture, delay/cursor presets and recording pause from the shared Capture window.
 - [x] Scrolling, horizontal scrolling, panoramic, interval and text capture from the Capture window.
-- [ ] Automatic scrolling, a drawn selection overlay (not possible on Wayland), unattended/background scheduling, and presets for other capture modes.
+- [x] Selection overlay on a frozen portal screenshot (region, freehand, multi-area, fixed size, repeat last); no window detection on Wayland.
+- [ ] Automatic scrolling, unattended/background scheduling, and presets for other capture modes.
 - [x] Webcam overlay toggle on the Record tab; pause and stop from the Capture window, tray or global shortcuts.
 - [ ] Floating recording controls, live drawing and cursor effects (a toolbar on screen would be captured by the portal recording).
 - [x] Open, email, copy, and print selected saved captures through desktop integrations.
