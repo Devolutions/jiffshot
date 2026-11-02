@@ -5,8 +5,17 @@ use ashpd::desktop::ResponseError;
 use jiffshot_doc::Document;
 
 pub(super) async fn capture_interactive() -> Result<Option<Document>, String> {
+    capture(true).await
+}
+
+/// The whole desktop, without a chooser (the desktop may ask for permission once).
+pub(super) async fn capture_full_screen() -> Result<Option<Document>, String> {
+    capture(false).await
+}
+
+async fn capture(interactive: bool) -> Result<Option<Document>, String> {
     let response = Screenshot::request()
-        .interactive(true)
+        .interactive(interactive)
         .modal(true)
         .send()
         .await

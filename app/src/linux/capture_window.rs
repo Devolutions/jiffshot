@@ -9,8 +9,9 @@ use std::cell::RefCell;
 
 const DELAYS: [u64; 4] = [0, 3, 5, 10];
 const INTERVALS: [u32; 5] = [0, 5, 10, 30, 60];
-const AREAS: [(&str, &str); 6] = [
-    ("screen", "Screen or window"),
+const AREAS: [(&str, &str); 7] = [
+    ("fullscreen", "Full screen"),
+    ("screen", "Window or screen (chooser)"),
     ("desktop", "Region or window (desktop dialog)"),
     ("scrolling", "Scrolling capture (down)"),
     ("scrolling-h", "Scrolling capture (right)"),
@@ -70,7 +71,7 @@ fn load() {
             s.tab = if tab == 2 { 2 } else { 1 };
         }
         if let Some(area) = value["area"].as_str().filter(|a| AREAS.iter().any(|(id, _)| id == a)) {
-            s.area = area.to_owned();
+            s.area = if area == "screen" { "fullscreen" } else { area }.to_owned();
         }
         s.interval = value["interval"].as_u64().map_or(0, |n| n as u32);
         s.delay = value["delay"].as_u64().unwrap_or(0);
@@ -102,7 +103,7 @@ pub fn set_window(window: Window) {
     load();
     with(|s| {
         if s.area.is_empty() {
-            s.area = "screen".to_owned();
+            s.area = "fullscreen".to_owned();
         }
         s.window = Some(window);
     });
@@ -157,7 +158,7 @@ fn view_json() -> String {
     with(|s| {
         let image = s.tab != 2;
         let recording = super::control::recording_active();
-        let interval = image && s.area == "screen" && s.interval > 0;
+        let interval = image && s.area.ends_with("screen") && s.interval > 0;
         let (verb, detail) = if busy {
             ("Stop", "Finish the running capture".to_owned())
         } else if image {
@@ -393,7 +394,7 @@ fn act(action: &str) {
             }
             let (video, cursor, delay, audio, area, interval, webcam) =
                 with(|s| (s.tab == 2, s.cursor, s.delay, audio_name(s), s.area.clone(), s.interval, s.webcam));
-            let long_running = !video && (area.contains("scrolling") || area == "panoramic" || (area == "screen" && interval > 0));
+            let long_running = !video && (area.contains("scrolling") || area == "panoramic" || (area.ends_with("screen") && interval > 0));
             if !long_running {
                 hide();
             }
@@ -408,6 +409,7 @@ fn act(action: &str) {
                 "scrolling" => super::shared::capture_scrolling(Mode::Scrolling(Direction::Vertical)),
                 "scrolling-h" => super::shared::capture_scrolling(Mode::Scrolling(Direction::Horizontal)),
                 "panoramic" => super::shared::capture_scrolling(Mode::Panoramic),
+                "fullscreen" if interval == 0 => super::shared::capture_full_screen(cursor, delay),
                 _ if interval > 0 => super::shared::capture_interval(interval, cursor),
                 _ => super::shared::capture_image_with(cursor, delay),
             }

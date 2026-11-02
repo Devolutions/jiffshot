@@ -237,6 +237,27 @@ pub(crate) fn finish_active(cancel: bool) {
 }
 
 /// The desktop's own screenshot dialog, which offers region and window choices.
+/// Captures the whole desktop after `delay` seconds without a chooser; falls back to the
+/// screen-sharing chooser when the desktop refuses.
+pub(crate) fn capture_full_screen(cursor: bool, delay: u64) {
+    report(if delay == 0 { "Capturing the screen…".into() } else { format!("Capturing in {delay} s…") });
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400 + delay * 1000));
+        let result = futures_lite::future::block_on(super::screenshot::capture_full_screen())
+            .and_then(|document| match document {
+                Some(document) => super::capture::save_capture(&document).map(Some),
+                None => Ok(None),
+            });
+        match result {
+            Err(error) => {
+                eprintln!("jiffshot: {error}; using the screen-sharing chooser");
+                capture_image_with(cursor, 0);
+            }
+            other => finish_single(other, false),
+        }
+    });
+}
+
 pub(crate) fn capture_desktop(then_text: bool) {
     report("Choose what to capture in the desktop dialog…".into());
     std::thread::spawn(move || {
