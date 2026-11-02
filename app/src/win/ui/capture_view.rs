@@ -722,7 +722,7 @@ fn apply_view(json: &str) -> Result<()> {
 }
 
 /// The quick switches (cursor and copy for images; microphone, system audio
-/// and webcam for video) and the More menu.
+/// and webcam for video) and the more-options menu.
 fn toggle_row(dark: Signal<bool>, subs: &Subscriptions, toggles: &[Toggle]) -> El<Grid> {
     let chips = StackPanel::el().orientation(Orientation::Horizontal).spacing(4.0).children_iter(toggles.iter().enumerate().map(|(i, toggle)| {
         // A gap between the image switches and the video ones in Select mode.
@@ -734,7 +734,22 @@ fn toggle_row(dark: Signal<bool>, subs: &Subscriptions, toggles: &[Toggle]) -> E
         .height(34.0)
         .margin((64.0, 2.0, 0.0, 0.0))
         .child(chips)
-        .child(icon_action_button(dark, subs, 76.0, "More", "\u{E712}", "Preview, timing, Screen Draw and recording settings", "more").grid_column(1))
+        .child(
+            on_click(
+                flat(dark)
+                    .grid_column(1)
+                    .width(34.0)
+                    .height(32.0)
+                    .padding(0.0)
+                    .font_size(20.0)
+                    .horizontal_content_alignment(HorizontalAlignment::Center)
+                    .vertical_content_alignment(VerticalAlignment::Center)
+                    .tool_tip_tip("More options: preview, timing, Screen Draw and recording settings")
+                    .content("\u{22EF}"),
+                subs,
+                move |button: &Button| request("menu", "more", button.upcast()),
+            ),
+        )
 }
 
 fn toggle_chip(dark: Signal<bool>, subs: &Subscriptions, toggle: &Toggle) -> El<Button> {
@@ -856,38 +871,6 @@ fn field_row(dark: Signal<bool>, subs: &Subscriptions, field: &FieldRow) -> El<G
         )),
         None => grid,
     }
-}
-
-fn icon_action_button(
-    dark: Signal<bool>,
-    subs: &Subscriptions,
-    width: f64,
-    label: &'static str,
-    icon: &'static str,
-    tooltip: &str,
-    menu: &'static str,
-) -> El<Grid> {
-    let icon = Border::el()
-        .width(24.0)
-        .height(32.0)
-        .horizontal_alignment(HorizontalAlignment::Left)
-        .margin((5.0, 0.0, 0.0, 0.0))
-        .child(glyph(icon, 14.0));
-    let button = Button::el()
-        .width(width)
-        .height(32.0)
-        .padding((27.0, 0.0, 5.0, 0.0))
-        .background(parts::TRANSPARENT)
-        .foreground(move || palette(dark).text)
-        .horizontal_content_alignment(HorizontalAlignment::Left)
-        .vertical_content_alignment(VerticalAlignment::Center)
-        .tool_tip_tip(tooltip.to_owned())
-        .content(label);
-    Grid::el()
-        .width(width)
-        .height(32.0)
-        .child(icon)
-        .child(on_click(button, subs, move |button: &Button| request("menu", menu, button.upcast())))
 }
 
 // ---- keys and closing ------------------------------------------------------

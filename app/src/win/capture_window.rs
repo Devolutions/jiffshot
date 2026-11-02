@@ -790,6 +790,51 @@ mod tests {
     }
 
     #[test]
+    fn mode_actions_switch_tabs_and_update_the_view() {
+        let expected = [
+            ("Select", vec!["area", "send", "image:effects"], 5),
+            ("Capture", vec!["area", "send", "image:effects"], 2),
+            ("Record", vec!["video:selection", "send"], 4),
+        ];
+        for previous in 0..=2 {
+            for (target, (verb, fields, toggles)) in expected.iter().enumerate() {
+                let mut settings = Settings { delay_seconds: 0, ..Settings::default() };
+                settings.capture_window.tab = previous;
+                with(|s| s.settings = settings);
+
+                act(&format!("tab:{target}"));
+
+                with(|s| {
+                    let view = panel::unified_view(&s.settings, "", false);
+                    assert_eq!(s.settings.capture_window.tab, target, "{previous} -> {target}");
+                    assert_eq!(view.tab, target, "{previous} -> {target}");
+                    assert_eq!(view.capture.verb, *verb, "{previous} -> {target}");
+                    assert_eq!(view.fields.iter().map(|row| row.id).collect::<Vec<_>>(), *fields, "{previous} -> {target}");
+                    assert_eq!(view.toggles.len(), *toggles, "{previous} -> {target}");
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn scoped_picks_preserve_the_selected_tab() {
+        for tab in 0..=2 {
+            let mut settings = Settings::default();
+            settings.capture_window.tab = tab;
+            with(|s| s.settings = settings);
+
+            act("pick:video:vsel:window");
+            act("pick:image:sel:scrolling");
+
+            with(|s| {
+                assert_eq!(s.settings.capture_window.tab, tab);
+                assert_eq!(s.settings.capture_window.selection, "scrolling");
+                assert_eq!(s.settings.capture_window.video_selection, "window");
+            });
+        }
+    }
+
+    #[test]
     fn shared_area_updates_both_targets_for_every_saved_tab() {
         for tab in 0..=2 {
             let mut settings = Settings::default();
