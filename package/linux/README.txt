@@ -11,7 +11,7 @@ Packages built elsewhere inherit that build distro's ELF ABI requirements.
 In particular, do not repackage an Ubuntu binary as a Fedora RPM: their
 Leptonica libraries have different SONAMEs. Build natively for each target.
 Both x64 and ARM64 are configured for all three formats; other architectures and
-older distributions are not currently supported. Rustolonia v12.1.2 publishes
+older distributions are not currently supported. Rustolonia v12.1.3 publishes
 linux-x64 and linux-arm64 runtime host assets. Host asset availability alone
 does not validate an application build: native CI must build, test and smoke
 the complete packages on each architecture.

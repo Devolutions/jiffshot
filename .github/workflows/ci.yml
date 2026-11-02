@@ -578,6 +578,7 @@ jobs:
       CARGO_TERM_COLOR: always
       MACOSX_DEPLOYMENT_TARGET: '13.0'
       JIFFSHOT_VERSION: ${{ inputs.version }}
+      RUSTOLONIA_HOST_LIB: ${{ github.workspace }}/target/${{ matrix.target }}/release/librustolonia_host.dylib
     steps:
       - uses: actions/checkout@v7
 
@@ -589,28 +590,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Rosetta installation failed' }
           & arch -x86_64 /usr/bin/true
           if ($LASTEXITCODE -ne 0) { throw 'Rosetta cannot execute Intel binaries' }
-
-      - name: Check out the compatible Rustolonia host
-        uses: actions/checkout@v7
-        with:
-          repository: Devolutions/rustolonia
-          ref: d30a7350ba2484e28820b803947193630c32e2bf
-          submodules: recursive
-          path: .ci/rustolonia
-
-      - name: Set up the ARM .NET SDK for the host build
-        uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: '10.0.301'
-
-      - name: Build the compatible Rustolonia host
-        shell: pwsh
-        run: |
-          $architecture = & uname -m
-          if ($LASTEXITCODE -ne 0 -or $architecture -cne 'arm64') {
-            throw 'Both macOS jobs require an ARM runner'
-          }
-          & ./package/macos/build-host.ps1 -Source .ci/rustolonia -Arch '${{ matrix.arch }}'
 
       - name: Set up Rust
         run: |
@@ -628,6 +607,9 @@ jobs:
             target
           key: macos-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: macos-${{ matrix.arch }}-
+
+      - name: Build
+        run: cargo build --release --locked -p jiffshot -p jiffshot-cli --target ${{ matrix.target }}
 
       - name: Test
         run: |
@@ -651,9 +633,6 @@ jobs:
           $env:PSModulePath = "$moduleRoot$([IO.Path]::PathSeparator)$env:PSModulePath"
           Import-Module Pester -RequiredVersion $version
           & ./package/macos/run-tests.ps1
-
-      - name: Build
-        run: cargo build --release --locked -p jiffshot -p jiffshot-cli --target ${{ matrix.target }}
 
       - name: Configure optional Apple signing
         id: signing
@@ -721,7 +700,9 @@ jobs:
           codesign --verify --deep --strict macos-package/Jiffshot.app
           hdiutil verify macos-package/*.dmg
           printf '%s\n' "$status" > macos-package/signing.txt
-          cp "$RUSTOLONIA_HOST_DIR/SHA256SUMS.txt" macos-package/host-SHA256SUMS.txt
+          (cd "target/${{ matrix.target }}/release" && shasum -a 256 \
+            librustolonia_host.dylib libAvaloniaNative.dylib libSkiaSharp.dylib libHarfBuzzSharp.dylib) \
+            > macos-package/host-SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v7
         with:
