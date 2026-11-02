@@ -17,6 +17,7 @@
 //! `JIFFSHOT_UITEST_CLIPBOARD` checks editor clipboard behavior without using
 //! the system clipboard.
 //! `JIFFSHOT_UITEST_FONTS` checks editor font notices without sending input.
+//! `JIFFSHOT_UITEST_PERMISSIONS` checks permission guidance without requesting access.
 //! `JIFFSHOT_UITEST_SHARE_PROGRAM` checks the custom application picker and
 //! sharing with a disposable application bundle.
 //! `JIFFSHOT_UITEST_SHARE_PREFS` checks an actual stale Preferences submission.
@@ -444,6 +445,10 @@ fn editor_walk(s: &mut Script) {
 /// The whole walk, in order.
 fn script() -> Script {
     let mut s = Script(VecDeque::new());
+    #[cfg(target_os = "macos")]
+    if env("JIFFSHOT_UITEST_PERMISSIONS").is_some() {
+        return permissions_script();
+    }
     #[cfg(target_os = "macos")]
     if env("JIFFSHOT_UITEST_NARRATION").is_some() {
         return narration_script();
@@ -1897,6 +1902,60 @@ fn library_drag_script() -> Script {
         test.line("rebuilt tiles re-registered and stale snapshots were removed");
         0
     });
+    script
+}
+
+#[cfg(target_os = "macos")]
+fn permissions_script() -> Script {
+    use jiffshot_capture::macos::permissions::Permission;
+    use super::permissions_macos::windows_for_selftest;
+
+    let mut script = Script(VecDeque::new());
+    script.wait(800).step(|test| {
+        assert!(windows_for_selftest().is_empty(), "startup must not show permission guidance");
+        super::main_window().expect("editor window").hide().expect("hide the editor");
+        test.line("startup did not request or warn about permissions");
+        150
+    });
+    for (index, permission) in [
+        Permission::ScreenRecording, Permission::Accessibility, Permission::Camera,
+        Permission::Microphone, Permission::Automation,
+    ].into_iter().enumerate() {
+        script.step(move |_| {
+            std::thread::spawn(move || {
+                for _ in 0..10 {
+                    assert_eq!(permission.denied().kind(), std::io::ErrorKind::PermissionDenied);
+                }
+            }).join().expect("report a synthetic denial from a worker");
+            300
+        });
+        script.step(move |test| {
+            let windows = windows_for_selftest();
+            assert_eq!(windows.len(), index + 1, "duplicate denials must reuse the guidance window");
+            let window = &windows.iter().find(|(kind, _)| *kind == permission).expect("guidance window").1;
+            assert!(window.get_is_visible().unwrap(), "guidance must show with the editor hidden");
+            assert_eq!(window.get_title().unwrap().unwrap(), format!("Jiffshot needs {} access", permission.name()));
+            window.close().expect("dismiss guidance using its close control");
+            test.line(format!("{} denial showed one guidance window with the editor hidden", permission.name()));
+            150
+        });
+        script.step(move |_| {
+            let windows = windows_for_selftest();
+            let window = &windows.iter().find(|(kind, _)| *kind == permission).unwrap().1;
+            assert!(!window.get_is_visible().unwrap(), "dismissal must not keep the guidance visible");
+            let _ = permission.denied();
+            150
+        });
+        script.step(move |test| {
+            let windows = windows_for_selftest();
+            assert_eq!(windows.len(), index + 1, "retry must not leak windows or subscriptions");
+            let window = &windows.iter().find(|(kind, _)| *kind == permission).unwrap().1;
+            assert!(window.get_is_visible().unwrap(), "a later denial must reopen guidance");
+            window.close().unwrap();
+            test.line(format!("{} guidance dismissed and reopened on a later denied attempt", permission.name()));
+            150
+        });
+    }
     script
 }
 

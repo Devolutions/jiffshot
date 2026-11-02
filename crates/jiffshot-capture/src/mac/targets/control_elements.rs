@@ -303,7 +303,7 @@ impl Walk {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "Accessibility enumeration was cancelled"));
         }
         if !accessibility_trusted() {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "Accessibility permission was revoked"));
+            return Err(crate::macos::permissions::Permission::Accessibility.denied());
         }
         if Instant::now() >= self.deadline {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "Accessibility enumeration timed out"));
@@ -433,7 +433,7 @@ pub fn accessibility_elements(
         return Err(io::Error::other("Accessibility enumeration must be requested from a worker thread"));
     }
     if !request_accessibility() {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "Jiffshot needs Accessibility permission to enumerate controls"));
+        return Err(crate::macos::permissions::Permission::Accessibility.error());
     }
     layout.validate()?;
     let deadline = Instant::now() + WALK_TIMEOUT;
