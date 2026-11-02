@@ -2727,11 +2727,12 @@ fn saved_areas_script() -> Script {
         let inputs = values(&scope, &delay);
         assert_eq!(panel::apply(&mut scheduled, "delay", &inputs, false), panel::Applied::Changed);
         scheduled.macos_schedule_area.as_mut().unwrap().session_only = true;
-        let delay = panel::panel(&scheduled, "delay", false, "Capture").unwrap();
+        let mut delay = panel::panel(&scheduled, "delay", false, "Capture").unwrap();
         assert!(delay.rows.iter().any(|row| matches!(row, panel::Row::Note { text } if text.contains("review it again after restarting"))));
         assert_eq!(values(&scope, &delay).len(), 10);
         test.line("session-only notices build in both saved-area panels");
         assert_eq!(delay.action.as_ref().map(|action| action.id), Some("select-scheduled-area"));
+        delay.id = "image:delay".into();
         let json = serde_json::to_string(&delay).unwrap();
         crate::capture_window::show(&scope);
         test.remember_windows();
@@ -2791,7 +2792,8 @@ fn open_saved_area_action() {
     let scope = super::scope().expect("the editor scope is unavailable");
     crate::capture_window::show(&scope);
     let settings = jiffshot_workflow::settings_snapshot();
-    let panel = jiffshot_workflow::panel::panel(&settings, "delay", false, "Capture").expect("the Time delay panel is unavailable");
+    let mut panel = jiffshot_workflow::panel::panel(&settings, "delay", false, "Capture").expect("the Time delay panel is unavailable");
+    panel.id = "image:delay".into();
     let json = serde_json::to_string(&panel).expect("could not encode the Time delay panel");
     let (_, _, action) = super::capture_view::show_delay_for_selftest(&json, 300.0)
         .expect("could not open the Time delay panel").expect("the Time delay panel is not scrollable");
@@ -2920,7 +2922,7 @@ fn capture_settings_handoff_script() -> Script {
         assert!(super::extras::widget_visible_for_selftest().expect("could not inspect the Capture Widget"));
         assert_eq!(settings.capture_window.tab, 2);
         assert_eq!(super::capture_view::view_tab_for_selftest(), Some(2));
-        let view = serde_json::to_string(&jiffshot_workflow::panel::view(&settings, &state.capture_key, state.time_lapse)).unwrap();
+        let view = serde_json::to_string(&jiffshot_workflow::panel::unified_view(&settings, &state.capture_key, state.time_lapse)).unwrap();
         assert_eq!(super::capture().sink.view.get_untracked(), view, "the Capture window did not show the latest settings");
         late_view.borrow_mut().take().expect("the delayed Capture callback is missing")()
             .expect("could not apply the delayed Capture callback");
@@ -3043,10 +3045,11 @@ fn add_capture_settings_steps(script: &mut Script) {
             Vec::new(),
             startup,
         );
+        capture.model.run(|model| model.run("apply:video:selection:[3,7]".into()));
         capture.model.run(|model| model.run("switch:preview".into()));
         capture.model.run(|model| model.run("tab:2".into()));
         capture.model.run(|model| model.run("tab:1".into()));
-        test.line("queued a fixed-area confirmation, switch changes, Preferences and tab changes");
+        test.line("queued a fixed-area confirmation, scoped video settings, Preferences and tab changes");
         2000
     });
     let confirmed = panel_fixed;
@@ -3058,10 +3061,12 @@ fn add_capture_settings_steps(script: &mut Script) {
         assert_eq!(settings.macos_fixed_area.as_ref().map(|proof| proof.rect), Some(fixed));
         assert!(!settings.copy_to_clipboard && !settings.open_in_editor);
         assert_eq!((settings.delay_seconds, settings.capture_window.tab), (7, 1));
+        assert_eq!((settings.record_fps, settings.countdown), (60, 7));
         let persisted = jiffshot_workflow::settings::Settings::load();
         assert_eq!(persisted.macos_fixed_area, settings.macos_fixed_area);
         assert_eq!(persisted.capture_window.fixed_at, settings.capture_window.fixed_at);
         assert_eq!((persisted.copy_to_clipboard, persisted.open_in_editor, persisted.delay_seconds, persisted.capture_window.tab), (false, false, 7, 1));
+        assert_eq!((persisted.record_fps, persisted.countdown), (60, 7));
         test.line("queued Capture and Preferences edits retained their order and persisted the fixed-area confirmation");
         0
     });

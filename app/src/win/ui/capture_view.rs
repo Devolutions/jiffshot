@@ -1006,6 +1006,11 @@ fn show_panel(json: &str) -> Result<()> {
 
 type ShownPanel = (ScrollViewer, Flyout, Option<Rc<dyn Fn()>>);
 
+#[cfg(any(test, target_os = "macos"))]
+fn is_timing_panel(id: &str) -> bool {
+    jiffshot_workflow::panel::capture_context(id).1 == "delay"
+}
+
 fn activate_panel_action(id: &str, flyout: &Flyout, values: &[Input]) {
     if let Err(error) = flyout.hide() {
         eprintln!("Capture options: could not close the panel: {error:?}");
@@ -1024,7 +1029,7 @@ fn show_panel_with_height(json: &str, max_height: Option<f64>) -> Result<Option<
     let children = body.children()?;
     children.add(TextBlock::new()?.text(&panel.title)?.font_weight(FontWeight::DemiBold)?.font_size(14.0)?.margin((0.0, 0.0, 0.0, 4.0))?)?;
     #[cfg(target_os = "macos")]
-    let (rows, scroll) = if panel.id == "delay" {
+    let (rows, scroll) = if is_timing_panel(&panel.id) {
         let content = StackPanel::new()?.spacing(8.0)?;
         let scroll = ScrollViewer::new()?
             .max_height(max_height.unwrap_or_else(|| delay_rows_height(&scope, &window)))?
@@ -1094,6 +1099,15 @@ fn show_problem(text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scoped_and_unscoped_timing_panels_are_identified() {
+        assert!(is_timing_panel("delay"));
+        assert!(is_timing_panel("image:delay"));
+        assert!(is_timing_panel("video:delay"));
+        assert!(!is_timing_panel("image:selection"));
+        assert!(!is_timing_panel("image:delay:extra"));
+    }
 
     fn contrast(foreground: Color, background: Color) -> f64 {
         fn luminance(color: Color) -> f64 {

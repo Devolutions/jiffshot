@@ -1879,6 +1879,93 @@ mod tests {
     }
 
     #[test]
+    fn unified_mode_picks_switch_tabs_and_update_the_view() {
+        let expected = [
+            ("Select", vec!["area", "send", "image:effects"], 5),
+            ("Capture", vec!["area", "send", "image:effects"], 2),
+            ("Record", vec!["video:selection", "send"], 4),
+        ];
+        for previous in 0..=2 {
+            for (target, (verb, fields, toggles)) in expected.iter().enumerate() {
+                let mut s = Settings { delay_seconds: 0, ..Settings::default() };
+                s.capture_window.tab = previous;
+
+                assert_eq!(pick_unified(&mut s, &format!("tab:{target}")), Pick::Changed);
+
+                let view = unified_view(&s, "", false);
+                assert_eq!(s.capture_window.tab, target, "{previous} -> {target}");
+                assert_eq!(view.tab, target, "{previous} -> {target}");
+                assert_eq!(view.capture.verb, *verb, "{previous} -> {target}");
+                assert_eq!(view.fields.iter().map(|row| row.id).collect::<Vec<_>>(), *fields, "{previous} -> {target}");
+                assert_eq!(view.toggles.len(), *toggles, "{previous} -> {target}");
+            }
+        }
+    }
+
+    #[test]
+    fn unified_scoped_picks_keep_the_selected_tab_and_panel_context() {
+        for tab in 0..=2 {
+            let mut s = Settings::default();
+            s.capture_window.tab = tab;
+
+            assert_eq!(pick_unified(&mut s, "video:vsel:window"), Pick::Changed);
+            assert_eq!(pick_unified(&mut s, "image:sel:scrolling"), Pick::Changed);
+            assert_eq!(s.capture_window.tab, tab);
+            assert_eq!(s.capture_window.selection, "scrolling");
+            assert_eq!(s.capture_window.video_selection, "window");
+            assert_eq!(pick_unified(&mut s, "image:panel:selection"), Pick::Panel("image:selection".into()));
+            assert_eq!(pick_unified(&mut s, "video:panel:selection"), Pick::Panel("video:selection".into()));
+            assert_eq!(s.capture_window.tab, tab);
+        }
+    }
+
+    #[test]
+    fn unified_shared_picks_update_image_and_video_for_each_tab() {
+        for tab in 0..=2 {
+            let mut s = Settings::default();
+            s.capture_window.tab = tab;
+            s.capture_window.selection = "scrolling".into();
+            s.capture_window.video_selection = "region".into();
+            s.include_cursor = false;
+            s.record_cursor = true;
+
+            assert_eq!(pick_unified(&mut s, "area:window"), Pick::Changed);
+            assert_eq!((s.capture_window.selection.as_str(), s.capture_window.video_selection.as_str()), ("window", "window"));
+            assert_eq!(pick_unified(&mut s, "area:region"), Pick::Changed);
+            assert_eq!((s.capture_window.selection.as_str(), s.capture_window.video_selection.as_str()), ("image", "region"));
+            assert_eq!(pick_unified(&mut s, "cursor-both"), Pick::Changed);
+            assert!(s.include_cursor && s.record_cursor);
+            assert_eq!(pick_unified(&mut s, "cursor-both"), Pick::Changed);
+            assert!(!s.include_cursor && !s.record_cursor);
+            assert_eq!(s.capture_window.tab, tab);
+        }
+    }
+
+    #[test]
+    fn unified_reset_restores_both_modes_without_changing_the_tab() {
+        let defaults = Settings::default();
+        for tab in 0..=2 {
+            let mut s = Settings::default();
+            s.capture_window.tab = tab;
+            s.capture_window.selection = "scrolling".into();
+            s.capture_window.video_selection = "fullscreen".into();
+            s.capture_window.fixed_at = Some((10, 20));
+            s.capture_window.timer = true;
+            s.record_audio = "both".into();
+            s.record_fps = 60;
+
+            assert_eq!(pick_unified(&mut s, "reset"), Pick::Changed);
+            assert_eq!(s.capture_window.tab, tab);
+            assert_eq!(s.capture_window.selection, defaults.capture_window.selection);
+            assert_eq!(s.capture_window.video_selection, defaults.capture_window.video_selection);
+            assert_eq!(s.capture_window.fixed_at, None);
+            assert!(!s.capture_window.timer);
+            assert_eq!(s.record_audio, defaults.record_audio);
+            assert_eq!(s.record_fps, defaults.record_fps);
+        }
+    }
+
+    #[test]
     fn fields_show_the_current_choices() {
         let s = settings();
         assert_eq!(field_text(&s, 1, Field::Selection), "Region (800 × 600)");

@@ -789,6 +789,7 @@ mod tests {
         assert_eq!(panel::unified_view(&settings, "", false).capture.detail, "Records Window");
     }
 
+    #[cfg(windows)]
     #[test]
     fn mode_actions_switch_tabs_and_update_the_view() {
         let expected = [
@@ -816,6 +817,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn scoped_picks_preserve_the_selected_tab() {
         for tab in 0..=2 {
@@ -834,6 +836,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn shared_area_updates_both_targets_for_every_saved_tab() {
         for tab in 0..=2 {
@@ -855,6 +858,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn shared_area_and_cursor_apply_to_images_and_video() {
         with(|s| s.settings = Settings::default());
@@ -901,6 +905,7 @@ mod tests {
         assert!(capture_menu(&settings, "view").iter().all(|item| !item.id.starts_with("tab:")));
     }
 
+    #[cfg(windows)]
     #[test]
     fn edit_menu_reset_restores_both_modes_without_changing_the_selected_mode() {
         let defaults = Settings::default();
@@ -928,6 +933,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn scoped_form_submission_applies_video_settings_without_touching_image_settings() {
         let mut settings = Settings::default();
@@ -941,6 +947,10 @@ mod tests {
             assert_eq!(s.settings.fixed_size, (800, 600));
             assert_eq!(s.settings.capture_window.tab, 0);
         });
+    }
+
+    #[test]
+    fn scoped_form_values_keep_the_target_and_embedded_colons() {
         assert_eq!(form_values("image:selection:[true,800,600]"),
             Some(("image:selection", "[true,800,600]")));
         assert_eq!(form_values("video:new-preset:[\"Meeting: demo\",\"\"]"),
