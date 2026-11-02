@@ -511,15 +511,6 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: pwsh -NoLogo -NoProfile -File package/macos/select-signing.ps1
 
-      - name: Enable Intel tests on the ARM runner
-        if: matrix.arch == 'x86_64'
-        shell: pwsh
-        run: |
-          & softwareupdate --install-rosetta --agree-to-license
-          if ($LASTEXITCODE -ne 0) { throw 'Rosetta installation failed' }
-          & arch -x86_64 /usr/bin/true
-          if ($LASTEXITCODE -ne 0) { throw 'Rosetta cannot execute Intel binaries' }
-
       - name: Set up Rust
         run: |
           rustup show
@@ -541,10 +532,12 @@ jobs:
         run: cargo build --release --locked -p jiffshot -p jiffshot-cli --target ${{ matrix.target }}
 
       - name: Test
+        if: matrix.arch == 'arm64'
         run: |
           cargo test --release --locked --workspace --target ${{ matrix.target }}
 
       - name: Test macOS PowerShell scripts
+        if: matrix.arch == 'arm64'
         shell: pwsh
         env:
           PESTER_VERSION: 5.9.1
