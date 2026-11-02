@@ -235,18 +235,22 @@ function Submit-MacNotarization([string]$Path, [string]$Profile, [string]$Keycha
     Invoke-MacRun '/usr/bin/xcrun' $arguments
 }
 
-function Invoke-MacStaple {
-    param([Parameter(Mandatory)][string]$Path)
+function Invoke-MacStapler {
+    param(
+        [Parameter(Mandatory)][ValidateSet('staple', 'validate')][string]$Action,
+        [Parameter(Mandatory)][string]$Path
+    )
 
+    $operation = if ($Action -ceq 'staple') { 'Stapling' } else { 'Validating the stapled ticket for' }
     for ($attempt = 1; $attempt -le 4; $attempt++) {
-        $result = Invoke-MacCommand -File '/usr/bin/xcrun' -Arguments @('stapler', 'staple', $Path) -AllowFailure
+        $result = Invoke-MacCommand -File '/usr/bin/xcrun' -Arguments @('stapler', $Action, $Path) -AllowFailure
         if ($result.Stdout) { [Console]::Out.Write($result.Stdout) }
         if ($result.Stderr) { [Console]::Error.Write($result.Stderr) }
         if ($result.ExitCode -eq 0) { return }
         # stapler uses EX_NOHOST (68) when Apple's ticket service cannot be reached.
         if ($result.ExitCode -ne 68 -or $attempt -eq 4) {
             $detail = if ($result.Stderr.Trim()) { $result.Stderr.Trim() } else { $result.Stdout.Trim() }
-            throw "Stapling '$Path' failed after $attempt attempt(s) with exit status $($result.ExitCode): $detail"
+            throw "$operation '$Path' failed after $attempt attempt(s) with exit status $($result.ExitCode): $detail"
         }
         $delay = 10 * [int][Math]::Pow(2, $attempt - 1)
         Write-Warning "Apple ticket service unavailable for '$Path' (exit 68, attempt $attempt/4); retrying in $delay seconds."
@@ -272,7 +276,7 @@ function New-MacDiskImage([string]$Staging, [string]$Destination, [string]$Ident
     if ($Identity -cne '-') { Sign-MacPath $temporaryDmg $Identity $Keychain $null $false }
     if ($NotaryProfile) {
         Submit-MacNotarization $temporaryDmg $NotaryProfile $Keychain
-        Invoke-MacStaple -Path $temporaryDmg
+        Invoke-MacStapler -Action staple -Path $temporaryDmg
     }
     return $temporaryDmg
 }
@@ -426,7 +430,7 @@ function Invoke-MacPackage {
             $archive = Join-Path $temporary 'Jiffshot.zip'
             Invoke-MacRun '/usr/bin/ditto' @('-c', '-k', '--keepParent', $app, $archive)
             Submit-MacNotarization $archive $NotaryProfile $Keychain
-            Invoke-MacStaple -Path $app
+            Invoke-MacStapler -Action staple -Path $app
         }
         $temporaryDmg = New-MacDiskImage $staging $dmgOutput $Identity $Keychain $NotaryProfile
         Invoke-MacRun '/usr/bin/ditto' @($app, $appOutput)
@@ -464,7 +468,7 @@ function Invoke-MacNotarizedDiskImage {
     )
     if ($plistVersion.Stdout.Trim() -cne $version) { throw "Application version does not match Cargo.toml version $version" }
     Invoke-MacRun '/usr/bin/codesign' @('--verify', '--deep', '--strict', $App)
-    Invoke-MacRun '/usr/bin/xcrun' @('stapler', 'validate', $App)
+    Invoke-MacStapler -Action validate -Path $App
     $dmgOutput = Join-Path $Output "Devolutions.Jiffshot-macos-$Arch-$version.dmg"
     if ([IO.File]::Exists($dmgOutput) -or [IO.Directory]::Exists($dmgOutput)) {
         throw 'The output disk image already exists; choose an empty output directory'
@@ -484,4 +488,4 @@ function Invoke-MacNotarizedDiskImage {
     Write-Host "Packaged $dmgOutput from the notarized app."
 }
 
-Export-ModuleMember -Function Invoke-MacPackage, Invoke-MacNotarizedDiskImage, Invoke-MacStaple, Invoke-MacCommand, Write-MacPlist, Get-CleanHostEnvironment
+Export-ModuleMember -Function Invoke-MacPackage, Invoke-MacNotarizedDiskImage, Invoke-MacStapler, Invoke-MacCommand, Write-MacPlist, Get-CleanHostEnvironment
