@@ -664,7 +664,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          xcrun stapler staple macos-package/Jiffshot.app
+          pwsh -NoLogo -NoProfile -File package/macos/staple.ps1 -Path macos-package/Jiffshot.app
           pwsh -NoLogo -NoProfile -File package/macos/build-notarized-dmg.ps1 \
             -App macos-package/Jiffshot.app -Output macos-package -Arch "${{ matrix.arch }}" -Identity "$IDENTITY"
           shopt -s nullglob
@@ -681,6 +681,7 @@ jobs:
         with:
           apple_password: ${{ secrets.APPLE_BOT_PASSWORD }}
           package_path: ${{ steps.disk_image.outputs.path }}
+          skip_stapling: 'true'
 
       - name: Verify macOS package
         env:
@@ -703,6 +704,7 @@ jobs:
             status=signed
           fi
           if [[ "$NOTARIZE" == true ]]; then
+            pwsh -NoLogo -NoProfile -File package/macos/staple.ps1 -Path "${images[0]}"
             xcrun stapler validate macos-package/Jiffshot.app
             xcrun stapler validate "${images[0]}"
             status=notarized

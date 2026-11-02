@@ -638,6 +638,8 @@ For macOS, the release workflow supports the same secrets and shared `Devolution
 
 The legacy secrets `APPLE_CERTIFICATE_BASE64`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_DEVELOPER_ID`, `APPLE_ID`, `APPLE_TEAM_ID`, and `APPLE_APP_PASSWORD` remain supported. If any UniGetUI-specific Apple secret is present, that configuration takes precedence and its certificate and password must both be present; certificate and notarization credentials from the two configurations are not mixed. Ordinary CI pushes and pull requests do not use Apple signing secrets. A release dry run without Apple credentials produces ad-hoc-signed apps and unsigned DMGs; with a certificate but no notarization password it produces signed, unnotarized DMGs. A non-dry-run requires complete signing and notarization credentials before starting the macOS builds, and verifies stapled tickets on both the app and DMG for each architecture before publishing.
 
+Local packaging and release CI retry app and DMG ticket stapling up to three times when Apple's ticket service is unavailable (`stapler` exit 68), waiting 10, 20, and 40 seconds between attempts. Other errors fail immediately; an exhausted retry budget still fails packaging. Only stapling is retried, not the build or notarization submission.
+
 ### Testing
 
 From the repository root:

@@ -235,6 +235,25 @@ function Submit-MacNotarization([string]$Path, [string]$Profile, [string]$Keycha
     Invoke-MacRun '/usr/bin/xcrun' $arguments
 }
 
+function Invoke-MacStaple {
+    param([Parameter(Mandatory)][string]$Path)
+
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        $result = Invoke-MacCommand -File '/usr/bin/xcrun' -Arguments @('stapler', 'staple', $Path) -AllowFailure
+        if ($result.Stdout) { [Console]::Out.Write($result.Stdout) }
+        if ($result.Stderr) { [Console]::Error.Write($result.Stderr) }
+        if ($result.ExitCode -eq 0) { return }
+        # stapler uses EX_NOHOST (68) when Apple's ticket service cannot be reached.
+        if ($result.ExitCode -ne 68 -or $attempt -eq 4) {
+            $detail = if ($result.Stderr.Trim()) { $result.Stderr.Trim() } else { $result.Stdout.Trim() }
+            throw "Stapling '$Path' failed after $attempt attempt(s) with exit status $($result.ExitCode): $detail"
+        }
+        $delay = 10 * [int][Math]::Pow(2, $attempt - 1)
+        Write-Warning "Apple ticket service unavailable for '$Path' (exit 68, attempt $attempt/4); retrying in $delay seconds."
+        Start-Sleep -Seconds $delay
+    }
+}
+
 function Confirm-MacComponents([string[]]$Paths, [string]$Arch) {
     foreach ($path in $Paths) {
         if (-not [IO.File]::Exists($path)) { throw "Required bundle binary not found: $path" }
@@ -253,7 +272,7 @@ function New-MacDiskImage([string]$Staging, [string]$Destination, [string]$Ident
     if ($Identity -cne '-') { Sign-MacPath $temporaryDmg $Identity $Keychain $null $false }
     if ($NotaryProfile) {
         Submit-MacNotarization $temporaryDmg $NotaryProfile $Keychain
-        Invoke-MacRun '/usr/bin/xcrun' @('stapler', 'staple', $temporaryDmg)
+        Invoke-MacStaple -Path $temporaryDmg
     }
     return $temporaryDmg
 }
@@ -407,7 +426,7 @@ function Invoke-MacPackage {
             $archive = Join-Path $temporary 'Jiffshot.zip'
             Invoke-MacRun '/usr/bin/ditto' @('-c', '-k', '--keepParent', $app, $archive)
             Submit-MacNotarization $archive $NotaryProfile $Keychain
-            Invoke-MacRun '/usr/bin/xcrun' @('stapler', 'staple', $app)
+            Invoke-MacStaple -Path $app
         }
         $temporaryDmg = New-MacDiskImage $staging $dmgOutput $Identity $Keychain $NotaryProfile
         Invoke-MacRun '/usr/bin/ditto' @($app, $appOutput)
@@ -465,4 +484,4 @@ function Invoke-MacNotarizedDiskImage {
     Write-Host "Packaged $dmgOutput from the notarized app."
 }
 
-Export-ModuleMember -Function Invoke-MacPackage, Invoke-MacNotarizedDiskImage, Invoke-MacCommand, Write-MacPlist, Get-CleanHostEnvironment
+Export-ModuleMember -Function Invoke-MacPackage, Invoke-MacNotarizedDiskImage, Invoke-MacStaple, Invoke-MacCommand, Write-MacPlist, Get-CleanHostEnvironment

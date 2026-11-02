@@ -2,6 +2,88 @@
 
 Import-Module (Join-Path $PSScriptRoot 'JiffshotMacPackage.psm1') -Force
 
+Describe 'macOS ticket stapling' {
+    InModuleScope JiffshotMacPackage {
+        BeforeEach {
+            $script:StapleAttempts = 0
+            $script:StapleDelays = [Collections.Generic.List[int]]::new()
+            Mock Start-Sleep { $script:StapleDelays.Add($Seconds) }
+        }
+
+        It 'staples successfully on attempt <SuccessAttempt>' -TestCases @(
+            @{ SuccessAttempt = 1; ExpectedDelays = @() }
+            @{ SuccessAttempt = 2; ExpectedDelays = @(10) }
+            @{ SuccessAttempt = 4; ExpectedDelays = @(10, 20, 40) }
+        ) {
+            param($SuccessAttempt, $ExpectedDelays)
+            Mock Invoke-MacCommand {
+                $script:StapleAttempts++
+                [pscustomobject]@{
+                    ExitCode = $(if ($script:StapleAttempts -eq $SuccessAttempt) { 0 } else { 68 })
+                    Stdout = ''
+                    Stderr = $(if ($script:StapleAttempts -eq $SuccessAttempt) { '' } else { 'The network connection was lost.' })
+                }
+            }
+
+            Invoke-MacStaple -Path '/fixture/Jiffshot app.dmg'
+
+            Should -Invoke Invoke-MacCommand -Times $SuccessAttempt -Exactly -ParameterFilter {
+                $File -ceq '/usr/bin/xcrun' -and $AllowFailure -and
+                ($Arguments -join '|') -ceq 'stapler|staple|/fixture/Jiffshot app.dmg'
+            }
+            $script:StapleDelays.ToArray() | Should -Be $ExpectedDelays
+        }
+
+        It 'gives up after three retries and preserves the final diagnostic' {
+            Mock Invoke-MacCommand {
+                [pscustomobject]@{ ExitCode = 68; Stdout = ''; Stderr = 'The network connection was lost.' }
+            }
+
+            { Invoke-MacStaple -Path '/fixture/Jiffshot.app' } |
+                Should -Throw "*Jiffshot.app*after 4 attempt(s)*exit status 68*The network connection was lost.*"
+
+            Should -Invoke Invoke-MacCommand -Times 4 -Exactly
+            $script:StapleDelays.ToArray() | Should -Be @(10, 20, 40)
+        }
+
+        It 'fails immediately for non-service errors' {
+            Mock Invoke-MacCommand {
+                [pscustomobject]@{ ExitCode = 65; Stdout = 'Could not validate ticket'; Stderr = '' }
+            }
+
+            { Invoke-MacStaple -Path '/fixture/Jiffshot.app' } |
+                Should -Throw '*after 1 attempt(s)*exit status 65*Could not validate ticket*'
+
+            Should -Invoke Invoke-MacCommand -Times 1 -Exactly
+            Should -Invoke Start-Sleep -Times 0 -Exactly
+        }
+
+        It 'stops retrying when a service error is followed by a permanent error' {
+            Mock Invoke-MacCommand {
+                $script:StapleAttempts++
+                [pscustomobject]@{
+                    ExitCode = $(if ($script:StapleAttempts -eq 1) { 68 } else { 65 })
+                    Stdout = ''
+                    Stderr = 'fixture error'
+                }
+            }
+
+            { Invoke-MacStaple -Path '/fixture/Jiffshot.app' } |
+                Should -Throw '*after 2 attempt(s)*exit status 65*fixture error*'
+
+            Should -Invoke Invoke-MacCommand -Times 2 -Exactly
+            $script:StapleDelays.ToArray() | Should -Be @(10)
+        }
+
+        It 'does not retry command launch failures' {
+            Mock Invoke-MacCommand { throw 'cannot launch xcrun' }
+            { Invoke-MacStaple -Path '/fixture/Jiffshot.app' } | Should -Throw '*cannot launch xcrun*'
+            Should -Invoke Invoke-MacCommand -Times 1 -Exactly
+            Should -Invoke Start-Sleep -Times 0 -Exactly
+        }
+    }
+}
+
 Describe 'macOS packaging' {
     InModuleScope JiffshotMacPackage {
         BeforeEach {
@@ -430,6 +512,9 @@ Describe 'macOS packaging' {
                 $Keychain | Should -BeExactly 'fixture-keychain'
                 $script:NotaryEvents.Add($(if ($Path.EndsWith('.zip')) { 'submit-app' } else { 'submit-image' }))
             }
+            Mock Invoke-MacStaple {
+                $script:NotaryEvents.Add($(if ($Path.EndsWith('.app')) { 'staple-app' } else { 'staple-image' }))
+            }
             Mock Invoke-MacRun {
                 if ($File -ceq '/usr/bin/ditto' -and $Arguments[0] -ceq '-c') {
                     $script:NotaryEvents.Add('zip')
@@ -441,9 +526,6 @@ Describe 'macOS packaging' {
                 elseif ($File -ceq '/usr/bin/hdiutil') {
                     $script:NotaryEvents.Add('image')
                     [IO.File]::WriteAllText($Arguments[-1], 'disk image')
-                }
-                elseif ($File -ceq '/usr/bin/xcrun') {
-                    $script:NotaryEvents.Add($(if ($Arguments[-1].EndsWith('.app')) { 'staple-app' } else { 'staple-image' }))
                 }
             }
             $output = Join-Path $script:Work 'out'
@@ -668,6 +750,33 @@ Describe 'macOS packaging entrypoint and CI' {
         $script:PowerShell = (Get-Process -Id $PID).Path
     }
 
+    It 'passes staple paths and propagates failures through the entrypoint for <Name>' -TestCases @(
+        @{ Name = 'success'; Fail = $false; ExpectedExit = 0 }
+        @{ Name = 'failure'; Fail = $true; ExpectedExit = 1 }
+    ) {
+        param($Name, $Fail, $ExpectedExit)
+        $directory = Join-Path $TestDrive "staple-$Name"
+        [void][IO.Directory]::CreateDirectory($directory)
+        [IO.File]::Copy((Join-Path $PSScriptRoot 'staple.ps1'), (Join-Path $directory 'staple.ps1'))
+        $stub = @'
+function Invoke-MacStaple {
+    param($Path)
+    if ($Path -cne '/fixture/Jiffshot app.dmg') { throw "Unexpected path: $Path" }
+    if (FAIL_STAPLE) { throw 'fixture stapling exhausted retries' }
+}
+Export-ModuleMember -Function Invoke-MacStaple
+'@
+        [IO.File]::WriteAllText((Join-Path $directory 'JiffshotMacPackage.psm1'), $stub.Replace('FAIL_STAPLE', "`$$Fail"))
+        $result = Invoke-MacCommand -File $script:PowerShell -Arguments @(
+            '-NoLogo', '-NoProfile', '-File', (Join-Path $directory 'staple.ps1'),
+            '-Path', '/fixture/Jiffshot app.dmg'
+        ) -AllowFailure
+        $result.ExitCode | Should -Be $ExpectedExit
+        if ($Fail) {
+            $result.Stderr | Should -Match 'macOS ticket stapling failed: fixture stapling exhausted retries'
+        }
+    }
+
     It 'enforces the requested default capability gates in the entrypoint' -TestCases @(
         @{ Name = 'default'; Extra = @(); Checked = $true }
         @{ Name = 'required'; Extra = @('-RequireNativeFileDrag'); Checked = $true }
@@ -788,7 +897,10 @@ Export-ModuleMember -Function Invoke-MacPackage
         $macos.IndexOf('- name: Notarize the macOS disk image') | Should -BeLessThan $macos.IndexOf('- name: Verify macOS package')
         $macos | Should -Match 'skip_checksum_validation: ''true'''
         $macos | Should -Match 'skip_stapling: ''true'''
-        $macos | Should -Match 'stapler staple macos-package/Jiffshot\.app'
+        $macos | Should -Match 'package/macos/staple\.ps1 -Path macos-package/Jiffshot\.app'
+        $macos | Should -Match 'package/macos/staple\.ps1 -Path "\$\{images\[0\]\}"'
+        @([regex]::Matches($macos, 'skip_stapling: ''true''')).Count | Should -Be 2
+        $macos | Should -Not -Match 'xcrun stapler staple'
         $macos | Should -Match 'stapler validate macos-package/Jiffshot\.app'
         $macos | Should -Match 'stapler validate "\$\{images\[0\]\}"'
         $macos | Should -Match 'codesign --verify --deep --strict "\$mountpoint/Jiffshot\.app"'
