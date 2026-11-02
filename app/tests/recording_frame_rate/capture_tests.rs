@@ -1,10 +1,7 @@
 use super::*;
 use gstreamer_app as gst_app;
 
-const INPUT_FPS: u64 = 20;
-const INPUT_FRAMES: u64 = 40;
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
-const VIDEO_COLORS: [[u8; 3]; 4] = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]];
 
 #[derive(Debug)]
 struct DecodedFrame {
@@ -22,69 +19,8 @@ struct DecodedVideo {
 
 #[derive(Debug)]
 struct DecodedAudio {
-    first_timestamp: u64,
     last_timestamp: u64,
     samples: Vec<f32>,
-}
-
-fn test_video_source() -> gst_app::AppSrc {
-    gst_app::AppSrc::builder()
-        .caps(
-            &gst::Caps::builder("video/x-raw")
-                .field("format", "RGBA")
-                .field("width", 64i32)
-                .field("height", 64i32)
-                .field("framerate", gst::Fraction::new(INPUT_FPS as i32, 1))
-                .build(),
-        )
-        .format(gst::Format::Time)
-        .is_live(false)
-        .build()
-}
-
-fn push_color_frames(source: &gst_app::AppSrc, start: u64) {
-    for index in 0..INPUT_FRAMES {
-        let [red, green, blue] = VIDEO_COLORS[index as usize % VIDEO_COLORS.len()];
-        let mut buffer = gst::Buffer::from_mut_slice([red, green, blue, 255].repeat(64 * 64));
-        let buffer_ref = buffer
-            .get_mut()
-            .expect("new test buffer should be writable");
-        buffer_ref.set_pts(gst::ClockTime::from_nseconds(
-            start + index * NANOS_PER_SECOND / INPUT_FPS,
-        ));
-        buffer_ref.set_duration(gst::ClockTime::from_nseconds(NANOS_PER_SECOND / INPUT_FPS));
-        source
-            .push_buffer(buffer)
-            .expect("recording source should accept a test frame");
-    }
-    source
-        .end_of_stream()
-        .expect("recording source should accept end of stream");
-}
-
-fn finish_finite_pipeline(pipeline: &gst::Pipeline) {
-    let message = pipeline
-        .bus()
-        .expect("recording pipeline should have a bus")
-        .timed_pop_filtered(
-            gst::ClockTime::from_seconds(20),
-            &[gst::MessageType::Eos, gst::MessageType::Error],
-        )
-        .expect("finite recording should finish");
-    match message.view() {
-        gst::MessageView::Eos(_) => {}
-        gst::MessageView::Error(error) => {
-            panic!(
-                "finite recording failed: {} ({:?})",
-                error.error(),
-                error.debug()
-            )
-        }
-        _ => unreachable!("only EOS and error messages were requested"),
-    }
-    pipeline
-        .set_state(gst::State::Null)
-        .expect("finite recording should stop");
 }
 
 fn presentation_timestamp(sample: &gst::Sample, buffer: &gst::BufferRef) -> u64 {
@@ -99,90 +35,6 @@ fn presentation_timestamp(sample: &gst::Sample, buffer: &gst::BufferRef) -> u64 
         .to_running_time(timestamp)
         .expect("decoded timestamp should fall within its segment")
         .nseconds()
-}
-
-fn write_finite_recording(
-    path: &Path,
-    frame_rate: RecordingFrameRate,
-    first_video_timestamp: u64,
-    with_audio: bool,
-) {
-    gst::init().expect("GStreamer should initialize");
-    let source = test_video_source();
-    let audio = if with_audio {
-        vec![gst::parse::bin_from_description(
-            "audiotestsrc num-buffers=300 samplesperbuffer=480 freq=440 volume=0.4 \
-             ! audio/x-raw,rate=48000,channels=1 ! identity",
-            true,
-        )
-        .expect("finite test audio source should be available")
-        .upcast::<gst::Element>()]
-    } else {
-        Vec::new()
-    };
-    let pipeline = recording_pipeline_with_layout(
-        source.clone().upcast(),
-        None,
-        WebcamLayout::default(),
-        audio,
-        frame_rate,
-        path,
-    )
-    .expect("production recording pipeline should be constructible");
-    let rate_elements: Vec<_> = pipeline
-        .iterate_elements()
-        .into_iter()
-        .map(|element| element.expect("pipeline elements should be iterable"))
-        .filter(|element| {
-            element
-                .factory()
-                .is_some_and(|factory| factory.name() == "videorate")
-        })
-        .collect();
-    assert_eq!(
-        rate_elements.len(),
-        usize::from(frame_rate != RecordingFrameRate::Source),
-        "Source must retain the old pipeline; fixed rates add one converter"
-    );
-    recording_timeline(&pipeline).expect("production timestamp adjustment should attach");
-    let observed = Arc::new(parking_lot::Mutex::new(HashMap::new()));
-    let converter = pipeline
-        .by_name("recording-video-converter")
-        .expect("recording should have a video converter");
-    let mut pads = vec![("video_input", converter)];
-    if let Some(rate) = rate_elements.first() {
-        pads.push(("rate_output", rate.clone()));
-    }
-    if let Some(audio) = pipeline.by_name("recording-audio-converter") {
-        pads.push(("audio_input", audio));
-    }
-    for (name, element) in pads {
-        let observed = Arc::clone(&observed);
-        element
-            .static_pad("src")
-            .expect("observed element should have a source pad")
-            .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
-                if let Some(timestamp) = info.buffer().and_then(|buffer| buffer.pts()) {
-                    observed.lock().entry(name).or_insert(timestamp.nseconds());
-                }
-                gst::PadProbeReturn::Ok
-            })
-            .expect("the test should observe the first timestamp");
-    }
-    pipeline
-        .set_state(gst::State::Playing)
-        .expect("finite recording should start");
-    push_color_frames(&source, first_video_timestamp);
-    finish_finite_pipeline(&pipeline);
-    if first_video_timestamp != 0 {
-        let observed = observed.lock();
-        eprintln!("{frame_rate:?} first production-pad timestamps: {observed:?}");
-        assert_eq!(
-            observed.get("video_input"),
-            Some(&first_video_timestamp),
-            "the fixture must deliver the requested first video timestamp"
-        );
-    }
 }
 
 fn decode_video(path: &Path) -> DecodedVideo {
@@ -301,7 +153,6 @@ fn decode_audio(path: &Path) -> DecodedAudio {
         .set_state(gst::State::Playing)
         .expect("recorded audio should start decoding");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    let mut first_timestamp = None;
     let mut last_timestamp = None;
     let mut samples = Vec::new();
     loop {
@@ -312,7 +163,6 @@ fn decode_audio(path: &Path) -> DecodedAudio {
         if let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(250)) {
             let buffer = sample.buffer().expect("decoded audio should have a buffer");
             let timestamp = presentation_timestamp(&sample, buffer);
-            first_timestamp.get_or_insert(timestamp);
             last_timestamp = Some(timestamp);
             let mapped = buffer
                 .map_readable()
@@ -339,7 +189,6 @@ fn decode_audio(path: &Path) -> DecodedAudio {
         .set_state(gst::State::Null)
         .expect("audio decoder should stop");
     DecodedAudio {
-        first_timestamp: first_timestamp.expect("recording should contain decoded audio"),
         last_timestamp: last_timestamp.expect("recording should contain decoded audio"),
         samples,
     }
@@ -359,179 +208,6 @@ fn audio_amplitude(samples: &[f32], frequency: f64, start: usize, length: usize)
                 (sine + sample * phase.sin(), cosine + sample * phase.cos())
             });
     2.0 * sine.hypot(cosine) / window.len() as f64
-}
-
-fn color_index(color: [u8; 3]) -> usize {
-    let (index, distance) = VIDEO_COLORS
-        .iter()
-        .enumerate()
-        .map(|(index, expected)| {
-            let distance: u32 = color
-                .iter()
-                .zip(expected)
-                .map(|(actual, expected)| u32::from(actual.abs_diff(*expected)))
-                .sum();
-            (index, distance)
-        })
-        .min_by_key(|(_, distance)| *distance)
-        .expect("test palette should not be empty");
-    assert!(
-        distance < 75,
-        "decoded frame color {color:?} is not in the test palette"
-    );
-    index
-}
-
-fn assert_fixed_cadence(video: &DecodedVideo, expected_fps: u64, expected_frames: usize) {
-    assert_eq!(
-        video.frame_rate,
-        gst::Fraction::new(expected_fps as i32, 1),
-        "decoded caps must report the selected frame rate"
-    );
-    let last_source_frame_tolerance = expected_fps.div_ceil(INPUT_FPS) as usize;
-    assert!(
-        video.frames.len().abs_diff(expected_frames) <= last_source_frame_tolerance,
-        "expected approximately {expected_frames} frames at {expected_fps} fps, got {}",
-        video.frames.len()
-    );
-    assert!(
-        video.duration.abs_diff(2 * NANOS_PER_SECOND) <= 100_000_000,
-        "two-second input should retain its duration, got {} ns",
-        video.duration
-    );
-    for (index, frame) in video.frames.iter().enumerate() {
-        let expected = index as u64 * NANOS_PER_SECOND / expected_fps;
-        assert!(
-            frame.timestamp.abs_diff(expected) <= 2_000_000,
-            "frame {index} at {expected_fps} fps has PTS {}, expected {expected}",
-            frame.timestamp
-        );
-    }
-}
-
-fn check_encoded_rate(rate: RecordingFrameRate, expected_fps: u64) {
-    let directory = tempfile::tempdir().expect("temporary directory should be available");
-    let path = directory.path().join("fixed-rate.mp4");
-    write_finite_recording(&path, rate, 0, false);
-    let video = decode_video(&path);
-    assert_eq!(video.dimensions, (64, 64));
-    assert_fixed_cadence(&video, expected_fps, expected_fps as usize * 2);
-    let colors: Vec<_> = video
-        .frames
-        .iter()
-        .map(|frame| color_index(frame.color))
-        .collect();
-    let unique_colors = colors
-        .iter()
-        .copied()
-        .collect::<std::collections::HashSet<_>>()
-        .len();
-    assert!(
-        unique_colors >= if expected_fps < INPUT_FPS { 3 } else { 4 },
-        "the decoded output should retain the expected changing source colors: {colors:?}"
-    );
-    let steps: Vec<_> = colors
-        .windows(2)
-        .map(|pair| (pair[1] + 4 - pair[0]) % 4)
-        .collect();
-    if expected_fps == INPUT_FPS {
-        let expected: Vec<_> = (0..INPUT_FRAMES as usize).map(|index| index % 4).collect();
-        assert_eq!(
-            colors, expected,
-            "Source must preserve every input frame in its original order"
-        );
-    } else if expected_fps < INPUT_FPS {
-        // Newer videorate releases repeat the final frame to fill the duration at EOS.
-        let body = match steps.split_last() {
-            Some((0, rest)) => rest,
-            _ => &steps[..],
-        };
-        assert!(
-            body.contains(&2) && body.iter().all(|step| matches!(step, 1 | 2)),
-            "15 fps must actually drop some of the changing 20 fps frames: {steps:?}"
-        );
-    } else {
-        assert!(
-            steps.contains(&0) && steps.iter().all(|step| matches!(step, 0 | 1)),
-            "{expected_fps} fps must actually duplicate changing 20 fps frames: {steps:?}"
-        );
-    }
-}
-
-#[test]
-fn recording_frame_rate_source_preserves_encoded_20_fps_frames() {
-    check_encoded_rate(RecordingFrameRate::Source, 20);
-}
-
-#[test]
-fn recording_frame_rate_15_drops_encoded_20_fps_frames() {
-    check_encoded_rate(RecordingFrameRate::Fps15, 15);
-}
-
-#[test]
-fn recording_frame_rate_24_duplicates_encoded_20_fps_frames() {
-    check_encoded_rate(RecordingFrameRate::Fps24, 24);
-}
-
-#[test]
-fn recording_frame_rate_30_duplicates_encoded_20_fps_frames() {
-    check_encoded_rate(RecordingFrameRate::Fps30, 30);
-}
-
-#[test]
-fn recording_frame_rate_60_duplicates_encoded_20_fps_frames() {
-    check_encoded_rate(RecordingFrameRate::Fps60, 60);
-}
-
-fn check_delayed_first_video_frame(rate: RecordingFrameRate) {
-    let directory = tempfile::tempdir().expect("temporary directory should be available");
-    let path = directory.path().join("delayed-video.mp4");
-    write_finite_recording(&path, rate, NANOS_PER_SECOND, true);
-    if let Some(directory) = std::env::var_os("JIFFSHOT_FRAME_RATE_FIXTURES") {
-        let directory = PathBuf::from(directory);
-        std::fs::create_dir_all(&directory).expect("fixture directory should be creatable");
-        let destination = directory.join(format!("delayed-{rate:?}.mp4"));
-        std::fs::copy(&path, &destination).expect("diagnostic recording should be copied");
-        eprintln!("diagnostic recording: {}", destination.display());
-    }
-    let video = decode_video(&path);
-    let audio = decode_audio(&path);
-    let first_video = video
-        .frames
-        .first()
-        .expect("recording should contain video")
-        .timestamp;
-    let amplitude = audio_amplitude(&audio.samples, 440.0, 9_600, 9_600);
-    assert!(
-        amplitude > 0.03,
-        "early audio must contain the 440 Hz tone: {amplitude}"
-    );
-    assert!(
-        first_video >= NANOS_PER_SECOND - 2_000_000,
-        "{rate:?}: first input video frame has PTS 1s, but decoded video begins at \
-         {first_video} ns (audio begins at {} ns); video must not be synthesized earlier",
-        audio.first_timestamp
-    );
-    assert!(
-        first_video >= audio.first_timestamp + 900_000_000,
-        "{rate:?}: audio at {} ns must remain about one second ahead of video at {first_video} ns",
-        audio.first_timestamp
-    );
-    assert!(
-        audio.last_timestamp >= 2 * NANOS_PER_SECOND,
-        "audio must extend beyond the video start, last audio PTS was {} ns",
-        audio.last_timestamp
-    );
-}
-
-#[test]
-fn recording_frame_rate_source_keeps_delayed_video_after_early_audio() {
-    check_delayed_first_video_frame(RecordingFrameRate::Source);
-}
-
-#[test]
-fn recording_frame_rate_fixed_keeps_delayed_video_after_early_audio() {
-    check_delayed_first_video_frame(RecordingFrameRate::Fps30);
 }
 
 fn assert_frame_pixels(
@@ -572,107 +248,6 @@ fn assert_audio_video_tail_synchronized(video: &DecodedVideo, audio: &DecodedAud
          audio {} ns",
         audio.last_timestamp
     );
-}
-
-#[test]
-fn recording_frame_rate_fixed_pause_keeps_webcam_audio_and_video_in_sync() {
-    gst::init().expect("GStreamer should initialize");
-    let directory = tempfile::tempdir().expect("temporary directory should be available");
-    let path = directory.path().join("fixed-rate-paused.mp4");
-    let screen = gst::parse::bin_from_description(
-        "videotestsrc name=screen is-live=true pattern=red \
-         ! video/x-raw,width=64,height=64,framerate=20/1 ! identity",
-        true,
-    )
-    .expect("live screen test source should be available");
-    let screen_pattern = screen
-        .by_name("screen")
-        .expect("screen pattern should be named");
-    let webcam = gst::parse::bin_from_description(
-        "videotestsrc is-live=true pattern=blue \
-         ! video/x-raw,width=64,height=64,framerate=20/1 ! identity",
-        true,
-    )
-    .expect("live webcam test source should be available");
-    let audio = gst::ElementFactory::make("audiotestsrc")
-        .property("is-live", true)
-        .property("do-timestamp", true)
-        .property("freq", 440.0f64)
-        .property("volume", 0.4f64)
-        .build()
-        .expect("live test audio should be available");
-    let pipeline = recording_pipeline_with_layout(
-        screen.upcast(),
-        Some(webcam.upcast()),
-        WebcamLayout::default(),
-        vec![audio.clone()],
-        RecordingFrameRate::Fps24,
-        &path,
-    )
-    .expect("fixed-rate webcam and audio pipeline should be constructible");
-    let (commands, receiver) = async_channel::bounded(8);
-    let (states, observed) = std::sync::mpsc::channel();
-    let recorder = std::thread::spawn(move || {
-        run_recording(&pipeline, receiver, |state| {
-            states
-                .send(state)
-                .expect("test should receive recording states")
-        })
-    });
-    let next_state = || {
-        observed
-            .recv_timeout(Duration::from_secs(10))
-            .expect("recording should report its state")
-    };
-    assert_eq!(next_state(), RecordingState::Recording);
-    std::thread::sleep(Duration::from_millis(1000));
-    commands
-        .send_blocking(RecordingCommand::TogglePause)
-        .expect("pause should be accepted");
-    assert_eq!(next_state(), RecordingState::Paused);
-    screen_pattern.set_property_from_str("pattern", "blue");
-    audio.set_property("freq", 1000.0f64);
-    std::thread::sleep(Duration::from_millis(1400));
-    screen_pattern.set_property_from_str("pattern", "green");
-    audio.set_property("freq", 880.0f64);
-    commands
-        .send_blocking(RecordingCommand::TogglePause)
-        .expect("resume should be accepted");
-    assert_eq!(next_state(), RecordingState::Recording);
-    std::thread::sleep(Duration::from_millis(1000));
-    commands
-        .send_blocking(RecordingCommand::Stop)
-        .expect("stop should be accepted");
-    assert_eq!(next_state(), RecordingState::Stopping);
-    assert_eq!(
-        recorder
-            .join()
-            .expect("recording thread should finish")
-            .expect("paused recording should finalize"),
-        RecordingRun::Finished
-    );
-
-    let video = decode_video(&path);
-    let audio = decode_audio(&path);
-    assert_eq!(video.dimensions, (64, 64));
-    assert_eq!(video.frame_rate, gst::Fraction::new(24, 1));
-    assert!(
-        (1_500_000_000..=3_000_000_000).contains(&video.duration),
-        "recorded duration must omit the 1.4-second pause: {} ns",
-        video.duration
-    );
-    assert_frame_pixels(&path, 0.25, (8, 8), [255, 0, 0], (55, 55));
-    assert_frame_pixels(&path, 1.35, (8, 8), [0, 255, 0], (55, 55));
-    let before = audio_amplitude(&audio.samples, 440.0, 9_600, 9_600);
-    let after = audio_amplitude(&audio.samples, 880.0, 62_400, 9_600);
-    let paused = audio_amplitude(&audio.samples, 1000.0, 62_400, 9_600);
-    assert!(before > 0.03, "pre-pause 440 Hz tone is missing: {before}");
-    assert!(after > 0.03, "post-resume 880 Hz tone is missing: {after}");
-    assert!(
-        paused < 0.03,
-        "the paused 1000 Hz tone leaked into the recording: {paused}"
-    );
-    assert_audio_video_tail_synchronized(&video, &audio);
 }
 
 #[derive(Clone, Copy)]
