@@ -85,11 +85,15 @@ thread_local! {
     static HOST: RefCell<Option<Host>> = const { RefCell::new(None) };
 }
 
+thread_local! {
+    /// The screenshot while the window takes its copy, before the host exists.
+    static LOADING: RefCell<Option<Frame>> = const { RefCell::new(None) };
+}
+
 fn copy_snapshot(rect: Rect, w: u32, h: u32, buf: &mut [u8], stride: usize) -> Result<bool, String> {
-    HOST.with(|host| {
-        let host = host.borrow();
-        let Some(host) = host.as_ref() else { return Ok(false) };
-        let frame = &host.model.snapshot;
+    LOADING.with(|loading| {
+        let loading = loading.borrow();
+        let Some(frame) = loading.as_ref() else { return Ok(false) };
         if rect != frame.bounds() || (w, h) != (frame.width, frame.height) || stride != w as usize * 4 {
             return Err("the screenshot does not match the window".to_owned());
         }
@@ -119,7 +123,12 @@ pub(crate) fn select(
     let model = Overlay::new(frame, center, mode);
     refresh(&model, &mut scene);
     let mut window = window;
-    window.load(1)?;
+    LOADING.with(|l| *l.borrow_mut() = Some(model.snapshot.clone()));
+    let loaded = window.load(1);
+    LOADING.with(|l| *l.borrow_mut() = None);
+    if !loaded? {
+        return Err("the screenshot could not be shown".to_owned());
+    }
     HOST.with(|h| *h.borrow_mut() = Some(Host { model, window, scene, done: Some(Box::new(done)) }));
     let shown = HOST.with(|h| {
         let h = h.borrow();
