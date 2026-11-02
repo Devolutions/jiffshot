@@ -69,6 +69,14 @@ pub const MODE_FILE: usize = 15;
 pub const MODE_VIDEO_FULL: usize = 16;
 #[cfg(target_os = "macos")]
 const MODE_SCHEDULE_AREA: usize = 17;
+/// Records a rectangle of the Video Region size, placed in the overlay.
+pub const MODE_VIDEO_FIXED: usize = 18;
+/// Select region on screen…: the selection becomes the Image or Video
+/// Region options' fixed region; nothing is captured.
+#[cfg(windows)]
+const MODE_PICK_REGION: usize = 19;
+#[cfg(windows)]
+const MODE_PICK_VIDEO_REGION: usize = 20;
 /// Not a mode: the command line asks for the Capture window.
 pub const OPEN_CAPTURE_WINDOW: usize = 99;
 const ID_SCROLL_BOTH: usize = 48;
@@ -110,6 +118,7 @@ pub fn mode_named(name: &str) -> Option<usize> {
         "fixed" => MODE_FIXED,
         "text" => MODE_TEXT,
         "video" => MODE_VIDEO,
+        "video-fixed" => MODE_VIDEO_FIXED,
         "steps" => MODE_STEPS,
         "menu" => usize::MAX,
         _ => return None,
@@ -276,6 +285,9 @@ enum PendingMode {
     Fixed(Rect),
     #[cfg(target_os = "macos")]
     Fixed(SavedAreaTicket),
+    /// A fixed-size recording at its saved position.
+    #[cfg(windows)]
+    Record(Rect),
 }
 
 #[cfg(target_os = "macos")]
@@ -804,10 +816,8 @@ fn report_finished_capture(owner: HWND, outcome: Outcome) -> Option<String> {
     outcome.is_error.then_some(outcome.message)
 }
 
-#[cfg(target_os = "macos")]
 struct ReopenCaptureWindow;
 
-#[cfg(target_os = "macos")]
 impl Drop for ReopenCaptureWindow {
     fn drop(&mut self) {
         crate::show_capture_window();
@@ -824,6 +834,8 @@ fn select_create_mode(choice: Option<usize>) -> Option<usize> {
 fn capture_interactive(mode: usize) {
     #[cfg(target_os = "macos")]
     let _reopen = (mode == MODE_SCHEDULE_AREA).then_some(ReopenCaptureWindow);
+    #[cfg(windows)]
+    let _reopen = matches!(mode, MODE_PICK_REGION | MODE_PICK_VIDEO_REGION).then_some(ReopenCaptureWindow);
     let Some((hwnd, settings)) = with_app(|app| {
         if app.busy {
             return None;
@@ -938,8 +950,14 @@ fn capture_interactive(mode: usize) {
             overlay::Mode::Fixed(settings.fixed_size.0.max(16), settings.fixed_size.1.max(16))
         }
         MODE_VIDEO => overlay::Mode::Video,
+        MODE_VIDEO_FIXED => {
+            let (width, height) = crate::panel::video_fixed_size(&settings);
+            overlay::Mode::VideoFixed(width, height)
+        }
         _ => overlay::Mode::Normal,
     };
+    // A fixed-size recording records like any other once placed.
+    let mode = if mode == MODE_VIDEO_FIXED { MODE_VIDEO } else { mode };
     let (overlay, selection) = match overlay::run(overlay) {
         Ok(result) => result,
         Err(error) => {
@@ -964,6 +982,18 @@ fn capture_interactive(mode: usize) {
                 capture_layout,
             ));
             notify(hwnd, title, &message, warning);
+        }
+        with_app(|app| app.busy = false);
+        return;
+    }
+    #[cfg(windows)]
+    if matches!(mode, MODE_PICK_REGION | MODE_PICK_VIDEO_REGION) {
+        if let Some(selection) = selection {
+            with_app(|app| {
+                crate::panel::set_fixed_region(&mut app.settings, mode == MODE_PICK_VIDEO_REGION, selection.rect());
+                app.settings.save();
+            });
+            publish_state();
         }
         with_app(|app| app.busy = false);
         return;
@@ -2094,6 +2124,11 @@ pub fn start_from_panel(s: Settings) {
         }
     }
     let mode = crate::panel::mode_of(&s, tab);
+    #[cfg(windows)]
+    if let ("video-fixed", Some((x, y))) = (mode.as_str(), s.capture_window.video_fixed_at) {
+        let (width, height) = crate::panel::video_fixed_size(&s);
+        return record_rect_soon(Rect::new(x, y, width, height));
+    }
     match (mode.as_str(), s.capture_window.fixed_at) {
         ("fixed", Some((x, y))) if tab == 1 => {
             capture_rect_after_delay(Rect::new(x, y, s.fixed_size.0, s.fixed_size.1))
@@ -2694,6 +2729,35 @@ fn record_screen_under_cursor() {
     with_app(|app| app.busy = false);
 }
 
+/// Records exactly `rect` (a fixed region with a saved position), without
+/// selecting.
+#[cfg(windows)]
+fn record_rect(rect: Rect) {
+    let Some((hwnd, settings)) = with_app(|app| {
+        if app.busy {
+            return None;
+        }
+        app.busy = true;
+        Some((app.hwnd, app.settings.clone()))
+    })
+    .flatten() else {
+        return;
+    };
+    let result = (|| {
+        let layout = CaptureLayout::current().map_err(|error| error.to_string())?;
+        if rect.intersect(layout.virtual_screen()).is_none() {
+            return Err("The saved recording position is off every screen. Change it in the Video Region options.".to_owned());
+        }
+        crate::recorder::record_in_layout(rect, &settings, layout)
+    })();
+    match result {
+        Ok(Some(path)) => spawn_video_finish(path, rect, settings, hwnd),
+        Ok(None) => {}
+        Err(error) => notify(hwnd, "Recording failed", &error, true),
+    }
+    with_app(|app| app.busy = false);
+}
+
 /// Starts a capture by preset mode name, after the delay setting (image
 /// captures; recordings count down themselves).
 pub fn start_mode_after_delay(name: &str) {
@@ -2705,7 +2769,7 @@ pub fn start_mode_after_delay(name: &str) {
     let Some((hwnd, delay)) = with_app(|app| (app.hwnd, app.settings.delay_seconds)) else {
         return;
     };
-    if delay == 0 || mode == MODE_VIDEO {
+    if delay == 0 || matches!(mode, MODE_VIDEO | MODE_VIDEO_FIXED) {
         // Let the Capture window disappear from the screen first.
         with_app(|app| app.pending_mode = Some(PendingMode::Mode(mode)));
         // SAFETY: a timer on our own window.
@@ -2754,6 +2818,47 @@ pub fn select_scheduled_area() {
     }
 }
 
+/// Select region on screen…: opens the selection overlay to choose the
+/// Image (or, with `video`, the Video) Region options' fixed region, then
+/// shows the Capture window again.
+#[cfg(windows)]
+pub fn select_fixed_region(video: bool) {
+    let Some((hwnd, available)) =
+        with_app(|app| (app.hwnd, !app.busy && app.pending_mode.is_none()))
+    else {
+        crate::show_capture_window();
+        return;
+    };
+    if !available {
+        notify(
+            hwnd,
+            "Region not selected",
+            "Another capture is already in progress or waiting to start.",
+            true,
+        );
+        crate::show_capture_window();
+        return;
+    }
+    let mode = if video { MODE_PICK_VIDEO_REGION } else { MODE_PICK_REGION };
+    with_app(|app| app.pending_mode = Some(PendingMode::Mode(mode)));
+    // SAFETY: a timer on our own window.
+    if unsafe { SetTimer(hwnd, TIMER_MODE, 150, None) } == 0 {
+        with_app(|app| app.pending_mode = None);
+        notify(hwnd, "Region not selected", "Could not start the selection overlay.", true);
+        crate::show_capture_window();
+    }
+}
+
+/// Records exactly `rect` once the Capture window has gone (recordings
+/// count down themselves).
+#[cfg(windows)]
+fn record_rect_soon(rect: Rect) {
+    let Some(hwnd) = with_app(|app| app.hwnd) else { return };
+    with_app(|app| app.pending_mode = Some(PendingMode::Record(rect)));
+    // SAFETY: a timer on our own window.
+    unsafe { SetTimer(hwnd, TIMER_MODE, 150, None) };
+}
+
 /// Captures exactly `rect` after the delay setting.
 pub fn capture_rect_after_delay(rect: Rect) {
     let Some((hwnd, delay)) = with_app(|app| (app.hwnd, app.settings.delay_seconds)) else {
@@ -2788,6 +2893,8 @@ fn run_pending_mode() {
         Some(PendingMode::Fixed(ticket)) => capture_fixed_rect(&settings, &ticket),
         #[cfg(windows)]
         Some(PendingMode::Fixed(rect)) => capture_fixed_rect(rect, settings.include_cursor),
+        #[cfg(windows)]
+        Some(PendingMode::Record(rect)) => return record_rect(rect),
         None => return,
     };
     match capture {
@@ -3507,6 +3614,7 @@ mod tests {
             assert!(mode_named(&p.mode).is_some(), "{}", p.mode);
         }
         assert_eq!(mode_named("steps"), Some(MODE_STEPS));
+        assert_eq!(mode_named("video-fixed"), Some(MODE_VIDEO_FIXED));
     }
 
     #[cfg(target_os = "macos")]
