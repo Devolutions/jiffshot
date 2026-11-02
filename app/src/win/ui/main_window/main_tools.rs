@@ -209,7 +209,13 @@ fn tool_button(sink: MainViewModelSink, theme: super::main_common::Theme, index:
     let active = move || sink.tool.with(|t| t == name);
     let button = palette_button(sink)
         .tool_tip_tip(def.caption)
-        .background(move || if active() { solid(ACCENT) } else { solid(TRANSPARENT) })
+        .background(move || {
+            if active() {
+                solid(if theme.dark.get() && cfg!(windows) { crate::ui::dark_blue::SELECTION } else { ACCENT })
+            } else {
+                solid(TRANSPARENT)
+            }
+        })
         .content(tool_content(sink, theme, def.glyph, def.caption, active))
         .command(action(format!("tool:{name}")));
     with_context_menu(

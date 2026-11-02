@@ -4,7 +4,9 @@
 //! exported image and a log to the directory named by `JIFFSHOT_UITEST`.
 //! `JIFFSHOT_UITEST_IMAGE` optionally names the image to annotate (and turns
 //! on the image-tool, template and window steps), `JIFFSHOT_UITEST_VIDEO` a
-//! video to step through; `JIFFSHOT_UITEST_KEEP` leaves the editor open.
+//! video to step through; `JIFFSHOT_UITEST_KEEP` leaves the test window open.
+//! `JIFFSHOT_UITEST_CAPTURE_ONLY` checks the Capture window and chooser
+//! without running the editor and overlay walk.
 //! On macOS, `JIFFSHOT_UITEST_OVERLAY` runs only the synthetic overlay test.
 //! `JIFFSHOT_UITEST_STARTUP` checks login-item status without changing it.
 //! `JIFFSHOT_UITEST_RECENT` checks recent-file actions with a scratch library.
@@ -33,7 +35,7 @@ use jiffshot_capture::gdi::Dib;
 use jiffshot_capture::Rect;
 use rustolonia::{AppScope, Signal};
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -564,6 +566,10 @@ fn script() -> Script {
     #[cfg(target_os = "macos")]
     if let Some(case) = env("JIFFSHOT_UITEST_POPUP_SHUTDOWN") {
         return popup_shutdown_script(&case);
+    }
+    if env("JIFFSHOT_UITEST_CAPTURE_ONLY").is_some() {
+        capture_ux_steps(&mut s);
+        return s;
     }
     #[cfg(target_os = "macos")]
     native_lifetime_steps(&mut s);
@@ -2721,11 +2727,12 @@ fn saved_areas_script() -> Script {
         let inputs = values(&scope, &delay);
         assert_eq!(panel::apply(&mut scheduled, "delay", &inputs, false), panel::Applied::Changed);
         scheduled.macos_schedule_area.as_mut().unwrap().session_only = true;
-        let delay = panel::panel(&scheduled, "delay", false, "Capture").unwrap();
+        let mut delay = panel::panel(&scheduled, "delay", false, "Capture").unwrap();
         assert!(delay.rows.iter().any(|row| matches!(row, panel::Row::Note { text } if text.contains("review it again after restarting"))));
         assert_eq!(values(&scope, &delay).len(), 10);
         test.line("session-only notices build in both saved-area panels");
         assert_eq!(delay.action.as_ref().map(|action| action.id), Some("select-scheduled-area"));
+        delay.id = "image:delay".into();
         let json = serde_json::to_string(&delay).unwrap();
         crate::capture_window::show(&scope);
         test.remember_windows();
@@ -2785,7 +2792,8 @@ fn open_saved_area_action() {
     let scope = super::scope().expect("the editor scope is unavailable");
     crate::capture_window::show(&scope);
     let settings = jiffshot_workflow::settings_snapshot();
-    let panel = jiffshot_workflow::panel::panel(&settings, "delay", false, "Capture").expect("the Time delay panel is unavailable");
+    let mut panel = jiffshot_workflow::panel::panel(&settings, "delay", false, "Capture").expect("the Time delay panel is unavailable");
+    panel.id = "image:delay".into();
     let json = serde_json::to_string(&panel).expect("could not encode the Time delay panel");
     let (_, _, action) = super::capture_view::show_delay_for_selftest(&json, 300.0)
         .expect("could not open the Time delay panel").expect("the Time delay panel is not scrollable");
@@ -2914,7 +2922,7 @@ fn capture_settings_handoff_script() -> Script {
         assert!(super::extras::widget_visible_for_selftest().expect("could not inspect the Capture Widget"));
         assert_eq!(settings.capture_window.tab, 2);
         assert_eq!(super::capture_view::view_tab_for_selftest(), Some(2));
-        let view = serde_json::to_string(&jiffshot_workflow::panel::view(&settings, &state.capture_key, state.time_lapse)).unwrap();
+        let view = serde_json::to_string(&jiffshot_workflow::panel::unified_view(&settings, &state.capture_key, state.time_lapse)).unwrap();
         assert_eq!(super::capture().sink.view.get_untracked(), view, "the Capture window did not show the latest settings");
         late_view.borrow_mut().take().expect("the delayed Capture callback is missing")()
             .expect("could not apply the delayed Capture callback");
@@ -3037,10 +3045,11 @@ fn add_capture_settings_steps(script: &mut Script) {
             Vec::new(),
             startup,
         );
+        capture.model.run(|model| model.run("apply:video:selection:[3,7]".into()));
         capture.model.run(|model| model.run("switch:preview".into()));
         capture.model.run(|model| model.run("tab:2".into()));
         capture.model.run(|model| model.run("tab:1".into()));
-        test.line("queued a fixed-area confirmation, switch changes, Preferences and tab changes");
+        test.line("queued a fixed-area confirmation, scoped video settings, Preferences and tab changes");
         2000
     });
     let confirmed = panel_fixed;
@@ -3052,10 +3061,12 @@ fn add_capture_settings_steps(script: &mut Script) {
         assert_eq!(settings.macos_fixed_area.as_ref().map(|proof| proof.rect), Some(fixed));
         assert!(!settings.copy_to_clipboard && !settings.open_in_editor);
         assert_eq!((settings.delay_seconds, settings.capture_window.tab), (7, 1));
+        assert_eq!((settings.record_fps, settings.countdown), (60, 7));
         let persisted = jiffshot_workflow::settings::Settings::load();
         assert_eq!(persisted.macos_fixed_area, settings.macos_fixed_area);
         assert_eq!(persisted.capture_window.fixed_at, settings.capture_window.fixed_at);
         assert_eq!((persisted.copy_to_clipboard, persisted.open_in_editor, persisted.delay_seconds, persisted.capture_window.tab), (false, false, 7, 1));
+        assert_eq!((persisted.record_fps, persisted.countdown), (60, 7));
         test.line("queued Capture and Preferences edits retained their order and persisted the fixed-area confirmation");
         0
     });
@@ -3413,7 +3424,22 @@ fn library_item(index: usize) -> Option<Rc<crate::vm::LibraryItemItem>> {
     sink().library.get_untracked().get(index).cloned()
 }
 
+fn isolated_library(library: &Path, output: &Path) -> bool {
+    match (std::fs::canonicalize(library), std::fs::canonicalize(output)) {
+        (Ok(library), Ok(output)) => library != output && library.starts_with(output),
+        _ => false,
+    }
+}
+
 fn library_steps(s: &mut Script) {
+    let safe = env("JIFFSHOT_LIBRARY")
+        .zip(env("JIFFSHOT_UITEST"))
+        .is_some_and(|(library, output)| isolated_library(Path::new(&library), Path::new(&output)));
+    if !safe {
+        s.log(|_| "library edits skipped: JIFFSHOT_LIBRARY must be an existing folder inside JIFFSHOT_UITEST".to_owned());
+        return;
+    }
+
     let k = sink();
     s.step(move |_| {
         if let Some(first) = library_item(0) {
@@ -3431,8 +3457,16 @@ fn library_steps(s: &mut Script) {
         };
         format!("library copy: {pasted}; status: {}", k.status.get_untracked())
     });
+    let original = Rc::new(RefCell::new(HashMap::<String, (bool, String)>::new()));
+    let saved = original.clone();
+    let restore_pins = original.clone();
     s.step(move |t| {
-        let count = k.library.get_untracked().len();
+        let items = k.library.get_untracked();
+        let count = items.len();
+        for item in &items {
+            let fields = item.fields.get_untracked();
+            saved.borrow_mut().insert(fields.path, (fields.is_pinned, fields.tags));
+        }
         t.note = count.to_string();
         if count > 1 {
             if let Some(first) = library_item(0) {
@@ -3501,9 +3535,11 @@ fn library_steps(s: &mut Script) {
     .step(move |t| {
         if t.note != "0" && t.note != "1" {
             t.shot("ui-9-library.png");
-            // Undo the test edits: unpin, untag, unpick, collapse.
+            call(|m| m.clear_library_selection());
+            let original = restore_pins.borrow();
             for item in k.library.get_untracked() {
-                if item.fields.get_untracked().is_pinned {
+                let fields = item.fields.get_untracked();
+                if original.get(&fields.path).is_some_and(|(pinned, _)| *pinned != fields.is_pinned) {
                     item.model.run(|m| m.toggle_pin());
                 }
             }
@@ -3515,11 +3551,14 @@ fn library_steps(s: &mut Script) {
             return 0;
         }
         for item in k.library.get_untracked() {
-            if !item.fields.get_untracked().tags.is_empty() {
-                item.model.run(|m| m.set_tags(String::new()));
+            let fields = item.fields.get_untracked();
+            let tags = original.borrow().get(&fields.path).map(|(_, tags)| tags.clone());
+            if let Some(tags) = tags {
+                if tags != fields.tags {
+                    item.model.run(move |m| m.set_tags(tags));
+                }
             }
         }
-        call(|m| m.clear_library_selection());
         set(k.thumb_size, 120.0);
         set(k.library_expanded, false);
         300
@@ -3663,6 +3702,215 @@ fn windows_steps(s: &mut Script, drop: String) {
 
 const HUD_PANEL: &str = r#"{"panels":[{"id":9001,"area":[200,200,640,360],"status":"● Recording 0:07 · 210 frames\nShift+F9 pause · Shift+F10 stop · Esc cancels","buttons":["Stop","Pause","Draw","Cancel"]}],"borders":[{"id":9002,"area":[200,200,640,360]}]}"#;
 const HUD_RECORDING: &str = r#"{"id":9003,"area":[200,200,640,360],"status":"","buttons":[],"toolbar":{"millis":29000,"frames":870,"paused":false,"cursor":true,"highlight":false,"clicks":true,"webcam":false,"webcam_corner":"bottom-right","webcam_circle":true,"system":false,"microphone":true,"draw":false,"draw_offered":true,"note":null}}"#;
+
+fn show_capture_tab_fixture(t: &mut Test, tab: usize, timing: &str, running: bool, schedule: Option<&str>) {
+    let mut settings = jiffshot_workflow::settings::Settings::default();
+    settings.capture_window.tab = tab;
+    settings.capture_window.timer = timing != "delay";
+    settings.capture_window.timing = timing.into();
+    settings.delay_seconds = 0;
+    settings.schedule_area = Some((10, 20, 640, 360));
+    settings.schedule = schedule.map(str::to_owned);
+    let view = jiffshot_workflow::panel::unified_view(&settings, "PrtScn", running);
+    match serde_json::to_string(&view) {
+        Ok(json) => set(super::capture().sink.view, json),
+        Err(error) => t.line(format!("capture fixture: {error}")),
+    }
+}
+
+fn show_capture_fixture(t: &mut Test, timing: &str, running: bool) {
+    show_capture_tab_fixture(t, 0, timing, running, None);
+}
+
+fn show_capture_scheduled_fixture(t: &mut Test, timing: &str, running: bool) {
+    show_capture_tab_fixture(t, 0, timing, running, Some("12:45"));
+}
+
+/// Checks the Capture window's normal and automatic states and its chooser.
+fn capture_ux_steps(s: &mut Script) {
+    let k = sink();
+    s.step(|t| {
+        run("theme:Dark");
+        match crate::capture_window::window() {
+            Some(window) => {
+                if let Err(error) = window.set_show_activated(false).and_then(|_| window.show()) {
+                    t.line(format!("capture window: {error:?}"));
+                }
+            }
+            None => t.line("capture window: not mounted"),
+        }
+        500
+    })
+    .step(|t| {
+        match (super::scope(), crate::capture_window::window()) {
+            (Some(scope), Some(window)) => match scope.platform_handle(&window) {
+                Ok(hwnd) => t.note = hwnd.to_string(),
+                Err(error) => t.line(format!("capture window handle: {error:?}")),
+            },
+            _ => t.line("capture window: not mounted"),
+        }
+        show_capture_fixture(t, "delay", false);
+        500
+    })
+    .step(|t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "capture-manual.png");
+        } else {
+            t.line("capture window: not shown");
+        }
+        t.shot("editor-dark.png");
+        show_capture_fixture(t, "interval", false);
+        500
+    })
+    .step(|t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "capture-interval.png");
+        }
+        show_capture_fixture(t, "interval", true);
+        500
+    })
+    .step(|t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "capture-interval-running.png");
+        }
+        show_capture_fixture(t, "delay", true);
+        500
+    })
+    .step(|t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "capture-manual-interval-running.png");
+        }
+        show_capture_scheduled_fixture(t, "delay", false);
+        500
+    })
+    .step(|t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "capture-manual-schedule-running.png");
+        }
+        show_capture_scheduled_fixture(t, "delay", true);
+        500
+    })
+    .step(|t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "capture-manual-both-running.png");
+        }
+        show_capture_scheduled_fixture(t, "interval", true);
+        500
+    })
+    .step(|t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "capture-interval-schedule-running.png");
+        }
+        show_capture_scheduled_fixture(t, "schedule", true);
+        500
+    })
+    .step(|t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "capture-schedule-both-running.png");
+        }
+        show_capture_fixture(t, "schedule", false);
+        500
+    })
+    .step(move |t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "capture-schedule.png");
+        }
+        show_capture_fixture(t, "schedule", true);
+        500
+    })
+    .step(|t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "capture-schedule-interval-running.png");
+        }
+        show_capture_tab_fixture(t, 1, "interval", true, None);
+        500
+    })
+    .step(|t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "capture-image-interval-running.png");
+        }
+        show_capture_tab_fixture(t, 1, "delay", false, None);
+        500
+    })
+    .step(|t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "capture-image-manual.png");
+        }
+        show_capture_tab_fixture(t, 2, "delay", false, None);
+        500
+    })
+    .step(|t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "capture-video.png");
+        }
+        show_capture_scheduled_fixture(t, "delay", true);
+        run("theme:Light");
+        500
+    })
+    .step(|t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "capture-manual-both-running-light.png");
+        }
+        t.shot("editor-light.png");
+        show_capture_fixture(t, "delay", false);
+        500
+    })
+    .step(|t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "capture-manual-light.png");
+        }
+        show_capture_fixture(t, "interval", false);
+        500
+    })
+    .step(move |t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "capture-interval-light.png");
+        }
+        if let Some(window) = crate::capture_window::window() {
+            if let Err(error) = window.hide() {
+                t.line(format!("capture window: {error:?}"));
+            }
+        }
+        t.remember_windows();
+        let chooser = serde_json::json!({
+            "panels": [{
+                "id": 9004,
+                "area": [200, 200, 640, 360],
+                "status": jiffshot_workflow::panel::SELECT_CREATE_PROMPT,
+                "buttons": jiffshot_workflow::panel::SELECT_CREATE_CHOICES,
+            }],
+            "borders": [],
+        });
+        set(k.hud, chooser.to_string());
+        500
+    })
+    .step(move |t| {
+        let windows = t.new_windows();
+        if windows.is_empty() {
+            t.line("capture chooser: not shown");
+        }
+        for hwnd in windows {
+            t.shot_of(hwnd, "capture-chooser.png");
+        }
+        set(k.hud, r#"{"panels":[],"borders":[]}"#.into());
+        200
+    })
+    .step(|t| {
+        if env("JIFFSHOT_UITEST_KEEP").is_some() {
+            run("theme:Dark");
+            show_capture_fixture(t, "delay", false);
+            match crate::capture_window::window() {
+                Some(window) => {
+                    if let Err(error) = window.set_show_activated(false).and_then(|_| window.show()) {
+                        t.line(format!("capture window: {error:?}"));
+                    }
+                }
+                None => t.line("capture window: not mounted"),
+            }
+        }
+        200
+    });
+}
 
 /// A capture panel and outline from the capture side's JSON, then the
 /// recording toolbar: recording, then paused with the webcam on and the
@@ -5880,6 +6128,7 @@ fn capture_window_selftest_action(action: String) {
 }
 
 fn capture_window_steps(s: &mut Script) {
+    let original_theme = Rc::new(RefCell::new(String::new()));
     s.step(|t| {
         t.remember_windows();
         if let Some(scope) = super::scope() {
@@ -5906,6 +6155,32 @@ fn capture_window_steps(s: &mut Script) {
             0
         });
     }
+    let saved_theme = original_theme.clone();
+    s.step(move |_| {
+        *saved_theme.borrow_mut() = sink().theme.get_untracked();
+        run("theme:Dark");
+        300
+    })
+    .step(|t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "ui-18-capture-dark.png");
+        }
+        0
+    })
+    .step(|_| {
+        run("theme:Light");
+        300
+    })
+    .step(|t| {
+        if let Ok(hwnd) = t.note.parse::<isize>() {
+            t.shot_of(hwnd, "ui-18-capture-light.png");
+        }
+        0
+    })
+    .step(move |_| {
+        run(format!("theme:{}", original_theme.borrow()));
+        300
+    });
     s.step(|_| {
         capture_window_selftest_action("tab:1".into());
         capture_window_selftest_action("switch:clipboard".into());
@@ -6527,4 +6802,28 @@ pub fn start(scope: &AppScope, dir: &Path) {
     test.line("started");
     let runner = Rc::new(RefCell::new(Runner { scope: scope.clone(), test, steps: script().0 }));
     next(UiOnly::new(runner));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn library_edits_require_an_existing_subdirectory_of_test_output() {
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("system clock before epoch").as_nanos();
+        let root = std::env::temp_dir().join(format!("jiffshot-ui-test-{}-{unique}", std::process::id()));
+        let output = root.join("output");
+        let library = output.join("library");
+        let other = root.join("other");
+        std::fs::create_dir_all(&library).expect("create isolated library");
+        std::fs::create_dir(&other).expect("create unrelated library");
+        assert!(isolated_library(&library, &output));
+        assert!(!isolated_library(&other, &output));
+        assert!(!isolated_library(&output, &output));
+        assert!(!isolated_library(&output.join("missing"), &output));
+        std::fs::remove_dir(&library).expect("remove isolated library");
+        std::fs::remove_dir(&output).expect("remove test output");
+        std::fs::remove_dir(&other).expect("remove unrelated library");
+        std::fs::remove_dir(&root).expect("remove test root");
+    }
 }

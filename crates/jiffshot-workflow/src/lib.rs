@@ -70,6 +70,12 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::HWND;
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+#[cfg(windows)]
+use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
 /// What the capture side asks of the app it runs in.
 pub struct Hooks {
@@ -142,8 +148,20 @@ pub fn capture_state_snapshot() -> Option<(settings::Settings, TrayState)> {
         .clone()
 }
 
-/// Runs `f` on the capture side's thread, where its state lives; safe from
-/// any thread. Dropped when the capture side is not running.
+#[cfg(windows)]
+fn is_local_window(hwnd: HWND) -> bool {
+    if hwnd.is_null() {
+        return false;
+    }
+    let mut process = 0;
+    // SAFETY: this only queries the owner of the window handle.
+    unsafe {
+        GetWindowThreadProcessId(hwnd, &mut process);
+        process == GetCurrentProcessId()
+    }
+}
+
+/// Runs `f` on this process's capture thread; dropped if it is not running.
 pub fn on_capture_thread(f: impl FnOnce() + Send + 'static) {
     let _ = post_capture_thread(f);
 }
@@ -299,6 +317,32 @@ pub mod capture {
         Ok(ticket)
     }
 
+    /// The interval action the Capture window showed when it was pressed.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum IntervalAction {
+        Start,
+        Stop,
+    }
+
+    impl IntervalAction {
+        pub(crate) fn should_toggle(self, running: bool) -> bool {
+            matches!((self, running), (Self::Start, false) | (Self::Stop, true))
+        }
+    }
+
+    /// The daily-schedule action the Capture window showed when it was pressed.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum ScheduleAction {
+        Start,
+        Stop,
+    }
+
+    impl ScheduleAction {
+        pub(crate) fn should_toggle(self, running: bool) -> bool {
+            matches!((self, running), (Self::Start, false) | (Self::Stop, true))
+        }
+    }
+
     /// Saves the window's settings.
     pub fn apply(s: Settings) {
         on_capture_thread(move || tray::apply_settings(s));
@@ -312,8 +356,44 @@ pub mod capture {
 
     /// Starts with the capture thread's committed settings, rather than a UI snapshot.
     #[cfg(target_os = "macos")]
-    pub fn start_current() -> bool {
-        super::post_capture_thread(tray::start_from_current_panel)
+    pub fn start_current(tab: usize) -> bool {
+        super::post_capture_thread(move || tray::start_from_current_panel(tab))
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn set_interval_current(action: IntervalAction) -> bool {
+        super::post_capture_thread(move || tray::set_timelapse(action))
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn set_schedule_current(action: ScheduleAction) -> bool {
+        super::post_capture_thread(move || tray::set_schedule_action(action))
+    }
+
+    /// Applies the settings and starts or stops the interval as displayed.
+    pub fn set_interval(s: Settings, action: IntervalAction) {
+        on_capture_thread(move || {
+            tray::apply_settings(s);
+            tray::set_timelapse(action);
+        });
+    }
+
+    /// Stops a running interval capture, without starting one if it already stopped.
+    pub fn stop_timelapse() {
+        on_capture_thread(tray::stop_timelapse);
+    }
+
+    /// Applies the settings and starts or cancels the displayed daily schedule.
+    pub fn set_schedule(s: Settings, action: ScheduleAction) {
+        on_capture_thread(move || {
+            tray::apply_settings(s);
+            tray::set_schedule_action(action);
+        });
+    }
+
+    /// Cancels a daily schedule without starting one if it already stopped.
+    pub fn cancel_schedule() {
+        on_capture_thread(|| tray::set_schedule_action(ScheduleAction::Stop));
     }
 
     pub fn run_preset(index: usize) {
@@ -334,7 +414,7 @@ pub mod capture {
 
     /// Moves a daily schedule that is on to `at`.
     pub fn move_schedule(at: String) {
-        on_capture_thread(move || tray::set_schedule(Some(at)));
+        on_capture_thread(move || tray::move_schedule(at));
     }
 
     /// Opens the selection overlay to choose a daily scheduled capture area.
@@ -1305,4 +1385,46 @@ pub fn run_command(args: &[String]) -> Option<i32> {
             1
         }
     })
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use jiffshot_capture::wide;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, GetDesktopWindow, HWND_MESSAGE};
+
+    #[test]
+    fn capture_dispatch_accepts_only_windows_in_this_process() {
+        struct TestWindow(HWND);
+        impl Drop for TestWindow {
+            fn drop(&mut self) {
+                // SAFETY: this test owns the window and runs on its creating thread.
+                unsafe { DestroyWindow(self.0) };
+            }
+        }
+
+        // SAFETY: a hidden message-only window using the system STATIC class.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        assert!(!hwnd.is_null(), "the test window should be created");
+        let window = TestWindow(hwnd);
+        assert!(is_local_window(window.0));
+        assert!(!is_local_window(std::ptr::null_mut()));
+        // SAFETY: obtaining the system desktop window is read-only.
+        assert!(!is_local_window(unsafe { GetDesktopWindow() }));
+    }
 }
