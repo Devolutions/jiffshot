@@ -94,7 +94,7 @@ try {
     $appLog = Join-Path $work 'app.log'
     [System.IO.File]::WriteAllText($displayFile, '')
     try {
-        $server = Start-ShellProcess 'exec Xvfb -displayfd 3 -screen 0 1280x900x24 -nolisten tcp 3>"$1" >"$2" 2>&1' @($displayFile, $serverLog) $work
+        $server = Start-ShellProcess 'exec Xvfb -displayfd 3 -screen 0 1280x900x24 -nolisten tcp -noreset 3>"$1" >"$2" 2>&1' @($displayFile, $serverLog) $work
         $deadline = [DateTime]::UtcNow.AddSeconds(10)
         $display = ''
         while ([DateTime]::UtcNow -lt $deadline) {

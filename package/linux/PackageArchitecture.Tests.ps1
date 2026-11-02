@@ -566,6 +566,11 @@ Describe 'Architecture workflows' {
         (Get-WorkflowJob 'linux').Contains('smoke.ps1 -Launcher') | Should -BeTrue
     }
 
+    It 'portable package smoke test keeps its Xvfb alive between window probes' {
+        $smoke = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'smoke.ps1'))
+        $smoke | Should -MatchExactly 'Xvfb -displayfd 3 .* -nolisten tcp -noreset '
+    }
+
     It 'install matrix covers both formats and native architectures' {
         $job = Get-WorkflowJob 'linux-package-install'
         $pattern = '- format: (\w+)\n\s+arch: (\w+)\n\s+runner: ([\w.-]+)\n\s+machine: (\w+)\n\s+package_arch: (\w+)\n\s+image: ([\w.:]+)\n\s+artifact: ([\w-]+)'
