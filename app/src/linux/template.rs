@@ -30,6 +30,27 @@ pub(super) fn create_template(
         .ok_or_else(|| format!("could not create template: {name}"))
 }
 
+/// Decodes an image file for a template zone.
+pub(super) fn load_zone_image(path: &std::path::Path) -> Result<Pixmap, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
+    if !file
+        .metadata()
+        .map_err(|error| format!("could not inspect {}: {error}", path.display()))?
+        .is_file()
+    {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    let image = image::ImageReader::new(std::io::BufReader::new(file))
+        .with_guessed_format()
+        .map_err(|error| error.to_string())?
+        .decode()
+        .map_err(|error| format!("could not decode {}: {error}", path.display()))?
+        .into_rgba8();
+    jiffshot_doc::io::from_rgba_image(&image)
+        .ok_or_else(|| format!("{} has no pixels", path.display()))
+}
+
 pub(super) fn selected_zone(editor: &Editor) -> Result<u64, String> {
     let object = editor
         .selected()
@@ -80,6 +101,21 @@ mod tests {
     use super::*;
     use jiffshot_doc::object::{Kind, ShapeKind, Style, Zone};
     use jiffshot_doc::{Box2, Rgba};
+
+    #[test]
+    fn zone_images_load_from_files_and_reject_other_input() {
+        let directory = tempfile::tempdir().expect("temporary directory should be available");
+        let path = directory.path().join("zone.png");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255]))
+            .save(&path)
+            .unwrap();
+        let pixmap = load_zone_image(&path).expect("a PNG should load");
+        assert_eq!((pixmap.width(), pixmap.height()), (3, 2));
+        let text = directory.path().join("note.png");
+        std::fs::write(&text, b"not an image").unwrap();
+        assert!(load_zone_image(&text).is_err());
+        assert!(load_zone_image(directory.path()).is_err());
+    }
 
     fn zone_ids(editor: &Editor) -> Vec<u64> {
         editor

@@ -132,6 +132,7 @@ pub fn start_shortcuts() {
     if !super::settings::global_shortcuts_enabled().unwrap_or(false) {
         return;
     }
+    let preset_hotkeys = super::settings::global_preset_shortcuts().unwrap_or(false);
     let (Ok(trigger), Ok(controls), Ok(start)) = (
         super::settings::global_capture_shortcut(),
         super::settings::global_recording_shortcuts(),
@@ -139,7 +140,7 @@ pub fn start_shortcuts() {
     ) else {
         return;
     };
-    let options = ShortcutOptions { recording_controls: controls, recording_start: start };
+    let options = ShortcutOptions { recording_controls: controls, recording_start: start, preset_hotkeys };
     std::thread::spawn(move || {
         let (_stop, receiver) = async_channel::bounded(1);
         let result = futures_lite::future::block_on(listen(
@@ -160,6 +161,22 @@ pub fn start_shortcuts() {
                     ShortcutAction::StopRecording => {
                         if control::recording_active() {
                             toggle_recording_with("none", true, false);
+                        }
+                    }
+                    ShortcutAction::Preset(index) => {
+                        let preset = super::settings::screen_capture_presets()
+                            .ok()
+                            .and_then(|presets| presets.into_iter().nth(index));
+                        match preset {
+                            Some(preset) => match preset.mode() {
+                                super::settings::PresetMode::Screen => capture_image_with(
+                                    matches!(preset.cursor(), super::capture::CaptureCursor::Included),
+                                    preset.delay_seconds(),
+                                ),
+                                super::settings::PresetMode::Desktop => capture_desktop(false),
+                                super::settings::PresetMode::Text => capture_text(),
+                            },
+                            None => report(format!("There is no capture preset number {}.", index + 1)),
                         }
                     }
                 }

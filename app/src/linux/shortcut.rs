@@ -91,7 +91,11 @@ impl RecordingStartShortcut {
 pub(super) struct ShortcutOptions {
     pub(super) recording_controls: bool,
     pub(super) recording_start: RecordingStartShortcut,
+    pub(super) preset_hotkeys: bool,
 }
+
+/// Presets beyond this many get no shortcut.
+pub(super) const MAX_PRESET_SHORTCUTS: usize = 9;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShortcutAction {
@@ -99,24 +103,28 @@ pub enum ShortcutAction {
     ToggleRecording,
     PauseRecording,
     StopRecording,
+    /// The saved capture preset at this zero-based position.
+    Preset(usize),
 }
 
 impl ShortcutAction {
-    fn id(self) -> &'static str {
+    fn id(self) -> String {
         match self {
-            Self::Capture => CAPTURE_SHORTCUT,
-            Self::ToggleRecording => TOGGLE_RECORDING_SHORTCUT,
-            Self::PauseRecording => PAUSE_RECORDING_SHORTCUT,
-            Self::StopRecording => STOP_RECORDING_SHORTCUT,
+            Self::Capture => CAPTURE_SHORTCUT.to_owned(),
+            Self::ToggleRecording => TOGGLE_RECORDING_SHORTCUT.to_owned(),
+            Self::PauseRecording => PAUSE_RECORDING_SHORTCUT.to_owned(),
+            Self::StopRecording => STOP_RECORDING_SHORTCUT.to_owned(),
+            Self::Preset(index) => format!("preset-{}", index + 1),
         }
     }
 
-    fn description(self) -> &'static str {
+    fn description(self) -> String {
         match self {
-            Self::Capture => "Capture screen or window",
-            Self::ToggleRecording => "Start or stop screen recording",
-            Self::PauseRecording => "Pause or resume screen recording",
-            Self::StopRecording => "Stop and save screen recording",
+            Self::Capture => "Capture screen or window".to_owned(),
+            Self::ToggleRecording => "Start or stop screen recording".to_owned(),
+            Self::PauseRecording => "Pause or resume screen recording".to_owned(),
+            Self::StopRecording => "Stop and save screen recording".to_owned(),
+            Self::Preset(index) => format!("Run capture preset {}", index + 1),
         }
     }
 }
@@ -200,11 +208,19 @@ async fn listen_in_session(
         .receive_activated()
         .await
         .map_err(|error| format!("could not listen for global shortcuts: {error}"))?;
-    let actions = shortcut_actions(preferred_trigger, options);
+    let preset_count = if options.preset_hotkeys {
+        crate::linux::settings::screen_capture_presets()
+            .map(|presets| presets.len().min(MAX_PRESET_SHORTCUTS))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let actions = shortcut_actions(preferred_trigger, options, preset_count);
     let shortcuts: Vec<_> = actions
         .iter()
         .map(|(action, trigger)| {
-            NewShortcut::new(action.id(), action.description()).preferred_trigger(*trigger)
+            NewShortcut::new(action.id(), action.description())
+                .preferred_trigger(trigger.as_str())
         })
         .collect();
     let request = match futures_lite::future::or(
@@ -287,25 +303,32 @@ async fn listen_in_session(
 fn shortcut_actions(
     preferred_trigger: &str,
     options: ShortcutOptions,
-) -> Vec<(ShortcutAction, &str)> {
-    let mut actions = vec![(ShortcutAction::Capture, preferred_trigger)];
+    preset_count: usize,
+) -> Vec<(ShortcutAction, String)> {
+    let mut actions = vec![(ShortcutAction::Capture, preferred_trigger.to_owned())];
     if options.recording_controls {
         if options.recording_start.audio().is_some() {
-            actions.push((ShortcutAction::ToggleRecording, "SHIFT+F8"));
+            actions.push((ShortcutAction::ToggleRecording, "SHIFT+F8".to_owned()));
         }
         actions.extend([
-            (ShortcutAction::PauseRecording, "SHIFT+F9"),
-            (ShortcutAction::StopRecording, "SHIFT+F10"),
+            (ShortcutAction::PauseRecording, "SHIFT+F9".to_owned()),
+            (ShortcutAction::StopRecording, "SHIFT+F10".to_owned()),
         ]);
+    }
+    if options.preset_hotkeys {
+        actions.extend(
+            (0..preset_count.min(MAX_PRESET_SHORTCUTS))
+                .map(|index| (ShortcutAction::Preset(index), format!("CTRL+ALT+{}", index + 1))),
+        );
     }
     actions
 }
 
-fn shortcut_activation(
+fn shortcut_activation<T>(
     session: &str,
     event_session: &str,
     shortcut: &str,
-    actions: &[(ShortcutAction, &str)],
+    actions: &[(ShortcutAction, T)],
 ) -> Option<ShortcutAction> {
     if session != event_session {
         return None;
@@ -336,14 +359,14 @@ mod tests {
             ShortcutAction::StopRecording,
         ] {
             assert_eq!(
-                shortcut_activation(session, session, action.id(), &actions),
+                shortcut_activation(session, session, &action.id(), &actions),
                 Some(action)
             );
             assert_eq!(
                 shortcut_activation(
                     session,
                     "/org/freedesktop/portal/desktop/session/test/two",
-                    action.id(),
+                    &action.id(),
                     &actions
                 ),
                 None
@@ -374,7 +397,7 @@ mod tests {
             },
         ] {
             assert!(
-                !shortcut_actions("CTRL+SHIFT+X", options)
+                !shortcut_actions("CTRL+SHIFT+X", options, 0)
                     .iter()
                     .any(|(action, _)| *action == ShortcutAction::ToggleRecording),
                 "start shortcut must not bind without both opt-ins: {options:?}"
@@ -385,8 +408,14 @@ mod tests {
             ShortcutOptions {
                 recording_controls: true,
                 recording_start: RecordingStartShortcut::Microphone,
+                ..ShortcutOptions::default()
             },
+            0,
         );
+        let actions: Vec<_> = actions
+            .iter()
+            .map(|(action, trigger)| (*action, trigger.as_str()))
+            .collect();
         assert_eq!(
             actions,
             [
@@ -396,6 +425,28 @@ mod tests {
                 (ShortcutAction::StopRecording, "SHIFT+F10"),
             ]
         );
+    }
+
+    #[test]
+    fn preset_shortcuts_need_opt_in_and_are_limited_to_nine() {
+        let off = shortcut_actions("CTRL+SHIFT+X", ShortcutOptions::default(), 4);
+        assert_eq!(off.len(), 1);
+        let on = ShortcutOptions {
+            preset_hotkeys: true,
+            ..ShortcutOptions::default()
+        };
+        let actions = shortcut_actions("CTRL+SHIFT+X", on, 12);
+        assert_eq!(actions.len(), 1 + MAX_PRESET_SHORTCUTS);
+        assert_eq!(
+            actions[2],
+            (ShortcutAction::Preset(1), "CTRL+ALT+2".to_owned())
+        );
+        let session = "/s";
+        assert_eq!(
+            shortcut_activation(session, session, "preset-3", &actions),
+            Some(ShortcutAction::Preset(2))
+        );
+        assert_eq!(shortcut_activation(session, session, "preset-10", &actions), None);
     }
 
     #[test]

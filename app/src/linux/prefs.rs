@@ -75,6 +75,7 @@ pub fn dialog(app: &App, tab: &str) -> String {
                 {"kind": "text", "label": "Preferred capture shortcut", "value": settings::global_capture_shortcut().unwrap_or_default()},
                 check("Recording pause and stop shortcuts", settings::global_recording_shortcuts().unwrap_or(false)),
                 choice("Recording start shortcut", &start, start_index),
+                check("Capture preset shortcuts (Ctrl+Alt+1 to 9 for the first presets)", settings::global_preset_shortcuts().unwrap_or(false)),
                 note("The desktop may ask you to confirm or change the keys; shortcut changes apply the next time Jiffshot starts."),
             ]},
         ],
@@ -121,7 +122,7 @@ pub fn apply(app: &mut App, json: &str) {
     if !hotkeys.is_empty() {
         let result = if on(&hotkeys, 0) {
             let start = RecordingStartShortcut::ALL[index(&hotkeys, 3, RecordingStartShortcut::ALL.len() - 1)];
-            let options = ShortcutOptions { recording_controls: on(&hotkeys, 2), recording_start: start };
+            let options = ShortcutOptions { recording_controls: on(&hotkeys, 2), recording_start: start, preset_hotkeys: on(&hotkeys, 4) };
             settings::set_global_shortcuts(&text(&hotkeys, 1), options).map(|_| ())
         } else {
             settings::disable_global_shortcuts()

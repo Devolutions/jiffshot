@@ -18,6 +18,22 @@ pub(super) async fn open_with(path: &Path) -> Result<bool, String> {
     portal_result(response, "open the capture")
 }
 
+pub(super) fn open_with_program(program: &Path, capture: &Path) -> Result<(), String> {
+    open_capture(capture)?;
+    let mut child = std::process::Command::new(program)
+        .arg(capture)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("could not start {}: {error}", program.display()))?;
+    // Reap the child without blocking the caller.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 pub(super) async fn email(path: &Path) -> Result<bool, String> {
     let file = open_capture(path)?;
     let response = ashpd::desktop::email::EmailRequest::default()
@@ -168,6 +184,34 @@ mod tests {
     use super::*;
     use std::os::unix::ffi::OsStringExt;
     use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn external_program_receives_the_capture_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().expect("temporary directory should be available");
+        let capture = directory.path().join("capture with space.png");
+        let output = directory.path().join("argument.txt");
+        let program = directory.path().join("record.sh");
+        std::fs::write(&capture, b"image").unwrap();
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\nprintf %s \"$1\" > '{}'\n", output.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        open_with_program(&program, &capture).expect("the program should start");
+        for _ in 0..100 {
+            if output.exists() && std::fs::metadata(&output).unwrap().len() > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            capture.as_os_str().as_encoded_bytes()
+        );
+        assert!(open_with_program(&program, &directory.path().join("missing.png")).is_err());
+    }
 
     #[test]
     fn folder_copies_keep_existing_files_and_support_non_utf8_names() {
