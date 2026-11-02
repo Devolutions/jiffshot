@@ -436,6 +436,7 @@ pub enum RecordingCommand {
     Stop,
     Restart,
     Cancel,
+    ToggleWebcam,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -477,7 +478,10 @@ async fn wait_for_recording_setup<T>(
                 state_changed(RecordingState::Cancelling);
                 return None;
             }
-            SetupNext::Command(Ok(RecordingCommand::TogglePause | RecordingCommand::Restart)) => {
+            SetupNext::Command(Ok(RecordingCommand::TogglePause
+                | RecordingCommand::Restart
+                | RecordingCommand::ToggleWebcam,
+            )) => {
                 state_changed(RecordingState::Starting);
             }
         }
@@ -1094,6 +1098,9 @@ fn run_recording(
                     RecordingState::Recording
                 });
             }
+            Ok(RecordingCommand::ToggleWebcam) => {
+                toggle_webcam_visibility(pipeline);
+            }
             Err(async_channel::TryRecvError::Empty) => {}
         }
         let Some(message) = bus.timed_pop_filtered(
@@ -1111,6 +1118,19 @@ fn run_recording(
         };
         return Err(stop_failed_recording(pipeline, error));
     }
+}
+
+/// Shows or hides the webcam overlay of a recording that started with the webcam enabled.
+/// Returns the new visibility, or `None` when the recording has no webcam overlay.
+fn toggle_webcam_visibility(pipeline: &gst::Pipeline) -> Option<bool> {
+    let compositor = pipeline.by_name("recording-webcam-compositor")?;
+    let pad = compositor
+        .sink_pads()
+        .into_iter()
+        .find(|pad| pad.property::<u32>("zorder") == 1)?;
+    let visible = pad.property::<f64>("alpha") < 0.5;
+    pad.set_property("alpha", if visible { 1.0f64 } else { 0.0f64 });
+    Some(visible)
 }
 
 fn recording_timeline(
@@ -1264,6 +1284,38 @@ fn recording_pipeline_with_sources(
     )
 }
 
+/// Draws the pointer halo into the recording when the preference is on and the session
+/// can report the pointer; otherwise `source` is returned unchanged.
+fn with_pointer_effects(
+    pipeline: &gst::Pipeline,
+    source: gst::Element,
+) -> Result<gst::Element, String> {
+    if !super::x11::is_x11_session() || !super::settings::pointer_effects().unwrap_or(false) {
+        return Ok(source);
+    }
+    let convert = gst::ElementFactory::make("videoconvert")
+        .build()
+        .map_err(|error| format!("could not create pointer effect converter: {error}"))?;
+    let format = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("video/x-raw")
+                .field("format", "RGBA")
+                .build(),
+        )
+        .build()
+        .map_err(|error| format!("could not set pointer effect format: {error}"))?;
+    pipeline
+        .add_many([&convert, &format])
+        .map_err(|error| format!("could not add pointer effects: {error}"))?;
+    gst::Element::link_many([&source, &convert, &format])
+        .map_err(|error| format!("could not connect pointer effects: {error}"))?;
+    if let Some(pad) = format.static_pad("src") {
+        super::pointer_fx::attach(&pad);
+    }
+    Ok(format)
+}
+
 fn recording_pipeline_with_layout(
     source: gst::Element,
     webcam_source: Option<gst::Element>,
@@ -1307,6 +1359,7 @@ fn recording_pipeline_with_layout(
     pipeline
         .add(&convert)
         .map_err(|error| format!("could not add recording video converter: {error}"))?;
+    let video_source = with_pointer_effects(&pipeline, video_source)?;
     gst::Element::link_many([&video_source, &convert])
         .map_err(|error| format!("could not connect recording video source: {error}"))?;
     let video_output = if let Some(frames_per_second) = frame_rate.frames_per_second() {
@@ -2014,6 +2067,29 @@ mod tests {
             both.iter().map(|source| source.name()).collect::<Vec<_>>(),
             ["system-audio", "microphone-audio"]
         );
+    }
+
+    #[test]
+    fn webcam_overlay_toggles_during_recording() {
+        gst::init().expect("GStreamer should initialize");
+        let pipeline = gst::Pipeline::new();
+        assert_eq!(toggle_webcam_visibility(&pipeline), None);
+        let Ok(compositor) = gst::ElementFactory::make("compositor")
+            .name("recording-webcam-compositor")
+            .build()
+        else {
+            return;
+        };
+        pipeline.add(&compositor).unwrap();
+        let screen = compositor.request_pad_simple("sink_%u").unwrap();
+        let webcam = compositor.request_pad_simple("sink_%u").unwrap();
+        screen.set_property("zorder", 0u32);
+        webcam.set_property("zorder", 1u32);
+        assert_eq!(toggle_webcam_visibility(&pipeline), Some(false));
+        assert_eq!(webcam.property::<f64>("alpha"), 0.0);
+        assert_eq!(screen.property::<f64>("alpha"), 1.0);
+        assert_eq!(toggle_webcam_visibility(&pipeline), Some(true));
+        assert_eq!(webcam.property::<f64>("alpha"), 1.0);
     }
 
     #[test]

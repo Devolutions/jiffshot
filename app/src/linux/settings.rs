@@ -14,11 +14,14 @@ const CAPTURE_DIRECTORY_KEY: &str = "capture_directory";
 const THEME_KEY: &str = "theme";
 const GLOBAL_CAPTURE_SHORTCUT_KEY: &str = "global_capture_shortcut";
 const GLOBAL_RECORDING_SHORTCUTS_KEY: &str = "global_recording_shortcuts";
+const GLOBAL_PRESET_SHORTCUTS_KEY: &str = "linux_global_preset_shortcuts";
+const POINTER_EFFECTS_KEY: &str = "linux_pointer_effects";
 const GLOBAL_RECORDING_START_KEY: &str = "linux_global_recording_start";
 const GLOBAL_SHORTCUTS_ENABLED_KEY: &str = "linux_global_shortcuts_enabled";
 const TRAY_ENABLED_KEY: &str = "linux_tray_enabled";
 const COPY_CAPTURE_TO_CLIPBOARD_KEY: &str = "copy_to_clipboard";
 const AUTOMATIC_COPY_DIRECTORY_KEY: &str = "linux_auto_copy_directory";
+const EXTERNAL_PROGRAM_KEY: &str = "linux_external_program";
 const CAPTURE_DELAY_SECONDS_KEY: &str = "capture_delay_seconds";
 const SCREEN_CAPTURE_PRESETS_KEY: &str = "linux_screen_capture_presets";
 const INTERVAL_SECONDS_KEY: &str = "interval_seconds";
@@ -86,6 +89,18 @@ pub fn global_recording_shortcuts() -> Result<bool, String> {
     global_recording_shortcuts_from(&settings_path()?)
 }
 
+pub(super) fn global_preset_shortcuts() -> Result<bool, String> {
+    global_preset_shortcuts_from(&settings_path()?)
+}
+
+pub(super) fn pointer_effects() -> Result<bool, String> {
+    pointer_effects_from(&settings_path()?)
+}
+
+pub(super) fn set_pointer_effects(enabled: bool) -> Result<(), String> {
+    set_pointer_effects_in(&settings_path()?, enabled)
+}
+
 pub(super) fn global_recording_start() -> Result<RecordingStartShortcut, String> {
     global_recording_start_from(&settings_path()?)
 }
@@ -129,6 +144,14 @@ pub(super) fn set_automatic_copy_directory(directory: Option<&Path>) -> Result<(
     set_automatic_copy_directory_in(&settings_path()?, directory)
 }
 
+pub(super) fn external_program() -> Result<Option<PathBuf>, String> {
+    external_program_from(&settings_path()?)
+}
+
+pub(super) fn set_external_program(program: Option<&Path>) -> Result<(), String> {
+    set_external_program_in(&settings_path()?, program)
+}
+
 pub(super) fn capture_delay_seconds() -> Result<u64, String> {
     capture_delay_seconds_from(&settings_path()?)
 }
@@ -137,11 +160,39 @@ pub(super) fn set_capture_delay_seconds(seconds: u64) -> Result<(), String> {
     set_capture_delay_seconds_in(&settings_path()?, seconds)
 }
 
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum PresetMode {
+    #[default]
+    Screen,
+    Desktop,
+    Text,
+}
+
+impl PresetMode {
+    fn is_screen(&self) -> bool {
+        *self == Self::Screen
+    }
+
+    pub(super) fn parse(text: &str) -> Result<Self, String> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "" | "screen" => Ok(Self::Screen),
+            "desktop" => Ok(Self::Desktop),
+            "text" => Ok(Self::Text),
+            _ => Err("the preset mode must be screen, desktop or text".to_owned()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct ScreenCapturePreset {
     pub(super) name: String,
     delay_seconds: u64,
     include_cursor: bool,
+    #[serde(default, skip_serializing_if = "PresetMode::is_screen")]
+    mode: PresetMode,
     #[serde(flatten)]
     other: Map<String, Value>,
 }
@@ -154,6 +205,7 @@ impl ScreenCapturePreset {
             name: name.to_owned(),
             delay_seconds,
             include_cursor: cursor.included(),
+            mode: PresetMode::Screen,
             other: Map::new(),
         })
     }
@@ -173,6 +225,10 @@ impl ScreenCapturePreset {
 
     pub(super) fn delay_seconds(&self) -> u64 {
         self.delay_seconds
+    }
+
+    pub(super) fn mode(&self) -> PresetMode {
+        self.mode
     }
 
     pub(super) fn cursor(&self) -> CaptureCursor {
@@ -198,6 +254,15 @@ pub(super) fn save_screen_capture_preset(
     cursor: CaptureCursor,
 ) -> Result<Vec<ScreenCapturePreset>, String> {
     save_screen_capture_preset_in(&settings_path()?, name, delay_seconds, cursor)
+}
+
+pub(super) fn save_capture_preset(
+    name: &str,
+    delay_seconds: u64,
+    cursor: CaptureCursor,
+    mode: PresetMode,
+) -> Result<Vec<ScreenCapturePreset>, String> {
+    save_capture_preset_in(&settings_path()?, name, delay_seconds, cursor, mode)
 }
 
 pub(super) fn delete_screen_capture_preset(name: &str) -> Result<Vec<ScreenCapturePreset>, String> {
@@ -481,6 +546,52 @@ fn validate_automatic_copy_directory(directory: &Path) -> Result<&str, String> {
     Ok(text)
 }
 
+fn external_program_from(path: &Path) -> Result<Option<PathBuf>, String> {
+    match read_settings(path)?.get(EXTERNAL_PROGRAM_KEY) {
+        None => Ok(None),
+        Some(Value::String(program))
+            if !program.is_empty() && Path::new(program).is_absolute() =>
+        {
+            Ok(Some(PathBuf::from(program)))
+        }
+        Some(_) => Err("the external program must be an absolute local path".to_owned()),
+    }
+}
+
+fn set_external_program_in(path: &Path, program: Option<&Path>) -> Result<(), String> {
+    let program = program.map(validate_external_program).transpose()?;
+    let _lock = lock_settings(path)?;
+    let mut settings = read_settings(path)?;
+    match program {
+        Some(program) => {
+            settings.insert(
+                EXTERNAL_PROGRAM_KEY.to_owned(),
+                Value::String(program.to_owned()),
+            );
+        }
+        None => {
+            settings.remove(EXTERNAL_PROGRAM_KEY);
+        }
+    }
+    write_settings(path, &settings)
+}
+
+fn validate_external_program(program: &Path) -> Result<&str, String> {
+    use std::os::unix::fs::PermissionsExt;
+    if !program.is_absolute() {
+        return Err("the external program must be an absolute local path".to_owned());
+    }
+    let text = program
+        .to_str()
+        .ok_or_else(|| "the external program path must be valid UTF-8".to_owned())?;
+    let metadata = std::fs::metadata(program)
+        .map_err(|error| format!("could not inspect {}: {error}", program.display()))?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err(format!("{} is not an executable file", program.display()));
+    }
+    Ok(text)
+}
+
 fn capture_delay_seconds_from(path: &Path) -> Result<u64, String> {
     let settings = read_settings(path)?;
     let seconds = match settings.get(CAPTURE_DELAY_SECONDS_KEY) {
@@ -551,7 +662,18 @@ fn save_screen_capture_preset_in(
     delay_seconds: u64,
     cursor: CaptureCursor,
 ) -> Result<Vec<ScreenCapturePreset>, String> {
+    save_capture_preset_in(path, name, delay_seconds, cursor, PresetMode::Screen)
+}
+
+fn save_capture_preset_in(
+    path: &Path,
+    name: &str,
+    delay_seconds: u64,
+    cursor: CaptureCursor,
+    mode: PresetMode,
+) -> Result<Vec<ScreenCapturePreset>, String> {
     let mut preset = ScreenCapturePreset::new(name, delay_seconds, cursor)?;
+    preset.mode = mode;
     let _lock = lock_settings(path)?;
     let mut settings = read_settings(path)?;
     let mut presets = screen_capture_presets_from_settings(&settings)?;
@@ -801,6 +923,31 @@ fn global_recording_shortcuts_from(path: &Path) -> Result<bool, String> {
     }
 }
 
+fn global_preset_shortcuts_from(path: &Path) -> Result<bool, String> {
+    match read_settings(path)?.get(GLOBAL_PRESET_SHORTCUTS_KEY) {
+        None => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "the global preset shortcuts preference must be a boolean".to_owned()),
+    }
+}
+
+fn pointer_effects_from(path: &Path) -> Result<bool, String> {
+    match read_settings(path)?.get(POINTER_EFFECTS_KEY) {
+        None => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "the pointer effects preference must be a boolean".to_owned()),
+    }
+}
+
+fn set_pointer_effects_in(path: &Path, enabled: bool) -> Result<(), String> {
+    let _lock = lock_settings(path)?;
+    let mut settings = read_settings(path)?;
+    settings.insert(POINTER_EFFECTS_KEY.to_owned(), Value::Bool(enabled));
+    write_settings(path, &settings)
+}
+
 fn global_recording_start_from(path: &Path) -> Result<RecordingStartShortcut, String> {
     let settings = read_settings(path)?;
     match settings.get(GLOBAL_RECORDING_START_KEY) {
@@ -839,6 +986,10 @@ fn set_global_shortcuts_in(
     settings.insert(
         GLOBAL_RECORDING_SHORTCUTS_KEY.to_owned(),
         Value::Bool(options.recording_controls),
+    );
+    settings.insert(
+        GLOBAL_PRESET_SHORTCUTS_KEY.to_owned(),
+        Value::Bool(options.preset_hotkeys),
     );
     settings.insert(
         GLOBAL_RECORDING_START_KEY.to_owned(),
@@ -1396,6 +1547,49 @@ mod tests {
         let remaining = delete_screen_capture_preset_in(&path, "keep").unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].name(), "other");
+    }
+
+    #[test]
+    fn presets_store_non_screen_modes_and_default_old_entries_to_screen() {
+        let directory = tempfile::tempdir().expect("temporary directory should be available");
+        let path = directory.path().join(SETTINGS_FILE);
+        std::fs::write(
+            &path,
+            br#"{"linux_screen_capture_presets":[{"name":"old","delay_seconds":1,"include_cursor":true}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            screen_capture_presets_from(&path).unwrap()[0].mode(),
+            PresetMode::Screen
+        );
+        let saved =
+            save_capture_preset_in(&path, "ocr", 0, CaptureCursor::Hidden, PresetMode::Text)
+                .unwrap();
+        assert_eq!(saved[1].mode(), PresetMode::Text);
+        assert_eq!(screen_capture_presets_from(&path).unwrap(), saved);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("\"mode\"").count(), 1);
+        assert_eq!(PresetMode::parse(" Desktop ").unwrap(), PresetMode::Desktop);
+        assert!(PresetMode::parse("video").is_err());
+    }
+
+    #[test]
+    fn external_program_round_trips_and_rejects_invalid_programs() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().expect("temporary directory should be available");
+        let path = directory.path().join(SETTINGS_FILE);
+        let program = directory.path().join("editor");
+        std::fs::write(&program, b"#!/bin/sh\n").unwrap();
+        std::fs::write(&path, br#"{"theme":"Dark"}"#).unwrap();
+        assert_eq!(external_program_from(&path).unwrap(), None);
+        assert!(set_external_program_in(&path, Some(&program)).is_err());
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(set_external_program_in(&path, Some(Path::new("editor"))).is_err());
+        set_external_program_in(&path, Some(&program)).unwrap();
+        assert_eq!(external_program_from(&path).unwrap(), Some(program));
+        set_external_program_in(&path, None).unwrap();
+        assert_eq!(external_program_from(&path).unwrap(), None);
+        assert_eq!(read_settings(&path).unwrap()["theme"], "Dark");
     }
 
     #[test]
@@ -2353,6 +2547,19 @@ mod tests {
     }
 
     #[test]
+    fn pointer_effects_default_off_and_persist() {
+        let directory = tempfile::tempdir().expect("temporary directory should be available");
+        let path = directory.path().join(SETTINGS_FILE);
+        assert!(!pointer_effects_from(&path).unwrap());
+        set_theme_in(&path, "Dark").unwrap();
+        set_pointer_effects_in(&path, true).unwrap();
+        assert!(pointer_effects_from(&path).unwrap());
+        assert_eq!(read_settings(&path).unwrap()[THEME_KEY], "Dark");
+        std::fs::write(&path, br#"{"linux_pointer_effects":"yes"}"#).unwrap();
+        assert!(pointer_effects_from(&path).is_err());
+    }
+
+    #[test]
     fn recording_start_shortcut_settings_preserve_opt_in_and_audio_choice() {
         let directory = tempfile::tempdir().expect("temporary directory should be available");
         let path = directory.path().join(SETTINGS_FILE);
@@ -2369,10 +2576,15 @@ mod tests {
                 ShortcutOptions {
                     recording_controls: true,
                     recording_start: choice,
+                    preset_hotkeys: choice == RecordingStartShortcut::Silent,
                 },
             )
             .unwrap();
             assert_eq!(global_recording_start_from(&path).unwrap(), choice);
+            assert_eq!(
+                global_preset_shortcuts_from(&path).unwrap(),
+                choice == RecordingStartShortcut::Silent
+            );
             assert_eq!(read_settings(&path).unwrap()[THEME_KEY], "Dark");
         }
         disable_global_shortcuts_in(&path).unwrap();

@@ -19,6 +19,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ),
     ("ocr", "recognize text in an image file"),
     ("library.list", "the newest saved captures"),
+    ("library.search", "search saved captures by text, tag or filter"),
+    ("library.tag", "replace the tags of a saved capture"),
+    ("library.pin", "pin or unpin a saved capture"),
     ("record.status", "the current recording"),
     ("record.start", "start a portal screen recording"),
     ("record.pause", "pause or resume the recording"),
@@ -176,6 +179,9 @@ fn dispatch(command: &str, args: &Value) -> Reply {
         "open" => open(&Args::new(args, &["path"])?),
         "ocr" => ocr(&Args::new(args, &["path"])?),
         "library.list" => library_list(&Args::new(args, &["limit"])?),
+        "library.search" => library_search(&Args::new(args, &["query", "filter", "limit"])?),
+        "library.tag" => library_tag(&Args::new(args, &["path", "tags"])?),
+        "library.pin" => library_pin(&Args::new(args, &["path"])?),
         "record.status" => {
             Args::new(args, &[])?;
             Ok(recording_status())
@@ -295,6 +301,62 @@ fn library_list(args: &Args) -> Reply {
     let captures = capture::recent_captures().map_err(internal)?;
     let paths: Vec<_> = captures.iter().take(limit).collect();
     Ok(json!({ "captures": paths }))
+}
+
+fn library_search(args: &Args) -> Reply {
+    use super::library::CaptureFilter;
+    let filter = match args.text("filter")?.unwrap_or("all") {
+        "all" => CaptureFilter::All,
+        "images" => CaptureFilter::Images,
+        "videos" => CaptureFilter::Videos,
+        "pinned" => CaptureFilter::Pinned,
+        "tagged" => CaptureFilter::Tagged,
+        other => {
+            return Err(invalid(format!(
+                "unknown filter {other}; use all, images, videos, pinned or tagged"
+            )))
+        }
+    };
+    let limit = args.count("limit")?.unwrap_or(50);
+    let captures = super::library::search_captures(args.text("query")?.unwrap_or(""), filter)
+        .map_err(internal)?;
+    let paths: Vec<_> = captures.iter().take(limit).collect();
+    Ok(json!({ "captures": paths }))
+}
+
+/// A capture inside the library folder; sidecar edits are limited to those.
+fn library_capture(args: &Args) -> Result<PathBuf, Error> {
+    let path = args
+        .text("path")?
+        .ok_or_else(|| invalid("this command needs --path CAPTURE"))?;
+    let missing = || {
+        Error::new(
+            ErrorCode::NotFound,
+            format!("no saved capture at {path}"),
+        )
+    };
+    let path = std::fs::canonicalize(absolute(Path::new(path))).map_err(|_| missing())?;
+    let library = std::fs::canonicalize(capture::capture_directory().map_err(internal)?)
+        .map_err(internal)?;
+    if !path.is_file() || !path.starts_with(&library) {
+        return Err(missing());
+    }
+    Ok(path)
+}
+
+fn library_tag(args: &Args) -> Reply {
+    let path = library_capture(args)?;
+    let tags = args
+        .text("tags")?
+        .ok_or_else(|| invalid("library tag needs --tags TEXT (empty removes tags)"))?;
+    let tags = super::library::set_tags(&path, tags).map_err(internal)?;
+    Ok(json!({ "path": path, "tags": tags }))
+}
+
+fn library_pin(args: &Args) -> Reply {
+    let path = library_capture(args)?;
+    let pinned = super::library::toggle_pin(&path).map_err(internal)?;
+    Ok(json!({ "path": path, "pinned": pinned }))
 }
 
 fn recording_status() -> Value {
@@ -483,6 +545,27 @@ mod tests {
         );
         let missing = dispatch("ocr", &json!({ "path": "/nonexistent/a.png" })).unwrap_err();
         assert_eq!(missing.code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn library_edits_validate_their_arguments() {
+        for command in ["library.tag", "library.pin"] {
+            assert_eq!(
+                dispatch(command, &Value::Null).unwrap_err().code,
+                ErrorCode::InvalidRequest,
+                "{command}"
+            );
+            assert_eq!(
+                dispatch(command, &json!({ "path": "/etc/hostname" }))
+                    .unwrap_err()
+                    .code,
+                ErrorCode::NotFound,
+                "{command}"
+            );
+        }
+        assert!(dispatch("library.search", &json!({ "filter": "nope" })).is_err());
+        let listed = dispatch("library.search", &json!({ "limit": "1" })).unwrap();
+        assert!(listed["captures"].as_array().unwrap().len() <= 1);
     }
 
     #[test]

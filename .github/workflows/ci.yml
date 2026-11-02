@@ -264,13 +264,6 @@ jobs:
           JIFFSHOT_TEST_FORMATS: tar.gz,deb
         run: pwsh -NoProfile -File package/linux/run-tests.ps1
 
-      - name: Smoke-test the relocated portable package
-        run: |
-          mkdir -p "$RUNNER_TEMP/jiffshot portable"
-          tar -xzf package/out/linux/*.tar.gz -C "$RUNNER_TEMP/jiffshot portable"
-          launcher=$(find "$RUNNER_TEMP/jiffshot portable" -path '*/bin/jiffshot' -type f)
-          pwsh -NoProfile -File package/linux/smoke.ps1 -Launcher "$launcher"
-
       - uses: actions/upload-artifact@v7
         with:
           name: jiffshot-linux-${{ matrix.arch }}

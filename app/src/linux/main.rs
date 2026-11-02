@@ -8,7 +8,7 @@ use jiffshot_doc::combine::Arrangement;
 use jiffshot_doc::editor::{Editor, Tool, TOOLS};
 use jiffshot_doc::{effects, Document, Rgba};
 use rustolonia::storage::{
-    FileTypeFilter, FolderPickerOptions, OpenFilePickerOptions, SaveFilePickerOptions,
+    DragDropEffects, FileDropEvent, FileTypeFilter, FolderPickerOptions, OpenFilePickerOptions, SaveFilePickerOptions,
     WellKnownFolder,
 };
 use rustolonia::{
@@ -156,6 +156,7 @@ struct ScreenPresetControls {
     name: Signal<String>,
     delay: Signal<String>,
     cursor: Signal<bool>,
+    mode: Signal<String>,
     presets: Signal<Vec<settings::ScreenCapturePreset>>,
 }
 
@@ -170,6 +171,7 @@ impl ScreenPresetControls {
             name: Signal::new(String::new()),
             delay: Signal::new(delay.to_string()),
             cursor: Signal::new(cursor.included()),
+            mode: Signal::new("screen".to_owned()),
             presets: Signal::new(presets),
         }
     }
@@ -303,6 +305,7 @@ struct ShortcutUi {
     status: Signal<String>,
     preferred: Signal<String>,
     recording_controls: Signal<bool>,
+    preset_hotkeys: Signal<bool>,
     recording_start: Signal<i32>,
     webcam: Signal<bool>,
 }
@@ -499,6 +502,7 @@ pub(crate) fn run() -> Result<()> {
         let preferred_shortcut = Signal::new(preferred_shortcut);
         let recording_shortcuts = Signal::new(recording_shortcut_preference);
         let recording_start = Signal::new(recording_start_preference.index());
+        let preset_hotkeys = Signal::new(settings::global_preset_shortcuts().unwrap_or(false));
         let copy_capture = Signal::new(copy_capture_preference);
         let capture_delay = Signal::new(capture_delay_preference.to_string());
         let interval_visible = Signal::new(false);
@@ -529,6 +533,7 @@ pub(crate) fn run() -> Result<()> {
             status,
             preferred: preferred_shortcut,
             recording_controls: recording_shortcuts,
+            preset_hotkeys,
             recording_start,
             webcam,
         };
@@ -575,6 +580,28 @@ pub(crate) fn run() -> Result<()> {
                 let canvas = canvas.clone();
                 move |scope| capture_screen(scope, canvas.clone(), status, captures, library)
             }))
+            .child(
+                action_button("Open menus capture… (5 s)", {
+                    let canvas = canvas.clone();
+                    move |scope| {
+                        capture_screen_with_options(
+                            scope,
+                            canvas.clone(),
+                            status,
+                            captures,
+                            library,
+                            ScreenCaptureOptions {
+                                seconds: OPEN_MENUS_DELAY_SECONDS,
+                                cursor: capture::CaptureCursor::Included,
+                                draw: false,
+                            },
+                        )
+                    }
+                })
+                .tool_tip_tip(
+                    "Choose a screen or window, then open a menu or dropdown during the 5-second countdown",
+                ),
+            )
             .child(action_button("Scrolling capture… (start/finish)", {
                 let canvas = canvas.clone();
                 move |scope| {
@@ -687,6 +714,42 @@ pub(crate) fn run() -> Result<()> {
                     }
                 },
             ))
+            .child(action_button("Screen draw (capture, then pen)…", {
+                let canvas = canvas.clone();
+                move |scope| {
+                    capture_screen_with_options(
+                        scope,
+                        canvas.clone(),
+                        status,
+                        captures,
+                        library,
+                        ScreenCaptureOptions {
+                            seconds: 0,
+                            cursor: capture::CaptureCursor::Hidden,
+                            draw: true,
+                        },
+                    )
+                }
+            }))
+            .child(action_button("Toggle pointer effects (X11)", move |_| {
+                status.set_if_changed(match settings::pointer_effects().and_then(|enabled| {
+                    settings::set_pointer_effects(!enabled).map(|()| !enabled)
+                }) {
+                    Ok(true) if !crate::linux::x11::is_x11_session() => {
+                        "Pointer effects saved, but only apply in X11 sessions.".to_owned()
+                    }
+                    Ok(true) => "Pointer effects will be drawn in the next recording.".to_owned(),
+                    Ok(false) => "Pointer effects are off.".to_owned(),
+                    Err(error) => format!("Could not change pointer effects: {error}"),
+                });
+            }))
+            .child(action_button("Show/hide webcam during recording", move |_| {
+                send_recording_command(
+                    capture::RecordingCommand::ToggleWebcam,
+                    "Toggling the webcam overlay…",
+                    status,
+                )
+            }))
             .child(action_button("Restart recording", move |_| {
                 send_recording_command(
                     capture::RecordingCommand::Restart,
@@ -707,6 +770,14 @@ pub(crate) fn run() -> Result<()> {
                     .checked(recording_shortcuts.two_way())
                     .tool_tip_tip(
                         "Include pause/resume and stop when enabling shortcuts; the desktop selects the final keys",
+                    ),
+            )
+            .child(
+                CheckBox::el()
+                    .content("Include preset shortcuts (first 9 presets)")
+                    .checked(preset_hotkeys.two_way())
+                    .tool_tip_tip(
+                        "Bind Ctrl+Alt+1 to 9 to your first saved presets when enabling shortcuts; the desktop selects the final keys",
                     ),
             )
             .child(action_button("Panoramic capture… (start/finish)", {
@@ -763,7 +834,36 @@ pub(crate) fn run() -> Result<()> {
                 move |_| toggle_video_pause(status)
             }))
             .child(action_button("Export video as GIF…", {
-                move |scope| export_video_dialog(scope, VideoExport::Gif, status)
+                move |scope| {
+                    export_video_dialog(scope, VideoExport::Gif(video::GifPreset::Original), status)
+                }
+            }))
+            .child(action_button("GIF: screen recording…", {
+                move |scope| {
+                    export_video_dialog(
+                        scope,
+                        VideoExport::Gif(video::GifPreset::ScreenRecording),
+                        status,
+                    )
+                }
+            }))
+            .child(action_button("GIF: high motion…", {
+                move |scope| {
+                    export_video_dialog(
+                        scope,
+                        VideoExport::Gif(video::GifPreset::HighMotion),
+                        status,
+                    )
+                }
+            }))
+            .child(action_button("GIF: small file…", {
+                move |scope| {
+                    export_video_dialog(
+                        scope,
+                        VideoExport::Gif(video::GifPreset::SmallFile),
+                        status,
+                    )
+                }
             }))
             .child(action_button("Save .jsd…", {
                 move |scope| save_document(scope, status)
@@ -866,6 +966,7 @@ pub(crate) fn run() -> Result<()> {
         let trim_start = Signal::new("0".to_owned());
         let trim_end = Signal::new("10".to_owned());
         let frame_time = Signal::new("0".to_owned());
+        let slide_seconds = Signal::new("3".to_owned());
         let video_frame_toolbar = WrapPanel::el()
             .orientation(Orientation::Horizontal)
             .child(TextBlock::el().text("Video frame (seconds):"))
@@ -886,6 +987,16 @@ pub(crate) fn run() -> Result<()> {
             }))
             .child(action_button("Export silent MP4…", {
                 move |scope| export_video_dialog(scope, VideoExport::SilentMp4, status)
+            }))
+            .child(
+                TextBox::el()
+                    .width(70.0)
+                    .text(slide_seconds.two_way())
+                    .placeholder_text("Seconds")
+                    .tool_tip_tip("Seconds each image is shown in a slideshow"),
+            )
+            .child(action_button("Slideshow from images…", {
+                move |scope| slideshow_dialog(scope, slide_seconds.get(), status)
             }));
         let video_trim_toolbar = WrapPanel::el()
             .orientation(Orientation::Horizontal)
@@ -1383,6 +1494,7 @@ pub(crate) fn run() -> Result<()> {
             }
         })?;
         wire_editor_shortcuts(scope, &window, canvas.clone(), status, captures, library)?;
+        wire_file_drop(scope, &window, canvas.clone(), status, library)?;
         scope.mount(window)?;
         if tray_preference {
             tray_ui.start(if matches!(launch, launch::Launch::Background) {
@@ -1508,6 +1620,78 @@ fn set_linux_theme(scope: &AppScope, theme: &'static str, status: Signal<String>
             )),
         },
         Err(error) => status.set_if_changed(format!("Could not set theme: {error}")),
+    }
+}
+
+/// Dropping an image on the window fills the selected template zone, or opens the file.
+fn wire_file_drop(
+    scope: &AppScope,
+    window: &Window,
+    canvas: ui::UiOnly<ui::canvas_view::CanvasView>,
+    status: Signal<String>,
+    library: LibraryControls,
+) -> Result<()> {
+    let drop_scope = scope.clone();
+    let canvas = Arc::new(canvas);
+    scope.on_file_drop(window, DragDropEffects::COPY, move |event| {
+        let FileDropEvent::Drop { items, .. } = event else {
+            return;
+        };
+        let Some(path) = items.iter().find_map(|item| item.local_path()) else {
+            return;
+        };
+        let path = path.to_path_buf();
+        let scope = drop_scope.clone();
+        let canvas = canvas.clone();
+        if let Err(error) = drop_scope.post(move || {
+            drop_file(&scope, path, (*canvas).clone(), library, status);
+        }) {
+            eprintln!("jiffshot: could not handle the dropped file: {error}");
+        }
+    })
+}
+
+fn drop_file(
+    scope: &AppScope,
+    path: PathBuf,
+    canvas: ui::UiOnly<ui::canvas_view::CanvasView>,
+    library: LibraryControls,
+    status: Signal<String>,
+) {
+    let zone = canvas::with_editor(|editor| {
+        template::selected_zone(editor).map(|id| (id, editor.document().background_arc()))
+    });
+    let Some(Ok((zone, background))) = zone else {
+        open_capture(scope, path, canvas, library, status);
+        return;
+    };
+    status.set_if_changed("Reading the dropped image...".to_owned());
+    let task_scope = scope.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("jiffshot-template-drop".to_owned())
+        .spawn(move || {
+            let result = template::load_zone_image(&path);
+            if let Err(error) = task_scope.post(move || match result {
+                Ok(image) => {
+                    editor_action(&canvas, status, "Image dropped into zone.", |editor| {
+                        if !Arc::ptr_eq(&background, &editor.document().background_arc())
+                            || editor.selection() != Some(zone)
+                        {
+                            return Err(
+                                "The selected template zone changed before the drop completed."
+                                    .to_owned(),
+                            );
+                        }
+                        template::fill_selected_zone(editor, image)
+                    });
+                }
+                Err(error) => status.set_if_changed(error),
+            }) {
+                eprintln!("Could not update template from a dropped file: {error}");
+            }
+        })
+    {
+        status.set_if_changed(format!("Could not start reading the dropped image: {error}"));
     }
 }
 
@@ -2180,6 +2364,8 @@ fn screen_preset_panel(
         .orientation(Orientation::Horizontal)
         .child(TextBlock::el().text("Preset name:"))
         .child(TextBox::el().width(150.0).text(controls.name.two_way()))
+        .child(TextBlock::el().text("Mode (screen, desktop, text):"))
+        .child(TextBox::el().width(90.0).text(controls.mode.two_way()))
         .child(TextBlock::el().text("Delay (seconds):"))
         .child(TextBox::el().width(60.0).text(controls.delay.two_way()))
         .child(
@@ -2189,19 +2375,22 @@ fn screen_preset_panel(
         )
         .child(action_button("Save screen preset", move |_| {
             let name = controls.name.get();
-            let result = controls
-                .delay
-                .get()
-                .trim()
-                .parse::<u64>()
-                .map_err(|_| "the capture delay must be a whole number of seconds".to_owned())
-                .and_then(|delay| {
-                    settings::save_screen_capture_preset(
-                        &name,
-                        delay,
-                        capture::CaptureCursor::from_included(controls.cursor.get()),
-                    )
-                });
+            let result = settings::PresetMode::parse(&controls.mode.get()).and_then(|mode| {
+                controls
+                    .delay
+                    .get()
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|_| "the capture delay must be a whole number of seconds".to_owned())
+                    .and_then(|delay| {
+                        settings::save_capture_preset(
+                            &name,
+                            delay,
+                            capture::CaptureCursor::from_included(controls.cursor.get()),
+                            mode,
+                        )
+                    })
+            });
             match result {
                 Ok(presets) => {
                     controls.name.set_if_changed(name.trim().to_owned());
@@ -2246,6 +2435,32 @@ fn screen_preset_panel(
         )
 }
 
+fn run_capture_preset(
+    scope: &AppScope,
+    canvas: ui::UiOnly<ui::canvas_view::CanvasView>,
+    status: Signal<String>,
+    captures: Signal<Vec<PathBuf>>,
+    library: LibraryControls,
+    preset: &settings::ScreenCapturePreset,
+) {
+    match preset.mode() {
+        settings::PresetMode::Screen => capture_screen_with_options(
+            scope,
+            canvas,
+            status,
+            captures,
+            library,
+            ScreenCaptureOptions {
+                seconds: preset.delay_seconds(),
+                cursor: preset.cursor(),
+                draw: false,
+            },
+        ),
+        settings::PresetMode::Desktop => capture_interactive(scope, canvas, status, captures, library),
+        settings::PresetMode::Text => grab_screen_text(scope, status),
+    }
+}
+
 fn screen_preset_button(
     preset: Signal<settings::ScreenCapturePreset>,
     canvas: ui::UiOnly<ui::canvas_view::CanvasView>,
@@ -2256,23 +2471,20 @@ fn screen_preset_button(
     let name = preset.get_untracked().name().to_owned();
     Button::el()
         .content(format!("Capture: {name}"))
-        .tool_tip_tip("Choose a screen or window using this preset's delay and cursor choices")
+        .tool_tip_tip("Run this preset: screen/window (with delay and cursor), desktop screenshot, or screen text")
         .with_op(move |scope, button| {
             let action_scope = scope.clone();
             let canvas = canvas.clone();
             let name = name.clone();
             button.clone().on_click(scope, move |_| {
                 match settings::screen_capture_preset(&name) {
-                    Ok(preset) => capture_screen_with_options(
+                    Ok(preset) => run_capture_preset(
                         &action_scope,
                         canvas.clone(),
                         status,
                         captures,
                         library,
-                        ScreenCaptureOptions {
-                            seconds: preset.delay_seconds(),
-                            cursor: preset.cursor(),
-                        },
+                        &preset,
                     ),
                     Err(error) => status
                         .set_if_changed(format!("Could not run screen capture preset: {error}")),
@@ -2695,6 +2907,51 @@ fn library_organization_panel(
             })
             .tool_tip_tip("Print the selected saved image, not unsaved editor changes"),
         );
+    let external_program = Signal::new(match settings::external_program() {
+        Ok(program) => program
+            .map(|program| program.display().to_string())
+            .unwrap_or_default(),
+        Err(error) => {
+            status.set_if_changed(format!("Could not load the external program: {error}"));
+            String::new()
+        }
+    });
+    let external_sharing = WrapPanel::el()
+        .orientation(Orientation::Horizontal)
+        .child(TextBlock::el().text("External program (absolute path):"))
+        .child(TextBox::el().width(260.0).text(external_program.two_way()))
+        .child(action_button("Save program", move |_| {
+            let text = external_program.get();
+            let program = (!text.trim().is_empty()).then(|| PathBuf::from(text.trim()));
+            match settings::set_external_program(program.as_deref()) {
+                Ok(()) => status.set_if_changed(if program.is_some() {
+                    "External program saved.".to_owned()
+                } else {
+                    "External program cleared.".to_owned()
+                }),
+                Err(error) => {
+                    status.set_if_changed(format!("Could not save the external program: {error}"))
+                }
+            }
+        }))
+        .child(
+            action_button("Send saved capture to program", move |_| {
+                let Some(path) = library.selected.get() else {
+                    status.set_if_changed("Select a saved capture before sharing.".to_owned());
+                    return;
+                };
+                let message = match settings::external_program() {
+                    Ok(Some(program)) => match share::open_with_program(&program, &path) {
+                        Ok(()) => "Sent the saved capture to the external program.".to_owned(),
+                        Err(error) => format!("Could not share the saved capture: {error}"),
+                    },
+                    Ok(None) => "Save an external program first.".to_owned(),
+                    Err(error) => format!("Could not load the external program: {error}"),
+                };
+                status.set_if_changed(message);
+            })
+            .tool_tip_tip("Run the saved program with the selected saved file as its argument"),
+        );
     let automatic_copy = WrapPanel::el()
         .orientation(Orientation::Horizontal)
         .child(
@@ -2721,6 +2978,7 @@ fn library_organization_panel(
         .child(TextBlock::el().text(move || library.selection_label()))
         .child(actions)
         .child(sharing)
+        .child(external_sharing)
         .child(automatic_copy)
 }
 
@@ -3327,6 +3585,7 @@ fn enable_global_capture_shortcut(scope: &AppScope, ui: ShortcutUi) {
         status,
         preferred,
         recording_controls,
+        preset_hotkeys,
         recording_start,
         webcam,
     } = ui;
@@ -3347,6 +3606,7 @@ fn enable_global_capture_shortcut(scope: &AppScope, ui: ShortcutUi) {
     let options = shortcut::ShortcutOptions {
         recording_controls: recording_controls.get(),
         recording_start,
+        preset_hotkeys: preset_hotkeys.get(),
     };
     let trigger = match settings::set_global_shortcuts(&preferred.get(), options) {
         Ok(trigger) => trigger,
@@ -3383,6 +3643,7 @@ fn enable_global_capture_shortcut(scope: &AppScope, ui: ShortcutUi) {
                                 shortcut::ShortcutAction::ToggleRecording => "start/stop",
                                 shortcut::ShortcutAction::PauseRecording => "pause/resume",
                                 shortcut::ShortcutAction::StopRecording => "stop",
+                                shortcut::ShortcutAction::Preset(_) => "preset",
                             };
                             format!("{label}: {trigger}")
                         })
@@ -3423,6 +3684,27 @@ fn enable_global_capture_shortcut(scope: &AppScope, ui: ShortcutUi) {
                             "Finalizing screen recording…",
                             status,
                         ),
+                        shortcut::ShortcutAction::Preset(index) => {
+                            match settings::screen_capture_presets()
+                                .map(|presets| presets.into_iter().nth(index))
+                            {
+                                Ok(Some(preset)) => run_capture_preset(
+                                    &action_scope,
+                                    action_canvas,
+                                    status,
+                                    captures,
+                                    library,
+                                    &preset,
+                                ),
+                                Ok(None) => status.set_if_changed(format!(
+                                    "There is no capture preset number {}.",
+                                    index + 1
+                                )),
+                                Err(error) => status.set_if_changed(format!(
+                                    "Could not run capture preset: {error}"
+                                )),
+                            }
+                        }
                     })
                     .map_err(|error| format!("could not handle a global shortcut: {error}"))
             },
@@ -3482,10 +3764,14 @@ fn disable_global_capture_shortcut(status: Signal<String>) {
     }
 }
 
+const OPEN_MENUS_DELAY_SECONDS: u64 = 5;
+
 #[derive(Clone, Copy)]
 struct ScreenCaptureOptions {
     seconds: u64,
     cursor: capture::CaptureCursor,
+    /// Open the capture with the pen selected, for drawing over the screen.
+    draw: bool,
 }
 
 fn screen_capture_available(status: Signal<String>) -> bool {
@@ -3541,7 +3827,11 @@ fn capture_screen(
         status,
         captures,
         library,
-        ScreenCaptureOptions { seconds, cursor },
+        ScreenCaptureOptions {
+            seconds,
+            cursor,
+            draw: false,
+        },
     );
 }
 
@@ -3556,7 +3846,11 @@ fn capture_screen_with_options(
     if !screen_capture_available(status) {
         return;
     }
-    let ScreenCaptureOptions { seconds, cursor } = options;
+    let ScreenCaptureOptions {
+        seconds,
+        cursor,
+        draw,
+    } = options;
     let delayed = if seconds == 0 {
         None
     } else {
@@ -3617,7 +3911,11 @@ fn capture_screen_with_options(
                     CompletedCapture {
                         document,
                         pending,
-                        delivery: CaptureDelivery::Screen,
+                        delivery: if draw {
+                            CaptureDelivery::ScreenDraw
+                        } else {
+                            CaptureDelivery::Screen
+                        },
                     },
                     canvas,
                     status,
@@ -3791,6 +4089,7 @@ fn grab_screen_text(scope: &AppScope, status: Signal<String>) {
 #[derive(Clone, Copy)]
 enum CaptureDelivery {
     Screen,
+    ScreenDraw,
     Interactive,
     Scrolling {
         mode: scroll::Mode,
@@ -3808,6 +4107,7 @@ impl CaptureDelivery {
     fn description(self) -> &'static str {
         match self {
             Self::Screen => "Screen captured",
+            Self::ScreenDraw => "Screen captured; draw with the pen",
             Self::Interactive => "Desktop screenshot captured",
             Self::Scrolling {
                 mode: scroll::Mode::Panoramic,
@@ -3878,6 +4178,9 @@ fn deliver_capture(
             let state = DOCUMENT_LOAD_REQUESTS.state(&pending, editor.document());
             if state == editor::DocumentLoadState::Ready {
                 load_editor_document(editor, document, saved_path.as_ref().ok().cloned());
+                if matches!(delivery, CaptureDelivery::ScreenDraw) {
+                    editor.set_tool(Tool::Pen);
+                }
             }
             state
         });
@@ -4981,6 +5284,151 @@ fn toggle_video_pause(status: Signal<String>) {
     }
 }
 
+fn slideshow_dialog(scope: &AppScope, seconds: String, status: Signal<String>) {
+    let seconds = match seconds.trim().parse::<f64>() {
+        Ok(value)
+            if (video::SLIDESHOW_MIN_SECONDS..=video::SLIDESHOW_MAX_SECONDS).contains(&value) =>
+        {
+            value
+        }
+        _ => {
+            status.set_if_changed(format!(
+                "Slide duration must be between {} and {} seconds.",
+                video::SLIDESHOW_MIN_SECONDS,
+                video::SLIDESHOW_MAX_SECONDS
+            ));
+            return;
+        }
+    };
+    let Some(window) = scope.main_window() else {
+        status.set_if_changed("The editor window is not available.".to_owned());
+        return;
+    };
+    let filter = ["png", "jpg", "jpeg", "bmp", "gif", "webp"]
+        .into_iter()
+        .fold(FileTypeFilter::new("Image files"), |filter, extension| {
+            filter.with_extension(extension)
+        });
+    let options = OpenFilePickerOptions::new()
+        .title("Select images for the slideshow (shown in filename order)")
+        .allow_multiple(true)
+        .start_in(WellKnownFolder::Pictures)
+        .file_type(filter);
+    let operation = match file_dialog::open_file_picker(scope, &window, &options) {
+        Ok(operation) => operation,
+        Err(error) => {
+            status.set_if_changed(format!("Could not open image picker: {error}"));
+            return;
+        }
+    };
+    status.set_if_changed("Select the images for the slideshow…".to_owned());
+    let task_scope = scope.clone();
+    if let Err(error) = scope.spawn(async move {
+        let Ok(PickerOutcome::Selected(items)) = operation.await else {
+            return;
+        };
+        let paths = items
+            .iter()
+            .map(|item| item.local_path().map(Path::to_path_buf))
+            .collect::<Option<Vec<_>>>();
+        let message = match paths {
+            None => Some("Every selected image must be a local file.".to_owned()),
+            Some(paths) if paths.is_empty() => Some("Select at least one image.".to_owned()),
+            Some(mut paths) => {
+                order_video_sources(&mut paths);
+                let save_scope = task_scope.clone();
+                if let Err(error) = task_scope.post(move || {
+                    save_slideshow_dialog(&save_scope, paths, seconds, status)
+                }) {
+                    eprintln!("Could not open the slideshow save dialog: {error}");
+                }
+                None
+            }
+        };
+        if let Some(message) = message {
+            if let Err(error) = task_scope.post(move || status.set_if_changed(message)) {
+                eprintln!("Could not report the slideshow selection: {error}");
+            }
+        }
+    }) {
+        status.set_if_changed(format!("Could not start the image picker: {error}"));
+    }
+}
+
+fn save_slideshow_dialog(
+    scope: &AppScope,
+    images: Vec<PathBuf>,
+    seconds: f64,
+    status: Signal<String>,
+) {
+    let Some(window) = scope.main_window() else {
+        status.set_if_changed("The editor window is not available.".to_owned());
+        return;
+    };
+    let options = SaveFilePickerOptions::new()
+        .title("Save slideshow video")
+        .suggested_file_name("Slideshow.mp4")
+        .start_in(WellKnownFolder::Pictures)
+        .default_extension("mp4")
+        .file_type(FileTypeFilter::new("MP4 video").with_extension("mp4"));
+    let operation = match file_dialog::save_file_picker(scope, &window, &options) {
+        Ok(operation) => operation,
+        Err(error) => {
+            status.set_if_changed(format!("Could not open video save dialog: {error}"));
+            return;
+        }
+    };
+    status.set_if_changed("Choose where to save the slideshow…".to_owned());
+    let task_scope = scope.clone();
+    if let Err(error) = scope.spawn(async move {
+        let Ok(PickerOutcome::Selected(items)) = operation.await else {
+            return;
+        };
+        let Some(destination) = items
+            .first()
+            .and_then(|item| item.local_path().map(Path::to_path_buf))
+        else {
+            if let Err(error) = task_scope.post(move || {
+                status.set_if_changed(
+                    "The selected destination is not available as a local file.".to_owned(),
+                )
+            }) {
+                eprintln!("Could not report slideshow destination error: {error}");
+            }
+            return;
+        };
+        let label = destination.display().to_string();
+        let thread_scope = task_scope.clone();
+        if let Err(error) =
+            task_scope.post(move || status.set_if_changed("Creating the slideshow…".to_owned()))
+        {
+            eprintln!("Could not report slideshow progress: {error}");
+        }
+        let started = std::thread::Builder::new()
+            .name("jiffshot-slideshow".to_owned())
+            .spawn(move || {
+                let result = video::create_slideshow(&images, seconds, &destination);
+                if let Err(error) = thread_scope.post(move || match result {
+                    Ok(()) => status.set_if_changed(format!("Saved slideshow to {label}")),
+                    Err(error) => {
+                        status.set_if_changed(format!("Could not create the slideshow: {error}"))
+                    }
+                }) {
+                    eprintln!("Could not report slideshow result: {error}");
+                }
+            });
+        if let Err(error) = started {
+            if let Err(post_error) = task_scope.post(move || {
+                status.set_if_changed(format!("Could not start the slideshow export: {error}"))
+            }) {
+                eprintln!("Could not report slideshow startup error: {post_error}");
+            }
+        }
+    }) {
+        status.set_if_changed(format!("Could not start video save dialog: {error}"));
+    }
+}
+
 fn combine_videos_dialog(scope: &AppScope, status: Signal<String>) {
     let Some(window) = scope.main_window() else {
         status.set_if_changed("The editor window is not available.".to_owned());
@@ -5417,42 +5865,42 @@ fn save_video_range(
 
 #[derive(Clone, Copy)]
 enum VideoExport {
-    Gif,
+    Gif(video::GifPreset),
     SilentMp4,
 }
 
 impl VideoExport {
     fn description(self) -> &'static str {
         match self {
-            Self::Gif => "animated GIF",
+            Self::Gif(_) => "animated GIF",
             Self::SilentMp4 => "silent MP4",
         }
     }
 
     fn extension(self) -> &'static str {
         match self {
-            Self::Gif => "gif",
+            Self::Gif(_) => "gif",
             Self::SilentMp4 => "mp4",
         }
     }
 
     fn suggested_file_name(self) -> &'static str {
         match self {
-            Self::Gif => "Animation.gif",
+            Self::Gif(_) => "Animation.gif",
             Self::SilentMp4 => "Silent video.mp4",
         }
     }
 
     fn thread_name(self) -> &'static str {
         match self {
-            Self::Gif => "jiffshot-video-gif",
+            Self::Gif(_) => "jiffshot-video-gif",
             Self::SilentMp4 => "jiffshot-video-silent",
         }
     }
 
     fn export(self, source: &Path, destination: &Path) -> std::result::Result<(), String> {
         match self {
-            Self::Gif => video::export_gif(source, destination),
+            Self::Gif(preset) => video::export_gif_with_preset(source, destination, preset),
             Self::SilentMp4 => video::export_silent_video(source, destination),
         }
     }

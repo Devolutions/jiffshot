@@ -120,7 +120,8 @@ pub(crate) fn select(
     let window = MonitorWindow::new(scope, 1, monitor, viewport, |input| Ok(on_input(input))).map_err(|e| format!("{e:?}"))?;
     let center = (bounds.width / 2, bounds.height / 2);
     let mut scene = Scene::default();
-    let model = Overlay::new(frame, center, mode);
+    let mut model = Overlay::new(frame, center, mode);
+    model.set_windows(crate::linux::x11::windows());
     refresh(&model, &mut scene);
     let mut window = window;
     LOADING.with(|l| *l.borrow_mut() = Some(model.snapshot.clone()));

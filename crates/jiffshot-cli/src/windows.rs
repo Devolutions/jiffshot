@@ -242,6 +242,9 @@ AVAILABLE ON LINUX
     open PATH                           open an image or project in the editor
     ocr --path IMAGE                    recognize text in an image
     library list [--limit N]            newest saved captures
+    library search [QUERY] [--filter all|images|videos|pinned|tagged] [--limit N]
+    library tag PATH TAGS               replace a capture's tags (comma separated)
+    library pin PATH                    toggle a capture's pin
     record start [--audio none|system|microphone|both] [--fps source|15|24|30|60] [--cursor]
     record status | pause | stop | cancel
 
@@ -424,6 +427,9 @@ const POSITIONALS: &[(&str, &[&str])] = &[
     ("wait.window", &["title*"]),
     ("wait.text", &["text*"]),
     ("open", &["path"]),
+    ("library.search", &["query"]),
+    ("library.tag", &["path", "tags"]),
+    ("library.pin", &["path"]),
     ("doc.open", &["path"]),
     ("doc.image", &["path"]),
     ("doc.action", &["name"]),
