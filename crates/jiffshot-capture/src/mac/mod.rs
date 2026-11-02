@@ -2,6 +2,7 @@
 
 pub mod ffi;
 pub mod sck;
+pub mod permissions;
 pub(crate) mod picker;
 
 /// Cancels open file panels and prevents queued panels from opening while quitting.

@@ -93,17 +93,16 @@ pub fn accessibility_trusted() -> bool {
 
 /// Requests Accessibility access when a feature actually needs it.
 pub fn request_accessibility() -> bool {
-    if accessibility_trusted() {
-        return true;
-    }
-    let yes = NSNumber::new_bool(true);
-    // SAFETY: the documented key is a CFString, bridged to NSString, and the
-    // dictionary and its Boolean remain alive for the trust query.
-    unsafe {
-        let key = &*(kAXTrustedCheckOptionPrompt as *const NSString);
-        let options = NSDictionary::from_slices(&[key], &[&*yes]);
-        AXIsProcessTrustedWithOptions((&*options as *const NSDictionary<NSString, NSNumber>).cast())
-    }
+    crate::macos::permissions::check_or_request(true, accessibility_trusted, || {
+        let yes = NSNumber::new_bool(true);
+        // SAFETY: the documented key is a CFString, bridged to NSString, and the
+        // dictionary and its Boolean remain alive for the trust query.
+        unsafe {
+            let key = &*(kAXTrustedCheckOptionPrompt as *const NSString);
+            let options = NSDictionary::from_slices(&[key], &[&*yes]);
+            AXIsProcessTrustedWithOptions((&*options as *const NSDictionary<NSString, NSNumber>).cast())
+        }
+    }, || crate::macos::permissions::Permission::Accessibility.report_denied())
 }
 
 fn number(dict: &NSDictionary<NSString, AnyObject>, key: &str) -> Option<f64> {
@@ -326,8 +325,7 @@ pub fn window_candidates(layout: &DisplayLayout) -> io::Result<Vec<Window>> {
 
 fn read_windows(layout: &DisplayLayout, include_offscreen: bool) -> io::Result<Vec<Window>> {
     if !crate::macos::sck::screen_access(true) {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            "Jiffshot needs Screen Recording permission to read window titles"));
+        return Err(crate::macos::permissions::Permission::ScreenRecording.error());
     }
     layout.validate()?;
     let front_pid = NSWorkspace::sharedWorkspace().frontmostApplication()
@@ -403,8 +401,7 @@ pub fn offscreen_minimized(window: &Window, candidates: &[Window]) -> io::Result
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "the selected window is already on screen"));
     }
     if !accessibility_trusted() {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            "Jiffshot needs Accessibility permission to identify off-screen windows"));
+        return Err(crate::macos::permissions::Permission::Accessibility.error());
     }
     ensure_unique_window_identity(window, candidates)?;
     if window.pid == std::process::id() && MainThreadMarker::new().is_none() {
@@ -450,8 +447,7 @@ pub enum WindowActivation {
 /// restored window must be allowed to appear before it can be raised.
 pub fn activate_window(window: &Window, require_title: bool, allow_restore: bool) -> io::Result<WindowActivation> {
     if !request_accessibility() {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            "Jiffshot needs Accessibility permission to activate a window"));
+        return Err(crate::macos::permissions::Permission::Accessibility.error());
     }
     if window.pid == std::process::id() && MainThreadMarker::new().is_none() {
         let window = window.clone();
@@ -540,8 +536,7 @@ fn matching_ax_window_named(app: AXUIElementRef, window: &Window, require_title:
 /// Checks both the frontmost application and the exact Accessibility window.
 pub fn window_has_input_focus(window: &Window) -> io::Result<bool> {
     if !accessibility_trusted() {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            "Jiffshot needs Accessibility permission to verify the focused window"));
+        return Err(crate::macos::permissions::Permission::Accessibility.denied());
     }
     if window.pid == std::process::id() && MainThreadMarker::new().is_none() {
         let window = window.clone();
@@ -812,6 +807,9 @@ fn step_element_description(mut read: impl FnMut(&str) -> String) -> (String, St
 /// without the Accessibility permission or anything there. Editable text
 /// controls are described only by their kind, and values are never read.
 pub fn element_at(x: i32, y: i32) -> Option<(String, String)> {
+    if !accessibility_trusted() {
+        return None;
+    }
     match element_at_checked(x, y) {
         Ok(element) => element,
         Err(error) => {
@@ -832,8 +830,8 @@ pub fn element_at_points_checked(x: f64, y: f64) -> io::Result<Option<(String, S
     if !x.is_finite() || !y.is_finite() || !(x as f32).is_finite() || !(y as f32).is_finite() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid Accessibility hit-test point"));
     }
-    if !accessibility_trusted() {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "Jiffshot needs Accessibility permission to describe a control"));
+    if !request_accessibility() {
+        return Err(crate::macos::permissions::Permission::Accessibility.error());
     }
     if MainThreadMarker::new().is_none() {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);

@@ -17,15 +17,13 @@ pub fn event_posting_allowed() -> bool {
 
 /// Requests the permission needed to send input events to another app.
 pub fn require_event_posting() -> std::io::Result<()> {
+    use crate::macos::permissions::{check_or_request, Permission};
     // SAFETY: both functions are plain permission queries; the request may
     // show the macOS permission prompt.
-    if unsafe { CGPreflightPostEventAccess() || CGRequestPostEventAccess() } {
+    if check_or_request(true, event_posting_allowed, || unsafe { CGRequestPostEventAccess() }, || {}) {
         Ok(())
     } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "Input automation and automatic scrolling need Accessibility permission. Allow Jiffshot in System Settings > Privacy & Security > Accessibility, then retry.",
-        ))
+        Err(Permission::Accessibility.denied())
     }
 }
 

@@ -18,7 +18,7 @@ use objc2_core_video::{
 use objc2_foundation::{NSArray, NSDictionary, NSError, NSNumber, NSObject, NSObjectProtocol, NSString};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCFrameStatus, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate,
-    SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType, SCWindow,
+    SCStreamErrorCode, SCStreamErrorDomain, SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 use std::io;
 use std::sync::mpsc;
@@ -32,23 +32,32 @@ pub fn err(e: impl std::fmt::Display) -> io::Error {
 fn ns_err(error: *mut NSError) -> io::Error {
     // SAFETY: a non-null NSError handed to a completion handler.
     match unsafe { error.as_ref() } {
-        Some(e) => err(e.localizedDescription()),
+        Some(e) => framework_error(e),
         None => err("ScreenCaptureKit failed"),
+    }
+}
+
+fn framework_error(error: &NSError) -> io::Error {
+    if &*error.domain() == unsafe { SCStreamErrorDomain } && error.code() == SCStreamErrorCode::UserDeclined.0 {
+        super::permissions::Permission::ScreenRecording.denied()
+    } else {
+        err(error.localizedDescription())
     }
 }
 
 /// Whether the user allowed this app to record the screen. Asking shows
 /// the system prompt once; afterwards the user must go to System Settings.
 pub fn screen_access(ask: bool) -> bool {
-    // SAFETY: plain queries.
-    unsafe { CGPreflightScreenCaptureAccess() || (ask && CGRequestScreenCaptureAccess()) }
+    super::permissions::check_or_request(
+        ask,
+        || unsafe { CGPreflightScreenCaptureAccess() },
+        || unsafe { CGRequestScreenCaptureAccess() },
+        || super::permissions::Permission::ScreenRecording.report_denied(),
+    )
 }
 
 fn denied() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        "Jiffshot needs Screen Recording permission (System Settings > Privacy & Security > Screen & System Audio Recording)",
-    )
+    super::permissions::Permission::ScreenRecording.error()
 }
 
 /// Displays and windows that can be captured, fetched synchronously.
@@ -255,7 +264,7 @@ define_class!(
         #[allow(non_snake_case)]
         #[unsafe(method(stream:didStopWithError:))]
         unsafe fn stream_didStopWithError(&self, _stream: &SCStream, error: &NSError) {
-            let message = error.localizedDescription().to_string();
+            let message = framework_error(error).to_string();
             *self.ivars().failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(message);
         }
     }
@@ -314,7 +323,7 @@ impl Stream {
             for kind in kinds {
                 stream
                     .addStreamOutput_type_sampleHandlerQueue_error(ProtocolObject::from_ref(&*output), *kind, Some(&queue))
-                    .map_err(|e| err(e.localizedDescription()))?;
+                    .map_err(|e| framework_error(&e))?;
             }
             wait_done("start", |block| stream.startCaptureWithCompletionHandler(Some(block)))?;
             Ok(Stream { stream, _output: output, _queue: queue, failure })
@@ -406,6 +415,19 @@ pub fn frame_interval(fps: u32) -> CMTime {
 mod tests {
     use super::*;
     use objc2_foundation::NSString;
+
+    #[test]
+    fn framework_permission_denials_include_recovery_without_mislabeling_other_errors() {
+        let denied = unsafe { NSError::errorWithDomain_code_userInfo(SCStreamErrorDomain, SCStreamErrorCode::UserDeclined.0, None) };
+        let error = framework_error(&denied);
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("Screen Recording"));
+        assert!(error.to_string().contains("System Settings"));
+        let other = unsafe { NSError::errorWithDomain_code_userInfo(&NSString::from_str("JiffshotTest"), SCStreamErrorCode::UserDeclined.0, None) };
+        let error = framework_error(&other);
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), other.localizedDescription().to_string());
+    }
 
     #[test]
     fn screen_capture_configuration_uses_srgb() {

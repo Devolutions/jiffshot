@@ -98,7 +98,7 @@ fn script_result(success: bool, stdout: &[u8], stderr: &[u8], status: &str, acti
         return Ok(None);
     }
     if error.ends_with("(-1743)") {
-        return Err(format!("{action}: macOS denied automation. Check System Settings > Privacy & Security > Automation, then retry. {error}"));
+        return Err(format!("{action}: macOS denied automation. {} {error}", crate::macos::permissions::Permission::Automation.denied()));
     }
     let detail = if error.is_empty() { status } else { error };
     Err(format!("{action}: {detail}"))

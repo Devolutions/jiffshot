@@ -21,6 +21,8 @@ mod main_window;
 mod native_theme;
 mod overlay;
 mod prefs_window;
+#[cfg(target_os = "macos")]
+mod permissions_macos;
 mod selftest;
 mod toast;
 mod tray;
@@ -164,6 +166,8 @@ pub fn mount_main_window(scope: &AppScope, model: impl MainViewModel, show: bool
     prefs_window::install(scope)?;
     overlay::install(scope)?;
     hud::install(scope)?;
+    #[cfg(target_os = "macos")]
+    permissions_macos::install(scope);
     // JIFFSHOT_UITEST=DIR: the editor drives itself (see `selftest`).
     if let Some(dir) = std::env::var_os("JIFFSHOT_UITEST").filter(|d| !d.is_empty()) {
         let test_scope = scope.clone();
@@ -214,6 +218,7 @@ pub fn detach_all() {
     #[cfg(target_os = "macos")]
     {
         hud::native_popup_macos::after_run();
+        permissions_macos::after_run();
         selftest::after_run();
     }
 }

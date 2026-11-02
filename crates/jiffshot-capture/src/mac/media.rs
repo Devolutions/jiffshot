@@ -6,6 +6,7 @@
 
 use super::{AudioBlock, AudioSpec, Result, VideoFrame, VideoSpec, HNS_PER_SECOND};
 use crate::macos::ffi::rect;
+use crate::macos::permissions::Permission;
 use crate::macos::sck::{self, SendBox};
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchRetained};
@@ -776,7 +777,7 @@ impl Reader {
             output.setAlwaysDiscardsLateVideoFrames(true);
             output
         };
-        let session = Session::start(video_type(), "Camera", &output, |_| delegate, cancel.as_deref(), |d, q| {
+        let session = Session::start(video_type(), Permission::Camera, &output, |_| delegate, cancel.as_deref(), |d, q| {
             // SAFETY: a serial queue, as required; the delegate outlives the session.
             unsafe { output.setSampleBufferDelegate_queue(Some(ProtocolObject::from_ref(d)), Some(q)) }
         })?;
@@ -1022,11 +1023,11 @@ fn webcam_frame(
     })
 }
 
-/// Asks for camera or microphone access (`what` names it in System
-/// Settings), waiting for the user's answer the first time.
-fn authorize(media_type: &AVMediaType, what: &str, cancel: Option<&AtomicBool>) -> Result<()> {
+/// Asks for camera or microphone access, waiting for the user's answer the first time.
+fn authorize(media_type: &AVMediaType, permission: Permission, cancel: Option<&AtomicBool>) -> Result<()> {
     check_cancel(cancel)?;
-    let denied = || format!("Jiffshot needs {what} permission (System Settings > Privacy & Security > {what})");
+    let what = permission.name();
+    let denied = || permission.denied().to_string();
     // SAFETY: plain class method calls; the block is copied.
     unsafe {
         match AVCaptureDevice::authorizationStatusForMediaType(media_type) {
@@ -1166,14 +1167,15 @@ impl Session {
     /// `attach` sets `delegate` as the output's delegate on the queue.
     fn start(
         media_type: &AVMediaType,
-        what: &str,
+        permission: Permission,
         output: &AVCaptureOutput,
         make_delegate: impl FnOnce(&AVCaptureSession) -> Retained<CaptureDelegate>,
         cancel: Option<&AtomicBool>,
         attach: impl FnOnce(&CaptureDelegate, &DispatchQueue),
     ) -> Result<Session> {
-        authorize(media_type, what, cancel)?;
+        authorize(media_type, permission, cancel)?;
         check_cancel(cancel)?;
+        let what = permission.name();
         let queue = DispatchQueue::new("com.devolutions.jiffshot.media", None);
         // SAFETY: AVFoundation calls with valid arguments; the session is
         // configured before it starts.
@@ -1469,7 +1471,7 @@ fn capture_audio_with_cancel(microphone: bool, cancel: Option<&AtomicBool>) -> R
         // SAFETY: a fresh output; it delivers the device's own PCM format,
         // which the converter reads.
         let output = unsafe { AVCaptureAudioDataOutput::new() };
-        let session = Session::start(audio_type(), "Microphone", &output, |session| {
+        let session = Session::start(audio_type(), Permission::Microphone, &output, |session| {
             let session = WeakCaptureSession(Weak::new(session));
             CaptureDelegate::new(Box::new(move |sample| {
                 let clock = session.clock();
