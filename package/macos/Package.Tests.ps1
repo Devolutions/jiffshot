@@ -10,12 +10,14 @@ Describe 'macOS ticket stapling' {
             Mock Start-Sleep { $script:StapleDelays.Add($Seconds) }
         }
 
-        It 'staples successfully on attempt <SuccessAttempt>' -TestCases @(
-            @{ SuccessAttempt = 1; ExpectedDelays = @() }
-            @{ SuccessAttempt = 2; ExpectedDelays = @(10) }
-            @{ SuccessAttempt = 4; ExpectedDelays = @(10, 20, 40) }
+        It 'runs stapler <Action> successfully on attempt <SuccessAttempt>' -TestCases @(
+            foreach ($action in 'staple', 'validate') {
+                @{ Action = $action; SuccessAttempt = 1; ExpectedDelays = @() }
+                @{ Action = $action; SuccessAttempt = 2; ExpectedDelays = @(10) }
+                @{ Action = $action; SuccessAttempt = 4; ExpectedDelays = @(10, 20, 40) }
+            }
         ) {
-            param($SuccessAttempt, $ExpectedDelays)
+            param($Action, $SuccessAttempt, $ExpectedDelays)
             Mock Invoke-MacCommand {
                 $script:StapleAttempts++
                 [pscustomobject]@{
@@ -25,40 +27,52 @@ Describe 'macOS ticket stapling' {
                 }
             }
 
-            Invoke-MacStaple -Path '/fixture/Jiffshot app.dmg'
+            Invoke-MacStapler -Action $Action -Path '/fixture/Jiffshot app.dmg'
 
             Should -Invoke Invoke-MacCommand -Times $SuccessAttempt -Exactly -ParameterFilter {
                 $File -ceq '/usr/bin/xcrun' -and $AllowFailure -and
-                ($Arguments -join '|') -ceq 'stapler|staple|/fixture/Jiffshot app.dmg'
+                ($Arguments -join '|') -ceq "stapler|$Action|/fixture/Jiffshot app.dmg"
             }
             $script:StapleDelays.ToArray() | Should -Be $ExpectedDelays
         }
 
-        It 'gives up after three retries and preserves the final diagnostic' {
+        It 'gives up stapler <Action> after three retries and preserves the final diagnostic' -TestCases @(
+            @{ Action = 'staple'; Operation = 'Stapling' }
+            @{ Action = 'validate'; Operation = 'Validating the stapled ticket for' }
+        ) {
+            param($Action, $Operation)
             Mock Invoke-MacCommand {
                 [pscustomobject]@{ ExitCode = 68; Stdout = ''; Stderr = 'The network connection was lost.' }
             }
 
-            { Invoke-MacStaple -Path '/fixture/Jiffshot.app' } |
-                Should -Throw "*Jiffshot.app*after 4 attempt(s)*exit status 68*The network connection was lost.*"
+            { Invoke-MacStapler -Action $Action -Path '/fixture/Jiffshot.app' } |
+                Should -Throw "$Operation '/fixture/Jiffshot.app' failed after 4 attempt(s)*exit status 68*The network connection was lost.*"
 
             Should -Invoke Invoke-MacCommand -Times 4 -Exactly
             $script:StapleDelays.ToArray() | Should -Be @(10, 20, 40)
         }
 
-        It 'fails immediately for non-service errors' {
+        It 'fails stapler <Action> immediately for non-service errors' -TestCases @(
+            @{ Action = 'staple' }
+            @{ Action = 'validate' }
+        ) {
+            param($Action)
             Mock Invoke-MacCommand {
                 [pscustomobject]@{ ExitCode = 65; Stdout = 'Could not validate ticket'; Stderr = '' }
             }
 
-            { Invoke-MacStaple -Path '/fixture/Jiffshot.app' } |
+            { Invoke-MacStapler -Action $Action -Path '/fixture/Jiffshot.app' } |
                 Should -Throw '*after 1 attempt(s)*exit status 65*Could not validate ticket*'
 
             Should -Invoke Invoke-MacCommand -Times 1 -Exactly
             Should -Invoke Start-Sleep -Times 0 -Exactly
         }
 
-        It 'stops retrying when a service error is followed by a permanent error' {
+        It 'stops retrying stapler <Action> when a service error is followed by a permanent error' -TestCases @(
+            @{ Action = 'staple' }
+            @{ Action = 'validate' }
+        ) {
+            param($Action)
             Mock Invoke-MacCommand {
                 $script:StapleAttempts++
                 [pscustomobject]@{
@@ -68,7 +82,7 @@ Describe 'macOS ticket stapling' {
                 }
             }
 
-            { Invoke-MacStaple -Path '/fixture/Jiffshot.app' } |
+            { Invoke-MacStapler -Action $Action -Path '/fixture/Jiffshot.app' } |
                 Should -Throw '*after 2 attempt(s)*exit status 65*fixture error*'
 
             Should -Invoke Invoke-MacCommand -Times 2 -Exactly
@@ -77,7 +91,7 @@ Describe 'macOS ticket stapling' {
 
         It 'does not retry command launch failures' {
             Mock Invoke-MacCommand { throw 'cannot launch xcrun' }
-            { Invoke-MacStaple -Path '/fixture/Jiffshot.app' } | Should -Throw '*cannot launch xcrun*'
+            { Invoke-MacStapler -Action validate -Path '/fixture/Jiffshot.app' } | Should -Throw '*cannot launch xcrun*'
             Should -Invoke Invoke-MacCommand -Times 1 -Exactly
             Should -Invoke Start-Sleep -Times 0 -Exactly
         }
@@ -512,7 +526,8 @@ Describe 'macOS packaging' {
                 $Keychain | Should -BeExactly 'fixture-keychain'
                 $script:NotaryEvents.Add($(if ($Path.EndsWith('.zip')) { 'submit-app' } else { 'submit-image' }))
             }
-            Mock Invoke-MacStaple {
+            Mock Invoke-MacStapler {
+                $Action | Should -BeExactly 'staple'
                 $script:NotaryEvents.Add($(if ($Path.EndsWith('.app')) { 'staple-app' } else { 'staple-image' }))
             }
             Mock Invoke-MacRun {
@@ -556,8 +571,7 @@ Describe 'macOS packaging' {
             Mock Get-MacDeploymentTarget { '13.0' }
             Mock Sign-MacPath { $script:ImageEvents.Add('sign') }
             Mock Invoke-MacRun {
-                if ($File -ceq '/usr/bin/xcrun') { $script:ImageEvents.Add('validate') }
-                elseif ($File -ceq '/usr/bin/hdiutil') {
+                if ($File -ceq '/usr/bin/hdiutil') {
                     $script:ImageEvents.Add('image')
                     [IO.File]::WriteAllText($Arguments[-1], 'disk image')
                 }
@@ -565,15 +579,27 @@ Describe 'macOS packaging' {
                     Copy-Item -LiteralPath $Arguments[0] -Destination $Arguments[1] -Recurse
                 }
             }
+            $script:ValidateAttempts = 0
+            Mock Start-Sleep { $script:ImageEvents.Add("sleep-$Seconds") }
+            Mock Invoke-MacCommand -ParameterFilter { $File -ceq '/usr/bin/xcrun' } {
+                $script:ValidateAttempts++
+                $script:ImageEvents.Add('validate')
+                [pscustomobject]@{
+                    ExitCode = $(if ($script:ValidateAttempts -eq 1) { 68 } else { 0 })
+                    Stdout = ''
+                    Stderr = $(if ($script:ValidateAttempts -eq 1) { 'The network connection was lost.' } else { '' })
+                }
+            }
             $output = Join-Path $script:Work 'out'
             Invoke-MacNotarizedDiskImage -App $app -Output $output -Arch x86_64 -Identity 'Developer ID Application: Example'
 
-            $script:ImageEvents.ToArray() | Should -Be @('validate', 'image', 'sign')
+            $script:ImageEvents.ToArray() | Should -Be @('validate', 'sleep-10', 'validate', 'image', 'sign')
             Test-Path -LiteralPath (Join-Path $output "Devolutions.Jiffshot-macos-x86_64-$(Get-MacWorkspaceVersion).dmg") |
                 Should -BeTrue
-            Should -Invoke Invoke-MacRun -Times 1 -Exactly -ParameterFilter {
-                $File -ceq '/usr/bin/xcrun' -and ($Arguments -join '|') -ceq "stapler|validate|$app"
+            Should -Invoke Invoke-MacCommand -Times 2 -Exactly -ParameterFilter {
+                $File -ceq '/usr/bin/xcrun' -and $AllowFailure -and ($Arguments -join '|') -ceq "stapler|validate|$app"
             }
+            Should -Invoke Invoke-MacRun -Times 0 -Exactly -ParameterFilter { $File -ceq '/usr/bin/xcrun' }
             Should -Invoke Invoke-MacRun -Times 1 -Exactly -ParameterFilter {
                 $File -ceq '/usr/bin/hdiutil' -and $Arguments[0] -ceq 'create' -and $Arguments -cnotcontains '-quiet'
             }
@@ -597,16 +623,19 @@ Describe 'macOS packaging' {
             $plist = Join-Path $app 'Contents/Info.plist'
             Write-MacPlist $plist (Get-MacInfoPlist '999.0.0')
             Mock Get-MacDeploymentTarget { '13.0' }
-            Mock Invoke-MacRun {
-                if ($File -ceq '/usr/bin/xcrun') { throw 'fixture app is not stapled' }
+            Mock Invoke-MacRun {}
+            Mock Start-Sleep {}
+            Mock Invoke-MacCommand -ParameterFilter { $File -ceq '/usr/bin/xcrun' } {
+                [pscustomobject]@{ ExitCode = 65; Stdout = ''; Stderr = 'fixture app is not stapled' }
             }
             $output = Join-Path $script:Work 'out'
             { Invoke-MacNotarizedDiskImage -App $app -Output $output -Arch arm64 -Identity 'Developer ID Application: Example' } |
                 Should -Throw '*Application version does not match*'
             Write-MacPlist $plist (Get-MacInfoPlist (Get-MacWorkspaceVersion))
             { Invoke-MacNotarizedDiskImage -App $app -Output $output -Arch arm64 -Identity 'Developer ID Application: Example' } |
-                Should -Throw '*fixture app is not stapled*'
+                Should -Throw '*after 1 attempt(s)*exit status 65*fixture app is not stapled*'
             Test-Path -LiteralPath $output | Should -BeFalse
+            Should -Invoke Start-Sleep -Times 0 -Exactly
             Should -Invoke Invoke-MacRun -Times 0 -Exactly -ParameterFilter { $File -ceq '/usr/bin/hdiutil' }
         }
 
@@ -750,30 +779,36 @@ Describe 'macOS packaging entrypoint and CI' {
         $script:PowerShell = (Get-Process -Id $PID).Path
     }
 
-    It 'passes staple paths and propagates failures through the entrypoint for <Name>' -TestCases @(
-        @{ Name = 'success'; Fail = $false; ExpectedExit = 0 }
-        @{ Name = 'failure'; Fail = $true; ExpectedExit = 1 }
+    It 'passes stapler <Action> paths and propagates failures through the entrypoint for <Name>' -TestCases @(
+        foreach ($case in @(
+            @{ Action = 'staple'; Switches = @(); Operation = 'stapling' }
+            @{ Action = 'validate'; Switches = @('-Validate'); Operation = 'validation' }
+        )) {
+            @{ Name = "$($case.Action)-success"; Action = $case.Action; Switches = $case.Switches; Operation = $case.Operation; Fail = $false; ExpectedExit = 0 }
+            @{ Name = "$($case.Action)-failure"; Action = $case.Action; Switches = $case.Switches; Operation = $case.Operation; Fail = $true; ExpectedExit = 1 }
+        }
     ) {
-        param($Name, $Fail, $ExpectedExit)
+        param($Name, $Action, $Switches, $Operation, $Fail, $ExpectedExit)
         $directory = Join-Path $TestDrive "staple-$Name"
         [void][IO.Directory]::CreateDirectory($directory)
         [IO.File]::Copy((Join-Path $PSScriptRoot 'staple.ps1'), (Join-Path $directory 'staple.ps1'))
         $stub = @'
-function Invoke-MacStaple {
-    param($Path)
+function Invoke-MacStapler {
+    param($Action, $Path)
+    if ($Action -cne 'EXPECTED_ACTION') { throw "Unexpected action: $Action" }
     if ($Path -cne '/fixture/Jiffshot app.dmg') { throw "Unexpected path: $Path" }
-    if (FAIL_STAPLE) { throw 'fixture stapling exhausted retries' }
+    if (FAIL_STAPLE) { throw 'fixture stapler exhausted retries' }
 }
-Export-ModuleMember -Function Invoke-MacStaple
+Export-ModuleMember -Function Invoke-MacStapler
 '@
-        [IO.File]::WriteAllText((Join-Path $directory 'JiffshotMacPackage.psm1'), $stub.Replace('FAIL_STAPLE', "`$$Fail"))
-        $result = Invoke-MacCommand -File $script:PowerShell -Arguments @(
-            '-NoLogo', '-NoProfile', '-File', (Join-Path $directory 'staple.ps1'),
-            '-Path', '/fixture/Jiffshot app.dmg'
-        ) -AllowFailure
+        $stub = $stub.Replace('FAIL_STAPLE', "`$$Fail").Replace('EXPECTED_ACTION', $Action)
+        [IO.File]::WriteAllText((Join-Path $directory 'JiffshotMacPackage.psm1'), $stub)
+        $result = Invoke-MacCommand -File $script:PowerShell -Arguments (@(
+            '-NoLogo', '-NoProfile', '-File', (Join-Path $directory 'staple.ps1')
+        ) + $Switches + @('-Path', '/fixture/Jiffshot app.dmg')) -AllowFailure
         $result.ExitCode | Should -Be $ExpectedExit
         if ($Fail) {
-            $result.Stderr | Should -Match 'macOS ticket stapling failed: fixture stapling exhausted retries'
+            $result.Stderr | Should -Match "macOS ticket $Operation failed: fixture stapler exhausted retries"
         }
     }
 
@@ -900,11 +935,11 @@ Export-ModuleMember -Function Invoke-MacPackage
         $macos | Should -Match 'package/macos/staple\.ps1 -Path macos-package/Jiffshot\.app'
         $macos | Should -Match 'package/macos/staple\.ps1 -Path "\$\{images\[0\]\}"'
         @([regex]::Matches($macos, 'skip_stapling: ''true''')).Count | Should -Be 2
-        $macos | Should -Not -Match 'xcrun stapler staple'
-        $macos | Should -Match 'stapler validate macos-package/Jiffshot\.app'
-        $macos | Should -Match 'stapler validate "\$\{images\[0\]\}"'
+        $macos | Should -Not -Match 'xcrun stapler'
+        $macos | Should -Match 'package/macos/staple\.ps1 -Validate -Path macos-package/Jiffshot\.app'
+        $macos | Should -Match 'package/macos/staple\.ps1 -Validate -Path "\$\{images\[0\]\}"'
         $macos | Should -Match 'codesign --verify --deep --strict "\$mountpoint/Jiffshot\.app"'
-        $macos | Should -Match 'stapler validate "\$mountpoint/Jiffshot\.app"'
+        $macos | Should -Match 'package/macos/staple\.ps1 -Validate -Path "\$mountpoint/Jiffshot\.app"'
         $release = [IO.File]::ReadAllText((Join-Path $script:Repository '.github/workflows/release.yml'))
         $release | Should -Match 'require_macos_notarization: \$\{\{ !inputs\.dry_run \}\}'
         $release | Should -Match '\$env:DRY_RUN -ne ''true'' -and \$status -ne ''notarized'''

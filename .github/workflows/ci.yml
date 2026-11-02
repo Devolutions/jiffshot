@@ -705,8 +705,8 @@ jobs:
           fi
           if [[ "$NOTARIZE" == true ]]; then
             pwsh -NoLogo -NoProfile -File package/macos/staple.ps1 -Path "${images[0]}"
-            xcrun stapler validate macos-package/Jiffshot.app
-            xcrun stapler validate "${images[0]}"
+            pwsh -NoLogo -NoProfile -File package/macos/staple.ps1 -Validate -Path macos-package/Jiffshot.app
+            pwsh -NoLogo -NoProfile -File package/macos/staple.ps1 -Validate -Path "${images[0]}"
             status=notarized
           fi
           mountpoint="$RUNNER_TEMP/jiffshot-dmg-${{ matrix.arch }}"
@@ -715,7 +715,7 @@ jobs:
           trap 'hdiutil detach "$mountpoint"' EXIT
           codesign --verify --deep --strict "$mountpoint/Jiffshot.app"
           if [[ "$NOTARIZE" == true ]]; then
-            xcrun stapler validate "$mountpoint/Jiffshot.app"
+            pwsh -NoLogo -NoProfile -File package/macos/staple.ps1 -Validate -Path "$mountpoint/Jiffshot.app"
           fi
           hdiutil detach "$mountpoint"
           trap - EXIT
