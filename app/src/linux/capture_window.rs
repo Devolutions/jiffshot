@@ -144,6 +144,14 @@ fn area_label(id: &str) -> &'static str {
     AREAS.iter().find(|(a, _)| *a == id).map_or("Screen or window", |(_, l)| l)
 }
 
+fn send_to_label() -> &'static str {
+    if super::settings::copy_capture_to_clipboard().unwrap_or(false) {
+        "Clipboard"
+    } else {
+        "None"
+    }
+}
+
 fn view_json() -> String {
     let busy = super::shared::busy();
     with(|s| {
@@ -184,12 +192,14 @@ fn view_json() -> String {
             "timing": "manual",
             "interval_running": false,
             "active_schedule": null,
-            "fields": [{
-                "id": "selection",
-                "label": "Area",
-                "text": if image { area_label(&s.area) } else { "Screen" },
-                "gear": null,
-            }],
+            "fields": if image {
+                vec![
+                    json!({"id": "selection", "label": "Area", "text": area_label(&s.area), "gear": null}),
+                    json!({"id": "sendto", "label": "Send to", "text": send_to_label(), "gear": null}),
+                ]
+            } else {
+                vec![json!({"id": "selection", "label": "Area", "text": "Screen", "gear": null})]
+            },
             "capture": {"verb": verb, "detail": detail, "hint": ""},
             "widget": false,
             "toggles": toggles,
@@ -281,6 +291,10 @@ fn open_menu(name: &str) {
             entry("open-editor", "Open the editor", false),
             entry("close", "Close", false),
         ]),
+        "sendto" => {
+            let copy = super::settings::copy_capture_to_clipboard().unwrap_or(false);
+            menu(vec![entry("sendto:none", "None", !copy), entry("sendto:clipboard", "Clipboard", copy)]);
+        }
         "edit" => menu(vec![entry("prefs", "Preferences…", false)]),
         "view" => menu(vec![entry("open-editor", "Open the editor", false)]),
         "help" => menu(vec![entry("website", "Jiffshot on GitHub", false)]),
@@ -297,6 +311,11 @@ fn pick(id: &str) {
         "open-editor" => crate::app::post(|app| app.show_editor()),
         "close" => hide(),
         "cancel" => super::shared::finish_active(true),
+        "sendto:none" | "sendto:clipboard" => {
+            if let Err(error) = super::settings::set_copy_capture_to_clipboard(id == "sendto:clipboard") {
+                super::shared::report(format!("Could not save the setting: {error}"));
+            }
+        }
         "prefs" => crate::app::post(|app| {
             app.show_editor();
             app.open_prefs("capture");

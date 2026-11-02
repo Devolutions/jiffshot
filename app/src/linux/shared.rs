@@ -7,7 +7,13 @@ use crate::winutil::{self, CaptureRequest};
 use std::path::PathBuf;
 
 fn open_in_editor(path: PathBuf) {
-    app::post(move |app| app.incoming(path));
+    let copy = super::settings::copy_capture_to_clipboard().unwrap_or(false);
+    app::post(move |app| {
+        app.incoming(path);
+        if copy {
+            app.copy_image();
+        }
+    });
 }
 
 pub(super) fn report(message: String) {

@@ -514,8 +514,8 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
             }
         })
         .icon(super::icon_file())
-        .width(560.0)
-        .height(320.0)
+        .width(if cfg!(target_os = "linux") { 660.0 } else { 560.0 })
+        .height(if cfg!(target_os = "linux") { 400.0 } else { 320.0 })
         .can_resize(false)
         .can_maximize(false);
     #[cfg(windows)]
