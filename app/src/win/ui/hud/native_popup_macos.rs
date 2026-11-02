@@ -1,8 +1,6 @@
 //! Capture-safe native popups for the recording toolbar and Capture Widget.
 //!
-//! The pinned Rustolonia crate predates the safe popup-gate wrapper. This
-//! narrow optional ABI bridge can be replaced by that wrapper once a matching
-//! Rustolonia crate and host release is available.
+//! Jiffshot coordinates the host's popup-gate ABI with its capture exclusions.
 
 use jiffshot_capture::screen::{self, ExclusionTicket};
 use rustolonia::{AppScope, AsControl, EventSubscription, Window};

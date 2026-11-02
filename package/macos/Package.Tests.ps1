@@ -451,13 +451,30 @@ Export-ModuleMember -Function Invoke-MacPackage
 
     It 'requires all host gates in macOS CI' {
         $workflow = [IO.File]::ReadAllText((Join-Path $script:Repository '.github/workflows/ci.yml'))
-        $macos = [regex]::Match($workflow, '(?s)\n  macos:\n(.*?)\n  msi:\n').Groups[1].Value
+        $macos = [regex]::Match($workflow, '(?s)\r?\n  macos:\r?\n(.*?)\r?\n  msi:\r?\n').Groups[1].Value
         $packaging = [regex]::Match($macos, '(?s)- name: Package and verify(.*?)- uses: actions/upload-artifact').Groups[1].Value
         foreach ($flag in '-RequireNativePopupGate', '-RequireNativeTermination', '-RequireNativeFileDrag') {
             $packaging | Should -Match ([regex]::Escape($flag))
         }
         $packaging | Should -Not -Match 'AllowUncheckedHost'
         $packaging | Should -Match 'package/macos/build\.ps1'
+    }
+
+    It 'builds and tests macOS with the release host before recording its checksums' {
+        $workflow = [IO.File]::ReadAllText((Join-Path $script:Repository '.github/workflows/ci.yml'))
+        $macos = [regex]::Match($workflow, '(?s)\r?\n  macos:\r?\n(.*?)\r?\n  msi:\r?\n').Groups[1].Value
+        $build = [regex]::Match($macos, '- name: Build\r?\n\s+run: cargo build --release --locked -p jiffshot -p jiffshot-cli --target')
+        $test = [regex]::Match($macos, '- name: Test\r?\n\s+run: \|\r?\n\s+cargo test --release --locked --workspace --target')
+        $build.Success | Should -BeTrue
+        $test.Success | Should -BeTrue
+        $build.Index | Should -BeLessThan $test.Index
+        $macos | Should -Match 'RUSTOLONIA_HOST_LIB: \$\{\{ github\.workspace \}\}/target/\$\{\{ matrix\.target \}\}/release/librustolonia_host\.dylib'
+        $macos | Should -Not -Match 'build-host\.ps1|RUSTOLONIA_HOST_DIR|\.ci/rustolonia'
+        $macos | Should -Match 'shasum -a 256'
+        foreach ($library in 'librustolonia_host.dylib', 'libAvaloniaNative.dylib', 'libSkiaSharp.dylib', 'libHarfBuzzSharp.dylib') {
+            $macos | Should -Match ([regex]::Escape($library))
+        }
+        $macos | Should -Match 'macos-package/host-SHA256SUMS\.txt'
     }
 
     It 'keeps the developer host fallback disabled only on macOS' {
