@@ -560,18 +560,16 @@ jobs:
 
   macos:
     name: macOS ${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-15
     environment:
       name: ${{ inputs.signing_environment || '' }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
-            arch: arm64
+          - arch: arm64
             target: aarch64-apple-darwin
-          - runner: macos-15-intel
-            arch: x86_64
+          - arch: x86_64
             target: x86_64-apple-darwin
     env:
       CARGO_TERM_COLOR: always
@@ -579,6 +577,37 @@ jobs:
       JIFFSHOT_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Enable Intel tests on the ARM runner
+        if: matrix.arch == 'x86_64'
+        shell: pwsh
+        run: |
+          & softwareupdate --install-rosetta --agree-to-license
+          if ($LASTEXITCODE -ne 0) { throw 'Rosetta installation failed' }
+          & arch -x86_64 /usr/bin/true
+          if ($LASTEXITCODE -ne 0) { throw 'Rosetta cannot execute Intel binaries' }
+
+      - name: Check out the compatible Rustolonia host
+        uses: actions/checkout@v7
+        with:
+          repository: Devolutions/rustolonia
+          ref: d30a7350ba2484e28820b803947193630c32e2bf
+          submodules: recursive
+          path: .ci/rustolonia
+
+      - name: Set up the ARM .NET SDK for the host build
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.301'
+
+      - name: Build the compatible Rustolonia host
+        shell: pwsh
+        run: |
+          $architecture = & uname -m
+          if ($LASTEXITCODE -ne 0 -or $architecture -cne 'arm64') {
+            throw 'Both macOS jobs require an ARM runner'
+          }
+          & ./package/macos/build-host.ps1 -Source .ci/rustolonia -Arch '${{ matrix.arch }}'
 
       - name: Set up Rust
         run: |
@@ -689,6 +718,7 @@ jobs:
           codesign --verify --deep --strict macos-package/Jiffshot.app
           hdiutil verify macos-package/*.dmg
           printf '%s\n' "$status" > macos-package/signing.txt
+          cp "$RUSTOLONIA_HOST_DIR/SHA256SUMS.txt" macos-package/host-SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v7
         with:
@@ -696,6 +726,7 @@ jobs:
           path: |
             macos-package/*.dmg
             macos-package/signing.txt
+            macos-package/host-SHA256SUMS.txt
           if-no-files-found: error
 
       - name: Remove temporary signing keychain
