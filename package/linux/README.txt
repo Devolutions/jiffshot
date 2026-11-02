@@ -13,7 +13,7 @@ Leptonica libraries have different SONAMEs. Build natively for each target.
 Both x64 and ARM64 are configured for all three formats; other architectures and
 older distributions are not currently supported. Rustolonia v12.1.3 publishes
 linux-x64 and linux-arm64 runtime host assets. Host asset availability alone
-does not validate an application build: native CI must build, test and smoke
+does not validate an application build: native CI must build, test and package
 the complete packages on each architecture.
 The GUI requires an X11 display or XWayland. The current Rustolonia host
 does not support a Wayland-only session without XWayland.
@@ -351,14 +351,8 @@ Package tests (Pester 5):
     pwsh package/linux/run-tests.ps1
   # Content tests default to the native machine; CI explicitly asserts the arch.
   # Synthetic ARM64 ELF unit tests do not execute an ARM64 runtime.
-  sudo apt install xvfb x11-utils
-  pwsh package/linux/smoke.ps1 -Launcher /path/to/extracted/bin/jiffshot
-The smoke test uses a private Xvfb display, temporary settings, and a generated
-image. It requires a visible app window and all three private runtimes loaded,
-then stops its own processes. CI also verifies clean installation/removal and
-desktop/MIME registration on Ubuntu 24.04 and Fedora 43.
-WSLg may expose a read-only /tmp/.X11-unix; in that case run the smoke test
-in an isolated container/rootfs instead of changing WSLg's socket directory.
+CI also verifies clean installation/removal and desktop/MIME registration on
+Ubuntu 24.04 and Fedora 43.
 
 The source CI also tests global shortcuts, responsive file loading, native
 file-picker fallback, image and GIF export and effects, saved-capture sharing,

@@ -2,7 +2,7 @@
 #Requires -Version 7.4
 <#
 .SYNOPSIS
-Assert the architecture of every installed private runtime ELF before smoke testing.
+Assert the architecture of every installed private runtime ELF after installation.
 #>
 [CmdletBinding()]
 param(

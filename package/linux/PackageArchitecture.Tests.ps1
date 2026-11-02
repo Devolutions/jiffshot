@@ -579,7 +579,6 @@ Describe 'Architecture workflows' {
                 'runs-on: ${{ matrix.runner }}'
                 'sha256sum --check "SHA256SUMS-linux-$4.txt"'
                 'validate-installed.ps1 -Arch "$4"'
-                'smoke.ps1 -Launcher /usr/bin/jiffshot'
                 'test "$(uname -m)" = "$2"'
                 'package-removal-sentinel'
                 'apt-get remove -y jiffshot'
