@@ -14,8 +14,8 @@ runs:
     - name: Validate signing configuration and install psign
       shell: pwsh
       env:
-        PSIGN_VERSION: 0.8.1
-        PSIGN_SHA256: cb3637318189a8ec99fdd467e76731760025ee2e797768335894dbf27129bbb2
+        PSIGN_VERSION: 0.8.2
+        PSIGN_SHA256: 2b4bf740028dc6daa68dccd33a2b1b5ced6d7e26f5775420dbfba042b115cf82
       run: |
         $ErrorActionPreference = 'Stop'
         foreach ($name in @(
