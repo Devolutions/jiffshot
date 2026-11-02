@@ -321,6 +321,156 @@ Describe 'macOS packaging' {
             Should -Invoke Confirm-MacFileDrag -Times 1 -Exactly
         }
 
+        It 'prepares a checked, signed app without creating an image for external notarization' {
+            $binary = Join-Path $script:Work 'jiffshot'
+            foreach ($name in @('jiffshot', 'jiffshot-cli') + $script:HostLibraries) {
+                [IO.File]::WriteAllText((Join-Path $script:Work $name), $name)
+            }
+            Mock Get-MacDeploymentTarget { '13.0' }
+            Mock New-MacIcon {}
+            Mock Sign-MacPath {}
+            Mock New-MacDiskImage { throw 'unexpected image creation' }
+            Mock Invoke-MacRun {
+                if ($File -ceq '/usr/bin/ditto') { Copy-Item -LiteralPath $Arguments[0] -Destination $Arguments[1] -Recurse }
+            }
+            Mock Confirm-MacHostDiscovery {}
+            Mock Confirm-MacPopupGate {}
+            Mock Confirm-MacTermination {}
+            Mock Confirm-MacFileDrag {}
+            $output = Join-Path $script:Work 'out'
+
+            { Invoke-MacPackage -Binary $binary -Output $output -Arch arm64 -PrepareForExternalNotarization } |
+                Should -Throw '*requires a Developer ID identity*'
+            { Invoke-MacPackage -Binary $binary -Output $output -Arch arm64 -Identity 'Developer ID Application: Example' `
+                -NotaryProfile 'profile' -PrepareForExternalNotarization } | Should -Throw '*no local notary profile*'
+            Invoke-MacPackage -Binary $binary -Output $output -Arch arm64 `
+                -Identity 'Developer ID Application: Example' -PrepareForExternalNotarization
+
+            Test-Path -LiteralPath (Join-Path $output 'Jiffshot.app/Contents/MacOS/jiffshot') | Should -BeTrue
+            @(Get-ChildItem -LiteralPath $output -Filter '*.dmg').Count | Should -Be 0
+            Should -Invoke New-MacDiskImage -Times 0 -Exactly
+            Should -Invoke Confirm-MacHostDiscovery -Times 1 -Exactly
+            Should -Invoke Confirm-MacPopupGate -Times 1 -Exactly
+            Should -Invoke Confirm-MacTermination -Times 1 -Exactly
+            Should -Invoke Confirm-MacFileDrag -Times 1 -Exactly
+        }
+
+        It 'preserves local notarization and stapling for the app and disk image' {
+            $binary = Join-Path $script:Work 'jiffshot'
+            foreach ($name in @('jiffshot', 'jiffshot-cli') + $script:HostLibraries) {
+                [IO.File]::WriteAllText((Join-Path $script:Work $name), $name)
+            }
+            $script:NotaryEvents = [Collections.Generic.List[string]]::new()
+            Mock Get-MacDeploymentTarget { '13.0' }
+            Mock New-MacIcon {}
+            Mock Sign-MacPath {}
+            Mock Confirm-MacHostDiscovery {}
+            Mock Confirm-MacPopupGate {}
+            Mock Confirm-MacTermination {}
+            Mock Confirm-MacFileDrag {}
+            Mock Submit-MacNotarization {
+                $Profile | Should -BeExactly 'fixture-profile'
+                $Keychain | Should -BeExactly 'fixture-keychain'
+                $script:NotaryEvents.Add($(if ($Path.EndsWith('.zip')) { 'submit-app' } else { 'submit-image' }))
+            }
+            Mock Invoke-MacRun {
+                if ($File -ceq '/usr/bin/ditto' -and $Arguments[0] -ceq '-c') {
+                    $script:NotaryEvents.Add('zip')
+                    [IO.File]::WriteAllText($Arguments[-1], 'archive')
+                }
+                elseif ($File -ceq '/usr/bin/ditto') {
+                    Copy-Item -LiteralPath $Arguments[0] -Destination $Arguments[1] -Recurse
+                }
+                elseif ($File -ceq '/usr/bin/hdiutil') {
+                    $script:NotaryEvents.Add('image')
+                    [IO.File]::WriteAllText($Arguments[-1], 'disk image')
+                }
+                elseif ($File -ceq '/usr/bin/xcrun') {
+                    $script:NotaryEvents.Add($(if ($Arguments[-1].EndsWith('.app')) { 'staple-app' } else { 'staple-image' }))
+                }
+            }
+            $output = Join-Path $script:Work 'out'
+            Invoke-MacPackage -Binary $binary -Output $output -Arch arm64 -Identity 'Developer ID Application: Example' `
+                -Keychain 'fixture-keychain' -NotaryProfile 'fixture-profile'
+
+            $script:NotaryEvents.ToArray() | Should -Be @(
+                'zip', 'submit-app', 'staple-app', 'image', 'submit-image', 'staple-image'
+            )
+            Test-Path -LiteralPath (Join-Path $output 'Jiffshot.app') | Should -BeTrue
+            @(Get-ChildItem -LiteralPath $output -Filter '*.dmg').Count | Should -Be 1
+        }
+
+        It 'builds a signed disk image only from a validated, stapled app' {
+            $app = Join-Path $script:Work 'Jiffshot.app'
+            $macos = Join-Path $app 'Contents/MacOS'
+            $frameworks = Join-Path $app 'Contents/Frameworks'
+            [void][IO.Directory]::CreateDirectory($macos)
+            [void][IO.Directory]::CreateDirectory($frameworks)
+            foreach ($name in 'jiffshot', 'jiffshot-cli') {
+                [IO.File]::WriteAllText((Join-Path $macos $name), $name)
+            }
+            foreach ($name in $script:HostLibraries) {
+                [IO.File]::WriteAllText((Join-Path $frameworks $name), $name)
+            }
+            Write-MacPlist (Join-Path $app 'Contents/Info.plist') (Get-MacInfoPlist (Get-MacWorkspaceVersion))
+            $script:ImageEvents = [Collections.Generic.List[string]]::new()
+            Mock Get-MacDeploymentTarget { '13.0' }
+            Mock Sign-MacPath { $script:ImageEvents.Add('sign') }
+            Mock Invoke-MacRun {
+                if ($File -ceq '/usr/bin/xcrun') { $script:ImageEvents.Add('validate') }
+                elseif ($File -ceq '/usr/bin/hdiutil') {
+                    $script:ImageEvents.Add('image')
+                    [IO.File]::WriteAllText($Arguments[-1], 'disk image')
+                }
+                elseif ($File -ceq '/usr/bin/ditto') {
+                    Copy-Item -LiteralPath $Arguments[0] -Destination $Arguments[1] -Recurse
+                }
+            }
+            $output = Join-Path $script:Work 'out'
+            Invoke-MacNotarizedDiskImage -App $app -Output $output -Arch x86_64 -Identity 'Developer ID Application: Example'
+
+            $script:ImageEvents.ToArray() | Should -Be @('validate', 'image', 'sign')
+            Test-Path -LiteralPath (Join-Path $output "Devolutions.Jiffshot-macos-x86_64-$(Get-MacWorkspaceVersion).dmg") |
+                Should -BeTrue
+            Should -Invoke Invoke-MacRun -Times 1 -Exactly -ParameterFilter {
+                $File -ceq '/usr/bin/xcrun' -and ($Arguments -join '|') -ceq "stapler|validate|$app"
+            }
+            Should -Invoke Invoke-MacRun -Times 1 -Exactly -ParameterFilter {
+                $File -ceq '/usr/bin/hdiutil' -and $Arguments[0] -ceq 'create' -and $Arguments -cnotcontains '-quiet'
+            }
+            Should -Invoke Sign-MacPath -Times 1 -Exactly -ParameterFilter {
+                $Path.EndsWith('.dmg') -and $Identity -ceq 'Developer ID Application: Example' -and -not $Runtime
+            }
+        }
+
+        It 'rejects an unstapled or mismatched app before creating an image' {
+            $app = Join-Path $script:Work 'Jiffshot.app'
+            $macos = Join-Path $app 'Contents/MacOS'
+            $frameworks = Join-Path $app 'Contents/Frameworks'
+            [void][IO.Directory]::CreateDirectory($macos)
+            [void][IO.Directory]::CreateDirectory($frameworks)
+            foreach ($name in 'jiffshot', 'jiffshot-cli') {
+                [IO.File]::WriteAllText((Join-Path $macos $name), $name)
+            }
+            foreach ($name in $script:HostLibraries) {
+                [IO.File]::WriteAllText((Join-Path $frameworks $name), $name)
+            }
+            $plist = Join-Path $app 'Contents/Info.plist'
+            Write-MacPlist $plist (Get-MacInfoPlist '999.0.0')
+            Mock Get-MacDeploymentTarget { '13.0' }
+            Mock Invoke-MacRun {
+                if ($File -ceq '/usr/bin/xcrun') { throw 'fixture app is not stapled' }
+            }
+            $output = Join-Path $script:Work 'out'
+            { Invoke-MacNotarizedDiskImage -App $app -Output $output -Arch arm64 -Identity 'Developer ID Application: Example' } |
+                Should -Throw '*Application version does not match*'
+            Write-MacPlist $plist (Get-MacInfoPlist (Get-MacWorkspaceVersion))
+            { Invoke-MacNotarizedDiskImage -App $app -Output $output -Arch arm64 -Identity 'Developer ID Application: Example' } |
+                Should -Throw '*fixture app is not stapled*'
+            Test-Path -LiteralPath $output | Should -BeFalse
+            Should -Invoke Invoke-MacRun -Times 0 -Exactly -ParameterFilter { $File -ceq '/usr/bin/hdiutil' }
+        }
+
         It 'does not publish an artifact when a required host probe fails' {
             $binary = Join-Path $script:Work 'jiffshot'
             foreach ($name in @('jiffshot', 'jiffshot-cli') + $script:HostLibraries) {
@@ -400,6 +550,61 @@ Describe 'macOS packaging' {
     }
 }
 
+Describe 'macOS signing selection' {
+    BeforeAll {
+        $script:PowerShell = (Get-Process -Id $PID).Path
+        $script:SigningSecrets = @(
+            'APPLE_APP_DEV_ID_APP_CERTIFICATE', 'APPLE_APP_DEV_ID_APP_CERTIFICATE_PASSWORD',
+            'APPLE_BOT_PASSWORD', 'DEVOLUTIONSBOT_TOKEN', 'APPLE_CERTIFICATE_BASE64',
+            'APPLE_CERTIFICATE_PASSWORD', 'APPLE_DEVELOPER_ID', 'APPLE_ID', 'APPLE_TEAM_ID',
+            'APPLE_APP_PASSWORD'
+        )
+    }
+
+    It 'handles <Name> without exposing credential values' -TestCases @(
+        @{ Name = 'an unsigned dry run'; Present = @(); Required = 'false'; Kind = 'none'; Enabled = 'false'; Notarize = 'false' }
+        @{ Name = 'a token without Apple credentials'; Present = @('DEVOLUTIONSBOT_TOKEN'); Required = 'false'; Kind = 'none'; Enabled = 'false'; Notarize = 'false' }
+        @{ Name = 'missing credentials for publication'; Present = @(); Required = 'true'; ExpectedError = 'require Apple signing and notarization' }
+        @{ Name = 'an incomplete shared certificate'; Present = @('APPLE_APP_DEV_ID_APP_CERTIFICATE'); Required = 'false'; ExpectedError = 'APPLE_APP_DEV_ID_APP_CERTIFICATE_PASSWORD' }
+        @{ Name = 'a missing private-actions token'; Present = @('APPLE_APP_DEV_ID_APP_CERTIFICATE', 'APPLE_APP_DEV_ID_APP_CERTIFICATE_PASSWORD'); Required = 'false'; ExpectedError = 'DEVOLUTIONSBOT_TOKEN' }
+        @{ Name = 'shared signing without notarization'; Present = @('APPLE_APP_DEV_ID_APP_CERTIFICATE', 'APPLE_APP_DEV_ID_APP_CERTIFICATE_PASSWORD', 'DEVOLUTIONSBOT_TOKEN'); Required = 'false'; Kind = 'unigetui'; Enabled = 'true'; Notarize = 'false' }
+        @{ Name = 'publication without a shared notary password'; Present = @('APPLE_APP_DEV_ID_APP_CERTIFICATE', 'APPLE_APP_DEV_ID_APP_CERTIFICATE_PASSWORD', 'DEVOLUTIONSBOT_TOKEN'); Required = 'true'; ExpectedError = 'require Apple signing and notarization' }
+        @{ Name = 'shared signing and notarization'; Present = @('APPLE_APP_DEV_ID_APP_CERTIFICATE', 'APPLE_APP_DEV_ID_APP_CERTIFICATE_PASSWORD', 'APPLE_BOT_PASSWORD', 'DEVOLUTIONSBOT_TOKEN'); Required = 'true'; Kind = 'unigetui'; Enabled = 'true'; Notarize = 'true' }
+        @{ Name = 'legacy signing without notarization'; Present = @('APPLE_CERTIFICATE_BASE64', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_DEVELOPER_ID'); Required = 'false'; Kind = 'legacy'; Enabled = 'true'; Notarize = 'false' }
+        @{ Name = 'legacy signing and notarization'; Present = @('APPLE_CERTIFICATE_BASE64', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_DEVELOPER_ID', 'APPLE_ID', 'APPLE_TEAM_ID', 'APPLE_APP_PASSWORD'); Required = 'true'; Kind = 'legacy'; Enabled = 'true'; Notarize = 'true' }
+        @{ Name = 'incomplete legacy notarization'; Present = @('APPLE_CERTIFICATE_BASE64', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_DEVELOPER_ID', 'APPLE_ID'); Required = 'false'; ExpectedError = 'Legacy notarization requires' }
+        @{ Name = 'incomplete shared credentials alongside legacy credentials'; Present = @('APPLE_BOT_PASSWORD', 'APPLE_CERTIFICATE_BASE64', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_DEVELOPER_ID'); Required = 'false'; ExpectedError = 'APPLE_APP_DEV_ID_APP_CERTIFICATE_PASSWORD' }
+        @{ Name = 'shared credentials taking precedence over legacy credentials'; Present = @('APPLE_APP_DEV_ID_APP_CERTIFICATE', 'APPLE_APP_DEV_ID_APP_CERTIFICATE_PASSWORD', 'APPLE_BOT_PASSWORD', 'DEVOLUTIONSBOT_TOKEN', 'APPLE_CERTIFICATE_BASE64'); Required = 'true'; Kind = 'unigetui'; Enabled = 'true'; Notarize = 'true' }
+    ) {
+        param($Name, $Present, $Required, $Kind, $Enabled, $Notarize, $ExpectedError)
+        $environment = @{}
+        foreach ($entry in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
+            $environment[[string]$entry.Key] = [string]$entry.Value
+        }
+        foreach ($name in $script:SigningSecrets) { $environment.Remove($name) }
+        foreach ($name in $Present) { $environment[$name] = "fixture-value-$name" }
+        $output = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $environment['GITHUB_OUTPUT'] = $output
+        $environment['REQUIRE_MACOS_NOTARIZATION'] = $Required
+        $result = Invoke-MacCommand -File $script:PowerShell -Arguments @(
+            '-NoLogo', '-NoProfile', '-File', (Join-Path $PSScriptRoot 'select-signing.ps1')
+        ) -Environment $environment -AllowFailure
+
+        if ($ExpectedError) {
+            $result.ExitCode | Should -Not -Be 0
+            $result.Stderr | Should -Match ([regex]::Escape($ExpectedError))
+            Test-Path -LiteralPath $output | Should -BeFalse
+        }
+        else {
+            $result.ExitCode | Should -Be 0
+            [IO.File]::ReadAllLines($output) | Should -Be @("kind=$Kind", "enabled=$Enabled", "notarize=$Notarize")
+        }
+        foreach ($name in $Present) {
+            ($result.Stdout + $result.Stderr) | Should -Not -Match ([regex]::Escape($environment[$name]))
+        }
+    }
+}
+
 Describe 'macOS packaging entrypoint and CI' {
     BeforeAll {
         $script:Repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
@@ -418,9 +623,11 @@ Describe 'macOS packaging entrypoint and CI' {
         $stub = @'
 function Invoke-MacPackage {
     param($Binary, $Output, $Arch, $Identity, $Keychain, $NotaryProfile,
-        [bool]$RequirePopupGate, [bool]$RequireTermination, [bool]$RequireFileDrag)
+        [bool]$RequirePopupGate, [bool]$RequireTermination, [bool]$RequireFileDrag,
+        [switch]$PrepareForExternalNotarization)
     [IO.File]::WriteAllText($env:BUILD_TEST_RESULT, (ConvertTo-Json -Compress -InputObject @{
         popup = $RequirePopupGate; termination = $RequireTermination; drag = $RequireFileDrag
+        external = $PrepareForExternalNotarization.IsPresent
     }))
 }
 Export-ModuleMember -Function Invoke-MacPackage
@@ -440,6 +647,7 @@ Export-ModuleMember -Function Invoke-MacPackage
         $checks.popup | Should -Be $Checked
         $checks.termination | Should -Be $Checked
         $checks.drag | Should -Be $Checked
+        $checks.external | Should -BeFalse
         $result = Invoke-MacCommand -File $script:PowerShell -Arguments @(
             '-NoLogo', '-NoProfile', '-File', (Join-Path $directory 'build.ps1'),
             '-Binary', 'unused', '-Output', 'unused', '-Arch', 'arm64',
@@ -447,6 +655,27 @@ Export-ModuleMember -Function Invoke-MacPackage
         ) -Environment $environment -AllowFailure
         $result.ExitCode | Should -Not -Be 0
         $result.Stderr | Should -Match 'cannot be combined'
+    }
+
+    It 'passes external notarization preparation through the entrypoint' {
+        $directory = Join-Path $TestDrive 'external-entrypoint'
+        [void][IO.Directory]::CreateDirectory($directory)
+        [IO.File]::Copy((Join-Path $PSScriptRoot 'build.ps1'), (Join-Path $directory 'build.ps1'))
+        $stub = @'
+function Invoke-MacPackage {
+    param($Binary, $Output, $Arch, $Identity, $Keychain, $NotaryProfile,
+        [bool]$RequirePopupGate, [bool]$RequireTermination, [bool]$RequireFileDrag,
+        [switch]$PrepareForExternalNotarization)
+    if (-not $PrepareForExternalNotarization) { throw 'external preparation was not passed' }
+}
+Export-ModuleMember -Function Invoke-MacPackage
+'@
+        [IO.File]::WriteAllText((Join-Path $directory 'JiffshotMacPackage.psm1'), $stub)
+        $result = Invoke-MacCommand -File $script:PowerShell -Arguments @(
+            '-NoLogo', '-NoProfile', '-File', (Join-Path $directory 'build.ps1'),
+            '-Binary', 'unused', '-Output', 'unused', '-Arch', 'arm64', '-PrepareForExternalNotarization'
+        )
+        $result.ExitCode | Should -Be 0
     }
 
     It 'requires all host gates in macOS CI' {
@@ -475,6 +704,36 @@ Export-ModuleMember -Function Invoke-MacPackage
             $macos | Should -Match ([regex]::Escape($library))
         }
         $macos | Should -Match 'macos-package/host-SHA256SUMS\.txt'
+    }
+
+    It 'uses the shared Apple secrets only for release signing and notarizes both artifacts' {
+        $workflow = [IO.File]::ReadAllText((Join-Path $script:Repository '.github/workflows/ci.yml'))
+        $macos = [regex]::Match($workflow, '(?s)\r?\n  macos:\r?\n(.*?)\r?\n  msi:\r?\n').Groups[1].Value
+        $selection = [regex]::Match($macos, '(?s)- name: Select macOS signing(.*?)- name: Enable Intel').Groups[1].Value
+        $selection | Should -Match "github\.event_name != 'pull_request' && inputs\.signing_environment != ''"
+        foreach ($secret in 'APPLE_APP_DEV_ID_APP_CERTIFICATE', 'APPLE_APP_DEV_ID_APP_CERTIFICATE_PASSWORD',
+                            'APPLE_BOT_PASSWORD', 'DEVOLUTIONSBOT_TOKEN') {
+            $selection | Should -Match ([regex]::Escape("secrets.$secret"))
+        }
+        $macos | Should -Match 'repository: Devolutions/actions'
+        $macos | Should -Match 'persist-credentials: false'
+        $macos | Should -Match 'macos-code-sign-setup'
+        $macos | Should -Match 'security set-keychain-settings -lut 21600 build\.keychain'
+        $macos | Should -Match 'rm -f -- certificate\.p12'
+        $macos | Should -Match 'steps\.signing\.outputs\.kind == ''legacy'''
+        $macos.IndexOf('- name: Notarize the macOS app') | Should -BeLessThan $macos.IndexOf('- name: Build disk image from notarized app')
+        $macos.IndexOf('- name: Build disk image from notarized app') | Should -BeLessThan $macos.IndexOf('- name: Notarize the macOS disk image')
+        $macos.IndexOf('- name: Notarize the macOS disk image') | Should -BeLessThan $macos.IndexOf('- name: Verify macOS package')
+        $macos | Should -Match 'skip_checksum_validation: ''true'''
+        $macos | Should -Match 'skip_stapling: ''true'''
+        $macos | Should -Match 'stapler staple macos-package/Jiffshot\.app'
+        $macos | Should -Match 'stapler validate macos-package/Jiffshot\.app'
+        $macos | Should -Match 'stapler validate "\$\{images\[0\]\}"'
+        $macos | Should -Match 'codesign --verify --deep --strict "\$mountpoint/Jiffshot\.app"'
+        $macos | Should -Match 'stapler validate "\$mountpoint/Jiffshot\.app"'
+        $release = [IO.File]::ReadAllText((Join-Path $script:Repository '.github/workflows/release.yml'))
+        $release | Should -Match 'require_macos_notarization: \$\{\{ !inputs\.dry_run \}\}'
+        $release | Should -Match '\$env:DRY_RUN -ne ''true'' -and \$status -ne ''notarized'''
     }
 
     It 'keeps the developer host fallback disabled only on macOS' {

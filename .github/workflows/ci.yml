@@ -15,6 +15,10 @@ on:
         description: GitHub environment for signing; empty produces unsigned CI artifacts
         type: string
         default: ''
+      require_macos_notarization:
+        description: Require macOS signing and notarization credentials before building
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -582,6 +586,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Select macOS signing
+        id: signing
+        if: github.event_name != 'pull_request' && inputs.signing_environment != ''
+        shell: pwsh
+        env:
+          REQUIRE_MACOS_NOTARIZATION: ${{ inputs.require_macos_notarization }}
+          APPLE_APP_DEV_ID_APP_CERTIFICATE: ${{ secrets.APPLE_APP_DEV_ID_APP_CERTIFICATE }}
+          APPLE_APP_DEV_ID_APP_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_APP_DEV_ID_APP_CERTIFICATE_PASSWORD }}
+          APPLE_BOT_PASSWORD: ${{ secrets.APPLE_BOT_PASSWORD }}
+          DEVOLUTIONSBOT_TOKEN: ${{ secrets.DEVOLUTIONSBOT_TOKEN }}
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: pwsh -NoLogo -NoProfile -File package/macos/select-signing.ps1
+
       - name: Enable Intel tests on the ARM runner
         if: matrix.arch == 'x86_64'
         shell: pwsh
@@ -634,8 +656,31 @@ jobs:
           Import-Module Pester -RequiredVersion $version
           & ./package/macos/run-tests.ps1
 
-      - name: Configure optional Apple signing
-        id: signing
+      - name: Checkout shared Apple signing actions
+        if: steps.signing.outputs.kind == 'unigetui'
+        uses: actions/checkout@v7
+        with:
+          repository: Devolutions/actions
+          ref: v1
+          token: ${{ secrets.DEVOLUTIONSBOT_TOKEN }}
+          path: .ci/devolutions-actions
+          persist-credentials: false
+
+      - name: Configure shared Apple signing
+        id: shared_signing
+        if: steps.signing.outputs.kind == 'unigetui'
+        uses: ./.ci/devolutions-actions/macos-code-sign-setup
+        with:
+          base64_certificate: ${{ secrets.APPLE_APP_DEV_ID_APP_CERTIFICATE }}
+          certificate_password: ${{ secrets.APPLE_APP_DEV_ID_APP_CERTIFICATE_PASSWORD }}
+
+      - name: Extend shared signing keychain timeout
+        if: steps.signing.outputs.kind == 'unigetui'
+        run: security set-keychain-settings -lut 21600 build.keychain
+
+      - name: Configure legacy Apple signing
+        id: legacy_signing
+        if: steps.signing.outputs.kind == 'legacy'
         env:
           CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -680,25 +725,107 @@ jobs:
 
       - name: Package and verify
         env:
-          IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID }}
+          IDENTITY: "${{ steps.signing.outputs.enabled == 'true' && (secrets.APPLE_DEVELOPER_ID || vars.APPLE_DEVELOPER_ID || 'Developer ID Application: Devolutions inc.') || '' }}"
+          SIGNING_KIND: ${{ steps.signing.outputs.kind }}
           SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
           NOTARIZE: ${{ steps.signing.outputs.notarize }}
         shell: bash
         run: |
           set -euo pipefail
           args=(-Binary "target/${{ matrix.target }}/release/jiffshot" -Output macos-package -Arch "${{ matrix.arch }}" -RequireNativePopupGate -RequireNativeTermination -RequireNativeFileDrag)
-          status=adhoc
           if [[ "$SIGNING_ENABLED" == true ]]; then
-            args+=(-Identity "$IDENTITY" -Keychain "$RUNNER_TEMP/jiffshot-signing.keychain-db")
-            status=signed
+            args+=(-Identity "$IDENTITY")
+            if [[ "$SIGNING_KIND" == legacy ]]; then
+              args+=(-Keychain "$RUNNER_TEMP/jiffshot-signing.keychain-db")
+            fi
           fi
           if [[ "$NOTARIZE" == true ]]; then
-            args+=(-NotaryProfile jiffshot-ci)
-            status=notarized
+            if [[ "$SIGNING_KIND" == legacy ]]; then
+              args+=(-NotaryProfile jiffshot-ci)
+            elif [[ "$SIGNING_KIND" == unigetui ]]; then
+              args+=(-PrepareForExternalNotarization)
+            else
+              echo "Unknown macOS signing mode: $SIGNING_KIND" >&2
+              exit 1
+            fi
           fi
           pwsh -NoLogo -NoProfile -File package/macos/build.ps1 "${args[@]}"
           codesign --verify --deep --strict macos-package/Jiffshot.app
-          hdiutil verify macos-package/*.dmg
+          if [[ "$SIGNING_KIND" == unigetui && "$NOTARIZE" == true ]]; then
+            ditto -c -k --keepParent macos-package/Jiffshot.app "$RUNNER_TEMP/Jiffshot-app.zip"
+          fi
+
+      - name: Notarize the macOS app
+        if: steps.signing.outputs.kind == 'unigetui' && steps.signing.outputs.notarize == 'true'
+        uses: ./.ci/devolutions-actions/macos-notarize
+        with:
+          apple_password: ${{ secrets.APPLE_BOT_PASSWORD }}
+          package_path: ${{ runner.temp }}/Jiffshot-app.zip
+          skip_checksum_validation: 'true'
+          skip_stapling: 'true'
+
+      - name: Build disk image from notarized app
+        id: disk_image
+        if: steps.signing.outputs.kind == 'unigetui' && steps.signing.outputs.notarize == 'true'
+        env:
+          IDENTITY: "${{ secrets.APPLE_DEVELOPER_ID || vars.APPLE_DEVELOPER_ID || 'Developer ID Application: Devolutions inc.' }}"
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun stapler staple macos-package/Jiffshot.app
+          pwsh -NoLogo -NoProfile -File package/macos/build-notarized-dmg.ps1 \
+            -App macos-package/Jiffshot.app -Output macos-package -Arch "${{ matrix.arch }}" -Identity "$IDENTITY"
+          shopt -s nullglob
+          images=(macos-package/*.dmg)
+          if [[ ${#images[@]} -ne 1 ]]; then
+            echo 'Expected exactly one macOS disk image.' >&2
+            exit 1
+          fi
+          printf 'path=%s\n' "${images[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Notarize the macOS disk image
+        if: steps.signing.outputs.kind == 'unigetui' && steps.signing.outputs.notarize == 'true'
+        uses: ./.ci/devolutions-actions/macos-notarize
+        with:
+          apple_password: ${{ secrets.APPLE_BOT_PASSWORD }}
+          package_path: ${{ steps.disk_image.outputs.path }}
+
+      - name: Verify macOS package
+        env:
+          SIGNING_ENABLED: ${{ steps.signing.outputs.enabled }}
+          NOTARIZE: ${{ steps.signing.outputs.notarize }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          images=(macos-package/*.dmg)
+          if [[ ${#images[@]} -ne 1 ]]; then
+            echo 'Expected exactly one macOS disk image.' >&2
+            exit 1
+          fi
+          codesign --verify --deep --strict macos-package/Jiffshot.app
+          hdiutil verify "${images[0]}"
+          status=adhoc
+          if [[ "$SIGNING_ENABLED" == true ]]; then
+            codesign --verify --strict "${images[0]}"
+            status=signed
+          fi
+          if [[ "$NOTARIZE" == true ]]; then
+            xcrun stapler validate macos-package/Jiffshot.app
+            xcrun stapler validate "${images[0]}"
+            status=notarized
+          fi
+          mountpoint="$RUNNER_TEMP/jiffshot-dmg-${{ matrix.arch }}"
+          mkdir "$mountpoint"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mountpoint" "${images[0]}"
+          trap 'hdiutil detach "$mountpoint"' EXIT
+          codesign --verify --deep --strict "$mountpoint/Jiffshot.app"
+          if [[ "$NOTARIZE" == true ]]; then
+            xcrun stapler validate "$mountpoint/Jiffshot.app"
+          fi
+          hdiutil detach "$mountpoint"
+          trap - EXIT
+          rmdir "$mountpoint"
           printf '%s\n' "$status" > macos-package/signing.txt
           (cd "target/${{ matrix.target }}/release" && shasum -a 256 \
             librustolonia_host.dylib libAvaloniaNative.dylib libSkiaSharp.dylib libHarfBuzzSharp.dylib) \
@@ -713,9 +840,23 @@ jobs:
             macos-package/host-SHA256SUMS.txt
           if-no-files-found: error
 
-      - name: Remove temporary signing keychain
-        if: always() && steps.signing.outputs.enabled == 'true'
-        run: security delete-keychain "$RUNNER_TEMP/jiffshot-signing.keychain-db"
+      - name: Remove temporary legacy signing keychain
+        if: always() && steps.signing.outputs.kind == 'legacy'
+        run: |
+          if [[ -f "$RUNNER_TEMP/jiffshot-signing.keychain-db" ]]; then
+            security delete-keychain "$RUNNER_TEMP/jiffshot-signing.keychain-db"
+          fi
+
+      - name: Remove shared signing keychain
+        if: always() && steps.signing.outputs.kind == 'unigetui' && steps.shared_signing.outcome != 'skipped'
+        run: |
+          if [[ -f certificate.p12 ]]; then
+            rm -f -- certificate.p12
+          fi
+          keychain="$HOME/Library/Keychains/build.keychain-db"
+          if [[ -f "$keychain" ]]; then
+            security delete-keychain "$keychain"
+          fi
 
   msi:
     name: ${{ matrix.rid }} MSI

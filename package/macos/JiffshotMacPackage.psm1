@@ -81,6 +81,14 @@ function Get-MacWorkspaceVersion {
     return $versions[0].Groups[1].Value
 }
 
+function Get-MacPackageVersion {
+    $version = Get-MacWorkspaceVersion
+    if ($env:JIFFSHOT_VERSION -and $env:JIFFSHOT_VERSION -cne $version) {
+        throw "JIFFSHOT_VERSION $env:JIFFSHOT_VERSION does not match Cargo.toml version $version"
+    }
+    return $version
+}
+
 function ConvertTo-MacVersion([string]$Version) {
     if ($Version -cnotmatch '^[0-9]+(?:\.[0-9]+){0,2}$') { throw "Invalid macOS version: $Version" }
     $parts = @($Version.Split('.') | ForEach-Object { [int]$_ })
@@ -227,6 +235,29 @@ function Submit-MacNotarization([string]$Path, [string]$Profile, [string]$Keycha
     Invoke-MacRun '/usr/bin/xcrun' $arguments
 }
 
+function Confirm-MacComponents([string[]]$Paths, [string]$Arch) {
+    foreach ($path in $Paths) {
+        if (-not [IO.File]::Exists($path)) { throw "Required bundle binary not found: $path" }
+        Invoke-MacRun '/usr/bin/lipo' @($path, '-verify_arch', $Arch)
+        $minimum = Get-MacDeploymentTarget $path $Arch
+        if ((ConvertTo-MacVersion $minimum) -gt (ConvertTo-MacVersion $script:MinimumMacOS)) {
+            throw "$path requires macOS $minimum; the bundle must support macOS $script:MinimumMacOS"
+        }
+    }
+}
+
+function New-MacDiskImage([string]$Staging, [string]$Destination, [string]$Identity, [string]$Keychain, [string]$NotaryProfile) {
+    [void][IO.Directory]::CreateSymbolicLink((Join-Path $Staging 'Applications'), '/Applications')
+    $temporaryDmg = Join-Path ([IO.Path]::GetDirectoryName($Staging)) ([IO.Path]::GetFileName($Destination))
+    Invoke-MacRun '/usr/bin/hdiutil' @('create', '-volname', 'Jiffshot', '-srcfolder', $Staging, '-fs', 'HFS+', '-format', 'UDZO', $temporaryDmg)
+    if ($Identity -cne '-') { Sign-MacPath $temporaryDmg $Identity $Keychain $null $false }
+    if ($NotaryProfile) {
+        Submit-MacNotarization $temporaryDmg $NotaryProfile $Keychain
+        Invoke-MacRun '/usr/bin/xcrun' @('stapler', 'staple', $temporaryDmg)
+    }
+    return $temporaryDmg
+}
+
 function Get-CleanHostEnvironment {
     $environment = @{}
     foreach ($entry in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
@@ -315,7 +346,8 @@ function Invoke-MacPackage {
         [string]$NotaryProfile,
         [bool]$RequirePopupGate = $true,
         [bool]$RequireTermination = $true,
-        [bool]$RequireFileDrag = $true
+        [bool]$RequireFileDrag = $true,
+        [switch]$PrepareForExternalNotarization
     )
     $Binary = [IO.Path]::GetFullPath($Binary)
     $Output = [IO.Path]::GetFullPath($Output)
@@ -323,23 +355,16 @@ function Invoke-MacPackage {
     $directory = [IO.Path]::GetDirectoryName($Binary)
     $cli = Join-Path $directory 'jiffshot-cli'
     $libraries = @($script:HostLibraries | ForEach-Object { Join-Path $directory $_ })
-    foreach ($path in @($Binary, $cli) + $libraries) {
-        if (-not [IO.File]::Exists($path)) { throw "Required bundle binary not found: $path" }
-        Invoke-MacRun '/usr/bin/lipo' @($path, '-verify_arch', $Arch)
-        $minimum = Get-MacDeploymentTarget $path $Arch
-        if ((ConvertTo-MacVersion $minimum) -gt (ConvertTo-MacVersion $script:MinimumMacOS)) {
-            throw "$path requires macOS $minimum; the bundle must support macOS $script:MinimumMacOS"
-        }
-    }
+    Confirm-MacComponents (@($Binary, $cli) + $libraries) $Arch
     if ($NotaryProfile -and $Identity -ceq '-') { throw 'Notarization requires a Developer ID signing identity' }
+    if ($PrepareForExternalNotarization -and (-not $Identity -or $Identity -ceq '-' -or $NotaryProfile)) {
+        throw 'External notarization preparation requires a Developer ID identity and no local notary profile'
+    }
     if (-not ($RequirePopupGate -and $RequireTermination -and $RequireFileDrag)) {
         if ($Identity -cne '-' -or $NotaryProfile) { throw 'Signing or notarization requires all native host capability checks' }
         [Console]::Error.WriteLine('WARNING: native host capability checks were skipped; this package may not run and is not suitable for distribution.')
     }
-    $version = Get-MacWorkspaceVersion
-    if ($env:JIFFSHOT_VERSION -and $env:JIFFSHOT_VERSION -cne $version) {
-        throw "JIFFSHOT_VERSION $env:JIFFSHOT_VERSION does not match Cargo.toml version $version"
-    }
+    $version = Get-MacPackageVersion
     [void][IO.Directory]::CreateDirectory($Output)
     $appOutput = Join-Path $Output 'Jiffshot.app'
     $dmgOutput = Join-Path $Output "Devolutions.Jiffshot-macos-$Arch-$version.dmg"
@@ -371,20 +396,18 @@ function Invoke-MacPackage {
         if ($RequirePopupGate) { Confirm-MacPopupGate $stagedBinary $stagedHost }
         if ($RequireTermination) { Confirm-MacTermination $stagedBinary $stagedHost }
         if ($RequireFileDrag) { Confirm-MacFileDrag $stagedBinary $stagedHost }
+        if ($PrepareForExternalNotarization) {
+            Invoke-MacRun '/usr/bin/ditto' @($app, $appOutput)
+            Write-Host "Prepared $appOutput for external notarization."
+            return
+        }
         if ($NotaryProfile) {
             $archive = Join-Path $temporary 'Jiffshot.zip'
             Invoke-MacRun '/usr/bin/ditto' @('-c', '-k', '--keepParent', $app, $archive)
             Submit-MacNotarization $archive $NotaryProfile $Keychain
             Invoke-MacRun '/usr/bin/xcrun' @('stapler', 'staple', $app)
         }
-        [void][IO.Directory]::CreateSymbolicLink((Join-Path $staging 'Applications'), '/Applications')
-        $temporaryDmg = Join-Path $temporary ([IO.Path]::GetFileName($dmgOutput))
-        Invoke-MacRun '/usr/bin/hdiutil' @('create', '-quiet', '-volname', 'Jiffshot', '-srcfolder', $staging, '-fs', 'HFS+', '-format', 'UDZO', $temporaryDmg)
-        if ($Identity -cne '-') { Sign-MacPath $temporaryDmg $Identity $Keychain $null $false }
-        if ($NotaryProfile) {
-            Submit-MacNotarization $temporaryDmg $NotaryProfile $Keychain
-            Invoke-MacRun '/usr/bin/xcrun' @('stapler', 'staple', $temporaryDmg)
-        }
+        $temporaryDmg = New-MacDiskImage $staging $dmgOutput $Identity $Keychain $NotaryProfile
         Invoke-MacRun '/usr/bin/ditto' @($app, $appOutput)
         [IO.File]::Copy($temporaryDmg, $dmgOutput)
     }
@@ -396,4 +419,48 @@ function Invoke-MacPackage {
     elseif (-not $NotaryProfile) { Write-Host 'The package is Developer ID signed but has not been notarized.' }
 }
 
-Export-ModuleMember -Function Invoke-MacPackage, Invoke-MacCommand, Write-MacPlist, Get-CleanHostEnvironment
+function Invoke-MacNotarizedDiskImage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$App,
+        [Parameter(Mandatory)][string]$Output,
+        [Parameter(Mandatory)][ValidateSet('arm64', 'x86_64')][string]$Arch,
+        [Parameter(Mandatory)][string]$Identity,
+        [string]$Keychain
+    )
+    $App = [IO.Path]::GetFullPath($App)
+    $Output = [IO.Path]::GetFullPath($Output)
+    if (-not [IO.Directory]::Exists($App)) { throw "Application bundle not found: $App" }
+    if (-not $Identity -or $Identity -ceq '-') { throw 'A Developer ID signing identity is required' }
+    $version = Get-MacPackageVersion
+    $macos = Join-Path $App 'Contents/MacOS'
+    $frameworks = Join-Path $App 'Contents/Frameworks'
+    $libraries = @($script:HostLibraries | ForEach-Object { Join-Path $frameworks $_ })
+    Confirm-MacComponents (@((Join-Path $macos 'jiffshot'), (Join-Path $macos 'jiffshot-cli')) + $libraries) $Arch
+    $plist = Join-Path $App 'Contents/Info.plist'
+    $plistVersion = Invoke-MacCommand -File '/usr/bin/plutil' -Arguments @(
+        '-extract', 'CFBundleShortVersionString', 'raw', '-o', '-', $plist
+    )
+    if ($plistVersion.Stdout.Trim() -cne $version) { throw "Application version does not match Cargo.toml version $version" }
+    Invoke-MacRun '/usr/bin/codesign' @('--verify', '--deep', '--strict', $App)
+    Invoke-MacRun '/usr/bin/xcrun' @('stapler', 'validate', $App)
+    $dmgOutput = Join-Path $Output "Devolutions.Jiffshot-macos-$Arch-$version.dmg"
+    if ([IO.File]::Exists($dmgOutput) -or [IO.Directory]::Exists($dmgOutput)) {
+        throw 'The output disk image already exists; choose an empty output directory'
+    }
+    [void][IO.Directory]::CreateDirectory($Output)
+    $temporary = [IO.Directory]::CreateTempSubdirectory('jiffshot-macos-image-').FullName
+    try {
+        $staging = Join-Path $temporary 'image'
+        [void][IO.Directory]::CreateDirectory($staging)
+        Invoke-MacRun '/usr/bin/ditto' @($App, (Join-Path $staging 'Jiffshot.app'))
+        $temporaryDmg = New-MacDiskImage $staging $dmgOutput $Identity $Keychain $null
+        [IO.File]::Copy($temporaryDmg, $dmgOutput)
+    }
+    finally {
+        [IO.Directory]::Delete($temporary, $true)
+    }
+    Write-Host "Packaged $dmgOutput from the notarized app."
+}
+
+Export-ModuleMember -Function Invoke-MacPackage, Invoke-MacNotarizedDiskImage, Invoke-MacCommand, Write-MacPlist, Get-CleanHostEnvironment
