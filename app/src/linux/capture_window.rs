@@ -281,6 +281,9 @@ fn open_menu(name: &str) {
             entry("open-editor", "Open the editor", false),
             entry("close", "Close", false),
         ]),
+        "edit" => menu(vec![entry("prefs", "Preferences…", false)]),
+        "view" => menu(vec![entry("open-editor", "Open the editor", false)]),
+        "help" => menu(vec![entry("website", "Jiffshot on GitHub", false)]),
         _ => {}
     }
 }
@@ -294,6 +297,13 @@ fn pick(id: &str) {
         "open-editor" => crate::app::post(|app| app.show_editor()),
         "close" => hide(),
         "cancel" => super::shared::finish_active(true),
+        "prefs" => crate::app::post(|app| {
+            app.show_editor();
+            app.open_prefs("capture");
+        }),
+        "website" => {
+            let _ = std::process::Command::new("xdg-open").arg("https://github.com/Devolutions/jiffshot").spawn();
+        }
         "pause" => {
             let _ = super::control::record_pause();
         }
@@ -345,7 +355,12 @@ fn act(action: &str) {
     match verb {
         "tab" => {
             let tab = arg.parse::<usize>().unwrap_or(1);
-            with(|s| s.tab = if tab == 2 { 2 } else { 1 });
+            with(|s| {
+                s.tab = if tab == 2 { 2 } else { 1 };
+                if tab == 0 {
+                    s.area = "desktop".to_owned();
+                }
+            });
             save();
             publish_view();
         }

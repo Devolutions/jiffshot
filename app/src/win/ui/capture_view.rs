@@ -323,7 +323,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         let content = StackPanel::el()
             .spacing(5.0)
             .horizontal_alignment(HorizontalAlignment::Center)
-            .child(glyph(MODE_GLYPHS[0], 28.0).text(move || MODE_GLYPHS[tab.get().min(2)].to_owned()).horizontal_alignment(HorizontalAlignment::Center).foreground(WHITE))
+            .child(glyph(MODE_GLYPHS[0], 28.0).text(move || super::icons::glyph(MODE_GLYPHS[tab.get().min(2)]).to_owned()).horizontal_alignment(HorizontalAlignment::Center).foreground(WHITE))
             .child(verb);
         let button = Button::el()
             .width(112.0)
@@ -359,7 +359,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         .foreground(move || palette(dark).text);
     let mode_capsule = Border::el()
         .width(168.0)
-        .height(52.0)
+        .height(if cfg!(target_os = "linux") { 66.0 } else { 52.0 })
         .padding(3.0)
         .corner_radius(12.0)
         .horizontal_alignment(HorizontalAlignment::Center)
