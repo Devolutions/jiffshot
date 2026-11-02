@@ -244,10 +244,30 @@ fn open_menu(name: &str) {
                     entry(&format!("interval:{n}"), &label, interval == n)
                 })
                 .collect();
+            let schedule = super::settings::schedule_preferences().ok();
+            let times: Vec<Value> = std::iter::once(entry("schedule:off", "Off", !schedule.is_some_and(|p| p.enabled)))
+                .chain(["09:00", "12:00", "15:00", "18:00"].map(|t| {
+                    let on = schedule.is_some_and(|p| p.enabled && p.time.to_string() == t);
+                    entry(&format!("schedule:{t}"), &format!("Every day at {t}"), on)
+                }))
+                .collect();
+            let presets = super::settings::screen_capture_presets().unwrap_or_default();
+            let mut preset_items: Vec<Value> = vec![entry("preset-save", "Save the current delay and cursor", false)];
+            for preset in &presets {
+                preset_items.push(entry(&format!("preset:{}", preset.name), &preset.name, false));
+            }
+            for preset in &presets {
+                preset_items.push(entry(&format!("preset-del:{}", preset.name), &format!("Delete {}", preset.name), false));
+            }
             let mut items = vec![
                 json!({"id": "", "label": "Delay", "enabled": true, "items": delays}),
                 json!({"id": "", "label": "Interval capture", "enabled": true, "items": intervals}),
+                json!({"id": "", "label": "Daily capture", "enabled": true, "items": times}),
+                json!({"id": "", "label": "Presets", "enabled": true, "items": preset_items}),
             ];
+            if super::control::recording_active() {
+                items.push(entry("pause", "Pause or resume the recording", false));
+            }
             if busy {
                 items.push(entry("cancel", "Cancel the running capture", false));
             }
@@ -269,6 +289,38 @@ fn pick(id: &str) {
         "open-editor" => crate::app::post(|app| app.show_editor()),
         "close" => hide(),
         "cancel" => super::shared::finish_active(true),
+        "pause" => {
+            let _ = super::control::record_pause();
+        }
+        "preset-save" => {
+            let (delay, cursor) = with(|s| (s.delay, s.cursor));
+            let name = format!("{delay} s delay, cursor {}", if cursor { "on" } else { "off" });
+            let included = super::capture::CaptureCursor::from_included(cursor);
+            if let Err(error) = super::settings::save_screen_capture_preset(&name, delay, included) {
+                super::shared::report(format!("Could not save the preset: {error}"));
+            }
+        }
+        _ if id.starts_with("preset-del:") => {
+            let _ = super::settings::delete_screen_capture_preset(&id["preset-del:".len()..]);
+        }
+        _ if id.starts_with("preset:") => {
+            if let Ok(preset) = super::settings::screen_capture_preset(&id["preset:".len()..]) {
+                with(|s| {
+                    s.delay = preset.delay_seconds();
+                    s.cursor = matches!(preset.cursor(), super::capture::CaptureCursor::Included);
+                });
+            }
+        }
+        _ if id.starts_with("schedule:") => {
+            let current = super::settings::schedule_preferences().map(|p| p.time).unwrap_or(super::settings::SchedulePreferences::default().time);
+            let result = match id["schedule:".len()..].parse::<super::schedule::ScheduleTime>() {
+                Ok(time) => super::settings::set_schedule_preferences(time, true),
+                Err(_) => super::settings::set_schedule_preferences(current, false),
+            };
+            if let Err(error) = result {
+                super::shared::report(format!("Could not save the schedule: {error}"));
+            }
+        }
         _ => {
             if let Some(n) = id.strip_prefix("delay:").and_then(|n| n.parse().ok()) {
                 with(|s| s.delay = n);

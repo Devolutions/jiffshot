@@ -10,7 +10,7 @@ fn open_in_editor(path: PathBuf) {
     app::post(move |app| app.incoming(path));
 }
 
-fn report(message: String) {
+pub(super) fn report(message: String) {
     app::post(move |app| app.set_status(message));
 }
 
@@ -98,6 +98,26 @@ pub fn start_tray() -> Option<super::tray::Session> {
     .ok()?;
     session.activate();
     Some(session)
+}
+
+/// Fires the daily capture while the application runs.
+pub fn start_schedule() {
+    use super::schedule::{DailySchedule, LocalMinute};
+    use super::settings::ScheduleClaim;
+    std::thread::spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_secs(15));
+        let Ok(preferences) = super::settings::schedule_preferences() else { continue };
+        if !preferences.enabled {
+            continue;
+        }
+        let Ok(now) = LocalMinute::now() else { continue };
+        let mut schedule = DailySchedule::new(preferences.time, preferences.last_fired);
+        if schedule.should_fire(now)
+            && matches!(super::settings::mark_schedule_fired(preferences.time, now.day()), Ok(ScheduleClaim::Claimed))
+        {
+            capture_image();
+        }
+    });
 }
 
 /// Binds the portal global shortcuts chosen in the settings; keeps running until the process exits.

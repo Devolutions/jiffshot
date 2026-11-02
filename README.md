@@ -431,6 +431,7 @@ While hidden, capture and recording results, scheduled-capture problems, and sho
 - [x] Provide opt-in tray operation with window restoration if the tray host disappears.
 - [x] Support opt-in desktop login startup with safe tray fallback.
 - [x] Save named screen/window presets with independent delay and cursor choices.
+- [x] Daily scheduled capture, delay/cursor presets and recording pause from the shared Capture window.
 - [x] Scrolling, horizontal scrolling, panoramic, interval and text capture from the Capture window.
 - [ ] Automatic scrolling, a drawn selection overlay (not possible on Wayland), unattended/background scheduling, and presets for other capture modes.
 - [ ] Recording floating controls, live drawing and cursor effects, and the full Windows video editor.

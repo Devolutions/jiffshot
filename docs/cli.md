@@ -349,6 +349,13 @@ every possible desktop or professional video workflow:
 This matrix is the coverage contract: unsupported rows are intentional boundaries,
 not promises hidden behind a success response.
 
+## Linux notes
+
+- The control socket is `$XDG_RUNTIME_DIR/jiffshot/control.sock`, owned by the running app.
+- Linux supports `status`, `screenshot`, `ocr`, `open`, `library list` and
+  `record start|status|pause|stop|cancel`. Screenshots and recordings go through the desktop
+  portal, which may ask for consent; there is no window/element automation (Wayland forbids it).
+
 ## macOS notes
 
 - `jiffshot-cli` is in `Jiffshot.app/Contents/MacOS` and talks to the running app over a

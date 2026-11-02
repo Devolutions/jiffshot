@@ -500,6 +500,7 @@ pub(crate) fn run() -> rustolonia::Result<()> {
     crate::linux::shared::install_capture_handler();
     let _tray = crate::linux::shared::start_tray();
     crate::linux::shared::start_shortcuts();
+    crate::linux::shared::start_schedule();
     let mut editor = Editor::new(Document::blank(1280, 720, Rgba::WHITE));
     editor.analyzer = Some(Box::new(ocr::Recognizer));
     *canvas::EDITOR.lock() = Some(editor);
