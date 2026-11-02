@@ -327,10 +327,7 @@ pub(crate) fn run() -> Result<()> {
         _ => {}
     }
     let _control = super::control::start();
-    if matches!(
-        launch,
-        launch::Launch::Editor(_) | launch::Launch::Capture | launch::Launch::Record
-    )
+    if !matches!(launch, launch::Launch::Background)
         && std::env::var_os("JIFFSHOT_CLASSIC_UI").is_none()
     {
         return crate::shared_main::run();

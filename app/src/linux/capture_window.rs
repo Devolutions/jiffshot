@@ -8,12 +8,24 @@ use serde_json::{json, Value};
 use std::cell::RefCell;
 
 const DELAYS: [u64; 4] = [0, 3, 5, 10];
+const INTERVALS: [u32; 5] = [0, 5, 10, 30, 60];
+const AREAS: [(&str, &str); 6] = [
+    ("screen", "Screen or window"),
+    ("desktop", "Region or window (desktop dialog)"),
+    ("scrolling", "Scrolling capture (down)"),
+    ("scrolling-h", "Scrolling capture (right)"),
+    ("panoramic", "Panoramic capture"),
+    ("text", "Text from screen"),
+];
 
 struct State {
     sink: Option<CaptureViewModelSink>,
     window: Option<Window>,
     /// 1 captures images, 2 records video.
     tab: usize,
+    area: String,
+    /// Seconds between interval captures; 0 captures once.
+    interval: u32,
     cursor: bool,
     delay: u64,
     system_audio: bool,
@@ -26,6 +38,8 @@ thread_local! {
         sink: None,
         window: None,
         tab: 1,
+        area: String::new(),
+        interval: 0,
         cursor: true,
         delay: 0,
         system_audio: false,
@@ -38,9 +52,62 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     STATE.with(|s| f(&mut s.borrow_mut()))
 }
 
+fn settings_path() -> Option<std::path::PathBuf> {
+    Some(dirs::config_dir()?.join("jiffshot").join("capture-window.json"))
+}
+
+fn load() {
+    let Some(value) = settings_path()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    else {
+        return;
+    };
+    with(|s| {
+        if let Some(tab) = value["tab"].as_u64() {
+            s.tab = if tab == 2 { 2 } else { 1 };
+        }
+        if let Some(area) = value["area"].as_str().filter(|a| AREAS.iter().any(|(id, _)| id == a)) {
+            s.area = area.to_owned();
+        }
+        s.interval = value["interval"].as_u64().map_or(0, |n| n as u32);
+        s.delay = value["delay"].as_u64().unwrap_or(0);
+        s.cursor = value["cursor"].as_bool().unwrap_or(true);
+        s.system_audio = value["system_audio"].as_bool().unwrap_or(false);
+        s.microphone = value["microphone"].as_bool().unwrap_or(false);
+    });
+}
+
+fn save() {
+    let value = with(|s| {
+        json!({
+            "tab": s.tab, "area": s.area, "interval": s.interval, "delay": s.delay,
+            "cursor": s.cursor, "system_audio": s.system_audio, "microphone": s.microphone,
+        })
+    });
+    let Some(path) = settings_path() else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(error) = std::fs::write(&path, value.to_string()) {
+        eprintln!("jiffshot: could not save the Capture window settings: {error}");
+    }
+}
+
 /// Remembers the window mounted for this model (hidden until shown).
 pub fn set_window(window: Window) {
-    with(|s| s.window = Some(window));
+    load();
+    with(|s| {
+        if s.area.is_empty() {
+            s.area = "screen".to_owned();
+        }
+        s.window = Some(window);
+    });
+}
+
+/// Redraws the window after a capture started or ended elsewhere.
+pub fn refresh() {
+    crate::app::post(|_| publish_view());
 }
 
 /// Shows the window in front.
@@ -70,17 +137,30 @@ fn toggle(id: &'static str, label: &'static str, on: bool) -> Value {
     json!({"id": id, "label": label, "on": on, "enabled": true})
 }
 
+fn area_label(id: &str) -> &'static str {
+    AREAS.iter().find(|(a, _)| *a == id).map_or("Screen or window", |(_, l)| l)
+}
+
 fn view_json() -> String {
+    let busy = super::shared::busy();
     with(|s| {
         let image = s.tab != 2;
         let recording = super::control::recording_active();
-        let delay = if s.delay == 0 {
-            String::new()
-        } else {
-            format!("After {} s", s.delay)
-        };
-        let (verb, detail) = if image {
-            ("Capture", delay)
+        let interval = image && s.area == "screen" && s.interval > 0;
+        let (verb, detail) = if busy {
+            ("Stop", "Finish the running capture".to_owned())
+        } else if image {
+            let delay = if s.delay == 0 {
+                String::new()
+            } else {
+                format!("After {} s", s.delay)
+            };
+            match s.area.as_str() {
+                "scrolling" | "scrolling-h" | "panoramic" => ("Start", "Then press Stop to finish".to_owned()),
+                "text" => ("Read", "Copy the text found".to_owned()),
+                _ if interval => ("Start", format!("Every {} s", s.interval)),
+                _ => ("Capture", delay),
+            }
         } else if recording {
             ("Stop", "Finish and open the video".to_owned())
         } else {
@@ -103,7 +183,7 @@ fn view_json() -> String {
             "fields": [{
                 "id": "selection",
                 "label": "Area",
-                "text": if image { "Screen or window" } else { "Screen" },
+                "text": if image { area_label(&s.area) } else { "Screen" },
                 "gear": null,
             }],
             "capture": {"verb": verb, "detail": detail, "hint": ""},
@@ -140,26 +220,38 @@ fn entry(id: &str, label: &str, checked: bool) -> Value {
 
 fn open_menu(name: &str) {
     match name {
-        "selection" => menu(vec![entry(
-            "area:portal",
-            "Screen or window (desktop dialog)",
-            true,
-        )]),
+        "selection" => {
+            let (image, area) = with(|s| (s.tab != 2, s.area.clone()));
+            if image {
+                menu(AREAS.iter().map(|(id, label)| entry(&format!("area:{id}"), label, *id == area)).collect());
+            } else {
+                menu(vec![entry("area:screen", "Screen (desktop dialog)", true)]);
+            }
+        }
         "more" => {
-            let delay = with(|s| s.delay);
-            menu(
-                DELAYS
-                    .iter()
-                    .map(|&n| {
-                        let label = if n == 0 {
-                            "No delay".to_owned()
-                        } else {
-                            format!("Delay {n} seconds")
-                        };
-                        entry(&format!("delay:{n}"), &label, delay == n)
-                    })
-                    .collect(),
-            );
+            let (delay, interval, busy) = with(|s| (s.delay, s.interval, super::shared::busy()));
+            let delays: Vec<Value> = DELAYS
+                .iter()
+                .map(|&n| {
+                    let label = if n == 0 { "No delay".to_owned() } else { format!("{n} seconds") };
+                    entry(&format!("delay:{n}"), &label, delay == n)
+                })
+                .collect();
+            let intervals: Vec<Value> = INTERVALS
+                .iter()
+                .map(|&n| {
+                    let label = if n == 0 { "Off".to_owned() } else { format!("Every {n} seconds") };
+                    entry(&format!("interval:{n}"), &label, interval == n)
+                })
+                .collect();
+            let mut items = vec![
+                json!({"id": "", "label": "Delay", "enabled": true, "items": delays}),
+                json!({"id": "", "label": "Interval capture", "enabled": true, "items": intervals}),
+            ];
+            if busy {
+                items.push(entry("cancel", "Cancel the running capture", false));
+            }
+            menu(items);
         }
         "file" => menu(vec![
             entry("open-editor", "Open the editor", false),
@@ -176,12 +268,18 @@ fn pick(id: &str) {
         "video:switch:microphone" => with(|s| s.microphone = !s.microphone),
         "open-editor" => crate::app::post(|app| app.show_editor()),
         "close" => hide(),
+        "cancel" => super::shared::finish_active(true),
         _ => {
             if let Some(n) = id.strip_prefix("delay:").and_then(|n| n.parse().ok()) {
                 with(|s| s.delay = n);
+            } else if let Some(n) = id.strip_prefix("interval:").and_then(|n| n.parse().ok()) {
+                with(|s| s.interval = n);
+            } else if let Some(area) = id.strip_prefix("area:") {
+                with(|s| s.area = area.to_owned());
             }
         }
     }
+    save();
     publish_view();
 }
 
@@ -191,18 +289,38 @@ fn act(action: &str) {
         "tab" => {
             let tab = arg.parse::<usize>().unwrap_or(1);
             with(|s| s.tab = if tab == 2 { 2 } else { 1 });
+            save();
             publish_view();
         }
         "menu" => open_menu(arg),
         "pick" => pick(arg),
         "capture" => {
-            let (video, cursor, delay, audio) = with(|s| (s.tab == 2, s.cursor, s.delay, audio_name(s)));
-            hide();
+            if super::shared::busy() {
+                super::shared::finish_active(false);
+                publish_view();
+                return;
+            }
+            let (video, cursor, delay, audio, area, interval) =
+                with(|s| (s.tab == 2, s.cursor, s.delay, audio_name(s), s.area.clone(), s.interval));
+            let long_running = !video && (area.contains("scrolling") || area == "panoramic" || (area == "screen" && interval > 0));
+            if !long_running {
+                hide();
+            }
             if video {
                 super::shared::toggle_recording_with(audio, cursor);
-            } else {
-                super::shared::capture_image_with(cursor, delay);
+                return;
             }
+            use super::scroll::{Direction, Mode};
+            match area.as_str() {
+                "desktop" => super::shared::capture_desktop(false),
+                "text" => super::shared::capture_text(),
+                "scrolling" => super::shared::capture_scrolling(Mode::Scrolling(Direction::Vertical)),
+                "scrolling-h" => super::shared::capture_scrolling(Mode::Scrolling(Direction::Horizontal)),
+                "panoramic" => super::shared::capture_scrolling(Mode::Panoramic),
+                _ if interval > 0 => super::shared::capture_interval(interval, cursor),
+                _ => super::shared::capture_image_with(cursor, delay),
+            }
+            publish_view();
         }
         "editor" => crate::app::post(|app| app.show_editor()),
         _ => {}
