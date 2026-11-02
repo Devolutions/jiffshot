@@ -24,6 +24,12 @@ from explicit directories rather than through Fontconfig. Ubuntu and Fedora
 DejaVu font locations are supported; installing a font that Fontconfig can find
 is not sufficient if its directory is absent from the document font search.
 
+Linux recording and video exports share the AAC stage in `app/src/linux/aac.rs`.
+Its sample-based encoder timestamps absorb small pause/resume timestamp overlaps
+without shortening encoded media. Source sample counts exclude codec padding;
+after EOS, MP4 presentation edits remove encoder priming and padding without
+discarding audible samples.
+
 ## Windows UI and view models
 
 `app/src/win/vm.rs` holds the view models: each window's values are signals the

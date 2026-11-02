@@ -106,7 +106,10 @@ pub(super) fn encoder() -> Result<gst::Element, String> {
         |name| {
             let builder = gst::ElementFactory::make(name)
                 .name("aac-encoder")
-                .property("bitrate", BITRATE);
+                .property("bitrate", BITRATE)
+                // Pause boundaries can overlap by a fraction of a mixer buffer.
+                // Keep codec timestamps sample-based instead of shortening MP4 media.
+                .property("perfect-timestamp", true);
             let builder = if name == "fdkaacenc" {
                 builder.property_from_str("rate-control", "cbr")
             } else {
@@ -414,23 +417,60 @@ mod tests {
 
     #[test]
     fn selected_encoder_negotiates_lc_stereo_and_decodes_a_resampled_tone() {
+        assert_gapless_tone(44_100, 441, 100, false);
+    }
+
+    #[test]
+    fn selected_encoder_preserves_samples_when_pause_timestamps_overlap() {
+        assert_gapless_tone(44_100, 441, 100, true);
+    }
+
+    #[test]
+    fn selected_encoder_preserves_partial_final_frames() {
+        // This endpoint leaves just 14 samples before the next AAC frame boundary.
+        assert_gapless_tone(48_000, 48_121, 2, false);
+        assert_gapless_tone(48_000, 48_121, 2, true);
+    }
+
+    fn assert_gapless_tone(rate: u64, samples: u64, buffers: u64, overlap: bool) {
         gst::init().expect("GStreamer should initialize");
         let selected = select_factory().expect("a real AAC encoder must be installed");
         let directory = tempfile::tempdir().expect("temporary media directory");
         let path = directory.path().join("resampled.mp4");
-        let pipeline = gst::parse::launch(
-            "audiotestsrc freq=440 num-buffers=100 samplesperbuffer=441 \
-             ! audio/x-raw,format=F32LE,rate=44100,channels=2,layout=interleaved \
+        let pipeline = gst::parse::launch(&format!(
+            "audiotestsrc freq=440 num-buffers={buffers} samplesperbuffer={samples} \
+             ! audio/x-raw,format=F32LE,rate={rate},channels=2,layout=interleaved \
              ! audioconvert ! audioresample \
              ! audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved \
              ! identity name=input \
-             aacparse name=parser ! mp4mux movie-timescale=48000 ! filesink name=output",
-        )
+             aacparse name=parser ! mp4mux movie-timescale=48000 ! filesink name=output"
+        ))
         .expect("headless audio pipeline should parse")
         .downcast::<gst::Pipeline>()
         .expect("headless audio test should have a pipeline");
         add_to_pipeline(&pipeline, "input", "parser")
             .expect("the selected real encoder should connect");
+        if overlap {
+            pipeline
+                .by_name("input")
+                .expect("raw audio input")
+                .static_pad("src")
+                .expect("raw audio output")
+                .add_probe(gst::PadProbeType::BUFFER, |_, info| {
+                    if let Some(buffer) = info.buffer_mut() {
+                        let pts = buffer.pts().expect("source audio timestamp");
+                        if pts >= gst::ClockTime::from_mseconds(500) {
+                            // Pause removal can shift the next mixer buffer slightly
+                            // before the preceding buffer's sample-based endpoint.
+                            buffer
+                                .make_mut()
+                                .set_pts(pts - gst::ClockTime::from_mseconds(1));
+                        }
+                    }
+                    gst::PadProbeReturn::Ok
+                })
+                .expect("timestamp overlap probe");
+        }
         let encoder = pipeline
             .by_name("aac-encoder")
             .expect("shared stage should have an encoder");
@@ -507,9 +547,13 @@ mod tests {
             .get::<u64>("num-bytes")
             .expect("source byte count")
             / 4;
-        // The finite resampler covers sample positions through (44100-1)/44100.
-        // Its exclusive output endpoint is 47999, not a codec-dependent allowance.
-        assert_eq!(source_frames, (44_100u64 - 1) * 48_000 / 44_100 + 1);
+        // The finite resampler includes the last input sample's position.
+        let expected_frames = if rate == 48_000 {
+            samples * buffers
+        } else {
+            (samples * buffers - 1) * 48_000 / rate + 1
+        };
+        assert_eq!(source_frames, expected_frames);
         let timing = mp4_timing(&pipeline).expect("AAC source accounting");
         if let Some(ref timing) = timing {
             assert_eq!(
@@ -605,17 +649,19 @@ mod tests {
             window.iter().any(|sample| sample.unsigned_abs() > 5_000),
             "decoded audio must contain the tone, not silence"
         );
-        let (mut dot, mut signal_energy, mut reference_energy) = (0.0, 0.0, 0.0);
-        for (index, &sample) in audio.iter().enumerate().take(9_600).skip(4_800) {
-            let reference = (std::f64::consts::TAU * 440.0 * index as f64 / 48_000.0).sin();
-            dot += f64::from(sample) * reference;
-            signal_energy += f64::from(sample).powi(2);
-            reference_energy += reference * reference;
+        for start in [4_800, audio.len() * 3 / 4] {
+            let (mut dot, mut signal_energy, mut reference_energy) = (0.0, 0.0, 0.0);
+            for (index, &sample) in audio.iter().enumerate().skip(start).take(4_800) {
+                let reference = (std::f64::consts::TAU * 440.0 * index as f64 / 48_000.0).sin();
+                dot += f64::from(sample) * reference;
+                signal_energy += f64::from(sample).powi(2);
+                reference_energy += reference * reference;
+            }
+            let correlation = dot / (signal_energy * reference_energy).sqrt();
+            assert!(
+                correlation > 0.98,
+                "decoded source phase must remain aligned at sample {start}: {correlation}"
+            );
         }
-        let correlation = dot / (signal_energy * reference_energy).sqrt();
-        assert!(
-            correlation > 0.98,
-            "decoded source phase must not shift by codec priming: {correlation}"
-        );
     }
 }
