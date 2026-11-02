@@ -10,6 +10,8 @@
 pub mod canvas_view;
 mod capture_view;
 mod dark_blue;
+#[cfg(windows)]
+mod editor_placement;
 pub mod dialogs;
 mod extras;
 mod hud;

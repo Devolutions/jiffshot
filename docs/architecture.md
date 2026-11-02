@@ -24,6 +24,12 @@ from explicit directories rather than through Fontconfig. Ubuntu and Fedora
 DejaVu font locations are supported; installing a font that Fontconfig can find
 is not sufficient if its directory is absent from the document font search.
 
+Linux recording and video exports share the AAC stage in `app/src/linux/aac.rs`.
+Its sample-based encoder timestamps absorb small pause/resume timestamp overlaps
+without shortening encoded media. Source sample counts exclude codec padding;
+after EOS, MP4 presentation edits remove encoder priming and padding without
+discarding audible samples.
+
 ## Windows UI and view models
 
 `app/src/win/vm.rs` holds the view models: each window's values are signals the
@@ -87,6 +93,14 @@ Each side owns its section; the library folder and the color theme are shared
 at the top, so captures are saved where the editor lists them and every
 window has the same theme. Reads and writes share one lock.
 `JIFFSHOT_LIBRARY` overrides the library for both sides without being saved.
+
+The Windows editor keeps its normal outer bounds, display DPI and maximized state
+in a separate `editor_window` section so ordinary editor preference saves do not
+overwrite window placement. On first opening it centers on the pointer's monitor,
+using at most 90% of the work area and the preferred 1500 by 960 logical-pixel size.
+Later openings restore its placement within one monitor's work area. Monitor,
+taskbar and DPI changes refit the window without spanning displays; minimized
+bounds never replace the normal placement (`app/src/win/ui/editor_placement.rs`).
 
 ## Windows preferences
 
