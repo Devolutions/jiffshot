@@ -24,6 +24,9 @@ mod main_window;
 mod native_theme;
 #[cfg(any(windows, target_os = "macos"))]
 mod overlay;
+#[cfg(target_os = "linux")]
+#[path = "overlay_linux.rs"]
+pub(crate) mod overlay;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod prefs_window;
 #[cfg(target_os = "macos")]

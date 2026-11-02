@@ -12,6 +12,7 @@ mod launch;
 mod library;
 mod main;
 mod notification;
+pub(crate) mod overlay;
 pub(crate) mod ocr;
 mod portal;
 mod portal_frame;

@@ -9,7 +9,12 @@ use std::cell::RefCell;
 
 const DELAYS: [u64; 4] = [0, 3, 5, 10];
 const INTERVALS: [u32; 5] = [0, 5, 10, 30, 60];
-const AREAS: [(&str, &str); 7] = [
+const AREAS: [(&str, &str); 12] = [
+    ("region", "Region"),
+    ("freehand", "Freehand region"),
+    ("multi", "Multiple areas"),
+    ("fixed", "Fixed size (1280 × 720)"),
+    ("repeat", "Repeat last area"),
     ("fullscreen", "Full screen"),
     ("screen", "Window or screen (chooser)"),
     ("desktop", "Region or window (desktop dialog)"),
@@ -103,7 +108,7 @@ pub fn set_window(window: Window) {
     load();
     with(|s| {
         if s.area.is_empty() {
-            s.area = "fullscreen".to_owned();
+            s.area = "region".to_owned();
         }
         s.window = Some(window);
     });
@@ -378,7 +383,7 @@ fn act(action: &str) {
             with(|s| {
                 s.tab = if tab == 2 { 2 } else { 1 };
                 if tab == 0 {
-                    s.area = "desktop".to_owned();
+                    s.area = "region".to_owned();
                 }
             });
             save();
@@ -402,13 +407,19 @@ fn act(action: &str) {
                 super::shared::toggle_recording_with(audio, cursor, webcam);
                 return;
             }
-            use super::scroll::{Direction, Mode};
+            use super::overlay::Mode;
+            use super::scroll::{Direction, Mode as ScrollMode};
             match area.as_str() {
                 "desktop" => super::shared::capture_desktop(false),
+                "region" => super::shared::capture_overlay(Mode::Normal, false, delay),
+                "freehand" => super::shared::capture_overlay(Mode::Freehand, false, delay),
+                "multi" => super::shared::capture_overlay(Mode::MultiArea, false, delay),
+                "fixed" => super::shared::capture_overlay(Mode::Fixed(1280, 720), false, delay),
+                "repeat" => super::shared::capture_overlay(Mode::Normal, true, delay),
                 "text" => super::shared::capture_text(),
-                "scrolling" => super::shared::capture_scrolling(Mode::Scrolling(Direction::Vertical)),
-                "scrolling-h" => super::shared::capture_scrolling(Mode::Scrolling(Direction::Horizontal)),
-                "panoramic" => super::shared::capture_scrolling(Mode::Panoramic),
+                "scrolling" => super::shared::capture_scrolling(ScrollMode::Scrolling(Direction::Vertical)),
+                "scrolling-h" => super::shared::capture_scrolling(ScrollMode::Scrolling(Direction::Horizontal)),
+                "panoramic" => super::shared::capture_scrolling(ScrollMode::Panoramic),
                 "fullscreen" if interval == 0 => super::shared::capture_full_screen(cursor, delay),
                 _ if interval > 0 => super::shared::capture_interval(interval, cursor),
                 _ => super::shared::capture_image_with(cursor, delay),

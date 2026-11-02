@@ -79,7 +79,7 @@ pub(crate) fn toggle_recording_with(audio: &'static str, cursor: bool, webcam: b
 
 pub fn install_capture_handler() {
     winutil::set_capture_handler(|request| match request {
-        CaptureRequest::Image => capture_image(),
+        CaptureRequest::Image => capture_overlay(super::overlay::Mode::Normal, false, 0),
         CaptureRequest::Video => toggle_recording(),
         CaptureRequest::CaptureWindow => app::post(|_| super::capture_window::show()),
     });
@@ -185,7 +185,7 @@ fn audio_name(audio: super::capture::RecordingAudio) -> &'static str {
 /// Runs the capture or recording requested on the command line.
 pub fn run_launch_action(flag: &str) {
     match flag {
-        "--capture" => capture_image(),
+        "--capture" => capture_overlay(super::overlay::Mode::Normal, false, 0),
         "--record" => toggle_recording(),
         "--capture-interactive" => capture_desktop(false),
         "--grab-text" => capture_text(),
@@ -233,6 +233,83 @@ pub(crate) fn finish_active(cancel: bool) {
             let _ = stop.try_send(());
         }
         None => {}
+    }
+}
+
+/// The last area the selection overlay captured, for "Repeat last area".
+static LAST_AREA: std::sync::Mutex<Option<jiffshot_capture::Rect>> = std::sync::Mutex::new(None);
+
+#[allow(clippy::chunks_exact_to_as_chunks)]
+fn frame_from_pixmap(pixmap: &tiny_skia::Pixmap) -> jiffshot_capture::Frame {
+    let mut frame = jiffshot_capture::Frame::new(pixmap.width(), pixmap.height());
+    for (dst, src) in frame.pixels.chunks_exact_mut(4).zip(pixmap.pixels()) {
+        let inv = 255 - src.alpha() as u32;
+        let over = |c: u8| (c as u32 + inv).min(255) as u8;
+        dst.copy_from_slice(&[over(src.blue()), over(src.green()), over(src.red()), 255]);
+    }
+    frame
+}
+
+#[allow(clippy::chunks_exact_to_as_chunks)]
+fn document_from_frame(frame: &jiffshot_capture::Frame) -> Option<jiffshot_doc::Document> {
+    let mut pixmap = tiny_skia::Pixmap::new(frame.width, frame.height)?;
+    for (dst, src) in pixmap.pixels_mut().iter_mut().zip(frame.pixels.chunks_exact(4)) {
+        let (b, g, r, a) = (src[0] as u32, src[1] as u32, src[2] as u32, src[3] as u32);
+        let premultiply = |c: u32| ((c * a + 127) / 255) as u8;
+        *dst = tiny_skia::PremultipliedColorU8::from_rgba(premultiply(r), premultiply(g), premultiply(b), a as u8)?;
+    }
+    Some(jiffshot_doc::Document::new(pixmap))
+}
+
+fn save_frame(frame: &jiffshot_capture::Frame) -> Result<PathBuf, String> {
+    let document = document_from_frame(frame).ok_or("the selection is empty")?;
+    super::capture::save_capture(&document)
+}
+
+/// Grabs the desktop, lets the user select on it with the overlay (like the Windows and macOS
+/// one), then saves and opens the selected part. `repeat` skips the overlay and takes the last
+/// area again. Falls back to the desktop's own dialog when the grab or the overlay fails.
+pub(crate) fn capture_overlay(mode: super::overlay::Mode, repeat: bool, delay: u64) {
+    report(if delay == 0 { "Preparing the selection…".into() } else { format!("Capturing in {delay} s…") });
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400 + delay * 1000));
+        let frame = match futures_lite::future::block_on(super::screenshot::capture_full_screen()) {
+            Ok(Some(document)) => frame_from_pixmap(&document.flatten()),
+            Ok(None) => return report("Capture cancelled".into()),
+            Err(error) => {
+                eprintln!("jiffshot: {error}; using the desktop dialog");
+                return capture_desktop(false);
+            }
+        };
+        let last = *LAST_AREA.lock().unwrap();
+        if let (true, Some(area)) = (repeat, last) {
+            return finish_selection(Some(super::overlay::Selection::Region(area)), frame);
+        }
+        let Some(scope) = app::scope() else { return report("The editor is not running".into()) };
+        let posted = scope.clone().post(move || {
+            let shown = crate::ui::overlay::select(&scope, frame, mode, |selection, frame| {
+                std::thread::spawn(move || finish_selection(selection, frame));
+            });
+            if let Err(error) = shown {
+                eprintln!("jiffshot: the selection overlay failed: {error}; using the desktop dialog");
+                capture_desktop(false);
+            }
+        });
+        if posted.is_err() {
+            report("The editor is not running".into());
+        }
+    });
+}
+
+fn finish_selection(selection: Option<super::overlay::Selection>, frame: jiffshot_capture::Frame) {
+    let Some(selection) = selection else { return report("Capture cancelled".into()) };
+    *LAST_AREA.lock().unwrap() = Some(selection.rect());
+    let result = super::overlay::crop(&frame, &selection)
+        .ok_or_else(|| "the selection is empty".to_owned())
+        .and_then(|cropped| save_frame(&cropped));
+    match result {
+        Ok(path) => open_in_editor(path),
+        Err(error) => report(format!("Capture failed: {error}")),
     }
 }
 

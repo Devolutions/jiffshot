@@ -271,6 +271,12 @@ pub fn schedule_sync() {
     }
 }
 
+/// The UI thread's scope, once the app runs.
+#[cfg(target_os = "linux")]
+pub(crate) fn scope() -> Option<AppScope> {
+    SCOPE.lock().unwrap().clone()
+}
+
 /// Runs `f` on the UI thread with the app state, from any thread.
 pub fn post(f: impl FnOnce(&mut App) + Send + 'static) {
     let scope = SCOPE.lock().unwrap().clone();
