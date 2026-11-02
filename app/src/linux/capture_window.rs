@@ -9,7 +9,7 @@ use std::cell::RefCell;
 
 const DELAYS: [u64; 4] = [0, 3, 5, 10];
 const INTERVALS: [u32; 5] = [0, 5, 10, 30, 60];
-const AREAS: [(&str, &str); 12] = [
+const AREAS: [(&str, &str); 11] = [
     ("region", "Region"),
     ("freehand", "Freehand region"),
     ("multi", "Multiple areas"),
@@ -17,7 +17,6 @@ const AREAS: [(&str, &str); 12] = [
     ("repeat", "Repeat last area"),
     ("fullscreen", "Full screen"),
     ("screen", "Window or screen (chooser)"),
-    ("desktop", "Region or window (desktop dialog)"),
     ("scrolling", "Scrolling capture (down)"),
     ("scrolling-h", "Scrolling capture (right)"),
     ("panoramic", "Panoramic capture"),
@@ -410,7 +409,6 @@ fn act(action: &str) {
             use super::overlay::Mode;
             use super::scroll::{Direction, Mode as ScrollMode};
             match area.as_str() {
-                "desktop" => super::shared::capture_desktop(false),
                 "region" => super::shared::capture_overlay(Mode::Normal, false, delay),
                 "freehand" => super::shared::capture_overlay(Mode::Freehand, false, delay),
                 "multi" => super::shared::capture_overlay(Mode::MultiArea, false, delay),
