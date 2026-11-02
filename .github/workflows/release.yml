@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version matching Cargo.toml, without the v prefix (for example, 0.1.0)
+        description: Version matching Cargo.toml, without the v prefix (for example, 0.2.0)
         required: true
         type: string
       dry_run:
