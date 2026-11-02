@@ -258,16 +258,8 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          # Linux packages are still built, verified, and kept in release-assets; set to 'true' to publish them.
-          PUBLISH_LINUX: 'false'
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:PUBLISH_LINUX -ne 'true') {
-            $linux = @(Get-ChildItem release\* -File -Include '*linux*', '*.deb', '*.rpm')
-            $linux | Remove-Item
-            $sums = @(Get-Content release\SHA256SUMS.txt | Where-Object { ($_ -split '  ', 2)[1] -notin $linux.Name })
-            $sums | Set-Content release\SHA256SUMS.txt -Encoding ascii
-          }
           $existing = git ls-remote --tags origin "refs/tags/$env:RELEASE_TAG"
           if ($LASTEXITCODE -ne 0) { throw 'Failed to check the release tag.' }
           if ($existing) { throw "Tag $env:RELEASE_TAG already exists; refusing to overwrite it." }
