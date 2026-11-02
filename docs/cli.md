@@ -352,7 +352,7 @@ not promises hidden behind a success response.
 ## Linux notes
 
 - The control socket is `$XDG_RUNTIME_DIR/jiffshot/control.sock`, owned by the running app.
-- Linux supports `status`, `screenshot`, `ocr`, `open`, `library list` and
+- Linux supports `status`, `screenshot`, `ocr`, `open`, `library list|search|tag|pin` and
   `record start|status|pause|stop|cancel`. Screenshots and recordings go through the desktop
   portal, which may ask for consent; there is no window/element automation (Wayland forbids it).
 

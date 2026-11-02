@@ -30,6 +30,17 @@ pub(super) fn create_template(
         .ok_or_else(|| format!("could not create template: {name}"))
 }
 
+/// Decodes an image file for a template zone.
+pub(super) fn load_zone_image(path: &std::path::Path) -> Result<Pixmap, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    jiffshot_doc::io::load_image(path)
+        .map_err(|error| format!("could not open {}: {error}", path.display()))
+}
+
 pub(super) fn selected_zone(editor: &Editor) -> Result<u64, String> {
     let object = editor
         .selected()
@@ -80,6 +91,21 @@ mod tests {
     use super::*;
     use jiffshot_doc::object::{Kind, ShapeKind, Style, Zone};
     use jiffshot_doc::{Box2, Rgba};
+
+    #[test]
+    fn zone_images_load_from_files_and_reject_other_input() {
+        let directory = tempfile::tempdir().expect("temporary directory should be available");
+        let path = directory.path().join("zone.png");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255]))
+            .save(&path)
+            .unwrap();
+        let pixmap = load_zone_image(&path).expect("a PNG should load");
+        assert_eq!((pixmap.width(), pixmap.height()), (3, 2));
+        let text = directory.path().join("note.png");
+        std::fs::write(&text, b"not an image").unwrap();
+        assert!(load_zone_image(&text).is_err());
+        assert!(load_zone_image(directory.path()).is_err());
+    }
 
     fn zone_ids(editor: &Editor) -> Vec<u64> {
         editor

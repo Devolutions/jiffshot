@@ -373,6 +373,143 @@ pub fn combine_videos(sources: &[PathBuf], destination: &Path) -> Result<(), Str
     )
 }
 
+const SLIDESHOW_MAX_WIDTH: u32 = 1920;
+const SLIDESHOW_MAX_HEIGHT: u32 = 1080;
+pub const SLIDESHOW_MIN_SECONDS: f64 = 0.5;
+pub const SLIDESHOW_MAX_SECONDS: f64 = 60.0;
+
+/// The slideshow frame size: the first image's size, shrunk to fit 1080p, with even sides.
+fn slideshow_dimensions(width: u32, height: u32) -> (u32, u32) {
+    let scale = (f64::from(SLIDESHOW_MAX_WIDTH) / f64::from(width.max(1)))
+        .min(f64::from(SLIDESHOW_MAX_HEIGHT) / f64::from(height.max(1)))
+        .min(1.0);
+    let even = |value: f64| (((value * scale).round() as u32).max(2) + 1) & !1;
+    (even(f64::from(width)), even(f64::from(height)))
+}
+
+/// Scales `image` to fit a `width` x `height` black frame, centered, as RGBA bytes.
+fn slideshow_frame(image: &RgbaImage, width: u32, height: u32) -> Vec<u8> {
+    let scale = (f64::from(width) / f64::from(image.width().max(1)))
+        .min(f64::from(height) / f64::from(image.height().max(1)));
+    let fitted_width = ((f64::from(image.width()) * scale).round() as u32).clamp(1, width);
+    let fitted_height = ((f64::from(image.height()) * scale).round() as u32).clamp(1, height);
+    let fitted = image::imageops::resize(
+        image,
+        fitted_width,
+        fitted_height,
+        image::imageops::FilterType::Triangle,
+    );
+    let mut canvas = RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
+    let (left, top) = ((width - fitted_width) / 2, (height - fitted_height) / 2);
+    for (x, y, pixel) in fitted.enumerate_pixels() {
+        let alpha = u32::from(pixel[3]);
+        let blend = |channel: u8| ((u32::from(channel) * alpha + 127) / 255) as u8;
+        canvas.put_pixel(
+            left + x,
+            top + y,
+            image::Rgba([blend(pixel[0]), blend(pixel[1]), blend(pixel[2]), 255]),
+        );
+    }
+    canvas.into_raw()
+}
+
+/// Writes a silent MP4 that shows each image for `seconds_per_slide` seconds, in order.
+pub fn create_slideshow(
+    images: &[PathBuf],
+    seconds_per_slide: f64,
+    destination: &Path,
+) -> Result<(), String> {
+    if images.is_empty() {
+        return Err("select at least one image for the slideshow".to_owned());
+    }
+    if !(SLIDESHOW_MIN_SECONDS..=SLIDESHOW_MAX_SECONDS).contains(&seconds_per_slide) {
+        return Err(format!(
+            "slide duration must be between {SLIDESHOW_MIN_SECONDS} and {SLIDESHOW_MAX_SECONDS} seconds"
+        ));
+    }
+    gst::init().map_err(|error| format!("could not initialize GStreamer: {error}"))?;
+    for image in images {
+        validate_edit_destination(image, destination)?;
+    }
+    let decoded = images
+        .iter()
+        .map(|path| {
+            jiffshot_doc::io::load_image(path)
+                .map(|pixmap| jiffshot_doc::io::to_rgba_image(&pixmap))
+                .map_err(|error| format!("could not open {}: {error}", path.display()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (width, height) = slideshow_dimensions(decoded[0].width(), decoded[0].height());
+    let staging = edit_staging_directory(destination)?;
+    let video_path = staging.path().join("slideshow.mp4");
+
+    let pipeline = gst::parse::launch(
+        "appsrc name=slides format=time block=true \
+         ! videoconvert ! videorate ! video/x-raw,framerate=30/1 \
+         ! x264enc tune=zerolatency ! h264parse ! mp4mux ! filesink name=output",
+    )
+    .map_err(|error| format!("could not create slideshow pipeline: {error}"))?
+    .downcast::<gst::Pipeline>()
+    .map_err(|_| "the slideshow pipeline is not a pipeline".to_owned())?;
+    pipeline
+        .by_name("output")
+        .ok_or_else(|| "slideshow pipeline has no output".to_owned())?
+        .set_property("location", video_path.to_string_lossy().as_ref());
+    let source = pipeline
+        .by_name("slides")
+        .ok_or_else(|| "slideshow pipeline has no source".to_owned())?
+        .downcast::<gst_app::AppSrc>()
+        .map_err(|_| "slideshow source is not an appsrc".to_owned())?;
+    source.set_caps(Some(
+        &gst::Caps::builder("video/x-raw")
+            .field("format", "RGBA")
+            .field("width", width as i32)
+            .field("height", height as i32)
+            .field("framerate", gst::Fraction::new(1, 1))
+            .build(),
+    ));
+    let bus = pipeline
+        .bus()
+        .ok_or_else(|| "slideshow pipeline has no bus".to_owned())?;
+    pipeline
+        .set_state(gst::State::Playing)
+        .map_err(|error| format!("could not start slideshow export: {error}"))?;
+    let slide = gst::ClockTime::from_nseconds((seconds_per_slide * 1e9) as u64);
+    let pushed = (|| {
+        for (index, image) in decoded.iter().enumerate() {
+            let mut buffer = gst::Buffer::from_mut_slice(slideshow_frame(image, width, height));
+            {
+                let buffer = buffer.get_mut().expect("a new buffer is writable");
+                buffer.set_pts(slide * index as u64);
+                buffer.set_duration(slide);
+            }
+            source
+                .push_buffer(buffer)
+                .map_err(|error| format!("could not encode slide {}: {error}", index + 1))?;
+        }
+        source
+            .end_of_stream()
+            .map(|_| ())
+            .map_err(|error| format!("could not finish the slideshow: {error}"))
+    })();
+    let outcome = pushed.and_then(|()| {
+        bus.timed_pop_filtered(
+            gst::ClockTime::from_seconds(300),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        )
+        .ok_or_else(|| "timed out while encoding the slideshow".to_owned())
+        .and_then(|message| match message.view() {
+            gst::MessageView::Error(error) => {
+                Err(format!("slideshow export failed: {}", error.error()))
+            }
+            _ => Ok(()),
+        })
+    });
+    let _ = pipeline.set_state(gst::State::Null);
+    outcome?;
+    save_video_edit(&video_path, destination)
+}
+
 pub fn export_silent_video(source: &Path, destination: &Path) -> Result<(), String> {
     gst::init().map_err(|error| format!("could not initialize GStreamer: {error}"))?;
     let source = canonical_path(source)?;
@@ -941,7 +1078,53 @@ fn export_video_ranges(
     result
 }
 
+/// Size and smoothness trade-offs for GIF export.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GifPreset {
+    /// Every frame at its original size.
+    Original,
+    ScreenRecording,
+    HighMotion,
+    SmallFile,
+}
+
+impl GifPreset {
+    /// Frames closer together than this are dropped.
+    fn min_frame_interval_ns(self) -> u64 {
+        match self {
+            Self::Original => 0,
+            Self::ScreenRecording => 66_000_000,
+            Self::HighMotion => 33_000_000,
+            Self::SmallFile => 100_000_000,
+        }
+    }
+
+    fn max_width(self) -> Option<u32> {
+        match self {
+            Self::Original => None,
+            Self::ScreenRecording => Some(960),
+            Self::HighMotion => Some(1280),
+            Self::SmallFile => Some(480),
+        }
+    }
+
+    fn encoder_speed(self) -> i32 {
+        match self {
+            Self::SmallFile => 20,
+            _ => 10,
+        }
+    }
+}
+
 pub fn export_gif(source: &Path, destination: &Path) -> Result<(), String> {
+    export_gif_with_preset(source, destination, GifPreset::Original)
+}
+
+pub fn export_gif_with_preset(
+    source: &Path,
+    destination: &Path,
+    preset: GifPreset,
+) -> Result<(), String> {
     gst::init().map_err(|error| format!("could not initialize GStreamer: {error}"))?;
     let source = canonical_path(source)?;
     validate_edit_destination(&source, destination)?;
@@ -954,7 +1137,7 @@ pub fn export_gif(source: &Path, destination: &Path) -> Result<(), String> {
     let staged_path = staging.path().join("export.gif");
     let file = File::create(&staged_path)
         .map_err(|error| format!("could not create temporary GIF: {error}"))?;
-    let mut encoder = GifEncoder::new_with_speed(file, 10);
+    let mut encoder = GifEncoder::new_with_speed(file, preset.encoder_speed());
     encoder
         .set_repeat(Repeat::Infinite)
         .map_err(|error| format!("could not configure animated GIF looping: {error}"))?;
@@ -983,6 +1166,13 @@ pub fn export_gif(source: &Path, destination: &Path) -> Result<(), String> {
                 None => continue,
             };
             let current = GifVideoFrame::from_sample(&sample)?;
+            if pending.as_ref().is_some_and(|previous| {
+                current.timestamp_ns.saturating_sub(previous.timestamp_ns)
+                    < preset.min_frame_interval_ns()
+            }) {
+                last_progress = std::time::Instant::now();
+                continue;
+            }
             if let Some(previous) = pending.take() {
                 let interval = current
                     .timestamp_ns
@@ -991,7 +1181,13 @@ pub fn export_gif(source: &Path, destination: &Path) -> Result<(), String> {
                     .ok_or_else(|| {
                         "video frames have non-increasing presentation timestamps".to_owned()
                     })?;
-                if encode_gif_frame(&mut encoder, &mut timing, &previous.document, interval)? {
+                if encode_gif_frame(
+                    &mut encoder,
+                    &mut timing,
+                    &previous.document,
+                    interval,
+                    preset.max_width(),
+                )? {
                     frame_count += 1;
                 }
                 last_interval = Some(interval);
@@ -1009,7 +1205,13 @@ pub fn export_gif(source: &Path, destination: &Path) -> Result<(), String> {
             .or(last_interval)
             .or(last.nominal_duration_ns)
             .ok_or_else(|| "could not determine the final video frame duration".to_owned())?;
-        if encode_gif_frame(&mut encoder, &mut timing, &last.document, duration)? {
+        if encode_gif_frame(
+            &mut encoder,
+            &mut timing,
+            &last.document,
+            duration,
+            preset.max_width(),
+        )? {
             frame_count += 1;
         }
     }
@@ -1106,26 +1308,41 @@ fn encode_gif_frame(
     timing: &mut GifTiming,
     document: &Document,
     duration_ns: u64,
+    max_width: Option<u32>,
 ) -> Result<bool, String> {
     let Some(duration_ms) = timing.frame_delay_ms(duration_ns)? else {
         return Ok(false);
     };
-    let frame = gif_frame_from_document(document, duration_ms)?;
+    let frame = gif_frame_from_document(document, duration_ms, max_width)?;
     encoder
         .encode_frame(frame)
         .map_err(|error| format!("could not encode GIF frame: {error}"))?;
     Ok(true)
 }
 
-fn gif_frame_from_document(document: &Document, duration_ms: u32) -> Result<Frame, String> {
+fn gif_frame_from_document(
+    document: &Document,
+    duration_ms: u32,
+    max_width: Option<u32>,
+) -> Result<Frame, String> {
     let pixmap = document.flatten();
     let mut rgba = Vec::with_capacity(pixmap.data().len());
     for pixel in pixmap.pixels() {
         let color = pixel.demultiply();
         rgba.extend_from_slice(&[color.red(), color.green(), color.blue(), color.alpha()]);
     }
-    let image = RgbaImage::from_raw(pixmap.width(), pixmap.height(), rgba)
+    let mut image = RgbaImage::from_raw(pixmap.width(), pixmap.height(), rgba)
         .ok_or_else(|| "decoded video frame has an invalid pixel buffer".to_owned())?;
+    if let Some(max_width) = max_width.filter(|max| image.width() > *max) {
+        let height = (u64::from(image.height()) * u64::from(max_width) / u64::from(image.width()))
+            .max(1) as u32;
+        image = image::imageops::resize(
+            &image,
+            max_width,
+            height,
+            image::imageops::FilterType::Triangle,
+        );
+    }
     Ok(Frame::from_parts(
         image,
         0,
@@ -2205,6 +2422,58 @@ mod tests {
     }
 
     #[test]
+    fn slideshow_frames_are_letterboxed_and_sized_for_the_encoder() {
+        assert_eq!(slideshow_dimensions(64, 48), (64, 48));
+        assert_eq!(slideshow_dimensions(3840, 2160), (1920, 1080));
+        assert_eq!(slideshow_dimensions(101, 51), (102, 52));
+        let wide = RgbaImage::from_pixel(40, 10, image::Rgba([200, 0, 0, 255]));
+        let frame = slideshow_frame(&wide, 40, 40);
+        assert_eq!(frame.len(), 40 * 40 * 4);
+        let pixel = |x: usize, y: usize| &frame[(y * 40 + x) * 4..(y * 40 + x) * 4 + 4];
+        assert_eq!(pixel(20, 2), [0, 0, 0, 255]);
+        assert_eq!(pixel(20, 20), [200, 0, 0, 255]);
+        let clear = RgbaImage::from_pixel(4, 4, image::Rgba([200, 0, 0, 0]));
+        assert_eq!(&slideshow_frame(&clear, 4, 4)[..4], [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn slideshow_shows_each_image_for_the_requested_time_in_order() {
+        gst::init().expect("GStreamer should initialize");
+        if ["x264enc", "h264parse", "mp4mux", "videorate"]
+            .into_iter()
+            .any(|plugin| gst::ElementFactory::find(plugin).is_none())
+        {
+            eprintln!("Skipping slideshow test because GStreamer plugins are unavailable");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temporary directory should be available");
+        let mut images = Vec::new();
+        for (name, color) in [("a.png", [255, 0, 0]), ("b.png", [0, 0, 255])] {
+            let path = directory.path().join(name);
+            RgbaImage::from_pixel(64, 48, image::Rgba([color[0], color[1], color[2], 255]))
+                .save(&path)
+                .unwrap();
+            images.push(path);
+        }
+        let destination = directory.path().join("slides.mp4");
+        assert!(create_slideshow(&[], 2.0, &destination).is_err());
+        assert!(create_slideshow(&images, 0.0, &destination).is_err());
+        assert!(create_slideshow(&images, 2.0, &images[0]).is_err());
+        create_slideshow(&images, 1.0, &destination).expect("slideshow should be created");
+        let duration = video_duration(&destination).unwrap().nseconds() as f64 / 1e9;
+        assert!((1.9..=2.1).contains(&duration), "duration was {duration}");
+        let first = frame_at(&destination, 0.3).unwrap();
+        let second = frame_at(&destination, 1.5).unwrap();
+        assert_eq!(first.size(), (64, 48));
+        let (a, b) = (
+            first.background().pixel(32, 24).unwrap(),
+            second.background().pixel(32, 24).unwrap(),
+        );
+        assert!(a.red() > 200 && a.blue() < 60, "first slide: {a:?}");
+        assert!(b.blue() > 200 && b.red() < 60, "second slide: {b:?}");
+    }
+
+    #[test]
     fn combining_preserves_clip_order_when_audio_starts_after_a_silent_clip() {
         gst::init().expect("GStreamer should initialize");
         let directory = tempfile::tempdir().expect("temporary directory should be available");
@@ -2499,6 +2768,40 @@ mod tests {
             total_ms += numerator;
         }
         assert_eq!(total_ms, 3_000, "GIF timing must not drift over 180 frames");
+    }
+
+    #[test]
+    fn gif_small_file_preset_drops_frames_and_scales_down() {
+        gst::init().expect("GStreamer should initialize");
+        let directory = tempfile::tempdir().expect("temporary directory should be available");
+        let source = directory.path().join("source.avi");
+        let destination = directory.path().join("animation.gif");
+        write_gif_test_video(&source, 60, 30);
+
+        export_gif_with_preset(&source, &destination, GifPreset::SmallFile)
+            .expect("30 fps video should export with the small file preset");
+        let file = File::open(destination).expect("exported GIF should exist");
+        let decoder = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(file))
+            .expect("exported GIF should be decodable");
+        let frames = image::AnimationDecoder::into_frames(decoder)
+            .collect_frames()
+            .expect("exported GIF frames should decode");
+        assert!(
+            (15..=25).contains(&frames.len()),
+            "10 fps output of two seconds should keep about 20 frames, got {}",
+            frames.len()
+        );
+        let total_ms: u32 = frames.iter().map(|frame| frame.delay().numer_denom_ms().0).sum();
+        assert!((1_800..=2_100).contains(&total_ms), "duration was {total_ms} ms");
+    }
+
+    #[test]
+    fn gif_preset_limits_frame_width() {
+        let document = jiffshot_doc::Document::new(jiffshot_doc::Pixmap::new(1000, 500).unwrap());
+        let frame = gif_frame_from_document(&document, 100, Some(480)).unwrap();
+        assert_eq!(frame.buffer().dimensions(), (480, 240));
+        let frame = gif_frame_from_document(&document, 100, Some(2000)).unwrap();
+        assert_eq!(frame.buffer().dimensions(), (1000, 500));
     }
 
     #[test]

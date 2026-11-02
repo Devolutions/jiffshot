@@ -1407,6 +1407,7 @@ dependencies = [
  "tempfile",
  "tiny-skia",
  "windows-sys 0.59.0",
+ "x11rb",
  "zbus",
 ]
 

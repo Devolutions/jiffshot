@@ -565,7 +565,7 @@ Describe 'Architecture workflows' {
         (Get-WorkflowJob 'linux-rpm').Contains('container: fedora:43') | Should -BeTrue
     }
 
-    It 'portable package smoke test keeps its Xvfb alive between window probes' {
+    It 'Linux package smoke test keeps its Xvfb alive between window probes' {
         $smoke = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'smoke.ps1'))
         $smoke | Should -MatchExactly 'Xvfb -displayfd 3 .* -nolisten tcp -noreset '
     }
