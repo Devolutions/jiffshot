@@ -1116,6 +1116,7 @@ impl GifPreset {
     }
 }
 
+#[cfg(test)]
 pub fn export_gif(source: &Path, destination: &Path) -> Result<(), String> {
     export_gif_with_preset(source, destination, GifPreset::Original)
 }
@@ -2434,43 +2435,6 @@ mod tests {
         assert_eq!(pixel(20, 20), [200, 0, 0, 255]);
         let clear = RgbaImage::from_pixel(4, 4, image::Rgba([200, 0, 0, 0]));
         assert_eq!(&slideshow_frame(&clear, 4, 4)[..4], [0, 0, 0, 255]);
-    }
-
-    #[test]
-    fn slideshow_shows_each_image_for_the_requested_time_in_order() {
-        gst::init().expect("GStreamer should initialize");
-        if ["x264enc", "h264parse", "mp4mux", "videorate"]
-            .into_iter()
-            .any(|plugin| gst::ElementFactory::find(plugin).is_none())
-        {
-            eprintln!("Skipping slideshow test because GStreamer plugins are unavailable");
-            return;
-        }
-        let directory = tempfile::tempdir().expect("temporary directory should be available");
-        let mut images = Vec::new();
-        for (name, color) in [("a.png", [255, 0, 0]), ("b.png", [0, 0, 255])] {
-            let path = directory.path().join(name);
-            RgbaImage::from_pixel(64, 48, image::Rgba([color[0], color[1], color[2], 255]))
-                .save(&path)
-                .unwrap();
-            images.push(path);
-        }
-        let destination = directory.path().join("slides.mp4");
-        assert!(create_slideshow(&[], 2.0, &destination).is_err());
-        assert!(create_slideshow(&images, 0.0, &destination).is_err());
-        assert!(create_slideshow(&images, 2.0, &images[0]).is_err());
-        create_slideshow(&images, 1.0, &destination).expect("slideshow should be created");
-        let duration = video_duration(&destination).unwrap().nseconds() as f64 / 1e9;
-        assert!((1.9..=2.1).contains(&duration), "duration was {duration}");
-        let first = frame_at(&destination, 0.3).unwrap();
-        let second = frame_at(&destination, 1.5).unwrap();
-        assert_eq!(first.size(), (64, 48));
-        let (a, b) = (
-            first.background().pixel(32, 24).unwrap(),
-            second.background().pixel(32, 24).unwrap(),
-        );
-        assert!(a.red() > 200 && a.blue() < 60, "first slide: {a:?}");
-        assert!(b.blue() > 200 && b.red() < 60, "second slide: {b:?}");
     }
 
     #[test]

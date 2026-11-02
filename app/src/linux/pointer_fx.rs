@@ -142,7 +142,7 @@ mod tests {
     use super::*;
 
     fn frame(width: usize, height: usize) -> Vec<u8> {
-        vec![0, 0, 0, 255].repeat(width * height)
+        [0, 0, 0, 255].repeat(width * height)
     }
 
     #[test]

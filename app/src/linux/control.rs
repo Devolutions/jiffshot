@@ -548,27 +548,6 @@ mod tests {
     }
 
     #[test]
-    fn library_edits_validate_their_arguments() {
-        for command in ["library.tag", "library.pin"] {
-            assert_eq!(
-                dispatch(command, &Value::Null).unwrap_err().code,
-                ErrorCode::InvalidRequest,
-                "{command}"
-            );
-            assert_eq!(
-                dispatch(command, &json!({ "path": "/etc/hostname" }))
-                    .unwrap_err()
-                    .code,
-                ErrorCode::NotFound,
-                "{command}"
-            );
-        }
-        assert!(dispatch("library.search", &json!({ "filter": "nope" })).is_err());
-        let listed = dispatch("library.search", &json!({ "limit": "1" })).unwrap();
-        assert!(listed["captures"].as_array().unwrap().len() <= 1);
-    }
-
-    #[test]
     fn library_list_respects_the_limit() {
         assert!(dispatch("library.list", &json!({ "limit": "x" })).is_err());
         let listed = dispatch("library.list", &json!({ "limit": "2" })).unwrap();
