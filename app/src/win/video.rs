@@ -956,7 +956,7 @@ impl NarrationSound {
         spec: AudioSpec,
         block: AudioBlock,
     ) -> Result<(), String> {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         {
             let _ = (started, spec);
             self.samples.extend_from_slice(&block.samples);
@@ -1028,7 +1028,7 @@ impl NarrationSound {
         ended: Instant,
         spec: AudioSpec,
     ) -> Result<FinishedNarration, String> {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         {
             let _ = (started, ended, spec);
             Ok(FinishedNarration {
@@ -2532,6 +2532,10 @@ mod tests {
 
 #[cfg(target_os = "macos")]
 #[path = "video/sound_macos.rs"]
+mod sound;
+
+#[cfg(target_os = "linux")]
+#[path = "video/sound_linux.rs"]
 mod sound;
 
 #[cfg(target_os = "macos")]

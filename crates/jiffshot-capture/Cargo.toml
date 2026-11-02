@@ -14,8 +14,17 @@ serde_json.workspace = true
 windows = { workspace = true, features = ["Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_Graphics_Gdi"] }
 windows-sys.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3.7", default-features = false, features = ["image-data", "wayland-data-control"] }
+gstreamer = "0.24"
+gstreamer-app = "0.24"
+gstreamer-pbutils = "0.24"
+gstreamer-video = { version = "0.24", features = ["v1_18"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
 block2.workspace = true
 dispatch2.workspace = true
 objc2.workspace = true
@@ -30,7 +39,7 @@ objc2-screen-capture-kit.workspace = true
 objc2-vision.workspace = true
 objc2-uniform-type-identifiers.workspace = true
 
-[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+[target.'cfg(any(windows, target_os = "macos", target_os = "linux"))'.dependencies]
 image.workspace = true
 tiny-skia.workspace = true
 jiffshot-doc = { path = "../jiffshot-doc" }

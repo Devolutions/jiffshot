@@ -139,7 +139,7 @@ pub(super) fn set_capture_delay_seconds(seconds: u64) -> Result<(), String> {
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct ScreenCapturePreset {
-    name: String,
+    pub(super) name: String,
     delay_seconds: u64,
     include_cursor: bool,
     #[serde(flatten)]

@@ -12,6 +12,46 @@ mod linux;
 
 mod canvas;
 mod library_tags;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "win/settings.rs"]
+mod settings;
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[path = "win/winutil.rs"]
+mod winutil;
+#[cfg(target_os = "linux")]
+#[allow(dead_code, clippy::wrong_self_convention, clippy::type_complexity, clippy::items_after_test_module)]
+#[path = "win/vm.rs"]
+mod vm;
+#[cfg(target_os = "linux")]
+#[allow(dead_code, clippy::wrong_self_convention, clippy::type_complexity, clippy::items_after_test_module)]
+#[path = "win/vm_support.rs"]
+mod vm_support;
+#[cfg(target_os = "linux")]
+#[allow(dead_code, clippy::all)]
+#[path = "win/library.rs"]
+mod library;
+#[cfg(target_os = "linux")]
+#[allow(dead_code, clippy::all)]
+#[path = "win/video.rs"]
+mod video;
+#[cfg(target_os = "linux")]
+#[allow(dead_code, clippy::all)]
+#[path = "win/app.rs"]
+mod app;
+#[cfg(target_os = "linux")]
+#[allow(dead_code, clippy::all)]
+#[path = "win/ocr.rs"]
+mod ocr;
+#[cfg(target_os = "linux")]
+#[allow(dead_code, clippy::all)]
+#[path = "win/share.rs"]
+mod share;
+#[cfg(target_os = "linux")]
+#[allow(dead_code, clippy::all)]
+#[path = "win/main.rs"]
+mod shared_main;
 mod trace;
 mod ui_only;
 
@@ -33,8 +73,8 @@ mod termination_macos;
 mod ui;
 
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
-#[path = "linux/ui.rs"]
+#[allow(dead_code, clippy::wrong_self_convention, clippy::type_complexity, clippy::items_after_test_module)]
+#[path = "win/ui/mod.rs"]
 mod ui;
 
 #[cfg(windows)]

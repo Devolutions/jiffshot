@@ -11,11 +11,12 @@
 //! portable [`frame`], [`geom`] and [`stitch`] modules; the Linux application
 //! has its own capture backend.
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 #[cfg_attr(windows, path = "win/clipboard.rs")]
 #[cfg_attr(target_os = "macos", path = "mac/clipboard.rs")]
+#[cfg_attr(target_os = "linux", path = "linux_clipboard.rs")]
 pub mod clipboard;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub mod config;
 #[cfg(windows)]
 #[path = "win/drag.rs"]
@@ -29,28 +30,30 @@ pub mod geom;
 #[cfg_attr(windows, path = "win/ipc.rs")]
 #[cfg_attr(target_os = "macos", path = "mac/ipc.rs")]
 pub mod ipc;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub mod library;
 #[cfg(target_os = "macos")]
 #[path = "mac/mod.rs"]
 pub mod macos;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub mod media;
 #[cfg(any(windows, target_os = "macos"))]
 pub mod ocr;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 #[cfg_attr(windows, path = "win/os.rs")]
 #[cfg_attr(target_os = "macos", path = "mac/os.rs")]
+#[cfg_attr(target_os = "linux", path = "linux_os.rs")]
 pub mod os;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub mod paths;
 #[cfg(any(windows, target_os = "macos"))]
 #[cfg_attr(windows, path = "win/screen.rs")]
 #[cfg_attr(target_os = "macos", path = "mac/screen.rs")]
 pub mod screen;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 #[cfg_attr(windows, path = "win/share.rs")]
 #[cfg_attr(target_os = "macos", path = "mac/share.rs")]
+#[cfg_attr(target_os = "linux", path = "linux_share.rs")]
 pub mod share;
 pub mod stitch;
 #[cfg(any(windows, target_os = "macos"))]

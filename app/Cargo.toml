@@ -34,6 +34,7 @@ gstreamer-app = "0.24"
 gstreamer-pbutils = "0.24"
 gstreamer-video = { version = "0.24", features = ["v1_18"] }
 jiffshot-capture = { path = "../crates/jiffshot-capture" }
+jiffshot-control = { path = "../crates/jiffshot-control" }
 ksni = { version = "0.3", default-features = false, features = ["async-io"] }
 leptess = "0.14"
 png.workspace = true

@@ -326,6 +326,12 @@ pub(crate) fn run() -> Result<()> {
         }
         _ => {}
     }
+    let _control = super::control::start();
+    if !matches!(launch, launch::Launch::Background)
+        && std::env::var_os("JIFFSHOT_CLASSIC_UI").is_none()
+    {
+        return crate::shared_main::run();
+    }
     App::load_from_env()?.run(move |scope| {
         let document = Document::blank(1280, 720, Rgba::WHITE);
         let mut initial_status = "Open an image or .jsd document to start editing.".to_owned();
@@ -1395,6 +1401,17 @@ pub(crate) fn run() -> Result<()> {
                 status.set_if_changed(format!("Could not start daily capture schedule: {error}"));
             }
         }
+        let open_scope = scope.clone();
+        let open_canvas = std::sync::Arc::new(canvas.clone());
+        super::control::set_open_handler(move |path| {
+            let scope = open_scope.clone();
+            let canvas = open_canvas.clone();
+            if let Err(error) = open_scope.post(move || {
+                open_capture(&scope, path, (*canvas).clone(), library, status);
+            }) {
+                eprintln!("jiffshot: could not open file from control request: {error}");
+            }
+        });
         let launch_scope = scope.clone();
         let launch_canvas = canvas.clone();
         scope.post(move || match launch {

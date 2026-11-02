@@ -229,6 +229,37 @@ EDITING AND LIVE ANNOTATIONS
   and the capability coverage/limitations.
 "#;
 
+#[cfg(target_os = "linux")]
+const USAGE: &str = r##"jiffshot-cli: drive the running Jiffshot from scripts and AI agents
+
+USAGE
+    jiffshot-cli [--pretty] [--timeout SECS] [--no-launch] COMMAND [ARGS]
+    jiffshot-cli help agent
+
+AVAILABLE ON LINUX
+    status                              server, library folder and recording
+    screenshot [--out FILE] [--cursor]  capture through the desktop portal
+    open PATH                           open an image or project in the editor
+    ocr --path IMAGE                    recognize text in an image
+    library list [--limit N]            newest saved captures
+    record start [--audio none|system|microphone|both] [--fps source|15|24|30|60] [--cursor]
+    record status | pause | stop | cancel
+
+Screenshots and recordings use the desktop portal and may need your consent.
+
+EXIT CODES
+    0 success, 1 failed, 2 invalid usage, 3 unavailable, 4 timed out
+"##;
+
+#[cfg(target_os = "linux")]
+const AGENT: &str = r#"jiffshot-cli on Linux prints one JSON object per command:
+    {"ok":true,"result":{...}}
+    {"ok":false,"error":{"code":"...","message":"..."}}
+
+Use `status` to discover available commands. The control socket lives in
+$XDG_RUNTIME_DIR/jiffshot and only the same user can connect to it.
+"#;
+
 #[cfg(target_os = "macos")]
 const USAGE: &str = r##"jiffshot-cli: drive the running Jiffshot from scripts and AI agents
 
@@ -403,7 +434,9 @@ const POSITIONALS: &[(&str, &[&str])] = &[
 ];
 
 /// Command groups written as two words (`record start`).
-const GROUPS: &[&str] = &["record", "steps", "wait", "doc", "video", "capture"];
+const GROUPS: &[&str] = &[
+    "record", "steps", "wait", "doc", "video", "capture", "library",
+];
 
 #[derive(Debug, Default, PartialEq)]
 struct Globals {
@@ -620,6 +653,8 @@ fn jiffshot_exe() -> Option<PathBuf> {
     #[cfg(windows)]
     let name = "jiffshot.exe";
     #[cfg(target_os = "macos")]
+    let name = "jiffshot";
+    #[cfg(target_os = "linux")]
     let name = "jiffshot";
     let beside = std::env::current_exe().ok()?.with_file_name(name);
     beside.exists().then_some(beside)
@@ -1028,6 +1063,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn help_describes_the_actual_default_targets() {
         let usage = USAGE.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
@@ -1108,7 +1144,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
+    #[cfg(not(windows))]
     fn paths_are_made_absolute() {
         let Action::Call { args, .. } =
             parse(&words("screenshot --out shots/a.png"), Path::new("/work")).unwrap()
@@ -1162,7 +1198,7 @@ mod tests {
         );
         #[cfg(windows)]
         let cwd = Path::new(r"C:\w");
-        #[cfg(target_os = "macos")]
+        #[cfg(not(windows))]
         let cwd = Path::new("/work");
         assert_eq!(
             parse(&words("run a.json"), cwd).unwrap(),
@@ -1251,7 +1287,7 @@ mod tests {
                 .clone();
         #[cfg(windows)]
         let cwd = Path::new(r"C:\demo");
-        #[cfg(target_os = "macos")]
+        #[cfg(not(windows))]
         let cwd = Path::new("/demo");
         absolute_paths(&mut args, cwd);
         assert_eq!(args["path"], json!(cwd.join("in.mp4")));

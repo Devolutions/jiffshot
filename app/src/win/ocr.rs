@@ -5,6 +5,7 @@ use jiffshot_doc::editor::Analyzer;
 use jiffshot_doc::smart::TextLine;
 use jiffshot_doc::{IRect, Pixmap};
 
+#[cfg(any(windows, target_os = "macos"))]
 fn bgra(pm: &Pixmap) -> Vec<u8> {
     let mut out = Vec::with_capacity(pm.data().len());
     for p in pm.pixels() {
@@ -18,7 +19,11 @@ fn bgra(pm: &Pixmap) -> Vec<u8> {
 
 /// Lines of text in `pm`, in its pixel coordinates.
 pub fn recognize(pm: &Pixmap) -> Result<Vec<TextLine>, String> {
+    #[cfg(target_os = "linux")]
+    return crate::linux::ocr::Recognizer::new()?.recognize(pm);
+    #[cfg(any(windows, target_os = "macos"))]
     let lines = jiffshot_capture::ocr::recognize(pm.width(), pm.height(), &bgra(pm))?;
+    #[cfg(any(windows, target_os = "macos"))]
     Ok(lines
         .into_iter()
         .map(|l| TextLine {

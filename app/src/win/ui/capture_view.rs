@@ -16,7 +16,18 @@ use super::dark_blue;
 use crate::vm::CaptureBinding;
 #[cfg(target_os = "macos")]
 use crate::vm::CaptureViewModelSink;
+#[cfg(not(target_os = "linux"))]
 use jiffshot_workflow::panel::CaptureTiming;
+/// The timing workflow of a tab (`panel::CaptureTiming`); Linux offers manual only.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureTiming {
+    #[default]
+    Manual,
+    Interval,
+    Schedule,
+}
 use rustolonia::{
     AppScope, AsControl, Border, Button, Color, Control, Dock, DockPanel, Effect, El, Flyout, FontWeight, Grid, HorizontalAlignment, Image, Key, MenuFlyout,
     MenuItem, MenuItemToggleType, NodeRef, Orientation, PlacementMode, Result, ScrollViewer, Separator, Signal, StackPanel, TextAlignment, TextBlock, TextWrapping, Upcast,
@@ -312,7 +323,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         let content = StackPanel::el()
             .spacing(5.0)
             .horizontal_alignment(HorizontalAlignment::Center)
-            .child(glyph(MODE_GLYPHS[0], 28.0).text(move || MODE_GLYPHS[tab.get().min(2)].to_owned()).horizontal_alignment(HorizontalAlignment::Center).foreground(WHITE))
+            .child(glyph(MODE_GLYPHS[0], 28.0).text(move || super::icons::glyph(MODE_GLYPHS[tab.get().min(2)]).to_owned()).horizontal_alignment(HorizontalAlignment::Center).foreground(WHITE))
             .child(verb);
         let button = Button::el()
             .width(112.0)
@@ -348,7 +359,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         .foreground(move || palette(dark).text);
     let mode_capsule = Border::el()
         .width(168.0)
-        .height(52.0)
+        .height(if cfg!(target_os = "linux") { 66.0 } else { 52.0 })
         .padding(3.0)
         .corner_radius(12.0)
         .horizontal_alignment(HorizontalAlignment::Center)
@@ -462,6 +473,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
 
     let theme_scope = scope.clone();
     let closing_scope = scope.clone();
+    #[cfg(any(windows, target_os = "macos"))]
     let loaded_scope = scope.clone();
     let window = Window::el()
         // The drawn title bar holds the icon and the menus, so the title is
@@ -496,14 +508,14 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                     }
                 }
             }
-            #[cfg(not(windows))]
+            #[cfg(target_os = "macos")]
             if let Some(hwnd) = window_ref.get().and_then(|window| parts::hwnd(&loaded_scope, &window)) {
                 parts::set_native_title(hwnd, TITLE);
             }
         })
         .icon(super::icon_file())
-        .width(560.0)
-        .height(320.0)
+        .width(if cfg!(target_os = "linux") { 660.0 } else { 560.0 })
+        .height(if cfg!(target_os = "linux") { 400.0 } else { 320.0 })
         .can_resize(false)
         .can_maximize(false);
     #[cfg(windows)]
@@ -566,9 +578,9 @@ fn follow(scope: &AppScope, binding: &CaptureBinding) -> Result<()> {
     let sink = binding.sink;
     let s = scope.clone();
     Effect::new(move || {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         let json = sink.view.get();
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         post(&s, "Capture window view", move || apply_view(&json));
         #[cfg(target_os = "macos")]
         {
@@ -1009,7 +1021,7 @@ fn show_panel(json: &str) -> Result<()> {
 
 type ShownPanel = (ScrollViewer, Flyout, Option<Rc<dyn Fn()>>);
 
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(all(test, not(target_os = "linux")), target_os = "macos"))]
 fn is_timing_panel(id: &str) -> bool {
     jiffshot_workflow::panel::capture_context(id).1 == "delay"
 }
@@ -1043,7 +1055,7 @@ fn show_panel_with_height(json: &str, max_height: Option<f64>) -> Result<Option<
     } else {
         (body.children()?, None)
     };
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     let (rows, scroll) = {
         let _ = (max_height, window);
         (body.children()?, None::<ScrollViewer>)
@@ -1099,7 +1111,7 @@ fn show_problem(text: &str) -> Result<()> {
     Flyout::new()?.placement(PlacementMode::BottomEdgeAlignedLeft)?.content(Some(&note as &dyn AsControl))?.show_at_with_control(&anchor)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "linux")))]
 mod tests {
     use super::*;
 

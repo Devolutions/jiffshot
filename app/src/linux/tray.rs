@@ -16,7 +16,7 @@ const WATCHER_NAME: &str = "org.kde.StatusNotifierWatcher";
 const WATCHER_PATH: &str = "/StatusNotifierWatcher";
 
 #[derive(Debug)]
-pub(super) enum Event {
+pub(crate) enum Event {
     Ready,
     Open,
     Capture,
@@ -32,13 +32,13 @@ enum Message {
     Stop,
 }
 
-pub(super) struct Session {
+pub(crate) struct Session {
     state: Arc<AtomicU8>,
     sender: mpsc::Sender<Message>,
 }
 
 impl Session {
-    pub(super) fn start(on_event: impl Fn(Event) + Send + 'static) -> Result<Self, String> {
+    pub(crate) fn start(on_event: impl Fn(Event) + Send + 'static) -> Result<Self, String> {
         let icon = tray_icon()?;
         let state = Arc::new(AtomicU8::new(STARTING));
         let (sender, receiver) = mpsc::channel();
@@ -55,13 +55,13 @@ impl Session {
         Ok(Self { state, sender })
     }
 
-    pub(super) fn activate(&self) -> bool {
+    pub(crate) fn activate(&self) -> bool {
         self.state
             .compare_exchange(READY, ACTIVE, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 
-    pub(super) fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         self.state.load(Ordering::Acquire) == ACTIVE
     }
 }

@@ -7,6 +7,7 @@
 
 #[cfg_attr(windows, path = "win/media.rs")]
 #[cfg_attr(target_os = "macos", path = "mac/media.rs")]
+#[cfg_attr(target_os = "linux", path = "linux/media.rs")]
 mod imp;
 
 pub use imp::{capture_audio, capture_audio_cancellable, startup, AudioCapture, Reader, Writer};
@@ -246,8 +247,18 @@ mod tests {
         );
         r.select_audio(true).unwrap();
         r.seek(0).unwrap();
-        let (_, pcm) = r.next_audio().unwrap().unwrap();
-        assert!(pcm.iter().any(|s| s.abs() > 2000), "audio came back");
+        // AAC priming can leave the first blocks near silent.
+        let mut loud = false;
+        for _ in 0..8 {
+            let Some((_, pcm)) = r.next_audio().unwrap() else {
+                break;
+            };
+            if pcm.iter().any(|s| s.abs() > 2000) {
+                loud = true;
+                break;
+            }
+        }
+        assert!(loud, "audio came back");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

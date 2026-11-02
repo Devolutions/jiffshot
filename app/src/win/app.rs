@@ -240,7 +240,7 @@ pub(crate) fn report_capture_settings_notice(title: &'static str, text: String) 
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn reserved_share_name(name: &str) -> bool {
     crate::share::BUILT_IN.contains(&name) || matches!(name, "Paint" | "Add program…")
 }
@@ -269,6 +269,12 @@ pub fn schedule_sync() {
             with(|app| app.sync());
         });
     }
+}
+
+/// The UI thread's scope, once the app runs.
+#[cfg(target_os = "linux")]
+pub(crate) fn scope() -> Option<AppScope> {
+    SCOPE.lock().unwrap().clone()
 }
 
 /// Runs `f` on the UI thread with the app state, from any thread.
@@ -1930,7 +1936,7 @@ impl App {
             }
             Ok(Some(Pasted::Files(files))) => {
                 let mut n = 0;
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 let mut errors = Vec::new();
                 for f in files {
                     match io::load_image(&f) {
@@ -1939,12 +1945,12 @@ impl App {
                             n += 1;
                         }
                         Err(_error) => {
-                            #[cfg(target_os = "macos")]
+                            #[cfg(any(target_os = "macos", target_os = "linux"))]
                             errors.push(format!("{}: {_error}", f.display()));
                         }
                     }
                 }
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 if !errors.is_empty() {
                     self.set_status(format!(
                         "Pasted {n} image file(s); could not open {}",
@@ -2226,6 +2232,7 @@ impl App {
         {
             self.autosave();
             self.stop_video();
+            #[cfg(any(windows, target_os = "macos"))]
             jiffshot_workflow::stop_engine();
             if let Err(error) = crate::ui::shutdown(&self.scope) {
                 self.exiting = false;
@@ -2362,8 +2369,16 @@ impl App {
         self.put_str("Toast", &value, |k, v| k.set_toast(v));
     }
 
+    #[cfg(any(windows, target_os = "macos"))]
     pub fn show_capture_window(&mut self) {
         crate::capture_window::show(&self.scope);
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn show_capture_window(&mut self) {
+        if let Err(error) = winutil::open_capture_window() {
+            self.set_status(error);
+        }
     }
 
     /// Shows Grab Text's result in its window (the `grab_text` signal).
@@ -2384,9 +2399,17 @@ impl App {
     }
 
     /// Opens the Preferences dialog on `tab` (the `prefs` signal).
+    #[cfg(any(windows, target_os = "macos"))]
     pub fn open_prefs(&mut self, tab: &str) {
         self.toasts += 1;
         let value = format!("{}\u{1f}{}", self.toasts, crate::prefs::dialog(self, tab));
+        self.put_str("Prefs", &value, |k, v| k.set_prefs(v));
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn open_prefs(&mut self, tab: &str) {
+        self.toasts += 1;
+        let value = format!("{}\u{1f}{}", self.toasts, crate::linux::prefs::dialog(self, tab));
         self.put_str("Prefs", &value, |k, v| k.set_prefs(v));
     }
 
@@ -2776,9 +2799,13 @@ impl App {
             "hidden" => self.hidden(),
             // The Preferences dialog: open it on a tab; apply what it sends.
             "prefs" => self.open_prefs(if arg.is_empty() { "capture" } else { arg }),
+            #[cfg(any(windows, target_os = "macos"))]
             "prefs-apply" => crate::prefs::apply(self, arg),
+            #[cfg(target_os = "linux")]
+            "prefs-apply" => crate::linux::prefs::apply(self, arg),
             // A capture panel's button ("ID:INDEX"; no index when closed), or
             // a toolbar's action ("ID:act:NAME").
+            #[cfg(any(windows, target_os = "macos"))]
             "hud" => {
                 let mut parts = arg.splitn(3, ':');
                 if let Some(id) = parts.next().and_then(|id| id.parse().ok()) {
@@ -2791,6 +2818,7 @@ impl App {
                 }
             }
             // The Capture Widget's buttons.
+            #[cfg(any(windows, target_os = "macos"))]
             "widget" => {
                 let mode = match arg {
                     "video" => jiffshot_workflow::MODE_VIDEO,
@@ -2933,7 +2961,7 @@ impl App {
     /// The flattened image as a temporary file named after the capture.
     fn temp_export(&mut self, ext: &str) -> std::result::Result<PathBuf, String> {
         let doc = with_editor(|e| e.document().clone()).ok_or("no document")?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let path = crate::share::temporary_export_path(&self.stem(), ext)?;
         #[cfg(windows)]
         let path = {
@@ -3240,12 +3268,12 @@ impl App {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     fn pick_program(&mut self) {
         let Some(window) = self.window() else { return };
-        let options = OpenFilePickerOptions::new()
-            .title("Add a program to share to")
-            .file_type(FileTypeFilter::new("Programs").with_extension("exe"));
+        let options = OpenFilePickerOptions::new().title("Add a program to share to");
+        #[cfg(windows)]
+        let options = options.file_type(FileTypeFilter::new("Programs").with_extension("exe"));
         let Ok(op) = self.scope.open_file_picker(&window, &options) else {
             return;
         };
@@ -3648,6 +3676,7 @@ impl App {
             .into_iter()
             .map(library::Entry::read)
             .collect();
+        #[cfg(any(windows, target_os = "macos"))]
         crate::tray::set_recent(
             self.library_entries
                 .iter()
@@ -4307,7 +4336,7 @@ impl App {
                     .join("\n");
                 let preview: String = text.chars().take(80).collect();
                 let copied = jiffshot_capture::clipboard::copy_text(&text, winutil::main_hwnd());
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 if let Err(error) = copied {
                     self.set_status(format!("Text found but copy failed: {error}. {preview}"));
                     return;
@@ -4486,7 +4515,10 @@ pub type ItemSink = Arc<Mutex<Option<LibraryItemViewModelSink>>>;
 /// it (`<stem>.cursor.png` and `.cursor.json`); it opens as a movable image.
 fn add_cursor_object(doc: &mut jiffshot_doc::Document, path: &Path) {
     if let Err(error) = try_add_cursor_object(doc, path) {
+        #[cfg(any(windows, target_os = "macos"))]
         jiffshot_workflow::log(&error);
+        #[cfg(target_os = "linux")]
+        eprintln!("{error}");
     }
 }
 
@@ -4570,7 +4602,7 @@ fn file_uri(path: &Path) -> String {
     out
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn file_uri(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
@@ -4605,7 +4637,7 @@ fn path_of_uri(uri: &str) -> std::result::Result<PathBuf, String> {
     Ok(PathBuf::from(text.replace('/', "\\")))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn path_of_uri(uri: &str) -> std::result::Result<PathBuf, String> {
     use std::os::unix::ffi::OsStringExt;
 

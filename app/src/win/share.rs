@@ -11,9 +11,13 @@ use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::path::Path;
 
 #[cfg(target_os = "macos")]
-pub(crate) use jiffshot_capture::share::{open_with_in, temporary_export_path};
+pub(crate) use jiffshot_capture::share::open_with_in;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) use jiffshot_capture::share::temporary_export_path;
 
 /// Destinations offered in the Share panel, before the user's programs.
+#[cfg(target_os = "linux")]
+pub const BUILT_IN: &[&str] = &["Open with…", "Email", "Folder…", "FTP", "Print"];
 #[cfg(windows)]
 pub const BUILT_IN: &[&str] = &["Open with…", "Email", "Word", "PowerPoint", "Excel", "OneNote", "Paint", "Folder…", "FTP", "Print"];
 #[cfg(target_os = "macos")]
@@ -169,6 +173,20 @@ fn credential(target: &str, _user: &str) -> Result<Option<String>, String> {
         CredFree(cred as *const _);
         Ok(Some(password))
     }
+}
+
+/// The password stored for this service and FTP username in the Secret Service.
+#[cfg(target_os = "linux")]
+fn credential(target: &str, user: &str) -> Result<Option<String>, String> {
+    let output = std::process::Command::new("secret-tool")
+        .args(["lookup", "service", target, "user", user])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("Could not read the FTP password (is secret-tool installed?): {e}"))?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&output.stdout).trim_end_matches(['\r', '\n']).to_owned()))
 }
 
 /// A generic-password item with this service and FTP username in Keychain.

@@ -209,25 +209,72 @@ pub fn recycle(files: &[PathBuf]) -> bool {
     true
 }
 
+/// What the editor asks the capture side for.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureRequest {
+    Image,
+    Video,
+    CaptureWindow,
+}
+
+#[cfg(target_os = "linux")]
+type CaptureHandler = Box<dyn Fn(CaptureRequest) + Send + Sync>;
+
+#[cfg(target_os = "linux")]
+static CAPTURE_HANDLER: std::sync::Mutex<Option<CaptureHandler>> = std::sync::Mutex::new(None);
+
+/// Registers the Linux capture flows that serve the editor's requests.
+#[cfg(target_os = "linux")]
+pub fn set_capture_handler(handler: impl Fn(CaptureRequest) + Send + Sync + 'static) {
+    *CAPTURE_HANDLER.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(Box::new(handler));
+}
+
+#[cfg(target_os = "linux")]
+fn request(request: CaptureRequest) -> Result<(), String> {
+    match CAPTURE_HANDLER.lock().unwrap_or_else(|poison| poison.into_inner()).as_ref() {
+        Some(handler) => {
+            handler(request);
+            Ok(())
+        }
+        None => Err("capture is not ready yet".to_owned()),
+    }
+}
+
 /// Starts a capture: the editor gets out of the way, then the capture side
 /// opens its overlay and hands the result back.
 pub fn start_capture() -> Result<(), String> {
-    minimize();
-    jiffshot_workflow::request_capture(jiffshot_workflow::MODE_IMAGE, 250);
-    Ok(())
+    #[cfg(target_os = "linux")]
+    return request(CaptureRequest::Image);
+    #[cfg(not(target_os = "linux"))]
+    {
+        minimize();
+        jiffshot_workflow::request_capture(jiffshot_workflow::MODE_IMAGE, 250);
+        Ok(())
+    }
 }
 
 /// Starts a screen recording.
 pub fn start_recording() -> Result<(), String> {
-    minimize();
-    jiffshot_workflow::request_capture(jiffshot_workflow::MODE_VIDEO, 250);
-    Ok(())
+    #[cfg(target_os = "linux")]
+    return request(CaptureRequest::Video);
+    #[cfg(not(target_os = "linux"))]
+    {
+        minimize();
+        jiffshot_workflow::request_capture(jiffshot_workflow::MODE_VIDEO, 250);
+        Ok(())
+    }
 }
 
 /// Opens the Capture window over the editor.
 pub fn open_capture_window() -> Result<(), String> {
-    jiffshot_workflow::request_capture(jiffshot_workflow::OPEN_CAPTURE_WINDOW, 1);
-    Ok(())
+    #[cfg(target_os = "linux")]
+    return request(CaptureRequest::CaptureWindow);
+    #[cfg(not(target_os = "linux"))]
+    {
+        jiffshot_workflow::request_capture(jiffshot_workflow::OPEN_CAPTURE_WINDOW, 1);
+        Ok(())
+    }
 }
 
 /// The flattened document as an opaque frame (composited over white) for
@@ -247,6 +294,54 @@ pub fn frame_from_pixmap(pm: &Pixmap) -> Frame {
 #[cfg(target_os = "macos")]
 pub fn frame_from_pixmap(pm: &Pixmap) -> Frame {
     jiffshot_workflow::frame_from_pixmap(pm)
+}
+
+#[cfg(target_os = "linux")]
+pub fn main_hwnd() -> isize {
+    0
+}
+
+#[cfg(target_os = "linux")]
+pub fn bring_to_front() {}
+
+#[cfg(target_os = "linux")]
+pub fn bring_forward(_handle: isize) {}
+
+#[cfg(target_os = "linux")]
+pub fn minimize() {}
+
+#[cfg(target_os = "linux")]
+pub fn reveal(path: &Path) {
+    open_folder(path.parent().unwrap_or(path));
+}
+
+#[cfg(target_os = "linux")]
+pub fn open_folder(path: &Path) {
+    if let Err(error) = jiffshot_capture::os::open_path(path) {
+        eprintln!("Could not open {}: {error}", path.display());
+    }
+}
+
+/// Moves files to the Trash with `gio`, so a mistaken delete can be undone.
+#[cfg(target_os = "linux")]
+pub fn recycle(files: &[PathBuf]) -> bool {
+    files.is_empty()
+        || std::process::Command::new("gio")
+            .arg("trash")
+            .args(files)
+            .status()
+            .is_ok_and(|status| status.success())
+}
+
+/// Preserves transparency when copying an editor image.
+#[cfg(target_os = "linux")]
+pub fn frame_from_pixmap(pm: &Pixmap) -> Frame {
+    let mut frame = Frame::new(pm.width(), pm.height());
+    for (dst, src) in frame.pixels.as_chunks_mut::<4>().0.iter_mut().zip(pm.pixels()) {
+        *dst = [src.blue(), src.green(), src.red(), src.alpha()];
+    }
+    frame.alpha = true;
+    frame
 }
 
 #[cfg(all(test, target_os = "macos"))]

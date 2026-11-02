@@ -84,7 +84,7 @@ current Rustolonia host.
 
 ## Features
 
-The detailed feature list below describes the Windows application. The Linux build currently supports the subset described in [Building from Source](#building-from-source).
+The detailed feature list below describes the Windows application. The Linux build currently supports the subset described in [Building from Source](#building-from-source). On Linux, a plain launch or opening a file now uses the same editor window as Windows and macOS (GStreamer media backend); it includes the Capture window (Image/Record tabs, cursor, delay and audio options over the desktop portal) and the opt-in tray; preferences and shortcuts are available; selecting a capture shows a frozen-screenshot overlay (dim, crosshair, magnifier, size label, F1 help; drag a region, click or F for the whole screen, freehand, multi-area, fixed-size and repeat-last modes) like Windows and macOS. Wayland cannot read the screen or place windows, so the overlay selects on a portal screenshot taken first (the desktop may flicker briefly or ask permission once), covers the screenshot's whole desktop in one fullscreen window, and cannot highlight individual windows. Set `JIFFSHOT_CLASSIC_UI=1` to use the earlier Linux-specific UI, which is also used for capture, scrolling and text-grab launch modes.
 
 ### Flexible Screen Capture
 
@@ -280,6 +280,8 @@ jiffshot.exe --quit                         # Stop the running Jiffshot instance
 
 ### Automation and AI agents: `jiffshot-cli` (Windows)
 
+On Linux, `jiffshot-cli` supports `status`, `screenshot`, `open`, `ocr --path`, `library list`, and `record start|status|pause|stop|cancel`, served by the running Jiffshot over a private per-user Unix socket in `$XDG_RUNTIME_DIR/jiffshot`. Portal-based screenshots and recordings may require desktop consent. `open PATH` loads a file into the running editor; the editing commands are not yet available. The rest of this section describes Windows.
+
 `jiffshot-cli.exe`, installed beside `jiffshot.exe`, drives the running Jiffshot (starting it if needed) so a script or an AI agent can screenshot, record and annotate a desktop software demo without anyone clicking through it by hand. Every command prints one JSON object and returns a meaningful exit code. It can click, type, press keys, find text by OCR and controls by UI Automation, and wait for windows or text.
 
 The CLI also supports bounded scrolling captures, live recording annotations,
@@ -429,14 +431,19 @@ While hidden, capture and recording results, scheduled-capture problems, and sho
 - [x] Provide opt-in tray operation with window restoration if the tray host disappears.
 - [x] Support opt-in desktop login startup with safe tray fallback.
 - [x] Save named screen/window presets with independent delay and cursor choices.
-- [ ] Automatic scrolling, specialized selection modes, unattended/background scheduling, and presets for other capture modes.
-- [ ] Recording floating controls, live drawing and cursor effects, and the full Windows video editor.
+- [x] Daily scheduled capture, delay/cursor presets and recording pause from the shared Capture window.
+- [x] Scrolling, horizontal scrolling, panoramic, interval and text capture from the Capture window.
+- [x] Selection overlay on a frozen portal screenshot (region, freehand, multi-area, fixed size, repeat last); no window detection on Wayland.
+- [ ] Automatic scrolling, unattended/background scheduling, and presets for other capture modes.
+- [x] Webcam overlay toggle on the Record tab; pause and stop from the Capture window, tray or global shortcuts.
+- [ ] Floating recording controls, live drawing and cursor effects (a toolbar on screen would be captured by the portal recording).
 - [x] Open, email, copy, and print selected saved captures through desktop integrations.
 - [x] Automatically copy new captures and recordings to an opt-in folder.
 - [x] Adjust numeric parameters for supported image effects.
 - [x] Start, stop, and pause recordings with opt-in global shortcuts.
 - [ ] Other automatic sharing destinations and additional global shortcuts.
-- [ ] Unified preferences, template drag-and-drop, and richer library organization.
+- [x] Unified Preferences window (Capture, Editor, Library, Hotkeys) in the shared UI; global shortcuts bind at startup.
+- [ ] Template drag-and-drop and richer library organization.
 - [ ] Verify native desktop consent and global shortcut activation, and test physical audio and camera devices.
 
 ### macOS builds

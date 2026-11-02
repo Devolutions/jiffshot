@@ -167,6 +167,7 @@ fn tool_content(sink: MainViewModelSink, theme: super::main_common::Theme, glyph
                 .text(super::super::icons::glyph(glyph).to_owned())
                 .font_family(ICON_FONT)
                 .font_size(18.0)
+                .height(if cfg!(target_os = "linux") { 28.0 } else { f64::NAN })
                 .horizontal_alignment(HorizontalAlignment::Center)
                 .foreground(move || if glyph_active() { solid(WHITE) } else { theme.get(Tone::Text) }),
         )
@@ -181,11 +182,17 @@ fn tool_content(sink: MainViewModelSink, theme: super::main_common::Theme, glyph
         )
 }
 
+/// Linux fonts have taller line boxes, so the glyph and its caption need more room.
+#[cfg(target_os = "linux")]
+const LABELED_HEIGHT: f64 = 62.0;
+#[cfg(not(target_os = "linux"))]
+const LABELED_HEIGHT: f64 = 48.0;
+
 /// A palette-sized button (`Button.tool`, `compact` without labels).
 fn palette_button(sink: MainViewModelSink) -> El<Button> {
     Button::el()
         .width(move || if sink.tool_labels.get() { 60.0 } else { 38.0 })
-        .height(move || if sink.tool_labels.get() { 48.0 } else { 34.0 })
+        .height(move || if sink.tool_labels.get() { LABELED_HEIGHT } else { 34.0 })
         .padding(0.0)
         .margin(2.0)
         .corner_radius(6.0)

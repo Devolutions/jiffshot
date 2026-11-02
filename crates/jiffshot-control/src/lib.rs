@@ -14,17 +14,19 @@
 //! [`ErrorCode::Unsupported`], so a CLI and a running Jiffshot of different
 //! builds fail clearly instead of misreading each other.
 
-#![cfg(any(windows, target_os = "macos"))]
+#![cfg(any(windows, target_os = "macos", target_os = "linux"))]
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "macos")]
-pub use macos::{
+#[cfg(target_os = "linux")]
+mod linux_ipc;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod unix;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub use unix::{
     call, connect, pipe_name, send, serve, serve_owned, serve_owned_with_completion, Completion,
     Pipe, Server,
 };

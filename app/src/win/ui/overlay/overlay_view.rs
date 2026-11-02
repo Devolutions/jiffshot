@@ -7,6 +7,7 @@
 
 use super::overlay_api::{self as api, OverlayState};
 use super::SurfaceViewport;
+#[cfg(any(windows, target_os = "macos"))]
 use crate::ui::hud::native;
 use jiffshot_capture::{CaptureMapping, Rect};
 use jiffshot_doc::text::{self, TextStyle};
@@ -86,7 +87,7 @@ impl MonitorWindow {
         handler: impl FnMut(&SurfaceInput) -> Result<bool> + Send + 'static,
     ) -> Result<Self> {
         let snapshot = scope.create_display_surface()?;
-        #[cfg(windows)]
+        #[cfg(not(target_os = "macos"))]
         snapshot.set_background(Some(0xFF00_0000))?;
         #[cfg(target_os = "macos")]
         snapshot.set_background(Some(0x0000_0000))?;
@@ -95,7 +96,7 @@ impl MonitorWindow {
         input.set_cursor(Cursor::Cross)?;
         let decor = Decor::new()?;
         let root = Panel::new()?.child(snapshot.control())?.child(&decor.canvas)?.child(input.control())?;
-        #[cfg(windows)]
+        #[cfg(not(target_os = "macos"))]
         let background = Color::rgb(0, 0, 0);
         #[cfg(target_os = "macos")]
         let background = Color::new(0, 0, 0, 0);
@@ -138,6 +139,11 @@ impl MonitorWindow {
 
     /// Desktop-coordinate pixels per DIP.
     pub fn scaling(&self) -> f64 {
+        // The one window shows the whole desktop screenshot, whatever the compositor scales.
+        #[cfg(target_os = "linux")]
+        if let Some(width) = self.input.metrics().ok().map(|m| m.width).filter(|w| *w > 0.0) {
+            return self.rect.width as f64 / width;
+        }
         desktop_scaling(self.scale, self.input.metrics().ok().map(|m| m.scaling))
     }
 
@@ -221,6 +227,7 @@ impl MonitorWindow {
     }
 
     /// Native handle (0 before the window has one).
+    #[cfg(any(windows, target_os = "macos"))]
     pub fn hwnd(&self, scope: &AppScope) -> isize {
         native::handle(scope, &self.window)
     }
@@ -728,7 +735,7 @@ impl Decor {
         if st.has(api::FLAG_MAGNIFIER) {
             #[cfg(target_os = "macos")]
             let magnifier_cursor = (st.cursor_precise[0], st.cursor_precise[1]);
-            #[cfg(windows)]
+            #[cfg(not(target_os = "macos"))]
             let magnifier_cursor = (f64::from(cx), f64::from(cy));
             let zoom = sc(8.0).max(6);
             let side = SAMPLES * zoom;
