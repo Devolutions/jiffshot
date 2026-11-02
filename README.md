@@ -434,7 +434,8 @@ While hidden, capture and recording results, scheduled-capture problems, and sho
 - [x] Daily scheduled capture, delay/cursor presets and recording pause from the shared Capture window.
 - [x] Scrolling, horizontal scrolling, panoramic, interval and text capture from the Capture window.
 - [ ] Automatic scrolling, a drawn selection overlay (not possible on Wayland), unattended/background scheduling, and presets for other capture modes.
-- [ ] Recording floating controls, live drawing and cursor effects, and the full Windows video editor.
+- [x] Webcam overlay toggle on the Record tab; pause and stop from the Capture window, tray or global shortcuts.
+- [ ] Floating recording controls, live drawing and cursor effects (a toolbar on screen would be captured by the portal recording).
 - [x] Open, email, copy, and print selected saved captures through desktop integrations.
 - [x] Automatically copy new captures and recordings to an opt-in folder.
 - [x] Adjust numeric parameters for supported image effects.

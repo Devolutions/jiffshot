@@ -136,11 +136,11 @@ pub fn recording_active() -> bool {
 
 /// Starts a recording with the given audio source ("none", "system",
 /// "microphone" or "both") and cursor visibility.
-pub fn start_recording_with(audio: &str, cursor: bool) -> Result<(), String> {
+pub fn start_recording_with(audio: &str, cursor: bool, webcam: bool) -> Result<(), String> {
     let args = if cursor {
-        json!({"audio": audio, "cursor": true})
+        json!({"audio": audio, "cursor": true, "webcam": webcam})
     } else {
-        json!({"audio": audio, "no_cursor": true})
+        json!({"audio": audio, "no_cursor": true, "webcam": webcam})
     };
     dispatch("record.start", &args)
         .map(|_| ())
@@ -180,7 +180,7 @@ fn dispatch(command: &str, args: &Value) -> Reply {
             Args::new(args, &[])?;
             Ok(recording_status())
         }
-        "record.start" => record_start(&Args::new(args, &["audio", "fps", "cursor", "no_cursor"])?),
+        "record.start" => record_start(&Args::new(args, &["audio", "fps", "cursor", "no_cursor", "webcam"])?),
         "record.pause" => {
             Args::new(args, &[])?;
             record_pause()
@@ -332,6 +332,11 @@ fn record_audio(name: Option<&str>) -> Result<RecordingAudio, Error> {
 fn record_start(args: &Args) -> Reply {
     let audio = record_audio(args.text("audio")?)?;
     let cursor = args.cursor()?;
+    let webcam = if args.flag("webcam")? {
+        RecordingWebcam::Enabled(super::settings::webcam_configuration().map_err(internal)?)
+    } else {
+        RecordingWebcam::Disabled
+    };
     let frame_rate = match args.text("fps")? {
         Some(fps) => RecordingFrameRate::from_stored_name(fps)
             .map_err(|_| invalid("fps must be source, 15, 24, 30 or 60"))?,
@@ -355,7 +360,7 @@ fn record_start(args: &Args) -> Reply {
             let outcome = futures_lite::future::block_on(capture::record_monitor_with_audio(
                 receiver,
                 audio,
-                RecordingWebcam::Disabled,
+                webcam,
                 cursor,
                 frame_rate,
                 move |next| *lock(&observed) = next,

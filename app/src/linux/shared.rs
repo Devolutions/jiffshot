@@ -50,10 +50,10 @@ pub(crate) fn capture_image_with(cursor: bool, delay: u64) {
 
 /// Starts a recording, or stops the running one and opens the video.
 pub(crate) fn toggle_recording() {
-    toggle_recording_with("none", true);
+    toggle_recording_with("none", true, false);
 }
 
-pub(crate) fn toggle_recording_with(audio: &'static str, cursor: bool) {
+pub(crate) fn toggle_recording_with(audio: &'static str, cursor: bool, webcam: bool) {
     std::thread::spawn(move || {
         if control::recording_active() {
             match control::stop_recording() {
@@ -63,7 +63,7 @@ pub(crate) fn toggle_recording_with(audio: &'static str, cursor: bool) {
             }
         } else {
             report("Choose a screen in the desktop dialog…".into());
-            match control::start_recording_with(audio, cursor) {
+            match control::start_recording_with(audio, cursor, webcam) {
                 Ok(()) => report("Recording… press Record again to stop".into()),
                 Err(error) => report(format!("Could not start recording: {error}")),
             }
@@ -145,7 +145,7 @@ pub fn start_shortcuts() {
                 match action {
                     ShortcutAction::Capture => app::post(|_| super::capture_window::show()),
                     ShortcutAction::ToggleRecording => match start.audio() {
-                        Some(audio) => toggle_recording_with(audio_name(audio), true),
+                        Some(audio) => toggle_recording_with(audio_name(audio), true, false),
                         None => report("The recording start shortcut is disabled.".into()),
                     },
                     ShortcutAction::PauseRecording => {
@@ -153,7 +153,7 @@ pub fn start_shortcuts() {
                     }
                     ShortcutAction::StopRecording => {
                         if control::recording_active() {
-                            toggle_recording_with("none", true);
+                            toggle_recording_with("none", true, false);
                         }
                     }
                 }

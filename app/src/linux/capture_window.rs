@@ -29,6 +29,7 @@ struct State {
     cursor: bool,
     delay: u64,
     system_audio: bool,
+    webcam: bool,
     microphone: bool,
     serial: u64,
 }
@@ -43,6 +44,7 @@ thread_local! {
         cursor: true,
         delay: 0,
         system_audio: false,
+        webcam: false,
         microphone: false,
         serial: 0,
     }) };
@@ -74,6 +76,7 @@ fn load() {
         s.delay = value["delay"].as_u64().unwrap_or(0);
         s.cursor = value["cursor"].as_bool().unwrap_or(true);
         s.system_audio = value["system_audio"].as_bool().unwrap_or(false);
+        s.webcam = value["webcam"].as_bool().unwrap_or(false);
         s.microphone = value["microphone"].as_bool().unwrap_or(false);
     });
 }
@@ -82,7 +85,7 @@ fn save() {
     let value = with(|s| {
         json!({
             "tab": s.tab, "area": s.area, "interval": s.interval, "delay": s.delay,
-            "cursor": s.cursor, "system_audio": s.system_audio, "microphone": s.microphone,
+            "cursor": s.cursor, "system_audio": s.system_audio, "webcam": s.webcam, "microphone": s.microphone,
         })
     });
     let Some(path) = settings_path() else { return };
@@ -172,6 +175,7 @@ fn view_json() -> String {
             vec![
                 toggle("video:switch:record-cursor", "Record the cursor", s.cursor),
                 toggle("video:switch:system-audio", "System audio", s.system_audio),
+                toggle("video:switch:webcam", "Webcam", s.webcam),
                 toggle("video:switch:microphone", "Microphone", s.microphone),
             ]
         };
@@ -285,6 +289,7 @@ fn pick(id: &str) {
     match id {
         "image:switch:cursor" | "video:switch:record-cursor" => with(|s| s.cursor = !s.cursor),
         "video:switch:system-audio" => with(|s| s.system_audio = !s.system_audio),
+        "video:switch:webcam" => with(|s| s.webcam = !s.webcam),
         "video:switch:microphone" => with(|s| s.microphone = !s.microphone),
         "open-editor" => crate::app::post(|app| app.show_editor()),
         "close" => hide(),
@@ -352,14 +357,14 @@ fn act(action: &str) {
                 publish_view();
                 return;
             }
-            let (video, cursor, delay, audio, area, interval) =
-                with(|s| (s.tab == 2, s.cursor, s.delay, audio_name(s), s.area.clone(), s.interval));
+            let (video, cursor, delay, audio, area, interval, webcam) =
+                with(|s| (s.tab == 2, s.cursor, s.delay, audio_name(s), s.area.clone(), s.interval, s.webcam));
             let long_running = !video && (area.contains("scrolling") || area == "panoramic" || (area == "screen" && interval > 0));
             if !long_running {
                 hide();
             }
             if video {
-                super::shared::toggle_recording_with(audio, cursor);
+                super::shared::toggle_recording_with(audio, cursor, webcam);
                 return;
             }
             use super::scroll::{Direction, Mode};
