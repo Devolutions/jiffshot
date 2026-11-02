@@ -334,10 +334,13 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
             .content(content);
         on_click(button, &subs, |_| run("capture".into()))
     };
+    // A fixed two-line slot keeps the capsule and button anchored across modes.
     let detail = TextBlock::el()
-        .visible(move || !action.get().1.is_empty())
         .text(move || action.get().1)
         .width(144.0)
+        .height(32.0)
+        .max_lines(2)
+        .text_trimming("CharacterEllipsis")
         .horizontal_alignment(HorizontalAlignment::Center)
         .text_alignment(TextAlignment::Center)
         .text_wrapping(TextWrapping::Wrap)
