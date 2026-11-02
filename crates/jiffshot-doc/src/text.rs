@@ -6,6 +6,7 @@ use crate::raster::blend;
 use ab_glyph::{Font, FontArc, GlyphId, PxScale, ScaleFont};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(not(target_os = "macos"))]
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use tiny_skia::Pixmap;
@@ -29,6 +30,86 @@ pub const FAMILIES: &[&str] = &[
 
 pub const DEFAULT_FAMILY: &str = "Segoe UI";
 
+/// Font families available to the editor, including installed macOS fonts.
+pub fn families() -> Vec<String> {
+    let mut families: Vec<String> = FAMILIES.iter().map(|name| (*name).to_owned()).collect();
+    #[cfg(target_os = "macos")]
+    for face in mac_fonts::database().faces() {
+        for (name, _) in &face.families {
+            if !name.starts_with('.')
+                && !families
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(name))
+            {
+                families.push(name.clone());
+            }
+        }
+    }
+    families.sort_unstable_by_key(|name| name.to_ascii_lowercase());
+    families
+}
+
+/// The actual face selected by the macOS font database.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FontFace {
+    pub family: String,
+    pub post_script_name: String,
+    pub weight: u16,
+    pub style: &'static str,
+    /// OpenType width class; 5 is normal.
+    pub stretch: u16,
+}
+
+#[cfg(target_os = "macos")]
+mod mac_fonts {
+    use super::FontFace;
+    use ab_glyph::{FontArc, FontVec};
+    use fontdb::{Database, Family, Query, Stretch, Style, Weight};
+    use std::sync::OnceLock;
+
+    pub fn database() -> &'static Database {
+        static DATABASE: OnceLock<Database> = OnceLock::new();
+        DATABASE.get_or_init(|| {
+            let mut db = Database::new();
+            db.load_system_fonts();
+            db
+        })
+    }
+
+    pub fn load(family: &str, bold: bool, italic: bool) -> Option<(FontArc, FontFace)> {
+        let query = Query {
+            families: &[Family::Name(family)],
+            weight: if bold { Weight::BOLD } else { Weight::NORMAL },
+            stretch: Stretch::Normal,
+            style: if italic { Style::Italic } else { Style::Normal },
+        };
+        let db = database();
+        let id = db.query(&query)?;
+        let face = db.face(id)?;
+        let selected = FontFace {
+            family: face
+                .families
+                .first()
+                .map_or_else(|| family.to_owned(), |(name, _)| name.clone()),
+            post_script_name: face.post_script_name.clone(),
+            weight: face.weight.0,
+            style: match face.style {
+                Style::Normal => "normal",
+                Style::Italic => "italic",
+                Style::Oblique => "oblique",
+            },
+            stretch: face.stretch.to_number(),
+        };
+        let font = db.with_face_data(id, |data, index| {
+            FontVec::try_from_vec_and_index(data.to_vec(), index)
+                .ok()
+                .map(FontArc::new)
+        })??;
+        Some((font, selected))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Align {
     #[default]
@@ -38,6 +119,7 @@ pub enum Align {
 }
 
 /// Regular, bold, italic and bold-italic file names for a family.
+#[cfg(not(target_os = "macos"))]
 fn files(family: &str) -> Option<[&'static str; 4]> {
     Some(match family.to_ascii_lowercase().as_str() {
         "segoe ui" => [
@@ -100,6 +182,7 @@ fn files(family: &str) -> Option<[&'static str; 4]> {
     })
 }
 
+#[cfg(not(target_os = "macos"))]
 const FALLBACK_FILES: &[&str] = &[
     "seguisym.ttf",
     "msyh.ttc",
@@ -110,6 +193,7 @@ const FALLBACK_FILES: &[&str] = &[
     "DejaVuSans.ttf",
 ];
 
+#[cfg(not(target_os = "macos"))]
 fn font_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(windir) = std::env::var_os("WINDIR") {
@@ -137,6 +221,7 @@ fn font_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+#[cfg(not(target_os = "macos"))]
 fn load_file(name: &str) -> Option<FontArc> {
     font_dirs().into_iter().find_map(|dir| {
         let bytes = std::fs::read(dir.join(name)).ok()?;
@@ -144,41 +229,256 @@ fn load_file(name: &str) -> Option<FontArc> {
     })
 }
 
-type Cache = Mutex<HashMap<(String, bool, bool), Option<FontArc>>>;
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct ResolvedFont {
+    font: FontArc,
+    face: FontFace,
+    family_fallback: bool,
+}
+
+#[cfg(target_os = "macos")]
+type CachedFont = ResolvedFont;
+#[cfg(not(target_os = "macos"))]
+type CachedFont = FontArc;
+
+type Cache = Mutex<HashMap<(String, bool, bool), Option<CachedFont>>>;
 
 fn cache() -> &'static Cache {
     static CACHE: OnceLock<Cache> = OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
-/// Loads a family's face, falling back to regular, then to the default
-/// family, then to any fallback font. `None` only if no font exists at all.
+/// Loads a family's face, using platform fallbacks when it is unavailable.
+/// Returns `None` when no usable primary or fallback face can be loaded.
+#[cfg(not(target_os = "macos"))]
 pub fn font(family: &str, bold: bool, italic: bool) -> Option<FontArc> {
     let key = (family.to_ascii_lowercase(), bold, italic);
     if let Some(found) = cache().lock().unwrap().get(&key) {
         return found.clone();
     }
-    let index = bold as usize + 2 * italic as usize;
-    let found = files(family)
-        .and_then(|f| load_file(f[index]).or_else(|| load_file(f[0])))
-        .or_else(|| {
-            (family != DEFAULT_FAMILY)
-                .then(|| font(DEFAULT_FAMILY, bold, italic))
-                .flatten()
-        })
-        .or_else(|| font_from_list(&["DejaVuSans.ttf", "arial.ttf"]))
-        .or_else(|| fallbacks().first().cloned());
+    let found = {
+        let index = bold as usize + 2 * italic as usize;
+        files(family)
+            .and_then(|f| load_file(f[index]).or_else(|| load_file(f[0])))
+            .or_else(|| {
+                (family != DEFAULT_FAMILY)
+                    .then(|| font(DEFAULT_FAMILY, bold, italic))
+                    .flatten()
+            })
+            .or_else(|| font_from_list(&["DejaVuSans.ttf", "arial.ttf"]))
+            .or_else(|| fallbacks().first().cloned())
+    };
     cache().lock().unwrap().insert(key, found.clone());
     found
 }
 
+#[cfg(target_os = "macos")]
+fn select_mac_font<T>(
+    family: &str,
+    mut load: impl FnMut(&str) -> Option<T>,
+) -> Option<(T, Option<&'static str>)> {
+    load(family)
+        .map(|font| (font, None))
+        .or_else(|| load("Helvetica Neue").map(|font| (font, Some("Helvetica Neue"))))
+        .or_else(|| load("Arial Unicode MS").map(|font| (font, Some("Arial Unicode MS"))))
+}
+
+#[cfg(target_os = "macos")]
+fn resolved_font(family: &str, bold: bool, italic: bool) -> Option<ResolvedFont> {
+    let key = (family.to_ascii_lowercase(), bold, italic);
+    if let Some(found) = cache().lock().unwrap().get(&key) {
+        return found.clone();
+    }
+    let found = select_mac_font(family, |name| mac_fonts::load(name, bold, italic)).map(
+        |((font, face), replacement)| ResolvedFont {
+            font,
+            face,
+            family_fallback: replacement.is_some(),
+        },
+    );
+    cache().lock().unwrap().insert(key, found.clone());
+    found
+}
+
+/// Loads the closest face in the requested family, or a macOS fallback family.
+#[cfg(target_os = "macos")]
+pub fn font(family: &str, bold: bool, italic: bool) -> Option<FontArc> {
+    resolved_font(family, bold, italic).map(|resolved| resolved.font)
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FontSubstitutionReason {
+    Family,
+    Style,
+    Unavailable,
+}
+
+/// A family or face substitution made by the renderer. A missing replacement
+/// means that no usable primary or fallback face was found.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FontSubstitution {
+    pub requested: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub reason: FontSubstitutionReason,
+    pub replacement: Option<FontFace>,
+}
+
+#[cfg(target_os = "macos")]
+fn substitution_for_face(
+    family: &str,
+    bold: bool,
+    italic: bool,
+    selected: Option<(&FontFace, bool)>,
+) -> Option<FontSubstitution> {
+    let reason = match selected {
+        None => FontSubstitutionReason::Unavailable,
+        Some((_, true)) => FontSubstitutionReason::Family,
+        Some((face, false))
+            if face.weight != if bold { 700 } else { 400 }
+                || face.style != if italic { "italic" } else { "normal" }
+                || face.stretch != 5 =>
+        {
+            FontSubstitutionReason::Style
+        }
+        Some(_) => return None,
+    };
+    Some(FontSubstitution {
+        requested: family.to_owned(),
+        bold,
+        italic,
+        reason,
+        replacement: selected.map(|(face, _)| face.clone()),
+    })
+}
+
+/// Reports the same face used by [`font`], without changing the requested
+/// family stored in the document.
+#[cfg(target_os = "macos")]
+pub fn font_substitution(family: &str, bold: bool, italic: bool) -> Option<FontSubstitution> {
+    let resolved = resolved_font(family, bold, italic);
+    substitution_for_face(
+        family,
+        bold,
+        italic,
+        resolved
+            .as_ref()
+            .map(|font| (&font.face, font.family_fallback)),
+    )
+}
+
+/// Reports substitutions for text objects and nested groups in document order.
+#[cfg(target_os = "macos")]
+pub fn object_font_substitutions<'a>(
+    objects: impl IntoIterator<Item = &'a crate::object::Object>,
+) -> Vec<FontSubstitution> {
+    use crate::object::Kind;
+    let mut seen = std::collections::HashSet::new();
+    let mut substitutions = Vec::new();
+    for object in objects {
+        object.walk(&mut |object| {
+            let (content, bold, italic) = match &object.kind {
+                Kind::Text { text, .. } | Kind::Callout { text, .. } => {
+                    (text, object.style.bold, object.style.italic)
+                }
+                Kind::Step { label, .. } => (label, true, false),
+                _ => return,
+            };
+            if content.is_empty()
+                || !seen.insert((object.style.font.to_ascii_lowercase(), bold, italic))
+            {
+                return;
+            }
+            if let Some(substitution) = font_substitution(&object.style.font, bold, italic) {
+                substitutions.push(substitution);
+            }
+        });
+    }
+    substitutions
+}
+
+/// Formats a bounded notice suitable for the editor and capture notifications.
+#[cfg(target_os = "macos")]
+pub fn describe_font_substitutions(substitutions: &[FontSubstitution]) -> Option<String> {
+    fn name(value: &str) -> String {
+        let mut chars = value.chars();
+        let mut label: String = chars
+            .by_ref()
+            .take(60)
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        if chars.next().is_some() {
+            label.push('…');
+        }
+        if label.trim().is_empty() {
+            "(empty family)".into()
+        } else {
+            label
+        }
+    }
+
+    if substitutions.is_empty() {
+        return None;
+    }
+    let mut descriptions: Vec<_> = substitutions
+        .iter()
+        .take(3)
+        .map(|substitution| {
+            let style = match (substitution.bold, substitution.italic) {
+                (true, true) => " (bold italic)",
+                (true, false) => " (bold)",
+                (false, true) => " (italic)",
+                (false, false) => "",
+            };
+            let requested = name(&substitution.requested);
+            match &substitution.replacement {
+                Some(replacement) => format!(
+                    "{requested}{style}: using {} (weight {}, {}, width {})",
+                    name(&replacement.family),
+                    replacement.weight,
+                    replacement.style,
+                    replacement.stretch,
+                ),
+                None => format!("{requested}{style}: no usable replacement; text will not render"),
+            }
+        })
+        .collect();
+    if substitutions.len() > descriptions.len() {
+        descriptions.push(format!("{} more", substitutions.len() - descriptions.len()));
+    }
+    Some(format!("Font substitution: {}", descriptions.join("; ")))
+}
+
+#[cfg(not(target_os = "macos"))]
 fn font_from_list(names: &[&str]) -> Option<FontArc> {
     names.iter().find_map(|n| load_file(n))
 }
 
 fn fallbacks() -> &'static [FontArc] {
     static FALLBACKS: OnceLock<Vec<FontArc>> = OnceLock::new();
-    FALLBACKS.get_or_init(|| FALLBACK_FILES.iter().filter_map(|n| load_file(n)).collect())
+    FALLBACKS.get_or_init(|| {
+        #[cfg(target_os = "macos")]
+        {
+            [
+                "Arial Unicode MS",
+                "PingFang SC",
+                "Hiragino Sans",
+                "Apple SD Gothic Neo",
+                "Apple Symbols",
+            ]
+            .iter()
+            .filter_map(|family| mac_fonts::load(family, false, false).map(|(font, _)| font))
+            .collect()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            FALLBACK_FILES.iter().filter_map(|n| load_file(n)).collect()
+        }
+    })
 }
 
 /// One positioned glyph: the font it comes from (index into
@@ -481,5 +781,372 @@ mod tests {
             p.data().chunks(4).any(|px| px[3] > 200),
             "glyphs were drawn"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolves_installed_families_and_collection_faces() {
+        let families = families();
+        assert!(families.iter().any(|name| name == "Helvetica Neue"));
+        let (regular, _) =
+            mac_fonts::load("Helvetica Neue", false, false).expect("system regular face");
+        let (bold, _) = mac_fonts::load("Helvetica Neue", true, false).expect("system bold face");
+        assert_ne!(regular.glyph_id('A').0, 0);
+        assert_ne!(bold.glyph_id('A').0, 0);
+        assert!(
+            font(DEFAULT_FAMILY, false, false).is_some(),
+            "documents with Windows fonts need a substitute"
+        );
+        let text = layout("Hello 世界", &style(20.0), None);
+        assert!(text.width() > 0.0);
+        assert!(
+            text.lines[0].glyphs.iter().all(|glyph| glyph.id.0 != 0),
+            "CJK glyphs need a fallback"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_cjk_fallback_renders_visible_glyphs() {
+        let layout = layout(
+            "漢字",
+            &TextStyle {
+                family: "Helvetica Neue",
+                size: 28.0,
+                bold: false,
+                italic: false,
+            },
+            None,
+        );
+        assert_eq!(layout.lines[0].glyphs.len(), 2);
+        for glyph in &layout.lines[0].glyphs {
+            assert_ne!(glyph.id.0, 0, "CJK character resolved to a missing glyph");
+            let font = &layout.fonts[glyph.font];
+            assert!(
+                font.outline_glyph(glyph.id.with_scale(layout.scales[glyph.font]))
+                    .is_some(),
+                "CJK fallback has no renderable outline"
+            );
+        }
+        let mut pixels = Pixmap::new(120, 60).unwrap();
+        draw(
+            &mut pixels,
+            (0, 0),
+            &layout,
+            0.0,
+            0.0,
+            120.0,
+            Align::Left,
+            Rgba::BLACK,
+        );
+        assert!(
+            pixels.data().chunks_exact(4).any(|pixel| pixel[3] != 0),
+            "CJK fallback drew no pixels"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_font_choice_reports_exact_and_fallback_faces() {
+        assert!(font_substitution("Helvetica Neue", false, false).is_none());
+        let missing = "Jiffshot deliberately unavailable family 8f29b6";
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let substitution =
+                font_substitution(missing, bold, italic).expect("missing family is reported");
+            assert_eq!(substitution.requested, missing);
+            assert_eq!((substitution.bold, substitution.italic), (bold, italic));
+            assert_eq!(substitution.reason, FontSubstitutionReason::Family);
+            assert_eq!(
+                substitution
+                    .replacement
+                    .as_ref()
+                    .map(|face| face.family.as_str()),
+                Some("Helvetica Neue")
+            );
+            assert_eq!(
+                substitution.replacement,
+                Some(mac_fonts::load("Helvetica Neue", bold, italic).unwrap().1)
+            );
+            let requested = layout(
+                "Sample",
+                &TextStyle {
+                    family: missing,
+                    size: 23.0,
+                    bold,
+                    italic,
+                },
+                None,
+            );
+            let fallback = layout(
+                "Sample",
+                &TextStyle {
+                    family: "Helvetica Neue",
+                    size: 23.0,
+                    bold,
+                    italic,
+                },
+                None,
+            );
+            assert_eq!(
+                (requested.width(), requested.height()),
+                (fallback.width(), fallback.height())
+            );
+            assert_eq!(
+                requested.lines[0]
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.id)
+                    .collect::<Vec<_>>(),
+                fallback.lines[0]
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.id)
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_font_choice_handles_each_fallback_and_no_font() {
+        let mut attempted = Vec::new();
+        let result = select_mac_font("missing", |name| {
+            attempted.push(name.to_owned());
+            (name == "Arial Unicode MS").then_some(7)
+        });
+        assert_eq!(result, Some((7, Some("Arial Unicode MS"))));
+        assert_eq!(attempted, ["missing", "Helvetica Neue", "Arial Unicode MS"]);
+        assert_eq!(select_mac_font::<()>("missing", |_| None), None);
+
+        let missing = "Jiffshot simulated unavailable fallback 1f320a";
+        let key = (missing.to_ascii_lowercase(), false, true);
+        cache().lock().unwrap().insert(key.clone(), None);
+        assert!(font(missing, false, true).is_none());
+        assert_eq!(
+            font_substitution(missing, false, true),
+            Some(FontSubstitution {
+                requested: missing.to_owned(),
+                bold: false,
+                italic: true,
+                reason: FontSubstitutionReason::Unavailable,
+                replacement: None,
+            }),
+        );
+        cache().lock().unwrap().remove(&key);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_font_choice_reports_closest_weight_slant_and_width() {
+        let regular = FontFace {
+            family: "Fixture".into(),
+            post_script_name: "Fixture-Regular".into(),
+            weight: 400,
+            style: "normal",
+            stretch: 5,
+        };
+        assert_eq!(
+            substitution_for_face("Fixture", false, false, Some((&regular, false))),
+            None
+        );
+        for (face, bold, italic) in [
+            (regular.clone(), true, false),
+            (regular.clone(), false, true),
+            (
+                FontFace {
+                    weight: 500,
+                    ..regular.clone()
+                },
+                false,
+                false,
+            ),
+            (
+                FontFace {
+                    style: "oblique",
+                    ..regular.clone()
+                },
+                false,
+                true,
+            ),
+            (
+                FontFace {
+                    stretch: 3,
+                    ..regular.clone()
+                },
+                false,
+                false,
+            ),
+        ] {
+            let substitution =
+                substitution_for_face("Fixture", bold, italic, Some((&face, false))).unwrap();
+            assert_eq!(substitution.reason, FontSubstitutionReason::Style);
+            assert_eq!(substitution.replacement, Some(face));
+        }
+        let fallback =
+            substitution_for_face("Missing", false, false, Some((&regular, true))).unwrap();
+        assert_eq!(fallback.reason, FontSubstitutionReason::Family);
+        assert_eq!(fallback.replacement, Some(regular));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_font_notice_uses_the_same_cached_face_as_rendering() {
+        let family = "Jiffshot simulated regular-only family fd242a";
+        let key = (family.to_ascii_lowercase(), true, false);
+        let (font, face) = mac_fonts::load("Helvetica Neue", false, false).unwrap();
+        assert_eq!((face.weight, face.style, face.stretch), (400, "normal", 5));
+        cache().lock().unwrap().insert(
+            key.clone(),
+            Some(ResolvedFont {
+                font,
+                face: face.clone(),
+                family_fallback: false,
+            }),
+        );
+        let notice = font_substitution(family, true, false).unwrap();
+        assert_eq!(notice.reason, FontSubstitutionReason::Style);
+        assert_eq!(notice.replacement, Some(face));
+        let message = describe_font_substitutions(&[notice]).unwrap();
+        assert!(message.contains("(bold): using Helvetica Neue (weight 400, normal, width 5)"));
+        let requested = layout(
+            "Sample",
+            &TextStyle {
+                family,
+                size: 23.0,
+                bold: true,
+                italic: false,
+            },
+            None,
+        );
+        let selected = layout(
+            "Sample",
+            &TextStyle {
+                family: "Helvetica Neue",
+                size: 23.0,
+                bold: false,
+                italic: false,
+            },
+            None,
+        );
+        assert_eq!(
+            (requested.width(), requested.height()),
+            (selected.width(), selected.height())
+        );
+        assert_eq!(
+            requested.lines[0]
+                .glyphs
+                .iter()
+                .map(|glyph| glyph.id)
+                .collect::<Vec<_>>(),
+            selected.lines[0]
+                .glyphs
+                .iter()
+                .map(|glyph| glyph.id)
+                .collect::<Vec<_>>(),
+        );
+        cache().lock().unwrap().remove(&key);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_font_notice_reports_the_second_fallback_face() {
+        let family = "Jiffshot simulated second fallback 1524e1";
+        let key = (family.to_ascii_lowercase(), false, false);
+        let (font, face) =
+            mac_fonts::load("Arial Unicode MS", false, false).expect("system Unicode fallback");
+        cache().lock().unwrap().insert(
+            key.clone(),
+            Some(ResolvedFont {
+                font,
+                face: face.clone(),
+                family_fallback: true,
+            }),
+        );
+        let notice = font_substitution(family, false, false).unwrap();
+        assert_eq!(notice.reason, FontSubstitutionReason::Family);
+        assert_eq!(notice.replacement, Some(face));
+        let requested = layout(
+            "Sample",
+            &TextStyle {
+                family,
+                size: 23.0,
+                bold: false,
+                italic: false,
+            },
+            None,
+        );
+        let selected = layout(
+            "Sample",
+            &TextStyle {
+                family: "Arial Unicode MS",
+                size: 23.0,
+                bold: false,
+                italic: false,
+            },
+            None,
+        );
+        assert_eq!(
+            (requested.width(), requested.height()),
+            (selected.width(), selected.height())
+        );
+        assert_eq!(
+            requested.lines[0]
+                .glyphs
+                .iter()
+                .map(|glyph| glyph.id)
+                .collect::<Vec<_>>(),
+            selected.lines[0]
+                .glyphs
+                .iter()
+                .map(|glyph| glyph.id)
+                .collect::<Vec<_>>(),
+        );
+        cache().lock().unwrap().remove(&key);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn font_notice_is_bounded_and_safe_for_the_notification_protocol() {
+        assert_eq!(describe_font_substitutions(&[]), None);
+        let face = |family: &str| FontFace {
+            family: family.into(),
+            post_script_name: "Fixture-Regular".into(),
+            weight: 400,
+            style: "normal",
+            stretch: 5,
+        };
+        let mut substitutions = vec![
+            FontSubstitution {
+                requested: "Missing\u{1f}family".into(),
+                bold: true,
+                italic: true,
+                reason: FontSubstitutionReason::Family,
+                replacement: Some(face("Helvetica Neue")),
+            },
+            FontSubstitution {
+                requested: "\n".into(),
+                bold: false,
+                italic: false,
+                reason: FontSubstitutionReason::Unavailable,
+                replacement: None,
+            },
+            FontSubstitution {
+                requested: "x".repeat(90),
+                bold: false,
+                italic: true,
+                reason: FontSubstitutionReason::Family,
+                replacement: Some(face("Arial Unicode MS")),
+            },
+        ];
+        substitutions.push(substitutions[0].clone());
+        let description = describe_font_substitutions(&substitutions).unwrap();
+        assert!(description.contains("Missing family (bold italic): using Helvetica Neue"));
+        assert!(description.contains("(empty family): no usable replacement; text will not render"));
+        assert!(description.contains(&format!(
+            "{}… (italic): using Arial Unicode MS",
+            "x".repeat(60)
+        )));
+        assert!(description.ends_with("1 more"));
+        assert!(!description.chars().any(char::is_control));
     }
 }

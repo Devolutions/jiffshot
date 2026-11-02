@@ -4,8 +4,14 @@
 //! and [`Panel`]s (sent to it as JSON) and hands back the ids and values the
 //! user picked.
 
+#[cfg(target_os = "macos")]
+use crate::geometry::{self, SavedAreaChanges, SavedAreaKind};
+#[cfg(target_os = "macos")]
+use crate::settings::SavedAreaConfirmation;
 use crate::settings::{Preset, Settings};
 use crate::workflow::{SHARES, VIDEO_SHARES};
+#[cfg(target_os = "macos")]
+use jiffshot_capture::Rect;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -377,7 +383,7 @@ pub fn mode_of(s: &Settings, tab: usize) -> String {
 
 /// "PrtScn" as it reads under the Capture button.
 pub(crate) fn key_name(key: &str) -> String {
-    key.replace("PrtScn", "Print Screen")
+    crate::keys::display(key)
 }
 
 /// The Capture button's label and the line under it.
@@ -685,7 +691,10 @@ pub fn menu(s: &Settings, which: &str) -> Vec<MenuItem> {
                 .map(|(t, name)| {
                     check(
                         format!("tab:{t}"),
-                        format!("{name}\tCtrl+{}", t + 1),
+                        format!(
+                            "{name}\t{}",
+                            crate::keys::display(&format!("{}+{}", crate::keys::COMMAND, t + 1))
+                        ),
                         t == tab,
                     )
                 })
@@ -843,6 +852,20 @@ pub fn number(label: &str, value: i64, min: i64, max: i64) -> Row {
     }
 }
 
+fn saved_number(label: &str, value: i64, min: i64, max: i64) -> Row {
+    #[cfg(target_os = "macos")]
+    let (min, max) = (min.min(value), max.max(value));
+    number(label, value, min, max)
+}
+
+fn coordinate_number(label: &str, value: i64) -> Row {
+    if cfg!(target_os = "macos") {
+        number(label, value, i32::MIN as i64, i32::MAX as i64)
+    } else {
+        number(label, value, -32768, 32767)
+    }
+}
+
 pub fn check_row(label: &str, value: bool) -> Row {
     Row::Check {
         label: label.into(),
@@ -877,6 +900,14 @@ pub struct Panel {
     pub rows: Vec<Row>,
     /// The confirm button's text; none for a read-only panel.
     pub ok: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<PanelAction>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct PanelAction {
+    pub id: &'static str,
+    pub label: &'static str,
 }
 
 fn panel_of(id: &str, title: &str, rows: Vec<Row>) -> Option<Panel> {
@@ -885,6 +916,7 @@ fn panel_of(id: &str, title: &str, rows: Vec<Row>) -> Option<Panel> {
         title: title.into(),
         rows,
         ok: Some("OK"),
+        action: None,
     })
 }
 
@@ -898,19 +930,37 @@ pub fn panel(s: &Settings, id: &str, runs_at_startup: bool, capture_key: &str) -
             if tab == 1 && matches!(s.capture_window.selection.as_str(), "image" | "fixed") =>
         {
             let (x, y) = s.capture_window.fixed_at.unwrap_or((0, 0));
-            panel_of(
-                id,
-                "Region options",
-                vec![
-                    check_row("Fixed region", fixed(s)),
-                    number("Width", s.fixed_size.0 as i64, 16, 16384),
-                    number("Height", s.fixed_size.1 as i64, 16, 16384),
-                    check_row("Set position", s.capture_window.fixed_at.is_some()),
-                    number("X", x as i64, -32768, 32767),
-                    number("Y", y as i64, -32768, 32767),
-                    check_row("Keep the pointer as a movable object", s.cursor_as_object),
-                ],
-            )
+            let rows = vec![
+                check_row("Fixed region", fixed(s)),
+                saved_number("Width", s.fixed_size.0 as i64, 16, 16384),
+                saved_number("Height", s.fixed_size.1 as i64, 16, 16384),
+                check_row("Set position", s.capture_window.fixed_at.is_some()),
+                coordinate_number("X", x as i64),
+                coordinate_number("Y", y as i64),
+                check_row("Keep the pointer as a movable object", s.cursor_as_object),
+            ];
+            #[cfg(target_os = "macos")]
+            let rows = {
+                let mut rows = rows;
+                rows.push(note(
+                    "The position uses display-grid pixels; width and height are output pixels.",
+                ));
+                if let Some((x, y)) = s.capture_window.fixed_at {
+                    let area = Rect::new(x, y, s.fixed_size.0, s.fixed_size.1);
+                    if geometry::saved_area_layout(SavedAreaKind::Fixed, area).is_err() {
+                        rows.push(note("Review the saved position in the current display grid. Unconfirmed values stay unchanged unless you remove or confirm them."));
+                        rows.push(check_row("Confirm position for these displays", false));
+                    } else if s
+                        .macos_fixed_area
+                        .as_ref()
+                        .is_some_and(|confirmation| confirmation.session_only)
+                    {
+                        rows.push(note(geometry::SESSION_ONLY_AREA_WARNING));
+                    }
+                }
+                rows
+            };
+            panel_of(id, "Region options", rows)
         }
         "selection" if tab == 1 => panel_of(
             id,
@@ -938,25 +988,61 @@ pub fn panel(s: &Settings, id: &str, runs_at_startup: bool, capture_key: &str) -
             } else {
                 s.capture_window.delay.max(1)
             };
-            panel_of(
-                id,
-                "Time delay",
-                vec![
-                    choice("Type", &["Delay", "Interval", "Schedule"], kind),
-                    number("Delay (seconds)", seconds as i64, 1, 600),
-                    number(
-                        "Interval (seconds)",
-                        s.interval_seconds.max(3) as i64,
-                        3,
-                        86_400,
-                    ),
-                    check_row("Skip identical captures", s.interval_skip_identical),
-                    text(
-                        "Daily at",
-                        s.schedule_default.clone().unwrap_or_else(|| "09:00".into()),
-                    ),
-                ],
-            )
+            let rows = vec![
+                choice("Type", &["Delay", "Interval", "Schedule"], kind),
+                number("Delay (seconds)", seconds as i64, 1, 600),
+                number(
+                    "Interval (seconds)",
+                    s.interval_seconds.max(3) as i64,
+                    3,
+                    86_400,
+                ),
+                check_row("Skip identical captures", s.interval_skip_identical),
+                text(
+                    "Daily at",
+                    s.schedule_default.clone().unwrap_or_else(|| "09:00".into()),
+                ),
+            ];
+            #[cfg(target_os = "macos")]
+            let rows = {
+                let mut rows = rows;
+                let (x, y, width, height) = s.schedule_area.unwrap_or((0, 0, 1280, 720));
+                rows.extend([
+                    check_row("Use a saved schedule area", s.schedule_area.is_some()),
+                    coordinate_number("Area X (grid pixels)", x as i64),
+                    coordinate_number("Area Y (grid pixels)", y as i64),
+                    saved_number("Area width (grid)", width as i64, 1, 32767),
+                    saved_number("Area height (grid)", height as i64, 1, 32767),
+                ]);
+                if let Some((x, y, width, height)) = s.schedule_area {
+                    if geometry::saved_area_layout(
+                        SavedAreaKind::Scheduled,
+                        Rect::new(x, y, width, height),
+                    )
+                    .is_err()
+                    {
+                        rows.push(note("Review the saved area in the current display grid. Unconfirmed values stay unchanged unless you remove or confirm them."));
+                        rows.push(check_row("Confirm area for these displays", false));
+                    } else if s
+                        .macos_schedule_area
+                        .as_ref()
+                        .is_some_and(|confirmation| confirmation.session_only)
+                    {
+                        rows.push(note(geometry::SESSION_ONLY_AREA_WARNING));
+                    }
+                }
+                rows
+            };
+            let panel = panel_of(id, "Time delay", rows)?;
+            #[cfg(target_os = "macos")]
+            let panel = Panel {
+                action: Some(PanelAction {
+                    id: "select-scheduled-area",
+                    label: "Select scheduled area on screen…",
+                }),
+                ..panel
+            };
+            Some(panel)
         }
         "webcam" => {
             let current = s
@@ -1012,7 +1098,14 @@ pub fn panel(s: &Settings, id: &str, runs_at_startup: bool, capture_key: &str) -
                 id,
                 "Capture Preferences",
                 vec![
-                    check_row("Run when Windows starts", runs_at_startup),
+                    check_row(
+                        if cfg!(target_os = "macos") {
+                            "Run at login"
+                        } else {
+                            "Run when Windows starts"
+                        },
+                        runs_at_startup,
+                    ),
                     check_row("Show the Capture Widget", s.show_widget),
                     number("Recording countdown (s)", s.countdown as i64, 0, 10),
                     choice("Recording frame rate", &["15", "24", "30", "60"], fps),
@@ -1033,13 +1126,18 @@ pub fn panel(s: &Settings, id: &str, runs_at_startup: bool, capture_key: &str) -
                 id: id.into(),
                 title: "Keyboard shortcuts".into(),
                 ok: None,
+                action: None,
                 rows: [
                     format!("{key}: capture (region, window or screen)"),
-                    "Ctrl+Print Screen: full screen".into(),
-                    "Shift+Print Screen: repeat the last region".into(),
-                    "While selecting: arrow keys nudge; Shift, Ctrl, Ctrl+Shift lock square, 16:9, 4:3; M hides the magnifier; F1 shows all keys; Enter captures; Esc cancels".into(),
+                    format!("{}: full screen", key_name(s.screen_key())),
+                    format!("{}: repeat the last region", key_name(s.repeat_key())),
+                    if cfg!(target_os = "macos") {
+                        "While selecting: arrow keys nudge; Shift, Cmd, Cmd+Shift lock square, 16:9, 4:3; M hides the magnifier; F1 shows all keys; Enter captures; Esc cancels"
+                    } else {
+                        "While selecting: arrow keys nudge; Shift, Ctrl, Ctrl+Shift lock square, 16:9, 4:3; M hides the magnifier; F1 shows all keys; Enter captures; Esc cancels"
+                    }.into(),
                     format!("While recording: {}", crate::recorder::keys_text("; ")),
-                    "In this window: Enter captures; Ctrl+1, 2, 3 switch tabs; Esc closes".into(),
+                    format!("In this window: Enter captures; {}, 2, 3 switch tabs; Esc closes", key_name(&format!("{}+1", crate::keys::COMMAND))),
                 ]
                 .into_iter()
                 .map(note)
@@ -1069,8 +1167,13 @@ pub fn panel(s: &Settings, id: &str, runs_at_startup: bool, capture_key: &str) -
 pub enum Applied {
     /// The settings changed; save them.
     Changed,
+    /// The settings changed, but a saved area needs review after restarting.
+    #[cfg(target_os = "macos")]
+    ChangedWithWarning(String),
     /// The settings changed, and a schedule that is on moves to this time.
     MoveSchedule(String),
+    #[cfg(target_os = "macos")]
+    MoveScheduleWithWarning(String, String),
     /// Replace the presets.
     Presets(Vec<Preset>),
     /// Run at startup on or off (the settings may have changed too).
@@ -1106,23 +1209,184 @@ pub fn string(values: &[Value], i: usize) -> String {
         .to_owned()
 }
 
+#[cfg(target_os = "macos")]
+enum AreaUpdate {
+    Preserve,
+    Unchanged,
+    Set(Option<SavedAreaConfirmation>),
+}
+
+#[cfg(target_os = "macos")]
+fn area_number(values: &[Value], index: usize) -> std::result::Result<i32, String> {
+    let value = values
+        .get(index)
+        .and_then(|value| {
+            value.as_i64().or_else(|| {
+                value
+                    .as_f64()
+                    .filter(|number| number.is_finite())
+                    .map(|number| number.round() as i64)
+            })
+        })
+        .ok_or_else(|| "Type a number for each capture coordinate and dimension.".to_owned())?;
+    i32::try_from(value).map_err(|_| "Capture coordinates must fit a 32-bit integer.".into())
+}
+
+#[cfg(target_os = "macos")]
+fn update_saved_area(
+    kind: SavedAreaKind,
+    previous: Option<Rect>,
+    next: Option<Rect>,
+    required: bool,
+    confirmed: bool,
+    changes: &mut SavedAreaChanges,
+) -> std::result::Result<AreaUpdate, String> {
+    let Some(next) = next else {
+        if previous.is_some() {
+            changes.clear(kind);
+        }
+        return Ok(AreaUpdate::Set(None));
+    };
+    let validation = previous.map(|area| geometry::saved_area_layout(kind, area));
+    match validation {
+        Some(Err(error)) if !confirmed => {
+            if required {
+                Err(error.to_string())
+            } else {
+                changes.clear(kind);
+                Ok(AreaUpdate::Preserve)
+            }
+        }
+        Some(Ok(_)) if previous == Some(next) => Ok(AreaUpdate::Unchanged),
+        _ => changes
+            .confirm(kind, next)
+            .map(|confirmation| AreaUpdate::Set(Some(confirmation)))
+            .map_err(|error| error.to_string()),
+    }
+}
+
 /// Applies the values of panel `id` (one per row, in order: numbers,
 /// booleans, choice indexes, strings) to `s`.
 pub fn apply(s: &mut Settings, id: &str, values: &[Value], runs_at_startup: bool) -> Applied {
+    #[cfg(target_os = "macos")]
+    {
+        let before = s.clone();
+        let (result, changes) = prepare_apply(s, id, values, runs_at_startup);
+        if !matches!(result, Applied::Problem(_)) {
+            if let Err(error) = changes.commit_after(|| Ok(())) {
+                *s = before;
+                return Applied::Problem(error.to_string());
+            }
+        }
+        result
+    }
+    #[cfg(windows)]
+    apply_inner(s, id, values, runs_at_startup)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn prepare_apply(
+    s: &mut Settings,
+    id: &str,
+    values: &[Value],
+    runs_at_startup: bool,
+) -> (Applied, SavedAreaChanges) {
+    let mut changes = SavedAreaChanges::default();
+    let result = apply_inner(s, id, values, runs_at_startup, &mut changes);
+    (result, changes)
+}
+
+fn apply_inner(
+    s: &mut Settings,
+    id: &str,
+    values: &[Value],
+    runs_at_startup: bool,
+    #[cfg(target_os = "macos")] changes: &mut SavedAreaChanges,
+) -> Applied {
     let tab = s.capture_window.tab.min(2);
     let clamp = |i: usize, min: i64, max: i64| int(values, i).clamp(min, max);
     match id {
-        "selection" if tab == 1 && values.len() == 7 => {
-            s.capture_window.selection = "image".into();
-            s.capture_window.fixed = on(values, 0);
-            s.fixed_size = (clamp(1, 16, 16384) as i32, clamp(2, 16, 16384) as i32);
-            s.capture_window.fixed_at = on(values, 3).then(|| {
+        "selection"
+            if tab == 1
+                && (values.len() == 7 || cfg!(target_os = "macos") && values.len() == 8) =>
+        {
+            #[cfg(windows)]
+            let position = on(values, 3).then(|| {
                 (
                     clamp(4, -32768, 32767) as i32,
                     clamp(5, -32768, 32767) as i32,
                 )
             });
+            #[cfg(windows)]
+            let size = (clamp(1, 16, 16384) as i32, clamp(2, 16, 16384) as i32);
+            #[cfg(target_os = "macos")]
+            let (position, size) = {
+                let area = (|| {
+                    let size = (area_number(values, 1)?, area_number(values, 2)?);
+                    let position = if on(values, 3) {
+                        Some((area_number(values, 4)?, area_number(values, 5)?))
+                    } else {
+                        None
+                    };
+                    Ok::<_, String>((position, size))
+                })();
+                match area {
+                    Ok(area) => area,
+                    Err(error) => return Applied::Problem(error),
+                }
+            };
+            #[cfg(target_os = "macos")]
+            let mut area_warning = None;
+            #[cfg(target_os = "macos")]
+            let replace_area = {
+                let previous = s
+                    .capture_window
+                    .fixed_at
+                    .map(|(x, y)| Rect::new(x, y, s.fixed_size.0, s.fixed_size.1));
+                let next = position.map(|(x, y)| Rect::new(x, y, size.0, size.1));
+                if next.is_none()
+                    && (!(16..=16384).contains(&size.0) || !(16..=16384).contains(&size.1))
+                {
+                    return Applied::Problem(
+                        "Fixed width and height must be between 16 and 16384 pixels.".into(),
+                    );
+                }
+                match update_saved_area(
+                    SavedAreaKind::Fixed,
+                    previous,
+                    next,
+                    on(values, 0),
+                    on(values, 7),
+                    changes,
+                ) {
+                    Ok(AreaUpdate::Preserve) => false,
+                    Ok(AreaUpdate::Unchanged) => true,
+                    Ok(AreaUpdate::Set(confirmation)) => {
+                        if confirmation
+                            .as_ref()
+                            .is_some_and(|confirmation| confirmation.session_only)
+                        {
+                            area_warning = Some(geometry::SESSION_ONLY_AREA_WARNING.to_owned());
+                        }
+                        s.macos_fixed_area = confirmation;
+                        true
+                    }
+                    Err(error) => return Applied::Problem(error),
+                }
+            };
+            #[cfg(windows)]
+            let replace_area = true;
+            s.capture_window.selection = "image".into();
+            s.capture_window.fixed = on(values, 0);
+            if replace_area {
+                s.fixed_size = size;
+                s.capture_window.fixed_at = position;
+            }
             s.cursor_as_object = on(values, 6);
+            #[cfg(target_os = "macos")]
+            if let Some(warning) = area_warning {
+                return Applied::ChangedWithWarning(warning);
+            }
             Applied::Changed
         }
         "selection" if tab == 1 => {
@@ -1141,6 +1405,55 @@ pub fn apply(s: &mut Settings, id: &str, values: &[Value], runs_at_startup: bool
             if kind == "schedule" && !valid {
                 return Applied::Problem("Type the time as HH:MM, for example 09:30.".into());
             }
+            #[cfg(target_os = "macos")]
+            let mut area_warning = None;
+            #[cfg(target_os = "macos")]
+            if values.len() >= 10 {
+                let previous = s
+                    .schedule_area
+                    .map(|(x, y, width, height)| Rect::new(x, y, width, height));
+                let next = if on(values, 5) {
+                    let area = (|| {
+                        Ok::<_, String>(Rect::new(
+                            area_number(values, 6)?,
+                            area_number(values, 7)?,
+                            area_number(values, 8)?,
+                            area_number(values, 9)?,
+                        ))
+                    })();
+                    match area {
+                        Ok(area) => Some(area),
+                        Err(error) => return Applied::Problem(error),
+                    }
+                } else {
+                    None
+                };
+                let replace_area = match update_saved_area(
+                    SavedAreaKind::Scheduled,
+                    previous,
+                    next,
+                    kind == "schedule" || s.schedule.is_some(),
+                    on(values, 10),
+                    changes,
+                ) {
+                    Ok(AreaUpdate::Preserve) => false,
+                    Ok(AreaUpdate::Unchanged) => true,
+                    Ok(AreaUpdate::Set(confirmation)) => {
+                        if confirmation
+                            .as_ref()
+                            .is_some_and(|confirmation| confirmation.session_only)
+                        {
+                            area_warning = Some(geometry::SESSION_ONLY_AREA_WARNING.to_owned());
+                        }
+                        s.macos_schedule_area = confirmation;
+                        true
+                    }
+                    Err(error) => return Applied::Problem(error),
+                };
+                if replace_area {
+                    s.schedule_area = next.map(|area| (area.x, area.y, area.width, area.height));
+                }
+            }
             s.capture_window.timing = kind.into();
             s.capture_window.delay = clamp(1, 1, 600) as u32;
             s.interval_seconds = clamp(2, 3, 86_400) as u32;
@@ -1155,6 +1468,14 @@ pub fn apply(s: &mut Settings, id: &str, values: &[Value], runs_at_startup: bool
                 0
             };
             s.capture_window.timer = kind != "delay";
+            #[cfg(target_os = "macos")]
+            if let Some(warning) = area_warning {
+                return if kind == "schedule" && s.schedule.is_some() {
+                    Applied::MoveScheduleWithWarning(at, warning)
+                } else {
+                    Applied::ChangedWithWarning(warning)
+                };
+            }
             if kind == "schedule" && s.schedule.is_some() {
                 Applied::MoveSchedule(at)
             } else {
@@ -1205,9 +1526,11 @@ pub fn apply(s: &mut Settings, id: &str, values: &[Value], runs_at_startup: bool
                 return Applied::Problem("Type a name for the preset.".into());
             }
             if !hotkey.is_empty() && crate::tray::parse_hotkey(&hotkey).is_none() {
-                return Applied::Problem(
-                    "Hotkeys look like Ctrl+Shift+1, Alt+F9 or PrtScn.".into(),
-                );
+                return Applied::Problem(format!(
+                    "Hotkeys look like {}, Alt+F9 or {}.",
+                    crate::keys::EXAMPLE,
+                    crate::keys::CAPTURE.2
+                ));
             }
             let hotkey = Some(hotkey).filter(|k| !k.is_empty());
             let mut presets = s.presets.clone();
@@ -1230,6 +1553,11 @@ pub fn apply(s: &mut Settings, id: &str, values: &[Value], runs_at_startup: bool
                         None => presets.push(preset),
                     }
                 }
+            }
+            let mut candidate = s.clone();
+            candidate.presets = presets.clone();
+            if let Err(error) = crate::prefs::validate_hotkeys(&candidate) {
+                return Applied::Problem(error);
             }
             Applied::Presets(presets)
         }
@@ -1273,6 +1601,21 @@ pub fn import_presets(current: &[Preset], json: &[u8]) -> Option<Vec<Preset>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    fn panel_values(panel: &Panel) -> Vec<Value> {
+        panel
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Number { value, .. } => Some((*value).into()),
+                Row::Check { value, .. } => Some((*value).into()),
+                Row::Choice { value, .. } => Some((*value).into()),
+                Row::Text { value, .. } | Row::Folder { value, .. } => Some(value.clone().into()),
+                Row::Note { .. } => None,
+            })
+            .collect()
+    }
 
     fn settings() -> Settings {
         let mut s = Settings {
@@ -1347,7 +1690,7 @@ mod tests {
         s.capture_window.timer = false;
         assert_eq!(
             capture_button(&s, 1, "PrtScn", false),
-            ("Capture", "Print Screen".to_owned())
+            ("Capture", crate::keys::display("PrtScn"))
         );
     }
 
@@ -1410,7 +1753,13 @@ mod tests {
         let mut s = settings();
         s.capture_window.tab = 1;
         let p = panel(&s, "selection", false, "PrtScn").unwrap();
-        assert_eq!(p.rows.len(), 7);
+        assert_eq!(
+            p.rows
+                .iter()
+                .filter(|row| !matches!(row, Row::Note { .. }))
+                .count(),
+            7
+        );
         let values: Vec<Value> = vec![
             true.into(),
             1024.into(),
@@ -1471,6 +1820,245 @@ mod tests {
     }
 
     #[test]
+    fn scheduled_area_picker_is_macos_only() {
+        let panel = panel(&settings(), "delay", false, "Capture").unwrap();
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            panel.action.as_ref().map(|action| action.id),
+            Some("select-scheduled-area")
+        );
+        #[cfg(windows)]
+        assert!(panel.action.is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn legacy_fixed_position_requires_explicit_review_and_tracks_later_edits() {
+        let _guard = geometry::SAVED_AREAS_TEST_LOCK.lock().unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Fixed).unwrap();
+        let layout = crate::geometry::CaptureLayout::current().unwrap();
+        let monitor = layout
+            .monitors()
+            .into_iter()
+            .find(|monitor| monitor.primary)
+            .unwrap();
+        let mut s = Settings::default();
+        s.capture_window.fixed = true;
+        s.capture_window.fixed_at = Some((monitor.rect.x, monitor.rect.y));
+        s.fixed_size = (100, 80);
+
+        let p = panel(&s, "selection", false, "Capture").unwrap();
+        let mut values = panel_values(&p);
+        assert_eq!(values.len(), 8);
+        let before = serde_json::to_value(&s).unwrap();
+        assert!(matches!(
+            apply(&mut s, "selection", &values, false),
+            Applied::Problem(_)
+        ));
+        assert_eq!(serde_json::to_value(&s).unwrap(), before);
+        values[7] = true.into();
+        assert_eq!(apply(&mut s, "selection", &values, false), Applied::Changed);
+        let rect = Rect::new(monitor.rect.x, monitor.rect.y, 100, 80);
+        assert_eq!(s.macos_fixed_area.as_ref().unwrap().rect, rect);
+        let old = geometry::saved_area_ticket(SavedAreaKind::Fixed, rect).unwrap();
+
+        let p = panel(&s, "selection", false, "Capture").unwrap();
+        let mut values = panel_values(&p);
+        assert_eq!(values.len(), 7);
+        values[1] = 101.into();
+        assert_eq!(apply(&mut s, "selection", &values, false), Applied::Changed);
+        assert!(old.validate().is_err());
+        assert_eq!(s.macos_fixed_area.as_ref().unwrap().rect.width, 101);
+        geometry::clear_saved_area(SavedAreaKind::Fixed).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unconfirmed_legacy_values_survive_unrelated_panel_edits_without_clamping() {
+        let _guard = geometry::SAVED_AREAS_TEST_LOCK.lock().unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Fixed).unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+        let mut s = Settings::default();
+        s.capture_window.fixed_at = Some((-50000, 0));
+        s.fixed_size = (40000, 50000);
+        let p = panel(&s, "selection", false, "Capture").unwrap();
+        assert!(matches!(&p.rows[1], Row::Number { value: 40000, max, .. } if *max >= 40000));
+        let mut values = panel_values(&p);
+        values[6] = false.into();
+        assert_eq!(apply(&mut s, "selection", &values, false), Applied::Changed);
+        assert_eq!(
+            (s.capture_window.fixed_at, s.fixed_size, s.cursor_as_object),
+            (Some((-50000, 0)), (40000, 50000), false)
+        );
+        values[0] = true.into();
+        values[7] = true.into();
+        assert!(matches!(
+            apply(&mut s, "selection", &values, false),
+            Applied::Problem(_)
+        ));
+        assert_eq!(s.fixed_size, (40000, 50000));
+
+        s.schedule_area = Some((-50000, 0, 40000, 50000));
+        let p = panel(&s, "delay", false, "Capture").unwrap();
+        assert!(matches!(&p.rows[8], Row::Number { value: 40000, max, .. } if *max >= 40000));
+        let mut values = panel_values(&p);
+        values[0] = 1.into();
+        values[4] = "09:30".into();
+        assert_eq!(apply(&mut s, "delay", &values, false), Applied::Changed);
+        assert_eq!(s.schedule_area, Some((-50000, 0, 40000, 50000)));
+        values[5] = false.into();
+        assert_eq!(apply(&mut s, "delay", &values, false), Applied::Changed);
+        assert_eq!(s.schedule_area, None);
+        assert_eq!(s.macos_schedule_area, None);
+        geometry::clear_saved_area(SavedAreaKind::Fixed).unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn legacy_scheduled_area_requires_confirmation_and_tracks_replacement() {
+        let _guard = geometry::SAVED_AREAS_TEST_LOCK.lock().unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+        let layout = crate::geometry::CaptureLayout::current().unwrap();
+        let monitor = layout
+            .monitors()
+            .into_iter()
+            .find(|monitor| monitor.primary)
+            .unwrap();
+        let mut s = Settings::default();
+        s.schedule = Some("09:00".into());
+        s.schedule_area = Some((monitor.rect.x, monitor.rect.y, 100, 80));
+        let p = panel(&s, "delay", false, "Capture").unwrap();
+        let mut values = panel_values(&p);
+        assert_eq!(values.len(), 11);
+        values[0] = 2.into();
+        values[4] = "10:30".into();
+        let before = serde_json::to_value(&s).unwrap();
+        assert!(matches!(
+            apply(&mut s, "delay", &values, false),
+            Applied::Problem(_)
+        ));
+        assert_eq!(serde_json::to_value(&s).unwrap(), before);
+        values[10] = true.into();
+        assert_eq!(
+            apply(&mut s, "delay", &values, false),
+            Applied::MoveSchedule("10:30".into())
+        );
+        let rect = Rect::new(monitor.rect.x, monitor.rect.y, 100, 80);
+        assert_eq!(s.macos_schedule_area.as_ref().unwrap().rect, rect);
+        let old = geometry::saved_area_ticket(SavedAreaKind::Scheduled, rect).unwrap();
+
+        let mut values = panel_values(&panel(&s, "delay", false, "Capture").unwrap());
+        assert_eq!(values.len(), 10);
+        values[8] = 101.into();
+        assert_eq!(
+            apply(&mut s, "delay", &values, false),
+            Applied::MoveSchedule("10:30".into())
+        );
+        assert!(old.validate().is_err());
+        assert_eq!(
+            s.schedule_area,
+            Some((monitor.rect.x, monitor.rect.y, 101, 80))
+        );
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unidentifiable_displays_warn_for_fixed_and_scheduled_panel_edits() {
+        let _guard = geometry::SAVED_AREAS_TEST_LOCK.lock().unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Fixed).unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+        let layout = crate::geometry::CaptureLayout::current().unwrap();
+        let monitor = layout
+            .monitors()
+            .into_iter()
+            .find(|monitor| monitor.primary)
+            .unwrap();
+        let mut s = Settings::default();
+        s.capture_window.fixed = true;
+        s.capture_window.fixed_at = Some((monitor.rect.x, monitor.rect.y));
+        s.fixed_size = (100, 80);
+        let mut values = panel_values(&panel(&s, "selection", false, "Capture").unwrap());
+        values[7] = true.into();
+        let applied =
+            geometry::with_missing_uuid_for_test(|| apply(&mut s, "selection", &values, false));
+        assert_eq!(
+            applied,
+            Applied::ChangedWithWarning(geometry::SESSION_ONLY_AREA_WARNING.into())
+        );
+        assert!(s.macos_fixed_area.as_ref().unwrap().session_only);
+        let rect = Rect::new(monitor.rect.x, monitor.rect.y, 100, 80);
+        let old = geometry::saved_area_ticket(SavedAreaKind::Fixed, rect).unwrap();
+        let p = panel(&s, "selection", false, "Capture").unwrap();
+        assert!(p.rows.iter().any(
+            |row| matches!(row, Row::Note { text } if text == geometry::SESSION_ONLY_AREA_WARNING)
+        ));
+        let mut values = panel_values(&p);
+        assert_eq!(apply(&mut s, "selection", &values, false), Applied::Changed);
+        values[1] = 101.into();
+        assert_eq!(
+            geometry::with_missing_uuid_for_test(|| apply(&mut s, "selection", &values, false)),
+            Applied::ChangedWithWarning(geometry::SESSION_ONLY_AREA_WARNING.into())
+        );
+        assert!(old.validate().is_err());
+
+        s.schedule = Some("09:00".into());
+        s.schedule_area = Some((monitor.rect.x, monitor.rect.y, 100, 80));
+        let mut values = panel_values(&panel(&s, "delay", false, "Capture").unwrap());
+        values[0] = 2.into();
+        values[4] = "10:30".into();
+        values[10] = true.into();
+        assert_eq!(
+            geometry::with_missing_uuid_for_test(|| apply(&mut s, "delay", &values, false)),
+            Applied::MoveScheduleWithWarning(
+                "10:30".into(),
+                geometry::SESSION_ONLY_AREA_WARNING.into()
+            )
+        );
+        assert!(s.macos_schedule_area.as_ref().unwrap().session_only);
+        assert!(geometry::saved_area_ticket(SavedAreaKind::Scheduled, rect).is_ok());
+        let p = panel(&s, "delay", false, "Capture").unwrap();
+        assert!(p.rows.iter().any(
+            |row| matches!(row, Row::Note { text } if text == geometry::SESSION_ONLY_AREA_WARNING)
+        ));
+        let mut values = panel_values(&p);
+        s.schedule = None;
+        values[8] = 101.into();
+        assert_eq!(
+            geometry::with_missing_uuid_for_test(|| apply(&mut s, "delay", &values, false)),
+            Applied::ChangedWithWarning(geometry::SESSION_ONLY_AREA_WARNING.into())
+        );
+        geometry::clear_saved_area(SavedAreaKind::Fixed).unwrap();
+        geometry::clear_saved_area(SavedAreaKind::Scheduled).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_saved_area_panels_keep_their_existing_shape() {
+        let mut s = Settings::default();
+        s.capture_window.fixed_at = Some((10, 20));
+        s.schedule_area = Some((10, 20, 100, 80));
+        assert_eq!(
+            panel(&s, "selection", false, "PrtScn").unwrap().rows.len(),
+            7
+        );
+        assert_eq!(panel(&s, "delay", false, "PrtScn").unwrap().rows.len(), 5);
+        let values = [
+            true.into(),
+            100.into(),
+            80.into(),
+            true.into(),
+            40000.into(),
+            20.into(),
+            false.into(),
+        ];
+        assert_eq!(apply(&mut s, "selection", &values, false), Applied::Changed);
+        assert_eq!(s.capture_window.fixed_at, Some((32767, 20)));
+        assert_eq!(s.schedule_area, Some((10, 20, 100, 80)));
+    }
+
+    #[test]
     fn presets_import_merges_by_name() {
         let current = Settings::default().presets;
         let json = serde_json::to_vec(&[Preset {
@@ -1483,5 +2071,32 @@ mod tests {
         assert_eq!(merged.len(), current.len());
         assert_eq!(merged.last().unwrap().mode, "video");
         assert!(import_presets(&current, b"not json").is_none());
+    }
+
+    #[test]
+    fn preset_edits_reject_collisions_and_reserved_shortcuts() {
+        let mut settings = Settings::default();
+        settings.capture_hotkey = Some("Ctrl+Alt+9".into());
+        settings.presets[0].hotkey = Some("Ctrl+Shift+8".into());
+        let before = serde_json::to_value(&settings).unwrap();
+        let duplicate_global = vec!["New".into(), "Alt+Control+9".into()];
+        assert!(matches!(
+            apply(&mut settings, "new-preset", &duplicate_global, false),
+            Applied::Problem(_)
+        ));
+        let duplicate_preset = vec!["Edited".into(), "Shift+Control+8".into()];
+        assert!(matches!(
+            apply(&mut settings, "edit-preset:1", &duplicate_preset, false),
+            Applied::Problem(_)
+        ));
+        #[cfg(target_os = "macos")]
+        {
+            let reserved = vec!["New".into(), "Cmd+Shift+4".into()];
+            assert!(matches!(
+                apply(&mut settings, "new-preset", &reserved, false),
+                Applied::Problem(_)
+            ));
+        }
+        assert_eq!(serde_json::to_value(&settings).unwrap(), before);
     }
 }

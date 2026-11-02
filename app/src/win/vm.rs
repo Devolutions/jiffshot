@@ -13,7 +13,6 @@
 use crate::vm_support::{publish, publish_update, watch, Element, ElementSink, ModelCell};
 use rustolonia::{Result, Signal};
 
-
 // ---- MainViewModel -----------------------------------------------------
 
 pub trait MainViewModel: Send + 'static {
@@ -953,13 +952,25 @@ impl MainViewModelSink {
         publish_update(self.fonts, move |list| list.push(value))
     }
     pub fn add_library(&self, value: impl LibraryItemViewModel) -> Result<()> {
-        Element::add(self.library, value, |m| Box::new(m) as Box<dyn LibraryItemViewModel>, |m, sink| m.attach(LibraryItemViewModelSink(sink)), |m| m.detach())
+        Element::add(
+            self.library,
+            value,
+            |m| Box::new(m) as Box<dyn LibraryItemViewModel>,
+            |m, sink| m.attach(LibraryItemViewModelSink(sink)),
+            |m| m.detach(),
+        )
     }
     pub fn clear_library(&self) -> Result<()> {
         Element::clear(self.library)
     }
     pub fn add_quick_styles(&self, value: impl QuickStyleViewModel) -> Result<()> {
-        Element::add(self.quick_styles, value, |m| Box::new(m) as Box<dyn QuickStyleViewModel>, |m, sink| m.attach(QuickStyleViewModelSink(sink)), |m| m.detach())
+        Element::add(
+            self.quick_styles,
+            value,
+            |m| Box::new(m) as Box<dyn QuickStyleViewModel>,
+            |m, sink| m.attach(QuickStyleViewModelSink(sink)),
+            |m| m.detach(),
+        )
     }
     pub fn clear_quick_styles(&self) -> Result<()> {
         Element::clear(self.quick_styles)
@@ -1039,10 +1050,14 @@ impl MainBinding {
         watch(sink.action, &model, |m, v| m.set_action(v))?;
         watch(sink.video_position, &model, |m, v| m.set_video_position(v))?;
         watch(sink.rotation, &model, |m, v| m.set_rotation(v))?;
-        watch(sink.background_fill, &model, |m, v| m.set_background_fill(v))?;
+        watch(sink.background_fill, &model, |m, v| {
+            m.set_background_fill(v)
+        })?;
         watch(sink.head_size, &model, |m, v| m.set_head_size(v))?;
         watch(sink.shadow_angle, &model, |m, v| m.set_shadow_angle(v))?;
-        watch(sink.shadow_distance, &model, |m, v| m.set_shadow_distance(v))?;
+        watch(sink.shadow_distance, &model, |m, v| {
+            m.set_shadow_distance(v)
+        })?;
         watch(sink.shadow_blur, &model, |m, v| m.set_shadow_blur(v))?;
         watch(sink.shadow_color, &model, |m, v| m.set_shadow_color(v))?;
         watch(sink.outline_color, &model, |m, v| m.set_outline_color(v))?;
@@ -1052,7 +1067,9 @@ impl MainBinding {
         watch(sink.v_align, &model, |m, v| m.set_v_align(v))?;
         watch(sink.padding, &model, |m, v| m.set_padding(v))?;
         watch(sink.fill2, &model, |m, v| m.set_fill2(v))?;
-        watch(sink.gradient_radial, &model, |m, v| m.set_gradient_radial(v))?;
+        watch(sink.gradient_radial, &model, |m, v| {
+            m.set_gradient_radial(v)
+        })?;
         watch(sink.gradient_angle, &model, |m, v| m.set_gradient_angle(v))?;
         watch(sink.canvas_color, &model, |m, v| m.set_canvas_color(v))?;
         watch(sink.gif_preset, &model, |m, v| m.set_gif_preset(v))?;
@@ -1064,11 +1081,19 @@ impl MainBinding {
         watch(sink.library_filter, &model, |m, v| m.set_library_filter(v))?;
         watch(sink.library_sort, &model, |m, v| m.set_library_sort(v))?;
         watch(sink.thumb_size, &model, |m, v| m.set_thumb_size(v))?;
-        watch(sink.library_expanded, &model, |m, v| m.set_library_expanded(v))?;
+        watch(sink.library_expanded, &model, |m, v| {
+            m.set_library_expanded(v)
+        })?;
         watch(sink.template_theme, &model, |m, v| m.set_template_theme(v))?;
-        watch(sink.template_captions, &model, |m, v| m.set_template_captions(v))?;
-        watch(sink.template_numbers, &model, |m, v| m.set_template_numbers(v))?;
-        watch(sink.template_footer, &model, |m, v| m.set_template_footer(v))?;
+        watch(sink.template_captions, &model, |m, v| {
+            m.set_template_captions(v)
+        })?;
+        watch(sink.template_numbers, &model, |m, v| {
+            m.set_template_numbers(v)
+        })?;
+        watch(sink.template_footer, &model, |m, v| {
+            m.set_template_footer(v)
+        })?;
         watch(sink.show_side_bar, &model, |m, v| m.set_show_side_bar(v))?;
         watch(sink.show_effects, &model, |m, v| m.set_show_effects(v))?;
         watch(sink.show_tray, &model, |m, v| m.set_show_tray(v))?;
@@ -1098,6 +1123,8 @@ pub trait LibraryItemViewModel: Send + 'static {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LibraryItemFields {
     pub path: String,
+    #[cfg(target_os = "macos")]
+    pub path_identity: std::path::PathBuf,
     pub label: String,
     pub thumbnail: String,
     pub is_current: bool,
@@ -1116,6 +1143,8 @@ impl Default for LibraryItemFields {
     fn default() -> Self {
         Self {
             path: String::new(),
+            #[cfg(target_os = "macos")]
+            path_identity: std::path::PathBuf::new(),
             label: String::new(),
             thumbnail: String::new(),
             is_current: false,
@@ -1142,6 +1171,10 @@ impl LibraryItemViewModelSink {
     pub fn set_path(&self, value: impl Into<String>) -> Result<()> {
         let value = value.into();
         self.0.update(move |f| f.path = value)
+    }
+    #[cfg(target_os = "macos")]
+    pub fn set_path_identity(&self, value: std::path::PathBuf) -> Result<()> {
+        self.0.update(move |f| f.path_identity = value)
     }
     pub fn set_label(&self, value: impl Into<String>) -> Result<()> {
         let value = value.into();
@@ -1187,7 +1220,6 @@ impl LibraryItemViewModelSink {
         self.0.update(move |f| f.thumb_height = value)
     }
 }
-
 
 // ---- QuickStyleViewModel -----------------------------------------------
 
@@ -1256,7 +1288,6 @@ impl QuickStyleViewModelSink {
     }
 }
 
-
 // ---- TrayViewModel -----------------------------------------------------
 
 pub trait TrayViewModel: Send + 'static {
@@ -1302,8 +1333,10 @@ pub struct TrayViewModelSink {
     pub include_cursor: Signal<bool>,
     pub show_widget: Signal<bool>,
     pub run_at_startup: Signal<bool>,
+    pub startup_notice: Signal<jiffshot_workflow::StartupNotice>,
     pub time_lapse: Signal<bool>,
     pub schedule: Signal<bool>,
+    pub schedule_paused: Signal<bool>,
     pub can_repeat: Signal<bool>,
     pub recent_captures: Signal<Vec<String>>,
 }
@@ -1317,8 +1350,10 @@ impl TrayViewModelSink {
             include_cursor: Signal::new(false),
             show_widget: Signal::new(false),
             run_at_startup: Signal::new(false),
+            startup_notice: Signal::new(jiffshot_workflow::StartupNotice::None),
             time_lapse: Signal::new(false),
             schedule: Signal::new(false),
+            schedule_paused: Signal::new(false),
             can_repeat: Signal::new(false),
             recent_captures: Signal::new(Vec::new()),
         }
@@ -1339,11 +1374,17 @@ impl TrayViewModelSink {
     pub fn set_run_at_startup(&self, value: bool) -> Result<()> {
         publish(self.run_at_startup, value)
     }
+    pub fn set_startup_notice(&self, value: jiffshot_workflow::StartupNotice) -> Result<()> {
+        publish(self.startup_notice, value)
+    }
     pub fn set_time_lapse(&self, value: bool) -> Result<()> {
         publish(self.time_lapse, value)
     }
     pub fn set_schedule(&self, value: bool) -> Result<()> {
         publish(self.schedule, value)
+    }
+    pub fn set_schedule_paused(&self, value: bool) -> Result<()> {
+        publish(self.schedule_paused, value)
     }
     pub fn set_can_repeat(&self, value: bool) -> Result<()> {
         publish(self.can_repeat, value)
@@ -1370,7 +1411,9 @@ impl TrayBinding {
     pub fn new(model: impl TrayViewModel) -> Result<Self> {
         let sink = TrayViewModelSink::new();
         let model: ModelCell<dyn TrayViewModel> = ModelCell::new(Box::new(model));
-        watch(sink.copy_to_clipboard, &model, |m, v| m.set_copy_to_clipboard(v))?;
+        watch(sink.copy_to_clipboard, &model, |m, v| {
+            m.set_copy_to_clipboard(v)
+        })?;
         watch(sink.open_in_editor, &model, |m, v| m.set_open_in_editor(v))?;
         watch(sink.include_cursor, &model, |m, v| m.set_include_cursor(v))?;
         watch(sink.show_widget, &model, |m, v| m.set_show_widget(v))?;

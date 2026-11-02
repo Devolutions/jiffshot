@@ -3,12 +3,14 @@
 //! keys and modifiers to the capture side's. On the UI thread.
 
 pub use jiffshot_workflow::ui_api::{
-    draw_copy, draw_demo, draw_end, draw_input, draw_tick, overlay_copy as copy, overlay_demo as demo, overlay_end_demo as end_demo,
-    overlay_input as input, overlay_shown as shown, overlay_text as text, OverlayState, FLAG_COLOR, FLAG_DONE, FLAG_GUIDES,
+    draw_copy, draw_demo, draw_end, draw_failed, draw_input, draw_pending, draw_tick, overlay_copy as copy, overlay_demo as demo, overlay_end_demo as end_demo,
+    overlay_failed as fail, overlay_guide_rectangles as guide_rectangles, overlay_input as input, overlay_pending as pending, overlay_shown as shown, overlay_text as text, OverlayState, FLAG_COLOR, FLAG_DONE, FLAG_GUIDES,
     FLAG_HELP, FLAG_MAGNIFIER, INPUT_CANCEL as CANCEL, INPUT_KEY as KEY, INPUT_MOVE as MOVE, INPUT_PRESS as PRESS,
-    INPUT_RELEASE as RELEASE, INPUT_WHEEL as WHEEL, MOD_CTRL, MOD_SHIFT, POINTS_GUIDES, POINTS_PATH, POINTS_REGIONS, TEXT_HELP,
+    INPUT_RELEASE as RELEASE, INPUT_WHEEL as WHEEL, MOD_CTRL, MOD_SHIFT, POINTS_PATH, POINTS_REGIONS, TEXT_HELP,
     TEXT_HINT, TEXT_SIZE, TEXT_TITLE,
 };
+#[cfg(target_os = "macos")]
+pub use jiffshot_workflow::ui_api::draw_demo_sized;
 use rustolonia::pixel_surface::Modifiers;
 use rustolonia::Key;
 
@@ -53,5 +55,20 @@ pub fn virtual_key(key: Option<Key>) -> i32 {
 
 /// The capture side's modifier bits for Avalonia's.
 pub fn modifiers(m: Modifiers) -> i32 {
-    (if m.shift() { MOD_SHIFT } else { 0 }) | (if m.control() { MOD_CTRL } else { 0 })
+    let command = if cfg!(target_os = "macos") { m.meta() } else { m.control() };
+    (if m.shift() { MOD_SHIFT } else { 0 }) | (if command { MOD_CTRL } else { 0 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustolonia::key_modifiers::{CONTROL, META, SHIFT};
+
+    #[test]
+    fn selection_uses_the_platform_command_modifier() {
+        let command = if cfg!(target_os = "macos") { META } else { CONTROL };
+        let other = if cfg!(target_os = "macos") { CONTROL } else { META };
+        assert_eq!(modifiers(Modifiers(command | SHIFT)), MOD_CTRL | MOD_SHIFT);
+        assert_eq!(modifiers(Modifiers(other)), 0);
+    }
 }

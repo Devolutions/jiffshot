@@ -202,8 +202,12 @@ impl State {
 
 /// The editor's modifier bits for a surface event.
 fn modifier_bits(m: Modifiers) -> i32 {
+    #[cfg(target_os = "macos")]
+    let command = m.meta();
+    #[cfg(not(target_os = "macos"))]
+    let command = m.control();
     (if m.shift() { MOD_SHIFT } else { 0 })
-        | (if m.control() { MOD_CTRL } else { 0 })
+        | (if command { MOD_CTRL } else { 0 })
         | (if m.alt() { MOD_ALT } else { 0 })
 }
 

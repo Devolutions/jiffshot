@@ -31,6 +31,14 @@ impl Frame {
         Rect::new(0, 0, self.width as i32, self.height as i32)
     }
 
+    pub fn validate(&self) -> io::Result<()> {
+        let expected = (self.width as usize).checked_mul(self.height as usize).and_then(|pixels| pixels.checked_mul(4));
+        if self.width == 0 || self.height == 0 || expected != Some(self.pixels.len()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid image dimensions or pixel buffer"));
+        }
+        Ok(())
+    }
+
     /// Returns `(r, g, b)` at a pixel, or `None` outside the frame.
     pub fn rgb(&self, x: i32, y: i32) -> Option<(u8, u8, u8)> {
         if !self.bounds().contains(x, y) {
@@ -81,9 +89,66 @@ impl Frame {
         Some(out)
     }
 
+    /// Returns a nearest-neighbor copy at the requested size.
+    pub fn resized_nearest(&self, width: u32, height: u32) -> Option<Frame> {
+        if width == 0 || height == 0 || self.width == 0 || self.height == 0 {
+            return None;
+        }
+        let mut out = Frame::new(width, height);
+        out.alpha = self.alpha;
+        for y in 0..height as usize {
+            let sy = y * self.height as usize / height as usize;
+            for x in 0..width as usize {
+                let sx = x * self.width as usize / width as usize;
+                let src = sy * self.stride() + sx * 4;
+                let dst = y * out.stride() + x * 4;
+                out.pixels[dst..dst + 4].copy_from_slice(&self.pixels[src..src + 4]);
+            }
+        }
+        Some(out)
+    }
+
+    /// Composites a straight-alpha image over this frame, clipping at its edges.
+    pub fn composite_over(&mut self, layer: &Frame, (x, y): (i64, i64)) -> io::Result<()> {
+        self.validate()?;
+        layer.validate()?;
+        let right = x.checked_add(i64::from(layer.width))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid image position"))?;
+        let bottom = y.checked_add(i64::from(layer.height))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid image position"))?;
+        let left = x.max(0);
+        let top = y.max(0);
+        let right = right.min(i64::from(self.width));
+        let bottom = bottom.min(i64::from(self.height));
+        for row in top..bottom {
+            for col in left..right {
+                let source = (((row - y) as usize * layer.width as usize) + (col - x) as usize) * 4;
+                let target = ((row as usize * self.width as usize) + col as usize) * 4;
+                let source = &layer.pixels[source..source + 4];
+                let target = &mut self.pixels[target..target + 4];
+                let source_alpha = if layer.alpha { u32::from(source[3]) } else { 255 };
+                if source_alpha == 0 {
+                    continue;
+                }
+                let target_alpha = if self.alpha { u32::from(target[3]) } else { 255 };
+                let alpha = source_alpha * 255 + target_alpha * (255 - source_alpha);
+                for channel in 0..3 {
+                    let value = u32::from(source[channel]) * source_alpha * 255
+                        + u32::from(target[channel]) * target_alpha * (255 - source_alpha);
+                    target[channel] = ((value + alpha / 2) / alpha) as u8;
+                }
+                if self.alpha {
+                    target[3] = ((alpha + 127) / 255) as u8;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Writes an RGB (or RGBA) PNG. Captures favour encode speed over size:
     /// a 4K screenshot must save in well under a second.
     pub fn encode_png(&self, out: impl Write) -> io::Result<()> {
+        self.validate()?;
         let mut encoder = png::Encoder::new(out, self.width, self.height);
         encoder.set_color(if self.alpha {
             png::ColorType::Rgba
@@ -152,5 +217,73 @@ mod tests {
         assert_eq!((info.width, info.height), (33, 17));
         let at = (4 * 33 + 9) * 3;
         assert_eq!(&buffer[at..at + 3], &[7, 4, 9]);
+    }
+
+    #[test]
+    fn nearest_resize_preserves_colors_and_alpha() {
+        let mut frame = gradient(2, 1);
+        frame.alpha = true;
+        frame.pixels[3] = 100;
+        frame.pixels[7] = 200;
+        let enlarged = frame.resized_nearest(4, 2).unwrap();
+        assert!(enlarged.alpha);
+        assert_eq!(&enlarged.pixels[..16], &[0, 0, 7, 100, 0, 0, 7, 100, 1, 0, 7, 200, 1, 0, 7, 200]);
+        assert_eq!(&enlarged.pixels[16..], &enlarged.pixels[..16]);
+        assert!(frame.resized_nearest(0, 1).is_none());
+    }
+
+    #[test]
+    fn composite_uses_straight_alpha_for_opaque_and_transparent_pixels() {
+        let mut frame = Frame { width: 3, height: 1, pixels: vec![
+            20, 40, 60, 255,
+            10, 20, 30, 0,
+            0, 0, 255, 128,
+        ], alpha: true };
+        let layer = Frame { width: 3, height: 1, pixels: vec![
+            200, 100, 50, 128,
+            200, 100, 50, 128,
+            255, 0, 0, 128,
+        ], alpha: true };
+        frame.composite_over(&layer, (0, 0)).unwrap();
+        assert_eq!(frame.pixels, [
+            110, 70, 55, 255,
+            200, 100, 50, 128,
+            170, 0, 85, 192,
+        ]);
+    }
+
+    #[test]
+    fn composite_clips_negative_positions_and_honors_opaque_frames() {
+        let mut frame = Frame::new(2, 2);
+        let mut layer = Frame::new(2, 2);
+        layer.pixels[12..16].copy_from_slice(&[11, 22, 33, 0]);
+        frame.composite_over(&layer, (-1, -1)).unwrap();
+        assert!(!frame.alpha);
+        assert_eq!(frame.rgb(0, 0), Some((33, 22, 11)));
+        assert_eq!(frame.rgb(1, 0), Some((0, 0, 0)));
+        let before = frame.pixels.clone();
+        frame.composite_over(&layer, (20, 20)).unwrap();
+        assert_eq!(frame.pixels, before);
+        frame.composite_over(&layer, (i64::MIN, i64::MIN)).unwrap();
+        assert_eq!(frame.pixels, before);
+    }
+
+    #[test]
+    fn composite_leaves_transparent_source_pixels_unchanged() {
+        let mut frame = Frame { width: 1, height: 1, pixels: vec![11, 22, 33, 40], alpha: true };
+        let layer = Frame { width: 1, height: 1, pixels: vec![255, 255, 255, 0], alpha: true };
+        frame.composite_over(&layer, (0, 0)).unwrap();
+        assert_eq!(frame.pixels, [11, 22, 33, 40]);
+    }
+
+    #[test]
+    fn composite_rejects_invalid_buffers_and_overflowing_positions() {
+        let mut frame = Frame::new(2, 2);
+        let mut layer = Frame::new(1, 1);
+        layer.pixels.pop();
+        assert_eq!(frame.composite_over(&layer, (0, 0)).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(frame.composite_over(&Frame::new(1, 1), (i64::MAX, 0)).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        frame.pixels.pop();
+        assert_eq!(frame.composite_over(&Frame::new(1, 1), (0, 0)).unwrap_err().kind(), io::ErrorKind::InvalidInput);
     }
 }

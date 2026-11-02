@@ -5,6 +5,46 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// A macOS saved rectangle and the exact reference grid on which it was reviewed.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavedAreaConfirmation {
+    pub version: u32,
+    pub kind: String,
+    pub rect: jiffshot_capture::Rect,
+    pub coordinate_space: Vec<u64>,
+    /// A missing display UUID permits use only until the current process exits.
+    #[serde(default)]
+    pub session_only: bool,
+}
+
+fn deserialize_confirmation<'de, D>(deserializer: D, label: &str) -> Result<Option<SavedAreaConfirmation>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(value) = Option::<serde_json::Value>::deserialize(deserializer)? else { return Ok(None) };
+    match serde_json::from_value(value) {
+        Ok(confirmation) => Ok(Some(confirmation)),
+        Err(error) => {
+            eprintln!("Malformed macOS {label} saved-area confirmation; the coordinates require review: {error}");
+            Ok(None)
+        }
+    }
+}
+
+fn deserialize_fixed_confirmation<'de, D>(deserializer: D) -> Result<Option<SavedAreaConfirmation>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_confirmation(deserializer, "fixed")
+}
+
+fn deserialize_schedule_confirmation<'de, D>(deserializer: D) -> Result<Option<SavedAreaConfirmation>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_confirmation(deserializer, "scheduled")
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -50,6 +90,10 @@ pub struct Settings {
     /// Effects list).
     pub capture_effects: Vec<String>,
     pub presets: Vec<Preset>,
+    /// Global hotkeys; absent values use the platform defaults.
+    pub capture_hotkey: Option<String>,
+    pub screen_hotkey: Option<String>,
+    pub repeat_hotkey: Option<String>,
     pub show_widget: bool,
     /// Daily capture time, "HH:MM", when on.
     pub schedule: Option<String>,
@@ -58,6 +102,11 @@ pub struct Settings {
     /// Area for scheduled captures (x, y, width, height); the screen under
     /// the pointer when unset.
     pub schedule_area: Option<(i32, i32, i32, i32)>,
+    /// macOS reference-grid confirmations. Windows preserves but does not use them.
+    #[serde(default, deserialize_with = "deserialize_fixed_confirmation", skip_serializing_if = "Option::is_none")]
+    pub macos_fixed_area: Option<SavedAreaConfirmation>,
+    #[serde(default, deserialize_with = "deserialize_schedule_confirmation", skip_serializing_if = "Option::is_none")]
+    pub macos_schedule_area: Option<SavedAreaConfirmation>,
     /// Where image captures go after saving: "none", "file", "clipboard",
     /// "email", "word", "powerpoint", "excel", "onenote", "paint",
     /// "program" or "print".
@@ -171,10 +220,15 @@ impl Default for Settings {
                     share: None,
                 },
             ],
+            capture_hotkey: None,
+            screen_hotkey: None,
+            repeat_hotkey: None,
             show_widget: false,
             schedule: None,
             schedule_default: None,
             schedule_area: None,
+            macos_fixed_area: None,
+            macos_schedule_area: None,
             share: "none".to_owned(),
             video_share: "none".to_owned(),
             capture_window: CaptureWindow::default(),
@@ -183,6 +237,18 @@ impl Default for Settings {
 }
 
 impl Settings {
+    pub fn capture_key(&self) -> &str {
+        self.capture_hotkey.as_deref().unwrap_or(crate::keys::CAPTURE.2)
+    }
+
+    pub fn screen_key(&self) -> &str {
+        self.screen_hotkey.as_deref().unwrap_or(crate::keys::SCREEN.2)
+    }
+
+    pub fn repeat_key(&self) -> &str {
+        self.repeat_hotkey.as_deref().unwrap_or(crate::keys::REPEAT.2)
+    }
+
     pub fn load() -> Settings {
         serde_json::from_value(jiffshot_capture::config::section("capture")).unwrap_or_default()
     }
@@ -191,5 +257,95 @@ impl Settings {
         if let Ok(value) = serde_json::to_value(self) {
             jiffshot_capture::config::set_section("capture", value);
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn try_save(&self) -> std::io::Result<()> {
+        let value = serde_json::to_value(self).map_err(std::io::Error::other)?;
+        jiffshot_capture::config::try_set_section("capture", value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_capture_settings_and_optional_coordinate_metadata_round_trip() {
+        let legacy = serde_json::json!({
+            "fixed_size": [640, 480],
+            "capture_window": { "fixed_at": [-50, 25] },
+            "schedule_area": [-50, 25, 640, 480]
+        });
+        let mut settings: Settings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(settings.capture_window.fixed_at, Some((-50, 25)));
+        assert_eq!(settings.schedule_area, Some((-50, 25, 640, 480)));
+        assert!(settings.macos_fixed_area.is_none());
+        assert!(settings.macos_schedule_area.is_none());
+        assert!(serde_json::to_value(&settings).unwrap().get("macos_fixed_area").is_none());
+
+        let confirmation = SavedAreaConfirmation {
+            version: 1,
+            kind: "fixed".into(),
+            rect: jiffshot_capture::Rect::new(-50, 25, 640, 480),
+            coordinate_space: vec![2.0_f64.to_bits(), u64::MAX],
+            session_only: false,
+        };
+        settings.macos_fixed_area = Some(confirmation.clone());
+        let settings: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(settings.macos_fixed_area, Some(confirmation.clone()));
+        assert_eq!(settings.schedule_area, Some((-50, 25, 640, 480)));
+        let mut old_proof = serde_json::to_value(&confirmation).unwrap();
+        old_proof.as_object_mut().unwrap().remove("session_only");
+        assert_eq!(serde_json::from_value::<SavedAreaConfirmation>(old_proof).unwrap(), confirmation);
+        let mut session_only = confirmation;
+        session_only.session_only = true;
+        assert_eq!(serde_json::from_str::<SavedAreaConfirmation>(&serde_json::to_string(&session_only).unwrap()).unwrap(), session_only);
+    }
+
+    #[test]
+    fn malformed_confirmations_do_not_discard_other_capture_settings() {
+        let valid = SavedAreaConfirmation {
+            version: 1,
+            kind: "scheduled".into(),
+            rect: jiffshot_capture::Rect::new(-50, 25, 640, 480),
+            coordinate_space: vec![2.0_f64.to_bits(), u64::MAX],
+            session_only: false,
+        };
+        for invalid in [
+            serde_json::json!("corrupt"),
+            serde_json::json!({}),
+            serde_json::json!({"version": "1", "kind": "fixed", "rect": valid.rect, "coordinate_space": [1]}),
+            serde_json::json!({"version": 1, "kind": "fixed", "rect": valid.rect, "coordinate_space": [-1]}),
+            serde_json::json!({"version": 2, "kind": "fixed", "rect": valid.rect, "coordinate_space": [1], "session_only": "false"}),
+            serde_json::json!({"version": 2, "kind": "fixed", "rect": valid.rect, "coordinate_space": [1], "session_only": null}),
+        ] {
+            let settings: Settings = serde_json::from_value(serde_json::json!({
+                "copy_to_clipboard": false,
+                "fixed_size": [640, 480],
+                "capture_window": { "fixed_at": [-50, 25] },
+                "schedule_area": [-50, 25, 640, 480],
+                "macos_fixed_area": invalid,
+                "macos_schedule_area": valid
+            })).unwrap();
+            assert!(!settings.copy_to_clipboard);
+            assert_eq!(settings.fixed_size, (640, 480));
+            assert_eq!(settings.capture_window.fixed_at, Some((-50, 25)));
+            assert_eq!(settings.schedule_area, Some((-50, 25, 640, 480)));
+            assert!(settings.macos_fixed_area.is_none());
+            assert_eq!(settings.macos_schedule_area, Some(valid.clone()));
+            let saved = serde_json::to_value(settings).unwrap();
+            assert!(saved.get("macos_fixed_area").is_none());
+            assert!(saved.get("macos_schedule_area").is_some());
+        }
+
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "fixed_size": [640, 480],
+            "macos_fixed_area": valid,
+            "macos_schedule_area": {"version": null}
+        })).unwrap();
+        assert_eq!(settings.fixed_size, (640, 480));
+        assert_eq!(settings.macos_fixed_area, Some(valid));
+        assert!(settings.macos_schedule_area.is_none());
     }
 }

@@ -119,7 +119,7 @@ pub struct AudioMetadata {
 /// Inspects a finalized video without playing it.
 ///
 /// # Errors
-/// Returns an error if the file is missing or Media Foundation cannot decode it.
+/// Returns an error if the file is missing or the platform decoder cannot open it.
 pub fn inspect(path: &Path) -> Result<Metadata> {
     if path
         .extension()
@@ -395,12 +395,25 @@ pub fn export_mp4(
     options: Mp4Options,
     progress: impl Fn(f64),
 ) -> Result<Metadata> {
+    export_mp4_cancellable(segments, out, options, progress, || false)
+}
+
+/// Like [`export_mp4`], but abandons staging if cancellation is requested.
+pub fn export_mp4_cancellable(
+    segments: &[Segment],
+    out: &Path,
+    options: Mp4Options,
+    progress: impl Fn(f64),
+    cancelled: impl Fn() -> bool,
+) -> Result<Metadata> {
+    check_cancelled(&cancelled)?;
     if segments.is_empty() || segments.len() > 256 {
         return Err(ExportError("provide 1..256 segments".into()));
     }
     let sources: Vec<Metadata> = segments
         .iter()
         .map(|(p, a, b)| {
+            check_cancelled(&cancelled)?;
             let m = inspect(p)?;
             validate_range(*a, *b, m.duration)?;
             Ok(m)
@@ -425,6 +438,7 @@ pub fn export_mp4(
     let mut base = 0_i64;
     let mut frame_count = 0;
     for (path, from, to) in segments {
+        check_cancelled(&cancelled)?;
         let (start, end) = (hns(*from), hns(*to));
         let mut video = Reader::open(path)?;
         video.seek(start)?;
@@ -447,11 +461,13 @@ pub fn export_mp4(
         };
         let mut n = 0_i64;
         loop {
+            check_cancelled(&cancelled)?;
             let at = start + n * HNS_PER_SECOND / spec.fps as i64;
             if at >= end {
                 break;
             }
             while next.as_ref().is_some_and(|f| f.time <= at) {
+                check_cancelled(&cancelled)?;
                 current = next
                     .take()
                     .ok_or_else(|| ExportError("missing pending frame".into()))?;
@@ -469,6 +485,7 @@ pub fn export_mp4(
             writer.write_frame(&pixels, base + at - start, finish - at)?;
             if let Some(a) = audio {
                 while pending.as_ref().is_some_and(|(t, _)| *t < finish) {
+                    check_cancelled(&cancelled)?;
                     let (time, pcm) = pending
                         .take()
                         .ok_or_else(|| ExportError("missing audio block".into()))?;
@@ -489,11 +506,14 @@ pub fn export_mp4(
         }
         base += end - start;
     }
+    check_cancelled(&cancelled)?;
     writer.finish()?;
+    check_cancelled(&cancelled)?;
     let mut metadata = inspect(&output.staging)?;
     metadata.path = out.to_path_buf();
     metadata.frames = Some(frame_count);
     metadata.audio_note = audio_note;
+    check_cancelled(&cancelled)?;
     output.publish()?;
     progress(1.0);
     Ok(metadata)
@@ -604,7 +624,20 @@ pub fn export_gif(
     options: GifOptions,
     progress: impl Fn(f64),
 ) -> Result<Metadata> {
+    export_gif_cancellable(source, out, (from, to), options, progress, || false)
+}
+
+/// Like [`export_gif`], but abandons staging if cancellation is requested.
+pub fn export_gif_cancellable(
+    source: &Path,
+    out: &Path,
+    (from, to): (f64, f64),
+    options: GifOptions,
+    progress: impl Fn(f64),
+    cancelled: impl Fn() -> bool,
+) -> Result<Metadata> {
     use image::codecs::gif::{GifEncoder, Repeat};
+    check_cancelled(&cancelled)?;
     let metadata = inspect(source)?;
     validate_range(from, to, metadata.duration)?;
     if !options.fps.is_finite()
@@ -647,12 +680,14 @@ pub fn export_gif(
             .ok_or_else(|| ExportError("range has no frames".into()))?;
         let mut next = reader.next_video()?;
         loop {
+            check_cancelled(&cancelled)?;
             let output_time = count as f64 * delay_ms as f64 / 1000.0;
             let at = from + output_time;
             if output_time >= to - from {
                 break;
             }
             while next.as_ref().is_some_and(|f| seconds(f.time) <= at) {
+                check_cancelled(&cancelled)?;
                 current = next
                     .take()
                     .ok_or_else(|| ExportError("missing pending GIF frame".into()))?;
@@ -702,6 +737,7 @@ pub fn export_gif(
             progress(((at - from) / (to - from)).clamp(0.0, 1.0));
         }
     }
+    check_cancelled(&cancelled)?;
     use std::io::Write;
     writer.flush()?;
     writer.get_ref().sync_all()?;
@@ -722,14 +758,25 @@ pub fn export_gif(
         bytes: fs::metadata(&output.staging)?.len(),
         frames: Some(count),
     };
+    check_cancelled(&cancelled)?;
     output.publish()?;
     progress(1.0);
     Ok(metadata)
 }
 
+fn check_cancelled(cancelled: &impl Fn() -> bool) -> Result<()> {
+    if cancelled() {
+        Err(ExportError("video export cancelled".into()))
+    } else {
+        Ok(())
+    }
+}
+
 struct Output {
     staging: PathBuf,
     destination: PathBuf,
+    #[cfg(target_os = "macos")]
+    staging_dir: PathBuf,
 }
 
 impl Output {
@@ -759,23 +806,43 @@ impl Output {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         for _ in 0..100 {
             let id = NEXT.fetch_add(1, Ordering::Relaxed);
-            let staging = parent.join(format!(
-                ".jiffshot-export-{}-{id}.{extension}",
-                std::process::id()
-            ));
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&staging)
+            #[cfg(target_os = "macos")]
             {
-                Ok(_) => {
-                    return Ok(Self {
-                        staging,
-                        destination: out.to_path_buf(),
-                    })
+                use std::os::unix::fs::DirBuilderExt;
+                let staging_dir =
+                    parent.join(format!(".jiffshot-export-{}-{id}", std::process::id()));
+                match fs::DirBuilder::new().mode(0o700).create(&staging_dir) {
+                    Ok(()) => {
+                        return Ok(Self {
+                            staging: staging_dir.join(format!("output.{extension}")),
+                            destination: out.to_path_buf(),
+                            staging_dir,
+                        })
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => return Err(e.into()),
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Err(e.into()),
+            }
+            #[cfg(windows)]
+            {
+                let staging = parent.join(format!(
+                    ".jiffshot-export-{}-{id}.{extension}",
+                    std::process::id()
+                ));
+                match fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&staging)
+                {
+                    Ok(_) => {
+                        return Ok(Self {
+                            staging,
+                            destination: out.to_path_buf(),
+                        })
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => return Err(e.into()),
+                }
             }
         }
         Err(ExportError("cannot reserve export staging file".into()))
@@ -786,30 +853,35 @@ impl Output {
             .write(true)
             .open(&self.staging)?
             .sync_all()?;
-        use std::os::windows::ffi::OsStrExt;
-        let from: Vec<u16> = self
-            .staging
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
-        let to: Vec<u16> = self
-            .destination
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
-        // SAFETY: both paths are live, NUL-terminated UTF-16 buffers. Staging is on the destination volume.
-        let ok = unsafe {
-            windows_sys::Win32::Storage::FileSystem::MoveFileExW(
-                from.as_ptr(),
-                to.as_ptr(),
-                windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
-                    | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if ok == 0 {
-            return Err(std::io::Error::last_os_error().into());
+        #[cfg(target_os = "macos")]
+        fs::rename(&self.staging, &self.destination)?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            let from: Vec<u16> = self
+                .staging
+                .as_os_str()
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+            let to: Vec<u16> = self
+                .destination
+                .as_os_str()
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+            // SAFETY: both paths are live, NUL-terminated UTF-16 buffers. Staging is on the destination volume.
+            let ok = unsafe {
+                windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+                    from.as_ptr(),
+                    to.as_ptr(),
+                    windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
+                        | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if ok == 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
         }
         Ok(())
     }
@@ -817,7 +889,23 @@ impl Output {
 
 impl Drop for Output {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.staging);
+        if let Err(error) = fs::remove_file(&self.staging) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "could not remove video export staging file {}: {error}",
+                    self.staging.display()
+                );
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if let Err(error) = fs::remove_dir(&self.staging_dir) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "could not remove video export staging directory {}: {error}",
+                    self.staging_dir.display()
+                );
+            }
+        }
     }
 }
 
@@ -978,9 +1066,22 @@ mod tests {
         assert!(progress.windows(2).all(|w| w[0] <= w[1]));
         assert_eq!(progress.last(), Some(&1.0));
         let (first, _) = frame(&out, 0.1).expect("first segment frame");
-        let (second, _) = frame(&out, 0.6).expect("second segment frame");
+        let (second, second_time) = frame(&out, 0.6).expect("second segment frame");
         assert!(first.pixels()[0].red() > 200 && first.pixels()[0].green() < 20);
-        assert!(second.pixels()[0].green() > 200 && second.pixels()[0].red() < 20);
+        assert!(
+            second.pixels()[0].green() > 200 && second.pixels()[0].red() < 20,
+            "second pixel {:?} at {second_time}",
+            second.pixels()[0]
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let (source, _) = frame(&green, 0.3).expect("source green frame");
+            let pixel = source.pixels()[0];
+            assert!(
+                pixel.red() < 15 && pixel.blue() < 15 && (225..=250).contains(&pixel.green()),
+                "green changed during encoding and decoding: {pixel:?}"
+            );
+        }
         let png = dir.path("still.png");
         let (w, h, at, bytes) = save_frame(&out, &png, 0.6).expect("PNG still");
         assert_eq!((w, h), (64, 48));
@@ -1101,6 +1202,133 @@ mod tests {
             .audio_note
             .as_ref()
             .is_some_and(|note| note.contains("--mute")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn preserves_audio_samples_at_trimmed_and_joined_timeline_positions() {
+        let dir = FixtureDir::new();
+        let source = dir.path("alternating.mp4");
+        let audio = AudioSpec {
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        let mut writer =
+            Writer::create(&source, VideoSpec::for_size(64, 48, 12), Some(audio)).unwrap();
+        for n in 0..12 {
+            let at = n * HNS_PER_SECOND / 12;
+            let end = (n + 1) * HNS_PER_SECOND / 12;
+            writer
+                .write_frame(&[50, 50, 50, 0].repeat(64 * 48), at, end - at)
+                .unwrap();
+            let amplitude = if n < 6 { 6000 } else { -6000 };
+            writer
+                .write_audio(&vec![amplitude; 48_000 / 12 * 2], at, end - at)
+                .unwrap();
+        }
+        writer.finish().unwrap();
+
+        let trimmed = dir.path("trim-audio.mp4");
+        export_mp4(
+            &[(source.clone(), 0.25, 0.75)],
+            &trimmed,
+            Mp4Options::default(),
+            |_| {},
+        )
+        .unwrap();
+        let joined = dir.path("join-audio.mp4");
+        export_mp4(
+            &[(source.clone(), 0.5, 1.0), (source, 0.0, 0.5)],
+            &joined,
+            Mp4Options::default(),
+            |_| {},
+        )
+        .unwrap();
+
+        let average = |path: &Path, from: f64, to: f64| {
+            let mut reader = Reader::open(path).unwrap();
+            reader.select_video(false).unwrap();
+            reader.select_audio(true).unwrap();
+            let (mut sum, mut count) = (0_i64, 0_usize);
+            while let Some((time, samples)) = reader.next_audio().unwrap() {
+                for (index, channels) in samples.chunks_exact(2).enumerate() {
+                    let at = time + index as i64 * HNS_PER_SECOND / i64::from(audio.sample_rate);
+                    if at >= hns(from) && at < hns(to) {
+                        sum += i64::from(channels[0]) + i64::from(channels[1]);
+                        count += 2;
+                    }
+                }
+            }
+            assert!(
+                count >= 8_000,
+                "too little audio in {from}..{to}: {count} samples"
+            );
+            sum as f64 / count as f64
+        };
+        assert!(average(&trimmed, 0.1, 0.2) > 4000.0);
+        assert!(average(&trimmed, 0.3, 0.4) < -4000.0);
+        assert!(average(&joined, 0.1, 0.2) < -4000.0);
+        assert!(average(&joined, 0.6, 0.7) > 4000.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn staging_directory_is_private_and_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = FixtureDir::new();
+        let output = Output::new(&dir.path("output.mp4"), &[], "mp4").unwrap();
+        let staging_dir = output.staging_dir.clone();
+        assert_eq!(
+            fs::metadata(&staging_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        fs::write(&output.staging, b"unfinished").unwrap();
+        drop(output);
+        assert!(!staging_dir.exists());
+    }
+
+    #[test]
+    fn cancelled_exports_preserve_existing_output_and_remove_staging() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = FixtureDir::new();
+        let source = dir.path("source.mp4");
+        fixture(&source, [20, 40, 100, 0], (64, 48), 12, None);
+        for extension in ["mp4", "gif"] {
+            let destination = dir.path(&format!("existing.{extension}"));
+            fs::write(&destination, b"previous output").unwrap();
+            let cancelled = AtomicBool::new(false);
+            let progress = |value: f64| {
+                if value > 0.1 {
+                    cancelled.store(true, Ordering::Release);
+                }
+            };
+            let check = || cancelled.load(Ordering::Acquire);
+            let result = if extension == "mp4" {
+                export_mp4_cancellable(
+                    &[(source.clone(), 0.0, 1.0)],
+                    &destination,
+                    Mp4Options::default(),
+                    progress,
+                    check,
+                )
+            } else {
+                export_gif_cancellable(
+                    &source,
+                    &destination,
+                    (0.0, 1.0),
+                    GifOptions::default(),
+                    progress,
+                    check,
+                )
+            };
+            assert_eq!(result.unwrap_err().to_string(), "video export cancelled");
+            assert_eq!(fs::read(&destination).unwrap(), b"previous output");
+            assert!(fs::read_dir(&dir.0).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".jiffshot-export-")));
+        }
     }
 
     #[test]

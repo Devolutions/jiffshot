@@ -1,6 +1,13 @@
-use super::{app, capture_window, drag_out, ocr, settings, tray, video, vm, vm_support, winutil};
+use super::{app, capture_window, ocr, settings, tray, video, vm, vm_support};
+#[cfg(windows)]
+use super::{drag_out, winutil};
 use crate::{canvas, ui};
-// Windows application entry point; the shared editor model is in jiffshot-doc.
+// Windows and macOS application entry point; the shared editor model is in
+// jiffshot-doc.
+#[cfg(target_os = "macos")]
+use crate::{
+    capture_engine_macos, file_drag_macos, mac_window, shutdown_ui_macos, termination_macos,
+};
 
 use app::act;
 use jiffshot_doc::editor::Tool;
@@ -384,9 +391,7 @@ impl MainViewModel for Model {
         ungroup,
         |_app| canvas::with_editor(|e| e.ungroup_selected())
     );
-    command!(flatten_selected, |_app| canvas::with_editor(
-        |e| e.flatten_selected()
-    ));
+    command!(flatten_selected, |app| app.flatten_selected());
     command!(smart_redact, |app| app.smart_redact());
     command!(new_from_clipboard, |app| app.new_from_clipboard());
     command!(print, |app| app.print());
@@ -441,11 +446,7 @@ impl MainViewModel for Model {
     }));
     command!(resize50, |app| app.resize(0.5));
     command!(resize200, |app| app.resize(2.0));
-    command!(flatten, |app| app.document_op("Flatten", |d| {
-        let any = !d.objects.is_empty();
-        d.flatten_objects();
-        any
-    }));
+    command!(flatten, |app| app.flatten_document());
     command!(zoom_in, |app| app.run("zoom:in"));
     command!(zoom_out, |app| app.run("zoom:out"));
     command!(zoom_fit, |app| app.run("zoom:fit"));
@@ -488,6 +489,82 @@ impl MainViewModel for Model {
 
 pub(crate) fn run() -> rustolonia::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(target_os = "macos")]
+    if args.as_slice() == ["--internal-check-host-discovery"] {
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+
+        match rustolonia::discover_host_path() {
+            Ok(path) => {
+                let mut stdout = std::io::stdout().lock();
+                let output = stdout
+                    .write_all(b"jiffshot-host-discovery-v1\0")
+                    .and_then(|_| stdout.write_all(path.as_os_str().as_bytes()))
+                    .and_then(|_| stdout.flush());
+                if let Err(error) = output {
+                    eprintln!("host discovery output failed: {error}");
+                    std::process::exit(1);
+                }
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("jiffshot-host-discovery-v1: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if args.as_slice() == ["--internal-check-native-file-drag"] {
+        match file_drag_macos::check_native_companion() {
+            Ok(()) => {
+                println!("jiffshot-native-file-drag-v1: supported");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("native file-drag companion check failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if args.as_slice() == ["--internal-check-file-drag-abi"] {
+        match file_drag_macos::check_host_abi() {
+            Ok(()) => {
+                println!("jiffshot-file-drag-abi-v1: supported");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("file-drag host ABI check failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if args.as_slice() == ["--internal-check-native-termination"] {
+        match termination_macos::check_host() {
+            Ok(()) => {
+                println!("jiffshot-native-termination-v1: supported");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("native termination check failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if args.as_slice() == ["--internal-check-native-popup-gate"] {
+        match ui::check_native_popup_gate() {
+            Ok(()) => {
+                println!("jiffshot-native-popup-gate-v1: supported");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("native popup-gate check failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     // Command-line tools and self-tests run and exit without the app.
     if let Some(code) = jiffshot_workflow::run_command(&args) {
         std::process::exit(code);
@@ -501,37 +578,151 @@ pub(crate) fn run() -> rustolonia::Result<()> {
     // The UI self-test drives the editor alone: no tray, hotkeys or
     // single-instance claim, and closing its window ends it.
     let tray = std::env::var_os("JIFFSHOT_UITEST").is_none();
+    #[cfg(target_os = "macos")]
+    let test_capture_engine = !tray
+        && (std::env::var_os("JIFFSHOT_UITEST_SAVED_AREAS_ENGINE").is_some()
+            || std::env::var_os("JIFFSHOT_UITEST_SETTINGS_HANDOFF").is_some()
+            || std::env::var_os("JIFFSHOT_UITEST_STARTUP").is_some()
+            || std::env::var_os("JIFFSHOT_UITEST_RECORDING_SHUTDOWN").is_some()
+            || std::env::var_os("JIFFSHOT_UITEST_IMAGE_SHUTDOWN").is_some()
+            || std::env::var_os("JIFFSHOT_UITEST_PANEL_SHUTDOWN").is_some()
+            || std::env::var_os("JIFFSHOT_UITEST_TERMINATION_TRAY_ONLY").is_some()
+            || std::env::var_os("JIFFSHOT_UITEST_ENGINE_QUIT").is_some()
+            || std::env::var_os("JIFFSHOT_UITEST_CONTROL").is_some()
+            || std::env::var("JIFFSHOT_UITEST_POPUP_SHUTDOWN").is_ok_and(|case| {
+                case.starts_with("native-engine-") || case.starts_with("exit-engine-")
+            }));
+    #[cfg(target_os = "macos")]
+    if test_capture_engine {
+        for name in [
+            "JIFFSHOT_LIBRARY",
+            "JIFFSHOT_CONFIG_DIR",
+            "JIFFSHOT_LOCAL_DIR",
+        ] {
+            if std::env::var_os(name).is_none_or(|value| value.is_empty()) {
+                eprintln!("{name} must name an isolated test directory");
+                std::process::exit(2);
+            }
+        }
+    }
     // One Jiffshot per session: a second launch hands its file or capture
     // to the running one and exits.
-    if tray && !jiffshot_workflow::claim_instance() {
+    #[cfg(windows)]
+    let primary_instance = !tray || jiffshot_workflow::claim_instance();
+    #[cfg(target_os = "macos")]
+    let primary_instance = !(tray || test_capture_engine)
+        || jiffshot_workflow::claim_instance().unwrap_or_else(|error| {
+            eprintln!("could not acquire the Jiffshot instance lock: {error}");
+            std::process::exit(1);
+        });
+    if !primary_instance {
+        #[cfg(target_os = "macos")]
+        if test_capture_engine {
+            eprintln!("the isolated capture self-test is already running");
+            std::process::exit(1);
+        }
+        #[cfg(windows)]
         match files.first().and_then(|f| std::path::absolute(f).ok()) {
             Some(file) => {
                 jiffshot_capture::ipc::send_to_editor(&file);
             }
             None => jiffshot_workflow::forward_to_running(capture),
         }
+        #[cfg(target_os = "macos")]
+        {
+            let result = match files.first() {
+                Some(file) => std::path::absolute(file).and_then(|file| {
+                    jiffshot_capture::ipc::send_to_editor_when_ready(
+                        &file,
+                        std::time::Duration::from_secs(10),
+                    )
+                }),
+                None => jiffshot_workflow::forward_to_running(capture),
+            };
+            if let Err(error) = result {
+                eprintln!("could not forward the request to the running Jiffshot: {error}");
+                std::process::exit(1);
+            }
+        }
         return Ok(());
     }
     let show_editor = !tray || !files.is_empty();
+    #[cfg(target_os = "macos")]
+    let show_editor = show_editor
+        && !(test_capture_engine && std::env::var_os("JIFFSHOT_UITEST_SETTINGS_HANDOFF").is_some());
     jiffshot_capture::screen::enable_per_monitor_dpi();
     let mut editor = Editor::new(Document::blank(1280, 720, Rgba::WHITE));
     editor.analyzer = Some(Box::new(ocr::Recognizer));
     *canvas::EDITOR.lock() = Some(editor);
     let result = App::load_from_env()?.run(move |scope| {
+        #[cfg(target_os = "macos")]
+        if let Err(error) = jiffshot_capture::screen::watch_displays() {
+            eprintln!("display configuration: {error}");
+        }
+        #[cfg(target_os = "macos")]
+        if let Err(error) = mac_window::watch_window_lifetimes(scope) {
+            eprintln!("window lifetime observation: {error}");
+        }
         let opening = scope
             .activation_items()?
             .iter()
             .find_map(|item| item.local_path().map(|p| p.to_path_buf()));
         vm_support::install(scope);
         app::install(scope.clone(), opening);
+        #[cfg(target_os = "macos")]
+        shutdown_ui_macos::install(scope)
+            .map_err(|error| rustolonia::Error::Load(error.to_string()))?;
+        #[cfg(target_os = "macos")]
+        termination_macos::install(scope)
+            .map_err(|error| rustolonia::Error::Load(error.to_string()))?;
+        #[cfg(target_os = "macos")]
+        file_drag_macos::install(scope)
+            .map_err(|error| rustolonia::Error::Load(error.to_string()))?;
+        #[cfg(target_os = "macos")]
+        scope.on_activation(|event| match event {
+            rustolonia::storage::ActivationEvent::Files(items)
+            | rustolonia::storage::ActivationEvent::OpenUri(items) => {
+                if let Some(path) = items
+                    .iter()
+                    .find_map(|item| item.local_path().map(|path| path.to_path_buf()))
+                {
+                    app::post(move |app| app.incoming(path));
+                } else if !items.is_empty() {
+                    app::post(|app| {
+                        app.toast(
+                            "Could not open the item",
+                            "The selected item has no local file path.",
+                            true,
+                        )
+                    });
+                }
+            }
+            rustolonia::storage::ActivationEvent::Reopen => app::post(|app| app.show_editor()),
+            _ => {}
+        })?;
         // A second editor hands its file to this one (see the capture
         // tool's hand-off); the pipe belongs to the first editor.
+        #[cfg(windows)]
         let _ = jiffshot_capture::ipc::serve(|path| app::post(move |app| app.incoming(path)));
-        if tray {
+        #[cfg(target_os = "macos")]
+        let editor_ipc_error = jiffshot_capture::ipc::serve(app::post_incoming).err();
+        #[cfg(target_os = "macos")]
+        let run_capture = tray || test_capture_engine;
+        #[cfg(windows)]
+        let run_capture = tray;
+        if run_capture {
             // The tray keeps Jiffshot running with the editor closed.
             scope.set_shutdown_mode(rustolonia::ShutdownMode::OnExplicitShutdown)?;
         }
         ui::mount_main_window(scope, Model, show_editor)?;
+        #[cfg(target_os = "macos")]
+        if let Some(error) = editor_ipc_error {
+            eprintln!("could not start the editor instance listener: {error}");
+            app::post(move |app| {
+                app.toast("Jiffshot hand-off unavailable", &error.to_string(), true)
+            });
+        }
+        #[cfg(windows)]
         if let Some(window) = scope.main_window() {
             winutil::set_main_hwnd(scope.platform_handle(&window).unwrap_or(0));
             drag_out::install(winutil::main_hwnd());
@@ -539,20 +730,51 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         // The Capture window, hidden until asked for (the UI self-test
         // drives it too).
         let window = ui::mount_capture_window(scope, capture_window::CaptureModel)?;
-        capture_window::set_window(window);
-        if tray {
+        capture_window::set_window(window, scope);
+        if run_capture {
             let hooks = jiffshot_workflow::Hooks {
                 open_in_editor: Box::new(|path| {
                     let path = path.to_path_buf();
-                    app::post(move |app| app.incoming(path));
-                    true
+                    #[cfg(target_os = "macos")]
+                    return match app::post_incoming(path) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            jiffshot_workflow::log(&format!(
+                                "could not queue a file for the editor: {error}"
+                            ));
+                            false
+                        }
+                    };
+                    #[cfg(windows)]
+                    {
+                        app::post(move |app| app.incoming(path));
+                        true
+                    }
                 }),
                 show_editor: Box::new(|| app::post(|app| app.show_editor())),
-                quit: Box::new(|| app::post(|app| app.exit())),
+                quit: Box::new(move || {
+                    #[cfg(target_os = "macos")]
+                    if test_capture_engine
+                        && std::env::var_os("JIFFSHOT_UITEST_ENGINE_QUIT").is_none()
+                        && std::env::var_os("JIFFSHOT_UITEST_RECORDING_EXTERNAL_QUIT").is_none()
+                        && std::env::var_os("JIFFSHOT_UITEST_CONTROL").is_none()
+                    {
+                        return;
+                    }
+                    #[cfg(target_os = "macos")]
+                    if let Err(error) = app::post_exit() {
+                        jiffshot_workflow::log(&format!(
+                            "could not queue the exit request: {error}"
+                        ));
+                    }
+                    #[cfg(windows)]
+                    app::post(|app| app.exit());
+                }),
                 notify: Box::new(|title, text, problem| {
                     let (title, text) = (title.to_owned(), text.to_owned());
                     app::post(move |app| app.toast(&title, &text, problem));
                 }),
+                #[cfg(windows)]
                 state: Box::new(|state| {
                     app::post(move |app| {
                         app.set_widget(state.show_widget);
@@ -560,6 +782,10 @@ pub(crate) fn run() -> rustolonia::Result<()> {
                         tray::publish(state);
                     })
                 }),
+                #[cfg(target_os = "macos")]
+                state: Box::new(|_| app::request_capture_state_refresh()),
+                #[cfg(target_os = "macos")]
+                startup_status: Box::new(|_| app::request_capture_state_refresh()),
                 show_capture_window: Box::new(|| app::post(|app| app.show_capture_window())),
                 show_text: Box::new(|text| app::post(move |app| app.show_grab_text(&text))),
                 hud: Box::new(app::post_hud),
@@ -568,14 +794,49 @@ pub(crate) fn run() -> rustolonia::Result<()> {
                     app::post_quiet(move |app| app.set_screen_draw(&json))
                 }),
             };
-            if let Err(error) = jiffshot_workflow::start_engine(capture, hooks) {
+            #[cfg(target_os = "macos")]
+            let started =
+                capture_engine_macos::start(|| jiffshot_workflow::start_engine(capture, hooks));
+            #[cfg(windows)]
+            let started = jiffshot_workflow::start_engine(capture, hooks).map(|_| ());
+            if let Err(error) = started {
                 eprintln!("the capture side did not start: {error}");
             }
             ui::mount_tray(scope, tray::TrayModel)?;
         }
         Ok(())
     });
+    #[cfg(target_os = "macos")]
+    let file_drag_error = file_drag_macos::uninstall().err();
+    #[cfg(target_os = "macos")]
+    let dispatcher_error = shutdown_ui_macos::stop().err();
+    #[cfg(target_os = "macos")]
+    let unexpected_engine = match capture_engine_macos::running() {
+        Ok(true) => Some("the UI loop ended before the capture engine stopped".to_owned()),
+        Ok(false) => None,
+        Err(error) => Some(error),
+    };
     ui::detach_all();
+    #[cfg(target_os = "macos")]
+    if let Some(error) = file_drag_error {
+        let message = format!("could not stop macOS file dragging: {error}");
+        jiffshot_workflow::log(&message);
+        return Err(rustolonia::Error::Load(message));
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(error) = dispatcher_error {
+        let message = format!("could not stop the shutdown dispatcher: {error}");
+        jiffshot_workflow::log(&message);
+        return Err(rustolonia::Error::Load(message));
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(error) = unexpected_engine {
+        jiffshot_workflow::log(&error);
+        return Err(rustolonia::Error::Load(error));
+    }
+    if !tray && ui::selftest_failed() {
+        std::process::exit(1);
+    }
     result
 }
 

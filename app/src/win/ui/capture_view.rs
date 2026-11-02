@@ -10,15 +10,20 @@
 
 pub(super) mod parts;
 
-use self::parts::{on_click, payload, post, Form, Input, Subscriptions, CTRL, GLYPHS};
+use self::parts::{on_click, payload, post, Form, Input, Subscriptions, GLYPHS};
 use crate::vm::CaptureBinding;
+#[cfg(target_os = "macos")]
+use crate::vm::CaptureViewModelSink;
 use rustolonia::{
     AnyEl, AppScope, AsControl, Border, Button, Color, Control, Dock, DockPanel, Effect, El, Flyout, FontWeight, Grid, HorizontalAlignment, Image, Key, MenuFlyout,
-    MenuItem, MenuItemToggleType, NodeRef, Orientation, PlacementMode, Result, Separator, Signal, StackPanel, TextBlock, TextWrapping, ToggleSwitch,
+    MenuItem, MenuItemToggleType, NodeRef, Orientation, PlacementMode, Result, ScrollViewer, Separator, Signal, StackPanel, TextBlock, TextWrapping, ToggleSwitch,
     Upcast, VerticalAlignment, Window, WindowStartupLocation,
 };
+#[cfg(target_os = "macos")]
+use rustolonia::ScrollBarVisibility;
 use serde::Deserialize;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 /// The window's colors.
 struct Palette {
@@ -137,6 +142,14 @@ struct Panel {
     rows: Vec<parts::Row>,
     /// The confirm button's text; none for a read-only panel.
     ok: Option<String>,
+    #[serde(default)]
+    action: Option<PanelAction>,
+}
+
+#[derive(Deserialize)]
+struct PanelAction {
+    id: String,
+    label: String,
 }
 
 // ---- state ------------------------------------------------------------------
@@ -391,8 +404,15 @@ fn follow(scope: &AppScope, binding: &CaptureBinding) -> Result<()> {
     let sink = binding.sink;
     let s = scope.clone();
     Effect::new(move || {
+        #[cfg(windows)]
         let json = sink.view.get();
+        #[cfg(windows)]
         post(&s, "Capture window view", move || apply_view(&json));
+        #[cfg(target_os = "macos")]
+        {
+            let _ = sink.view.get();
+            post(&s, "Capture window view", latest_view_update(sink));
+        }
         Ok(())
     })?;
     let s = scope.clone();
@@ -419,6 +439,21 @@ fn follow(scope: &AppScope, binding: &CaptureBinding) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn latest_view_update(sink: CaptureViewModelSink) -> impl FnOnce() -> Result<()> + Send + 'static {
+    move || apply_view(&sink.view.get_untracked())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn delayed_view_for_selftest() -> impl FnOnce() -> Result<()> + Send + 'static {
+    latest_view_update(super::capture().sink)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn view_tab_for_selftest() -> Option<usize> {
+    with_ui(|ui| ui.tab.get_untracked())
+}
+
 /// A borderless button (`Button.flat`).
 fn flat(dark: Signal<bool>) -> El<Button> {
     Button::el().background(parts::TRANSPARENT).padding((9.0, 4.0)).corner_radius(5.0).foreground(move || palette(dark).text)
@@ -427,7 +462,7 @@ fn flat(dark: Signal<bool>) -> El<Button> {
 /// An icon-font glyph.
 fn glyph(text: &str, size: f64) -> El<TextBlock> {
     TextBlock::el()
-        .text(text.to_owned())
+        .text(super::icons::glyph(text).to_owned())
         .font_family(GLYPHS)
         .font_size(size)
         .horizontal_alignment(HorizontalAlignment::Center)
@@ -456,7 +491,7 @@ fn tab_button(dark: Signal<bool>, tab: Signal<usize>, subs: &Subscriptions, i: u
         .padding(0.0)
         .corner_radius(6.0)
         .horizontal_content_alignment(HorizontalAlignment::Center)
-        .tool_tip_tip(tip.to_owned())
+        .tool_tip_tip(super::shortcut(tip))
         .content(content);
     on_click(button, subs, move |_| run(format!("tab:{i}")))
 }
@@ -551,16 +586,16 @@ fn switch_row(dark: Signal<bool>, subs: &Subscriptions, row: &SwitchRow, height:
 
 // ---- keys and closing ------------------------------------------------------
 
-/// Enter captures, Escape closes, Ctrl+1…3 pick a tab.
+/// Enter captures, Escape closes, and the command key plus 1…3 picks a tab.
 fn on_key(e: &mut rustolonia::ControlKeyDownEventArgs) {
     if e.handled {
         return;
     }
-    let ctrl = e.key_modifiers & CTRL != 0;
+    let command = e.key_modifiers & super::COMMAND_MODIFIER != 0;
     match Key::try_from(e.key) {
         Ok(Key::Return) => run("capture".into()),
         Ok(Key::Escape) => close_to_tray(),
-        Ok(key @ (Key::D1 | Key::D2 | Key::D3)) if ctrl => run(format!("tab:{}", key as i32 - Key::D1 as i32)),
+        Ok(key @ (Key::D1 | Key::D2 | Key::D3)) if command => run(format!("tab:{}", key as i32 - Key::D1 as i32)),
         _ => return,
     }
     e.handled = true;
@@ -660,20 +695,77 @@ fn window_command(command: &str) {
 
 // ---- option panels and notes -----------------------------------------------
 
+#[cfg(target_os = "macos")]
+fn delay_rows_height(scope: &AppScope, window: &Window) -> f64 {
+    let height = scope.platform_handle(window).ok()
+        .and_then(crate::mac_window::window)
+        .and_then(|window| window.screen())
+        .map(|screen| screen.visibleFrame().size.height)
+        .filter(|height| height.is_finite() && *height > 0.0);
+    match height {
+        Some(height) => (height - 180.0).clamp(120.0, 640.0),
+        None => {
+            eprintln!("Capture options: could not determine the window's screen; using a conservative panel height");
+            300.0
+        }
+    }
+}
+
 fn show_panel(json: &str) -> Result<()> {
-    let Ok(panel) = serde_json::from_str::<Panel>(json) else { return Ok(()) };
-    let Some((scope, _, anchor, popup)) = popup_target() else { return Ok(()) };
-    let Some(owner) = with_ui(|ui| ui.window) else { return Ok(()) };
+    show_panel_with_height(json, None).map(|_| ())
+}
+
+type ShownPanel = (ScrollViewer, Flyout, Option<Rc<dyn Fn()>>);
+
+fn activate_panel_action(id: &str, flyout: &Flyout, values: &[Input]) {
+    if let Err(error) = flyout.hide() {
+        eprintln!("Capture options: could not close the panel: {error:?}");
+        return;
+    }
+    run(format!("{id}:{}", parts::values(values)));
+}
+
+fn show_panel_with_height(json: &str, max_height: Option<f64>) -> Result<Option<ShownPanel>> {
+    let Ok(panel) = serde_json::from_str::<Panel>(json) else { return Ok(None) };
+    let Some((scope, window, anchor, popup)) = popup_target() else { return Ok(None) };
+    let Some(owner) = with_ui(|ui| ui.window) else { return Ok(None) };
     popup.clear();
 
     let body = StackPanel::new()?.spacing(8.0)?.margin(4.0)?.min_width(280.0)?;
-    let rows = body.children()?;
-    rows.add(TextBlock::new()?.text(&panel.title)?.font_weight(FontWeight::DemiBold)?.font_size(14.0)?.margin((0.0, 0.0, 0.0, 4.0))?)?;
+    let children = body.children()?;
+    children.add(TextBlock::new()?.text(&panel.title)?.font_weight(FontWeight::DemiBold)?.font_size(14.0)?.margin((0.0, 0.0, 0.0, 4.0))?)?;
+    #[cfg(target_os = "macos")]
+    let (rows, scroll) = if panel.id == "delay" {
+        let content = StackPanel::new()?.spacing(8.0)?;
+        let scroll = ScrollViewer::new()?
+            .max_height(max_height.unwrap_or_else(|| delay_rows_height(&scope, &window)))?
+            .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)?
+            .content(Some(&content))?;
+        children.add(&scroll)?;
+        (content.children()?, Some(scroll))
+    } else {
+        (body.children()?, None)
+    };
+    #[cfg(windows)]
+    let (rows, scroll) = {
+        let _ = (max_height, window);
+        (body.children()?, None::<ScrollViewer>)
+    };
     let mut inputs: Vec<Input> = Vec::new();
     for row in &panel.rows {
         rows.add(parts::row(&scope, Form::Panel, row, owner, &mut inputs, &popup)?)?;
     }
     let flyout = Flyout::new()?.placement(PlacementMode::BottomEdgeAlignedLeft)?.content(Some(&body as &dyn AsControl))?;
+
+    let mut panel_action: Option<Rc<dyn Fn()>> = None;
+    if let Some(action) = &panel.action {
+        let button = Button::new()?.content_text(&action.label)?.horizontal_alignment(HorizontalAlignment::Stretch)?;
+        let (id, open, values) = (action.id.clone(), flyout.clone(), inputs.clone());
+        popup.keep(button.subscribe_click(move |_| activate_panel_action(&id, &open, &values))?);
+        let (id, open, values) = (action.id.clone(), flyout.clone(), inputs.clone());
+        panel_action = Some(Rc::new(move || activate_panel_action(&id, &open, &values)));
+        children.add(&button)?;
+    }
 
     let buttons = StackPanel::new()?.orientation(Orientation::Horizontal)?.spacing(8.0)?.horizontal_alignment(HorizontalAlignment::Right)?.margin((0.0, 8.0, 0.0, 0.0))?;
     if let Some(ok) = &panel.ok {
@@ -694,8 +786,14 @@ fn show_panel(json: &str) -> Result<()> {
         let _ = open.hide();
     })?);
     buttons.children()?.add(&close)?;
-    rows.add(&buttons)?;
-    flyout.show_at_with_control(&anchor)
+    children.add(&buttons)?;
+    flyout.show_at_with_control(&anchor)?;
+    Ok(scroll.map(|scroll| (scroll, flyout, panel_action)))
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn show_delay_for_selftest(json: &str, height: f64) -> Result<Option<ShownPanel>> {
+    show_panel_with_height(json, Some(height))
 }
 
 fn show_problem(text: &str) -> Result<()> {

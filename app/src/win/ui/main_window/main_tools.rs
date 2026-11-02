@@ -47,7 +47,7 @@ pub const TOOLS: [ToolDef; 22] = [
 ];
 
 /// The icon font of the palette's glyphs.
-const ICON_FONT: &str = "Segoe Fluent Icons, Segoe MDL2 Assets, Segoe UI Symbol";
+const ICON_FONT: &str = super::super::icons::FONT;
 
 fn index_of(name: &str) -> Option<usize> {
     TOOLS.iter().position(|t| t.name == name)
@@ -164,7 +164,7 @@ fn tool_content(sink: MainViewModelSink, theme: super::main_common::Theme, glyph
         .spacing(2.0)
         .child(
             TextBlock::el()
-                .text(glyph.to_owned())
+                .text(super::super::icons::glyph(glyph).to_owned())
                 .font_family(ICON_FONT)
                 .font_size(18.0)
                 .horizontal_alignment(HorizontalAlignment::Center)

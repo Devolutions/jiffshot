@@ -38,17 +38,17 @@ pub fn open_in(owner: isize, program: &str, file: &Path) -> Result<(), String> {
 }
 
 /// Lets Windows ask which program to open the file with.
-pub fn open_with(owner: isize, file: &Path) -> Result<(), String> {
+pub fn open_with(owner: isize, file: &Path) -> Result<bool, String> {
     if shell(owner, "openas", &file.to_string_lossy(), None) {
-        Ok(())
+        Ok(true)
     } else {
         Err("Windows could not show the Open with dialog".into())
     }
 }
 
-pub fn print(owner: isize, file: &Path) -> Result<(), String> {
+pub fn print(owner: isize, file: &Path) -> Result<bool, String> {
     if shell(owner, "print", &file.to_string_lossy(), None) {
-        Ok(())
+        Ok(true)
     } else {
         Err("Windows has no print handler for this file type".into())
     }
@@ -111,7 +111,7 @@ type MapiSendMailW = unsafe extern "system" fn(
 
 /// Opens a new message in the default mail program with `file` attached
 /// (Simple MAPI, which Outlook and most desktop mail programs provide).
-pub fn email(owner: isize, file: &Path, subject: &str) -> Result<(), String> {
+pub fn email(owner: isize, file: &Path, subject: &str) -> Result<bool, String> {
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
     const MAPI_LOGON_UI: u32 = 1;
     const MAPI_DIALOG: u32 = 8;
@@ -157,7 +157,8 @@ pub fn email(owner: isize, file: &Path, subject: &str) -> Result<(), String> {
             files: &mut attachment,
         };
         match send(0, owner as usize, &message, MAPI_DIALOG | MAPI_LOGON_UI, 0) {
-            0 | 1 => Ok(()), // success, or the user cancelled
+            0 => Ok(true),
+            1 => Ok(false),
             code => Err(format!(
                 "the mail program refused the message (MAPI error {code})"
             )),

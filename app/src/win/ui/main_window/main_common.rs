@@ -183,9 +183,7 @@ pub fn number_text(value: f64) -> String {
 
 /// A file URI's or path's file name, decoded (recent file headers).
 pub fn file_name(uri: &str) -> String {
-    let path = uri.strip_prefix("file:///").unwrap_or(uri);
-    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    crate::ui::percent_decode(name)
+    crate::ui::recent_file_name(uri)
 }
 
 // ---- recurring controls -----------------------------------------------------
@@ -392,6 +390,8 @@ mod tests {
     #[test]
     fn labels_come_from_uris_and_values() {
         assert_eq!(file_name("file:///C:/Captures/My%20shot.png"), "My shot.png");
+        assert_eq!(file_name("file:///tmp/caf%C3%A9%20%5C%20100%25.png"), "café \\ 100%.png");
+        assert_eq!(file_name("file:///tmp/%é.png"), "%é.png");
         assert_eq!(number_text(28.0), "28");
         assert_eq!(number_text(2.46), "2.5");
     }

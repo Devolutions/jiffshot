@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use jiffshot_control::{Error, ErrorCode};
 use serde_json::{json, Map, Value};
 
+#[cfg(windows)]
 const USAGE: &str = r##"jiffshot-cli: drive the running Jiffshot from scripts and AI agents
 
 USAGE
@@ -58,7 +59,7 @@ INPUT (pointer moves glide visibly and typing is paced while recording)
     click [X,Y] [POINTER] [--right|--middle] [--double] [--no-step] [--description TEXT]
     move [X,Y] [POINTER]
     drag X1,Y1 X2,Y2 [--right]
-    scroll N [POINTER] [--horizontal]       positive scrolls up (or right)
+    scroll N [POINTER] [--horizontal]       positive scrolls down (or right)
     type TEXT [TARGET] [--delay-ms N]       \n presses Enter, \t presses Tab
     key COMBO [TARGET] [--repeat N]         e.g. ctrl+s, alt+f4, win+r, enter, f5
     focus [TITLE] [--process P]             restore and bring a window to the front
@@ -106,10 +107,12 @@ OTHER
     call COMMAND [JSON]                     send a raw command with a JSON arguments object
     help [agent]                            this text, or the guide for AI agents
 
-TARGET (what to capture, look at or type into; default: the screen under the pointer)
-    --screen N | --desktop | --region X,Y,W,H
+TARGET (what to capture, look at or type into)
+    --screen N|primary|cursor | --desktop | --region X,Y,W,H
     --window HWND | --title TEXT | --process NAME | --class NAME   (windows come to the front
     first unless --no-activate)
+    Without a target, screenshot, capture scroll and record start use the primary display;
+    OCR, wait text and OCR-based pointer searches use the whole desktop.
 
 POINTER (where to click, move or scroll; in screen pixels)
     X,Y | --text TEXT (found by OCR in TARGET) | --element NAME [--type T] (UI Automation in
@@ -119,6 +122,7 @@ EXIT CODES
     0 success, 1 failed, 2 invalid usage, 3 Jiffshot unavailable, 4 timed out
 "##;
 
+#[cfg(windows)]
 const AGENT: &str = r#"jiffshot-cli for AI agents
 =========================
 
@@ -223,6 +227,107 @@ EDITING AND LIVE ANNOTATIONS
   an argument `{"$ref":"shot.path"}` reuses its path with the original JSON
   type. References also work in cleanup. See docs/cli.md for full examples
   and the capability coverage/limitations.
+"#;
+
+#[cfg(target_os = "macos")]
+const USAGE: &str = r##"jiffshot-cli: drive the running Jiffshot from scripts and AI agents
+
+USAGE
+    jiffshot-cli [--pretty] [--timeout SECS] [--no-launch] COMMAND [ARGS]
+    jiffshot-cli help agent
+
+AVAILABLE ON MACOS
+    status                              server and currently available commands
+    monitors                            displays and their rectangles
+    windows [--title TEXT]              on-screen and identifiable off-screen windows
+    elements [TARGET] [--name N] [--type T] [--max N]
+    cursor                              current pointer position
+    screenshot [TARGET] [--out FILE.png] [--cursor] [--delay-ms N]
+    capture scroll [TARGET] [--out FILE.png] [--horizontal] [--max-frames N]
+                   [--timeout-ms N] [--settle-ms N] [--notches N]
+    ocr [TARGET] [--find TEXT]          recognize visible text
+    focus [TARGET]                      bring a window to the front
+    wait window | text ...              wait for a window or text
+    record start [TARGET] [--out FILE.mp4] [--fps N] [--audio none|system|mic|both]
+                 [--clicks] [--highlight] [--no-cursor] [--max-seconds N] [--key ID]
+    record status | pause | resume
+    record stop | cancel [--id ID]
+    record options [--id ID] [--args JSON]
+    record annotate --kind JSON [--style JSON] [--duration-ms N]
+    record clear [--id ID]
+    steps status | start | add | finish | cancel
+    click [X,Y] [--text TEXT|--element NAME] [--right|--middle] [--double] [--no-step]
+    move [X,Y] [--text TEXT|--element NAME]
+    drag X1,Y1 X2,Y2 [--right]         drag with a mouse button
+    scroll N [X,Y] [--horizontal]      positive scrolls down (or right)
+    type TEXT [TARGET] [--delay-ms N]  type Unicode text
+    key COMBO [TARGET] [--repeat N]    e.g. cmd+s, ctrl+shift+a, enter
+    video info | frame | export | join ...
+    open [PATH]                         open a file, or show the editor
+    quit                                request a graceful exit
+    doc tools | list                    discover tools or list document sessions
+    doc new --width W --height H [--color "#RRGGBB"]
+    doc open PATH                       load an image or editable .jsd
+    doc status --id ID                  document size, objects and undo/redo
+    doc draw --id ID --tool NAME --from X,Y --to X,Y [--text T] [--style JSON]
+    doc add | update | image | select | action | crop | resize | effect --id ID ...
+    doc ocr | redact | simplify --id ID
+    doc combine --document-ids JSON [--layout vertical|horizontal|grid]
+    doc save --id ID --out FILE.jsd     save an editable document
+    doc export --id ID --out FILE       export a flattened image or PDF
+    doc close --id ID                   release a document session
+    run FILE.json                       run a scripted sequence
+    call COMMAND [JSON]                 send a raw command and JSON arguments
+    sleep MS                            pause on the client
+
+TARGET selects --region X,Y,W,H, --screen INDEX|primary|cursor, --desktop,
+or a window using --window ID, --title TEXT, --process NAME or --class NAME.
+Without a target, screenshot, capture scroll and record start use the primary
+display; OCR, wait text and OCR-based pointer searches use the whole desktop.
+Use --screen cursor for the display under the pointer.
+Window capture activates the window unless --no-activate is set. Input requires
+Accessibility permission; when a window is named, typing stops if it loses focus.
+Off-screen windows require Accessibility and unambiguous identity; `windows`
+reports omitted candidates. A minimized window is restored before activation;
+--no-activate refuses off-screen windows.
+For click, move and scroll, explicit coordinates take precedence over a window
+selector: that window is not activated or checked. Use --text or --element with
+a window to target it instead.
+Element targeting requires a named window. Enumeration omits editable text
+values and labels, reports `truncated` when bounded, and returns `enabled: null`
+when an app does not expose that state. Core Graphics does not acknowledge
+whether another app accepted a posted event. `status` lists available commands.
+
+EXIT CODES
+    0 success, 1 failed, 2 invalid usage, 3 unavailable, 4 timed out
+"##;
+
+#[cfg(target_os = "macos")]
+const AGENT: &str = r#"jiffshot-cli on macOS prints one JSON object per command:
+    {"ok":true,"result":{...}}
+    {"ok":false,"error":{"code":"...","message":"..."}}
+
+Use `status` to discover available commands. Capture, OCR and recording accept
+regions, displays, the desktop or windows. Untargeted screenshots, scrolling
+captures and recordings use the primary display; OCR, wait text and text-based
+pointer searches use the desktop. Use `--screen cursor` for the display under
+the pointer. Identifiable minimized and hidden
+windows can be activated with Accessibility permission; `windows` reports
+omitted off-screen candidates. `record start` waits for
+the first frame; `record stop` finalizes the MP4. Pass `--key` to make retries
+of a start idempotent. Live annotations use recording-pixel coordinates.
+Use `elements --title APP` to inspect Accessibility controls and
+`click --title APP --element NAME` to target one. Editable text values and
+labels are omitted; `truncated` reports a bounded inventory and `enabled` can
+be null. Explicit click, move and scroll coordinates override window selectors;
+the window is not activated or checked. Input requires Accessibility permission;
+a targeted keyboard sequence stops if its window loses focus. Posted input is
+not acknowledged by its target.
+Headless `doc` sessions support editable annotations, saving .jsd and flattened
+export. `run FILE.json` supports scripted steps, typed result references and a
+`finally` section. `capture scroll` stitches overlapping frames and reports
+whether it stopped at the end or at a frame, time or pixel limit. It needs both
+Screen Recording and Accessibility permission.
 "#;
 
 /// Options that take no value.
@@ -512,22 +617,31 @@ fn jiffshot_exe() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("JIFFSHOT_EXE") {
         return Some(PathBuf::from(p));
     }
-    let beside = std::env::current_exe().ok()?.with_file_name("jiffshot.exe");
+    #[cfg(windows)]
+    let name = "jiffshot.exe";
+    #[cfg(target_os = "macos")]
+    let name = "jiffshot";
+    let beside = std::env::current_exe().ok()?.with_file_name(name);
     beside.exists().then_some(beside)
 }
 
 /// Starts Jiffshot in the tray and waits until it answers.
 fn launch() -> Result<(), Error> {
+    #[cfg(windows)]
     use std::os::windows::process::CommandExt;
+    #[cfg(windows)]
     const DETACHED_PROCESS: u32 = 0x0000_0008;
+    #[cfg(windows)]
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
     let exe = jiffshot_exe().ok_or_else(|| {
-        Error::new(ErrorCode::Unavailable, "Jiffshot is not running and jiffshot.exe was not found beside jiffshot-cli (set JIFFSHOT_EXE)")
+        Error::new(ErrorCode::Unavailable, "Jiffshot is not running and its executable was not found beside jiffshot-cli (set JIFFSHOT_EXE)")
     })?;
     eprintln!("jiffshot-cli: starting {}", exe.display());
-    let mut child = std::process::Command::new(&exe)
-        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+    let mut command = std::process::Command::new(&exe);
+    #[cfg(windows)]
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    let mut child = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -848,7 +962,10 @@ pub(super) fn main() -> ExitCode {
 
     // Jiffshot brings target windows to the front; let it.
     // SAFETY: plain Win32 call.
-    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(u32::MAX) };
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(u32::MAX)
+    };
 
     let result = match action {
         Action::Help(topic) => {
@@ -911,6 +1028,19 @@ mod tests {
     }
 
     #[test]
+    fn help_describes_the_actual_default_targets() {
+        let usage = USAGE.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            usage.contains("screenshot, capture scroll and record start use the primary display")
+        );
+        assert!(
+            usage.contains("OCR, wait text and OCR-based pointer searches use the whole desktop")
+        );
+        assert!(usage.contains("--screen"));
+        assert!(usage.contains("cursor"));
+    }
+
+    #[test]
     fn groups_become_dotted_commands() {
         assert_eq!(
             call_of("record start --process notepad --fps 30"),
@@ -929,6 +1059,13 @@ mod tests {
         assert_eq!(
             call_of("steps start How to save"),
             ("steps.start".into(), json!({ "title": "How to save" }))
+        );
+        assert_eq!(
+            call_of("capture scroll --region 1,2,300,400 --horizontal --max-frames 2 --notches 1"),
+            (
+                "capture.scroll".into(),
+                json!({ "region": "1,2,300,400", "horizontal": true, "max_frames": "2", "notches": "1" })
+            )
         );
         assert!(parse(&words("record"), Path::new(".")).is_err());
     }
@@ -962,11 +1099,29 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn paths_are_made_absolute() {
         let (_, args) = call_of(r"screenshot --out shots\a.png");
         assert_eq!(args["out"], json!(r"C:\work\shots\a.png"));
         let (_, args) = call_of(r"screenshot --out D:\b.png");
         assert_eq!(args["out"], json!(r"D:\b.png"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn paths_are_made_absolute() {
+        let Action::Call { args, .. } =
+            parse(&words("screenshot --out shots/a.png"), Path::new("/work")).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(args["out"], json!("/work/shots/a.png"));
+        let Action::Call { args, .. } =
+            parse(&words("screenshot --out /other/b.png"), Path::new("/work")).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(args["out"], json!("/other/b.png"));
     }
 
     #[test]
@@ -1005,9 +1160,13 @@ mod tests {
             parse(&words("sleep 250"), Path::new(".")).unwrap(),
             Action::Sleep(250)
         );
+        #[cfg(windows)]
+        let cwd = Path::new(r"C:\w");
+        #[cfg(target_os = "macos")]
+        let cwd = Path::new("/work");
         assert_eq!(
-            parse(&words("run a.json"), Path::new(r"C:\w")).unwrap(),
-            Action::Run(PathBuf::from(r"C:\w\a.json"))
+            parse(&words("run a.json"), cwd).unwrap(),
+            Action::Run(cwd.join("a.json"))
         );
         let Action::Call { command, args } = parse(
             &[
@@ -1090,9 +1249,13 @@ mod tests {
                 .as_object()
                 .expect("args")
                 .clone();
-        absolute_paths(&mut args, Path::new(r"C:\demo"));
-        assert_eq!(args["path"], r"C:\demo\in.mp4");
-        assert_eq!(args["segments"][0]["path"], r"C:\demo\a.mp4");
+        #[cfg(windows)]
+        let cwd = Path::new(r"C:\demo");
+        #[cfg(target_os = "macos")]
+        let cwd = Path::new("/demo");
+        absolute_paths(&mut args, cwd);
+        assert_eq!(args["path"], json!(cwd.join("in.mp4")));
+        assert_eq!(args["segments"][0]["path"], json!(cwd.join("a.mp4")));
         assert_eq!(args["segments"][0]["from"], 1);
     }
 

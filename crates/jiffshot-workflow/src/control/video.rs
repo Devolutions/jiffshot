@@ -91,6 +91,30 @@ fn options(a: &Args) -> Result<Mp4Options, jiffshot_control::Error> {
     })
 }
 
+fn run_export<T>(
+    work: impl FnOnce(&dyn Fn() -> bool) -> Result<T, post::ExportError>,
+) -> Result<T, jiffshot_control::Error> {
+    let observed = std::cell::Cell::new(false);
+    let cancelled = || {
+        #[cfg(target_os = "macos")]
+        let stopping = crate::shutdown_macos::requested();
+        #[cfg(not(target_os = "macos"))]
+        let stopping = false;
+        observed.set(observed.get() || stopping);
+        stopping
+    };
+    work(&cancelled).map_err(|error| {
+        if observed.get() {
+            jiffshot_control::Error::new(
+                jiffshot_control::ErrorCode::Conflict,
+                "Jiffshot is shutting down; video export cancelled",
+            )
+        } else {
+            internal(error)
+        }
+    })
+}
+
 fn export(a: &Args) -> Reply {
     a.only(&[
         "path",
@@ -132,16 +156,28 @@ fn export(a: &Args) -> Reply {
         if !(1.0..=50.0).contains(&options.fps) {
             return Err(invalid("GIF fps must be 1..50"));
         }
-        post::export_gif(&segment.0, &out, (segment.1, segment.2), options, |_| {})
+        run_export(|cancelled| {
+            post::export_gif_cancellable(
+                &segment.0,
+                &out,
+                (segment.1, segment.2),
+                options,
+                |_| {},
+                cancelled,
+            )
+        })
     } else {
         for key in ["max_width", "loop", "fade", "dither"] {
             if a.has(key) {
                 return Err(invalid(format!("{key} is only supported for GIF exports")));
             }
         }
-        post::export_mp4(&[segment], &out, options(a)?, |_| {})
+        let options = options(a)?;
+        run_export(|cancelled| {
+            post::export_mp4_cancellable(&[segment], &out, options, |_| {}, cancelled)
+        })
     };
-    serde_json::to_value(result.map_err(internal)?).map_err(internal)
+    serde_json::to_value(result?).map_err(internal)
 }
 
 fn join(a: &Args) -> Reply {
@@ -173,8 +209,11 @@ fn join(a: &Args) -> Reply {
     let out = a
         .out("out", &["mp4"])?
         .ok_or_else(|| invalid("out is required"))?;
-    serde_json::to_value(post::export_mp4(&segments, &out, options(a)?, |_| {}).map_err(internal)?)
-        .map_err(internal)
+    let options = options(a)?;
+    serde_json::to_value(run_export(|cancelled| {
+        post::export_mp4_cancellable(&segments, &out, options, |_| {}, cancelled)
+    })?)
+    .map_err(internal)
 }
 
 fn overlays(a: &Args) -> Result<Vec<Overlay>, jiffshot_control::Error> {

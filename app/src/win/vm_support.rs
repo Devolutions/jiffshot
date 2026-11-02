@@ -202,9 +202,14 @@ fn owner_of<F: 'static>(fields: Signal<F>) -> Option<u64> {
 }
 
 fn recycle<F: 'static>(fields: Signal<F>, key: u64) {
-    with_slots(|slots: &mut Vec<(Signal<F>, u64)>| {
-        if let Some(slot) = slots.iter_mut().find(|(s, k)| *s == fields && *k == key) {
-            slot.1 = 0;
+    // At native process exit, the slot cache may already have been dropped.
+    let _ = SLOTS.try_with(|slots| {
+        let mut slots = slots.borrow_mut();
+        if let Some(entries) = slots.get_mut(&std::any::TypeId::of::<F>()) {
+            let entries = entries.downcast_mut::<Vec<(Signal<F>, u64)>>().expect("slot type");
+            if let Some(slot) = entries.iter_mut().find(|(s, k)| *s == fields && *k == key) {
+                slot.1 = 0;
+            }
         }
     });
 }
@@ -232,6 +237,29 @@ fn fresh<F: Default + 'static>() -> (Signal<F>, u64) {
 }
 
 type Attach<M, F> = fn(&mut M, ElementSink<F>) -> Result<()>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recycling_after_the_slot_cache_is_destroyed_is_safe() {
+        struct LateDrop(Signal<u8>);
+        impl Drop for LateDrop {
+            fn drop(&mut self) {
+                recycle(self.0, 1);
+            }
+        }
+        thread_local! {
+            static LATE: RefCell<Option<LateDrop>> = const { RefCell::new(None) };
+        }
+        std::thread::spawn(|| {
+            let signal = Signal::new(0u8);
+            LATE.with(|late| *late.borrow_mut() = Some(LateDrop(signal)));
+            with_slots(|slots: &mut Vec<(Signal<u8>, u64)>| slots.push((signal, 1)));
+        }).join().unwrap();
+    }
+}
 
 impl<F: Clone + Default + PartialEq + 'static, M: ?Sized + 'static> Element<F, M> {
     fn make<V: Send + 'static>(

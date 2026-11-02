@@ -1,5 +1,8 @@
+//! The Avalonia desktop front end shared by the Windows and macOS builds.
+
 pub(crate) mod app;
 pub(crate) mod capture_window;
+#[cfg(windows)]
 pub(crate) mod drag_out;
 pub(crate) mod library;
 mod main;

@@ -47,9 +47,26 @@ pub fn publish(state: TrayState) {
         let _ = sink.set_include_cursor(state.include_cursor);
         let _ = sink.set_show_widget(state.show_widget);
         let _ = sink.set_run_at_startup(state.run_at_startup);
+        let _ = sink.set_startup_notice(state.startup_notice);
         let _ = sink.set_time_lapse(state.time_lapse);
+        let _ = sink.set_schedule_paused(state.schedule_paused);
         let _ = sink.set_schedule(state.schedule);
         let _ = sink.set_can_repeat(state.can_repeat);
+    });
+}
+
+#[cfg(target_os = "macos")]
+pub fn publish_startup(status: jiffshot_workflow::StartupStatus) {
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.run_at_startup = status.requested;
+        state.startup_notice = status.notice;
+    });
+    SINK.with(|sink| {
+        if let Some(sink) = sink.borrow().as_ref() {
+            let _ = sink.set_run_at_startup(status.requested);
+            let _ = sink.set_startup_notice(status.notice);
+        }
     });
 }
 
@@ -95,7 +112,10 @@ impl TrayViewModel for TrayModel {
         switch(value, |s| s.show_widget, TrayAction::ShowWidget)
     }
     fn set_run_at_startup(&mut self, value: bool) -> Result<()> {
-        switch(value, |s| s.run_at_startup, TrayAction::RunAtStartup)
+        if STATE.with(|s| s.borrow().run_at_startup) != value {
+            jiffshot_workflow::capture::set_run_at_startup(value);
+        }
+        Ok(())
     }
     fn set_time_lapse(&mut self, value: bool) -> Result<()> {
         switch(value, |s| s.time_lapse, TrayAction::TimeLapse)

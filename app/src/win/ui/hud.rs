@@ -9,6 +9,9 @@
 //! view model's `run`.
 
 mod hud_toolbar;
+#[cfg(target_os = "macos")]
+pub(super) mod native_popup_macos;
+#[cfg_attr(target_os = "macos", path = "hud/native_macos.rs")]
 pub(in crate::ui) mod native;
 
 use hud_toolbar::RecordingToolbar;
@@ -25,12 +28,86 @@ use std::sync::Arc;
 
 thread_local! {
     static HUD: RefCell<Hud> = RefCell::new(Hud::default());
+    #[cfg(target_os = "macos")]
+    static TEST_MENU: RefCell<Option<rustolonia::MenuFlyout>> = const { RefCell::new(None) };
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn toolbar_tooltip_for_selftest(id: u64, open: bool) -> std::result::Result<(), String> {
+    let target = HUD.with(|hud| hud.borrow().toolbars.get(&id).map(RecordingToolbar::tooltip_for_selftest))
+        .ok_or("the test toolbar is unavailable")?;
+    if open {
+        target.set_tool_tip_placement(rustolonia::PlacementMode::Top).map_err(|error| error.to_string())?;
+    }
+    target.set_tool_tip_is_open(open).map_err(|error| error.to_string())?;
+    if !open {
+        target.set_tool_tip_placement(rustolonia::PlacementMode::Pointer).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn toolbar_menu_for_selftest(id: u64, open: bool) -> std::result::Result<(), String> {
+    if open {
+        let show = HUD.with(|hud| hud.borrow().toolbars.get(&id).map(|toolbar| toolbar.menu_for_selftest(id)))
+            .ok_or("the test toolbar is unavailable")?;
+        let menu = show().map_err(|error| error.to_string())?;
+        TEST_MENU.with(|slot| *slot.borrow_mut() = Some(menu));
+    } else {
+        let menu = TEST_MENU.with(|slot| slot.borrow_mut().take()).ok_or("the test toolbar menu is unavailable")?;
+        menu.hide().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn close_toolbar_for_selftest(id: u64) -> std::result::Result<(), String> {
+    let toolbar = HUD.with(|hud| hud.borrow_mut().toolbars.remove(&id)).ok_or("the test toolbar is unavailable")?;
+    toolbar.close();
+    Ok(())
 }
 
 /// Sends a command to the main view model (`hud:…`), on the UI thread.
 fn run(command: String) {
     crate::ui::main().model.run(|m| m.run(command));
 }
+
+#[cfg(target_os = "macos")]
+fn report_failure(message: String) {
+    eprintln!("hud: {message}");
+    crate::app::post(move |app| app.toast("Capture controls failed", &message, true));
+}
+
+#[cfg(target_os = "macos")]
+fn show_protected(
+    scope: &AppScope,
+    window: &Window,
+    click_through: bool,
+    position: impl FnOnce() -> std::io::Result<()> + Send + 'static,
+    failed: impl FnOnce(String) + Send + 'static,
+) -> std::io::Result<()> {
+    let number = native::show_protected(scope, window, click_through)?;
+    let result = native::reveal_when_excluded(
+        scope, window, number, click_through,
+        move || position().map_err(|error| error.to_string()),
+        || Ok(()),
+        move |message| {
+            report_failure(message.clone());
+            failed(message);
+        },
+    );
+    if result.is_err() {
+        if let Err(error) = window.close() {
+            eprintln!("hud: could not close a failed window: {error}");
+        }
+        if let Err(error) = native_popup_macos::discard_failed_owner(window) {
+            eprintln!("hud: could not clear a failed window's popup gate: {error}");
+        }
+    }
+    result
+}
+
+type HudResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// The windows showing, by the capture side's ids.
 #[derive(Default)]
@@ -73,7 +150,14 @@ fn apply(scope: &AppScope, json: &str) {
                         toolbar.update(state);
                         HUD.with(|h| h.borrow_mut().toolbars.insert(id, toolbar));
                     }
-                    Err(error) => eprintln!("hud: no toolbar: {error:?}"),
+                    Err(error) => {
+                        eprintln!("hud: no toolbar: {error:?}");
+                        #[cfg(target_os = "macos")]
+                        {
+                            report_failure(format!("Could not show the recording toolbar: {error}"));
+                            run(format!("hud:{id}:act:cancel"));
+                        }
+                    }
                 }
             }
             continue;
@@ -90,7 +174,14 @@ fn apply(scope: &AppScope, json: &str) {
                 Ok(panel) => {
                     HUD.with(|h| h.borrow_mut().panels.insert(id, panel));
                 }
-                Err(error) => eprintln!("hud: no panel: {error:?}"),
+                Err(error) => {
+                    eprintln!("hud: no panel: {error:?}");
+                    #[cfg(target_os = "macos")]
+                    {
+                        report_failure(format!("Could not show the capture panel: {error}"));
+                        run(format!("hud:{id}"));
+                    }
+                }
             }
         }
     }
@@ -121,7 +212,11 @@ fn apply(scope: &AppScope, json: &str) {
             Ok(border) => {
                 HUD.with(|h| h.borrow_mut().borders.insert(id, border));
             }
-            Err(error) => eprintln!("hud: no outline: {error:?}"),
+            Err(error) => {
+                eprintln!("hud: no outline: {error:?}");
+                #[cfg(target_os = "macos")]
+                report_failure(format!("Could not show the capture outline: {error}"));
+            }
         }
     }
     HUD.with(|h| {
@@ -141,15 +236,16 @@ fn apply(scope: &AppScope, json: &str) {
 /// Moves `window`, `size` DIPs, next to `area` (desktop pixels): below it,
 /// else above it, else inside its bottom edge, `gap` DIPs away; centred
 /// under the area or aligned with its right edge.
-fn place_beside(window: &Window, area: Rect, size: (f64, f64), gap: f64, centred: bool) {
+fn place_beside(_scope: &AppScope, window: &Window, area: Rect, size: (f64, f64), gap: f64, centred: bool) -> std::result::Result<(), String> {
     let (work, scale) = native::screen_of(area);
     let (w, h) = ((size.0 * scale).ceil() as i32, (size.1 * scale).ceil() as i32);
     let gap = (gap * scale).round() as i32;
     let x = if centred { area.x + (area.width - w) / 2 } else { area.right() - w };
     let (x, y) = native::beside(area, work, x, w, h, gap);
-    if let Err(error) = window.set_position((x, y)) {
-        eprintln!("hud: placing a window failed: {error:?}");
-    }
+    #[cfg(target_os = "macos")]
+    { native::position(_scope, window, x, y).map_err(|error| error.to_string()) }
+    #[cfg(windows)]
+    { window.set_position((x, y)).map_err(|error| error.to_string()) }
 }
 
 /// A borderless, topmost window that does not take the focus.
@@ -177,7 +273,7 @@ impl HudPanel {
     /// Gap between the area and the panel, past the outline (DIPs).
     const GAP: f64 = 11.0;
 
-    fn new(scope: &AppScope, id: u64, area: Rect, buttons: &[String], status: &str) -> Result<Self> {
+    fn new(scope: &AppScope, id: u64, area: Rect, buttons: &[String], status: &str) -> HudResult<Self> {
         let text = TextBlock::new()?
             .text(status)?
             .font_size(13.5)?
@@ -220,7 +316,20 @@ impl HudPanel {
             .content(Some(&themed))?;
         scope.set_topmost(&window, true)?;
         let placed = window.clone();
-        subscriptions.push(window.subscribe_size_changed(move |e| place_beside(&placed, area, (e.new_size.width, e.new_size.height), Self::GAP, false))?);
+        let placement_scope = scope.clone();
+        #[cfg(target_os = "macos")]
+        let placement_ready = Arc::new(AtomicBool::new(false));
+        #[cfg(target_os = "macos")]
+        let event_ready = placement_ready.clone();
+        subscriptions.push(window.subscribe_size_changed(move |e| {
+            #[cfg(target_os = "macos")]
+            if !event_ready.load(Ordering::Acquire) {
+                return;
+            }
+            if let Err(error) = place_beside(&placement_scope, &placed, area, (e.new_size.width, e.new_size.height), Self::GAP, false) {
+                eprintln!("hud: placing a window failed: {error}");
+            }
+        })?);
         let dismissed = Arc::new(AtomicBool::new(false));
         let closed = dismissed.clone();
         // Closed by anything but the capture side (which never happens in
@@ -230,8 +339,29 @@ impl HudPanel {
                 run(format!("hud:{id}"));
             }
         })?);
-        window.show()?;
-        native::prepare(scope, &window, false);
+        #[cfg(windows)]
+        {
+            window.show()?;
+            native::prepare(scope, &window, false);
+        }
+        #[cfg(target_os = "macos")]
+        let positioned = window.clone();
+        #[cfg(target_os = "macos")]
+        let position_scope = scope.clone();
+        #[cfg(target_os = "macos")]
+        show_protected(
+            scope,
+            &window,
+            false,
+            move || {
+                placement_ready.store(true, Ordering::Release);
+                if let Some(size) = native::size(&position_scope, &positioned)? {
+                    place_beside(&position_scope, &positioned, area, size, Self::GAP, false).map_err(std::io::Error::other)?;
+                }
+                Ok(())
+            },
+            |_| {},
+        )?;
         Ok(HudPanel {
             window,
             status: text,
@@ -262,7 +392,7 @@ impl HudBorder {
     /// The outline's thickness, in desktop pixels.
     const WEIGHT: i32 = 3;
 
-    fn new(scope: &AppScope, area: Rect) -> Result<Self> {
+    fn new(scope: &AppScope, area: Rect) -> HudResult<Self> {
         let outer = area.inflate(Self::WEIGHT);
         let (_, scale) = native::screen_of(outer);
         let frame = Border::new()?
@@ -276,9 +406,26 @@ impl HudBorder {
             .content(Some(&frame))?;
         scope.set_transparent(&window, true)?;
         scope.set_topmost(&window, true)?;
-        window.show()?;
-        native::prepare(scope, &window, true);
-        native::place(native::handle(scope, &window), outer, false);
+        #[cfg(windows)]
+        {
+            window.show()?;
+            native::prepare(scope, &window, true);
+            native::place(native::handle(scope, &window), outer, false);
+        }
+        #[cfg(target_os = "macos")]
+        let positioned = window.clone();
+        #[cfg(target_os = "macos")]
+        let position_scope = scope.clone();
+        #[cfg(target_os = "macos")]
+        show_protected(
+            scope,
+            &window,
+            true,
+            move || {
+                native::place_checked(native::handle(&position_scope, &positioned), outer, false)
+            },
+            |_| {},
+        )?;
         Ok(HudBorder { window })
     }
 

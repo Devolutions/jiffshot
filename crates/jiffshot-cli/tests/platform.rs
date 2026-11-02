@@ -1,4 +1,4 @@
-#![cfg(not(windows))]
+#![cfg(not(any(windows, target_os = "macos")))]
 
 use std::process::Command;
 
@@ -12,6 +12,6 @@ fn non_windows_cli_reports_unavailability_and_fails() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8_lossy(&output.stderr).trim(),
-        "jiffshot-cli is currently available only on Windows",
+        "jiffshot-cli is currently available only on Windows and macOS",
     );
 }

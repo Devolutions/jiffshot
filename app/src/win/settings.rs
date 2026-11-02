@@ -9,7 +9,7 @@ use jiffshot_doc::Rgba;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// The shared library folder, as loaded (changed through
@@ -218,6 +218,12 @@ impl Settings {
         if let Ok(value) = serde_json::to_value(self) {
             jiffshot_capture::config::set_section("editor", value);
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn try_save(&self) -> std::io::Result<()> {
+        let value = serde_json::to_value(self).map_err(std::io::Error::other)?;
+        jiffshot_capture::config::try_set_section("editor", value)
     }
 
     /// Changes the shared color theme.

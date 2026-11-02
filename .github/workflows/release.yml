@@ -139,6 +139,7 @@ jobs:
       RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
       RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
       SIGNING_ENVIRONMENT: ${{ needs.preflight.outputs.signing_environment }}
+      DRY_RUN: ${{ inputs.dry_run }}
     steps:
       - uses: actions/checkout@v7
 
@@ -224,6 +225,22 @@ jobs:
           pwsh -NoProfile -File package/linux/assemble-release.ps1 -ArtifactDir artifacts `
             -OutputDir release -Version "$env:RELEASE_VERSION"
           if ($LASTEXITCODE -ne 0) { throw 'Linux release assembly requires all six verified x64/ARM64 packages and their checksums.' }
+          foreach ($arch in @('arm64', 'x86_64')) {
+            $package = "artifacts\jiffshot-macos-$arch"
+            $name = "Devolutions.Jiffshot-macos-$arch-$env:RELEASE_VERSION.dmg"
+            $dmg = "$package\$name"
+            $statusFile = "$package\signing.txt"
+            foreach ($required in @($dmg, $statusFile)) {
+              if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Missing macOS release file: $required" }
+            }
+            $status = (Get-Content -LiteralPath $statusFile -Raw).Trim()
+            if ($status -notin @('adhoc', 'signed', 'notarized')) { throw "Unknown macOS signing status: $status" }
+            if ($env:DRY_RUN -ne 'true' -and $status -ne 'notarized') {
+              throw "macOS $arch is $status; published releases require a signed and notarized disk image."
+            }
+            Write-Host "macOS $arch signing status: $status"
+            Copy-Item -LiteralPath $dmg -Destination "release\$name"
+          }
           Get-ChildItem release -File | Sort-Object Name | ForEach-Object {
             '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
           } | Set-Content release\SHA256SUMS.txt -Encoding ascii
@@ -255,4 +272,4 @@ jobs:
         if: inputs.dry_run
         shell: pwsh
         run: |
-          "Dry run completed for $env:RELEASE_TAG using $env:SIGNING_ENVIRONMENT. Signed Windows packages, six unsigned Linux x64/ARM64 tar.gz/DEB/RPM packages, per-architecture Linux checksums, and SHA256SUMS.txt are in the release-assets artifact. No tag or GitHub Release was created." >> $env:GITHUB_STEP_SUMMARY
+          "Dry run completed for $env:RELEASE_TAG using $env:SIGNING_ENVIRONMENT. Signed Windows packages, six unsigned Linux x64/ARM64 tar.gz/DEB/RPM packages, two macOS disk images (unsigned when Apple credentials are unavailable), per-architecture Linux checksums, and SHA256SUMS.txt are in the release-assets artifact. No tag or GitHub Release was created." >> $env:GITHUB_STEP_SUMMARY

@@ -83,6 +83,12 @@ impl Document {
         id
     }
 
+    /// Families substituted while rendering text, including text in groups.
+    #[cfg(target_os = "macos")]
+    pub fn font_substitutions(&self) -> Vec<crate::text::FontSubstitution> {
+        crate::text::object_font_substitutions(&self.objects)
+    }
+
     /// Adds an existing object under a fresh id.
     pub fn insert(&mut self, mut object: Object) -> u64 {
         object.id = self.allocate_id();
@@ -418,6 +424,56 @@ mod tests {
             }
         }
         d
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn font_substitutions_follow_nested_text_and_step_rendering_without_changing_the_document() {
+        let missing = "Jiffshot deliberately unavailable group face a4e290";
+        let mut d = Document::blank(240, 140, Rgba::WHITE);
+        let rect = Box2::new(5.0, 5.0, 115.0, 45.0);
+        let italic = Style { font: missing.to_owned(), italic: true, ..Style::default() };
+        d.add(Kind::Shape { rect, shape: ShapeKind::Rectangle }, italic.clone());
+        d.add(Kind::Text { rect, text: String::new() }, italic.clone());
+        let text = Object::new(101, Kind::Text { rect, text: "Text".into() }, italic.clone());
+        let callout = Object::new(
+            102,
+            Kind::Callout { rect, tail: Pt::new(100.0, 65.0), text: "Callout".into(), shape: ShapeKind::Rectangle, arrow: false, more_tails: vec![] },
+            italic.clone(),
+        );
+        let step = Object::new(
+            103,
+            Kind::Step { center: Pt::new(150.0, 70.0), radius: 25.0, label: "1".into(), shape: ShapeKind::Ellipse },
+            italic.clone(),
+        );
+        let nested = Object::new(104, Kind::Group { objects: vec![callout, step] }, Style::default());
+        d.add(Kind::Group { objects: vec![text, nested] }, Style::default());
+        d.add(
+            Kind::Text { rect, text: "Available".into() },
+            Style { font: "Helvetica Neue".into(), ..Style::default() },
+        );
+
+        let original = d.objects.clone();
+        let substitutions = d.font_substitutions();
+        assert_eq!(substitutions.len(), 2);
+        assert_eq!(substitutions[0], crate::text::font_substitution(missing, false, true).unwrap());
+        assert_eq!(substitutions[1], crate::text::font_substitution(missing, true, false).unwrap());
+        assert!(substitutions.iter().all(|font| font.reason == crate::text::FontSubstitutionReason::Family));
+        assert_eq!(d.objects, original);
+
+        let mut explicit = d.clone();
+        for object in &mut explicit.objects {
+            object.walk_mut(&mut |object| {
+                if object.style.font == missing {
+                    object.style.font = "Helvetica Neue".into();
+                }
+            });
+        }
+        assert_eq!(d.flatten().data(), explicit.flatten().data());
+        let bytes = crate::io::document_bytes(&d).unwrap();
+        let loaded = crate::io::document_from_bytes(bytes).unwrap();
+        assert_eq!(loaded.objects, original);
+        assert_eq!(loaded.font_substitutions(), substitutions);
     }
 
     #[test]

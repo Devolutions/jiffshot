@@ -343,11 +343,27 @@ every possible desktop or professional video workflow:
 | Other special capture modes | Open menus can be captured with a target rectangle and delayed screenshot; freehand/multi-area compositions can be masked/combined in documents. Native interactive panoramic/two-axis capture, daily scheduling and presets are not dedicated CLI APIs. |
 | Professional video timeline | No multitrack timeline, transitions, speed ramps, synthesized narration, subtitles/transcription, background-music mixing, camera-device selection or arbitrary codecs. Use an external media tool for these rather than assume support. |
 | GUI editor/settings/sharing | Headless documents/video file editing do not expose the user's live GUI document, preferences, saved styles/presets or mail/Office/FTP/print dialogs. `open` is available for visual inspection. |
-| Platform/security | Windows interactive user desktop only. No Session-0 capture, lock-screen/UAC secure-desktop bypass or automation of protected/elevated apps beyond Windows permissions. Same-user programs are inside the control pipe's trust boundary. |
+| Platform/security | Windows and macOS interactive user desktop only (see [macOS notes](#macos-notes)). No Session-0 capture, lock-screen/UAC secure-desktop bypass or automation of protected/elevated apps beyond Windows permissions. Same-user programs are inside the control pipe's trust boundary. |
 | Safe unattended work | Target exact HWNDs and dedicated demo apps; don't type into the user's existing documents. Device warnings, OCR uncertainty and annotations must be inspected. A disconnected client does not roll back an already accepted command. |
 
 This matrix is the coverage contract: unsupported rows are intentional boundaries,
 not promises hidden behind a success response.
+
+## macOS notes
+
+- `jiffshot-cli` is in `Jiffshot.app/Contents/MacOS` and talks to the running app over a
+  private per-user Unix socket in the app's local-data directory; both ends verify the
+  peer user.
+- Window ids are Quartz window numbers rather than HWNDs; `--class` matches the
+  owning application name.
+- Untargeted screenshots, scrolling captures and recordings use the primary display;
+  OCR and text search without a target use the whole desktop.
+- Positive vertical `scroll` notches scroll down, the opposite of Windows;
+  positive horizontal notches scroll right.
+- `elements` and `--element` use the Accessibility API, and input uses Quartz events.
+  Jiffshot needs Screen Recording and Accessibility permissions (and Microphone/Camera
+  for those recording sources); missing permissions are reported as errors.
+- Direct Office insertion is not available; use files, the clipboard or `open`.
 
 ## Tips for agents
 

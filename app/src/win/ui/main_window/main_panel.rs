@@ -246,7 +246,11 @@ fn zone_section(s: MainViewModelSink, theme: Theme) -> El<StackPanel> {
     };
     part(s, "zone")
         .child(section(theme, "DROP ZONE"))
-        .child(note(theme, "Drop an image here from the tray or Explorer. Drag inside a selected zone to move its picture.").margin((0.0, 0.0, 0.0, 6.0)))
+        .child(note(theme, if cfg!(target_os = "macos") {
+            "Drop an image here from the tray or Finder. Drag inside a selected zone to move its picture."
+        } else {
+            "Drop an image here from the tray or Explorer. Drag inside a selected zone to move its picture."
+        }).margin((0.0, 0.0, 0.0, 6.0)))
         .child(
             WrapPanel::el()
                 .child(zone_toggle("Fill", false).tool_tip_tip("Fill the zone, cropping the picture"))

@@ -1,13 +1,14 @@
-#[cfg(windows)]
-mod windows;
+#[cfg(any(windows, target_os = "macos"))]
+#[path = "windows.rs"]
+mod desktop;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn main() -> std::process::ExitCode {
-    windows::main()
+    desktop::main()
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn main() -> std::process::ExitCode {
-    eprintln!("jiffshot-cli is currently available only on Windows");
+    eprintln!("jiffshot-cli is currently available only on Windows and macOS");
     std::process::ExitCode::FAILURE
 }

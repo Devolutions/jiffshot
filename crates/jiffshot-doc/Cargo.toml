@@ -12,3 +12,6 @@ serde.workspace = true
 serde_json.workspace = true
 tiny-skia.workspace = true
 zip.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+fontdb = "0.23"

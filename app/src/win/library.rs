@@ -5,9 +5,9 @@
 
 use crate::app::{self, ItemSink};
 use crate::vm::{LibraryItemViewModel, LibraryItemViewModelSink};
-use rustolonia::Result;
 use jiffshot_capture::library::CaptureMeta;
 use jiffshot_doc::{io, raster, Document, Pixmap};
+use rustolonia::Result;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -26,11 +26,17 @@ impl Entry {
     pub fn read(path: PathBuf) -> Entry {
         let meta = jiffshot_capture::library::read_meta(&path);
         let modified = modified(&path).unwrap_or(SystemTime::UNIX_EPOCH);
-        Entry { path, meta, modified }
+        Entry {
+            path,
+            meta,
+            modified,
+        }
     }
 
     pub fn is_video(&self) -> bool {
-        self.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
+        self.path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
     }
 
     pub fn pinned(&self) -> bool {
@@ -53,14 +59,24 @@ impl Entry {
     }
 
     fn name(&self) -> String {
-        self.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+        self.path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
     }
 
     /// Everything a search matches: name, window title, app, address, tags.
     fn haystack(&self) -> String {
         let mut s = self.name();
         if let Some(m) = &self.meta {
-            for part in [m.window_title.as_deref(), m.process.as_deref(), m.url.as_deref()].into_iter().flatten() {
+            for part in [
+                m.window_title.as_deref(),
+                m.process.as_deref(),
+                m.url.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
                 s.push(' ');
                 s.push_str(part);
             }
@@ -93,7 +109,18 @@ impl Entry {
 /// The filters offered, from what the entries have: fixed ones, then
 /// each app, web site and tag.
 pub fn filters(entries: &[Entry]) -> Vec<String> {
-    let mut out: Vec<String> = ["All", "Images", "Videos", "Pinned", "Today", "Last 7 days", "Tagged"].iter().map(|s| s.to_string()).collect();
+    let mut out: Vec<String> = [
+        "All",
+        "Images",
+        "Videos",
+        "Pinned",
+        "Today",
+        "Last 7 days",
+        "Tagged",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
     let mut add = |prefix: &str, values: Vec<&str>| {
         let mut v: Vec<&str> = values;
         v.sort_unstable_by_key(|s| s.to_lowercase());
@@ -102,14 +129,26 @@ pub fn filters(entries: &[Entry]) -> Vec<String> {
     };
     add("App", entries.iter().filter_map(Entry::app).collect());
     add("Site", entries.iter().filter_map(Entry::site).collect());
-    add("Tag", entries.iter().flat_map(|e| e.tags().iter().map(String::as_str)).collect());
+    add(
+        "Tag",
+        entries
+            .iter()
+            .flat_map(|e| e.tags().iter().map(String::as_str))
+            .collect(),
+    );
     out
 }
 
 pub const SORTS: &[&str] = &["Newest", "Oldest", "Name", "App", "Size"];
 
 /// The entries a search, filter and sort leave, pinned ones first.
-pub fn select(entries: &[Entry], query: &str, filter: &str, sort: &str, now: SystemTime) -> Vec<Entry> {
+pub fn select(
+    entries: &[Entry],
+    query: &str,
+    filter: &str,
+    sort: &str,
+    now: SystemTime,
+) -> Vec<Entry> {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     let age = |e: &Entry| now.duration_since(e.modified).unwrap_or_default();
     let mut out: Vec<Entry> = entries
@@ -134,11 +173,21 @@ pub fn select(entries: &[Entry], query: &str, filter: &str, sort: &str, now: Sys
         })
         .cloned()
         .collect();
-    let pixels = |e: &Entry| e.meta.as_ref().map_or(0, |m| m.width as u64 * m.height as u64);
+    let pixels = |e: &Entry| {
+        e.meta
+            .as_ref()
+            .map_or(0, |m| m.width as u64 * m.height as u64)
+    };
     match sort {
         "Oldest" => out.sort_by_key(|e| e.modified),
         "Name" => out.sort_by_key(|e| e.name().to_lowercase()),
-        "App" => out.sort_by(|a, b| a.app().unwrap_or("~").to_lowercase().cmp(&b.app().unwrap_or("~").to_lowercase()).then(b.modified.cmp(&a.modified))),
+        "App" => out.sort_by(|a, b| {
+            a.app()
+                .unwrap_or("~")
+                .to_lowercase()
+                .cmp(&b.app().unwrap_or("~").to_lowercase())
+                .then(b.modified.cmp(&a.modified))
+        }),
         "Size" => out.sort_by_key(|e| std::cmp::Reverse(pixels(e))),
         _ => out.sort_by_key(|e| std::cmp::Reverse(e.modified)),
     }
@@ -210,13 +259,32 @@ impl Item {
         // keep their name.
         let stem = self.entry.name();
         let video = stem.starts_with("Recording ");
-        let parts: Vec<&str> = stem.trim_start_matches("Capture ").trim_start_matches("Recording ").split(' ').collect();
+        let parts: Vec<&str> = stem
+            .trim_start_matches("Capture ")
+            .trim_start_matches("Recording ")
+            .split(' ')
+            .collect();
         if let [date, time, ..] = parts.as_slice() {
             let d: Vec<&str> = date.split('-').collect();
-            if d.len() == 3 && time.len() >= 4 && time[..4].bytes().all(|b| b.is_ascii_digit()) {
-                const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+            if d.len() == 3
+                && time
+                    .as_bytes()
+                    .get(..4)
+                    .is_some_and(|b| b.iter().all(u8::is_ascii_digit))
+            {
+                const MONTHS: [&str; 12] = [
+                    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
+                    "Dec",
+                ];
                 if let Ok(m) = d[1].parse::<usize>() {
-                    return format!("{}{} {} {}:{}", if video { "▶ " } else { "" }, MONTHS[(m.max(1) - 1).min(11)], d[2].trim_start_matches('0'), &time[..2], &time[2..4]);
+                    return format!(
+                        "{}{} {} {}:{}",
+                        if video { "▶ " } else { "" },
+                        MONTHS[(m.max(1) - 1).min(11)],
+                        d[2].trim_start_matches('0'),
+                        &time[..2],
+                        &time[2..4]
+                    );
                 }
             }
         }
@@ -232,11 +300,17 @@ impl Item {
 impl LibraryItemViewModel for Item {
     fn attach(&mut self, sink: LibraryItemViewModelSink) -> Result<()> {
         sink.set_path(self.path.to_string_lossy())?;
+        #[cfg(target_os = "macos")]
+        sink.set_path_identity(self.path.clone())?;
         sink.set_label(self.label())?;
         sink.set_is_current(*self.current.lock().unwrap())?;
         sink.set_is_selected(*self.selected.lock().unwrap())?;
         sink.set_unsaved(*self.unsaved.lock().unwrap())?;
-        sink.set_kind(if self.entry.is_video() { "Video" } else { "Image" })?;
+        sink.set_kind(if self.entry.is_video() {
+            "Video"
+        } else {
+            "Image"
+        })?;
         sink.set_is_pinned(self.entry.pinned())?;
         sink.set_tags(self.entry.tags().join(", "))?;
         sink.set_info(self.entry.info())?;
@@ -310,9 +384,18 @@ fn cache_dir() -> PathBuf {
 /// Where the thumbnail for a capture lives. The name hashes the path, so
 /// moving the library never shows stale thumbnails.
 pub fn thumbnail_path(capture: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+        capture.as_os_str().as_bytes()
+    };
+    #[cfg(not(target_os = "macos"))]
+    let lowercase = capture.to_string_lossy().to_lowercase();
+    #[cfg(not(target_os = "macos"))]
+    let bytes = lowercase.as_bytes();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in capture.to_string_lossy().to_lowercase().bytes() {
-        h = (h ^ b as u64).wrapping_mul(0x100_0000_01b3);
+    for &byte in bytes {
+        h = (h ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
     }
     cache_dir().join(format!("{h:016x}.png"))
 }
@@ -325,7 +408,10 @@ fn modified(p: &Path) -> Option<SystemTime> {
 fn stale(capture: &Path) -> bool {
     let thumb = modified(&thumbnail_path(capture));
     let edits = jiffshot_capture::library::edits_of(capture);
-    let newest = [modified(capture), edits.as_deref().and_then(modified)].into_iter().flatten().max();
+    let newest = [modified(capture), edits.as_deref().and_then(modified)]
+        .into_iter()
+        .flatten()
+        .max();
     match (thumb, newest) {
         (Some(t), Some(n)) => t < n,
         (None, _) => true,
@@ -350,9 +436,12 @@ pub fn write_thumbnail(doc: &Document, capture: &Path) {
 }
 
 pub fn is_video(capture: &Path) -> bool {
-    capture.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
+    capture
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
 }
 
+#[cfg(windows)]
 /// Whether the capture has saved edits on top of its original file.
 pub fn has_edits(capture: &Path) -> bool {
     jiffshot_capture::library::edits_of(capture).is_some()
@@ -384,9 +473,15 @@ pub fn make_thumbnails(items: Vec<Item>) {
             if !stale(&item.path) {
                 continue;
             }
-            let Some(small) = render_source(&item.path).as_ref().and_then(shrink) else { continue };
+            let Some(small) = render_source(&item.path).as_ref().and_then(shrink) else {
+                continue;
+            };
             let thumb = thumbnail_path(&item.path);
-            if io::encode(&small, io::Format::Png, 0).ok().and_then(|b| std::fs::write(&thumb, b).ok()).is_some() {
+            if io::encode(&small, io::Format::Png, 0)
+                .ok()
+                .and_then(|b| std::fs::write(&thumb, b).ok())
+                .is_some()
+            {
                 // Sinks dispatch to the UI thread themselves.
                 if let Some(sink) = item.sink() {
                     let _ = sink.set_thumbnail(thumb.to_string_lossy());
@@ -402,7 +497,14 @@ mod tests {
     use jiffshot_capture::library::CaptureKind;
     use jiffshot_capture::Rect;
 
-    fn entry(name: &str, age_hours: u64, app: Option<&str>, url: Option<&str>, tags: &[&str], pinned: bool) -> Entry {
+    fn entry(
+        name: &str,
+        age_hours: u64,
+        app: Option<&str>,
+        url: Option<&str>,
+        tags: &[&str],
+        pinned: bool,
+    ) -> Entry {
         let meta = CaptureMeta {
             kind: CaptureKind::Region,
             rect: Rect::new(0, 0, 10, 10),
@@ -417,27 +519,102 @@ mod tests {
             pinned,
         };
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-        Entry { path: PathBuf::from(format!("C:/lib/{name}.png")), meta: Some(meta), modified: now - Duration::from_secs(age_hours * 3600) }
+        Entry {
+            path: PathBuf::from(format!("C:/lib/{name}.png")),
+            meta: Some(meta),
+            modified: now - Duration::from_secs(age_hours * 3600),
+        }
     }
 
     #[test]
     fn search_filter_sort_and_pins() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
         let all = vec![
-            entry("alpha", 1, Some("chrome.exe"), Some("https://docs.example.com/a?b"), &["docs"], false),
+            entry(
+                "alpha",
+                1,
+                Some("chrome.exe"),
+                Some("https://docs.example.com/a?b"),
+                &["docs"],
+                false,
+            ),
             entry("beta", 30, Some("code.exe"), None, &[], true),
-            entry("gamma", 200, Some("chrome.exe"), None, &["Docs", "release"], false),
+            entry(
+                "gamma",
+                200,
+                Some("chrome.exe"),
+                None,
+                &["Docs", "release"],
+                false,
+            ),
         ];
         let names = |v: Vec<Entry>| v.iter().map(|e| e.name()).collect::<Vec<_>>();
-        assert_eq!(names(select(&all, "", "All", "Newest", now)), ["beta", "alpha", "gamma"], "pinned first");
+        assert_eq!(
+            names(select(&all, "", "All", "Newest", now)),
+            ["beta", "alpha", "gamma"],
+            "pinned first"
+        );
         assert_eq!(names(select(&all, "", "Today", "Newest", now)), ["alpha"]);
-        assert_eq!(names(select(&all, "", "Last 7 days", "Oldest", now)), ["beta", "alpha"]);
-        assert_eq!(names(select(&all, "CHROME window", "All", "Name", now)), ["alpha", "gamma"]);
-        assert_eq!(names(select(&all, "", "Tag: docs", "Newest", now)), ["alpha", "gamma"]);
-        assert_eq!(names(select(&all, "", "Site: docs.example.com", "Newest", now)), ["alpha"]);
+        assert_eq!(
+            names(select(&all, "", "Last 7 days", "Oldest", now)),
+            ["beta", "alpha"]
+        );
+        assert_eq!(
+            names(select(&all, "CHROME window", "All", "Name", now)),
+            ["alpha", "gamma"]
+        );
+        assert_eq!(
+            names(select(&all, "", "Tag: docs", "Newest", now)),
+            ["alpha", "gamma"]
+        );
+        assert_eq!(
+            names(select(&all, "", "Site: docs.example.com", "Newest", now)),
+            ["alpha"]
+        );
         let f = filters(&all);
-        assert!(f.contains(&"App: chrome.exe".to_string()) && f.contains(&"App: code.exe".to_string()));
-        assert_eq!(f.iter().filter(|x| x.starts_with("Tag: ")).count(), 2, "tags deduplicated ignoring case: {f:?}");
+        assert!(
+            f.contains(&"App: chrome.exe".to_string()) && f.contains(&"App: code.exe".to_string())
+        );
+        assert_eq!(
+            f.iter().filter(|x| x.starts_with("Tag: ")).count(),
+            2,
+            "tags deduplicated ignoring case: {f:?}"
+        );
         assert_eq!(parse_tags(" a, b ;; c ,A"), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn labels_accept_unicode_in_date_like_names() {
+        let renamed = entry("notes-for-review 雪雪", 1, None, None, &[], false);
+        assert_eq!(
+            Item::new(renamed, false, false, 88.0).label(),
+            "notes-for-review 雪雪"
+        );
+        let captured = entry("Capture 2026-10-28 141503", 1, None, None, &[], false);
+        assert_eq!(
+            Item::new(captured, false, false, 88.0).label(),
+            "Oct 28 14:15"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn thumbnail_keys_preserve_case_and_native_path_bytes() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        assert_ne!(
+            thumbnail_path(Path::new("/library/Example.png")),
+            thumbnail_path(Path::new("/library/example.png"))
+        );
+        let invalid = |byte| {
+            PathBuf::from(OsString::from_vec(vec![
+                b'/', b'a', byte, b'.', b'p', b'n', b'g',
+            ]))
+        };
+        assert_ne!(
+            thumbnail_path(&invalid(0xfe)),
+            thumbnail_path(&invalid(0xff))
+        );
     }
 }
