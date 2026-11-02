@@ -2401,8 +2401,10 @@ impl App {
     }
 
     #[cfg(target_os = "linux")]
-    pub fn open_prefs(&mut self, _tab: &str) {
-        self.set_status("Preferences are not available in this build yet");
+    pub fn open_prefs(&mut self, tab: &str) {
+        self.toasts += 1;
+        let value = format!("{}\u{1f}{}", self.toasts, crate::linux::prefs::dialog(self, tab));
+        self.put_str("Prefs", &value, |k, v| k.set_prefs(v));
     }
 
     /// The capture side's panels and outlines (the `hud` signal).
@@ -2793,6 +2795,8 @@ impl App {
             "prefs" => self.open_prefs(if arg.is_empty() { "capture" } else { arg }),
             #[cfg(any(windows, target_os = "macos"))]
             "prefs-apply" => crate::prefs::apply(self, arg),
+            #[cfg(target_os = "linux")]
+            "prefs-apply" => crate::linux::prefs::apply(self, arg),
             // A capture panel's button ("ID:INDEX"; no index when closed), or
             // a toolbar's action ("ID:act:NAME").
             #[cfg(any(windows, target_os = "macos"))]

@@ -400,7 +400,7 @@ fn no_recording() -> Error {
     Error::new(ErrorCode::Conflict, "no recording is running")
 }
 
-fn record_pause() -> Reply {
+pub(super) fn record_pause() -> Reply {
     let (commands, state) = {
         let slot = lock(&RECORDING);
         let recording = slot.as_ref().ok_or_else(no_recording)?;

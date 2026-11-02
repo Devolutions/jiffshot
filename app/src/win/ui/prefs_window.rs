@@ -139,7 +139,7 @@ fn show(json: &str) -> Result<()> {
         &subs,
         move |_| {
             // The values to send, by tab.
-            #[cfg(windows)]
+            #[cfg(not(target_os = "macos"))]
             let values: Map<String, Value> = tabs.iter().map(|(id, inputs)| (id.clone(), parts::values(inputs))).collect();
             #[cfg(target_os = "macos")]
             let values: Map<String, Value> = {
@@ -215,6 +215,7 @@ fn show(json: &str) -> Result<()> {
         None => window.show()?,
     }
     if let Some(hwnd) = parts::hwnd(&scope, &window) {
+        #[allow(clippy::unnecessary_cast)]
         crate::winutil::bring_forward(hwnd as isize);
     }
     with(|s| s.open = Some(Open { window, subs }));

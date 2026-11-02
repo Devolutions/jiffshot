@@ -15,6 +15,7 @@ mod notification;
 pub(crate) mod ocr;
 mod portal;
 mod portal_frame;
+pub(crate) mod prefs;
 mod schedule;
 mod screenshot;
 mod scroll;

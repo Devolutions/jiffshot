@@ -24,7 +24,7 @@ mod main_window;
 mod native_theme;
 #[cfg(any(windows, target_os = "macos"))]
 mod overlay;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod prefs_window;
 #[cfg(target_os = "macos")]
 mod permissions_macos;
@@ -182,6 +182,8 @@ pub fn mount_main_window(scope: &AppScope, model: impl MainViewModel, show: bool
         #[cfg(target_os = "macos")]
         permissions_macos::install(scope);
     }
+    #[cfg(target_os = "linux")]
+    prefs_window::install(scope)?;
     // JIFFSHOT_UITEST=DIR: the editor drives itself (see `selftest`).
     #[cfg(any(windows, target_os = "macos"))]
     if let Some(dir) = std::env::var_os("JIFFSHOT_UITEST").filter(|d| !d.is_empty()) {

@@ -100,6 +100,62 @@ pub fn start_tray() -> Option<super::tray::Session> {
     Some(session)
 }
 
+/// Binds the portal global shortcuts chosen in the settings; keeps running until the process exits.
+pub fn start_shortcuts() {
+    use super::shortcut::{listen, ShortcutAction, ShortcutOptions};
+    if !super::settings::global_shortcuts_enabled().unwrap_or(false) {
+        return;
+    }
+    let (Ok(trigger), Ok(controls), Ok(start)) = (
+        super::settings::global_capture_shortcut(),
+        super::settings::global_recording_shortcuts(),
+        super::settings::global_recording_start(),
+    ) else {
+        return;
+    };
+    let options = ShortcutOptions { recording_controls: controls, recording_start: start };
+    std::thread::spawn(move || {
+        let (_stop, receiver) = async_channel::bounded(1);
+        let result = futures_lite::future::block_on(listen(
+            trigger,
+            options,
+            receiver,
+            |_| Ok(()),
+            move |action| {
+                match action {
+                    ShortcutAction::Capture => app::post(|_| super::capture_window::show()),
+                    ShortcutAction::ToggleRecording => match start.audio() {
+                        Some(audio) => toggle_recording_with(audio_name(audio), true),
+                        None => report("The recording start shortcut is disabled.".into()),
+                    },
+                    ShortcutAction::PauseRecording => {
+                        let _ = control::record_pause();
+                    }
+                    ShortcutAction::StopRecording => {
+                        if control::recording_active() {
+                            toggle_recording_with("none", true);
+                        }
+                    }
+                }
+                Ok(())
+            },
+        ));
+        if let Err(error) = result {
+            eprintln!("jiffshot: global shortcuts unavailable: {error}");
+        }
+    });
+}
+
+fn audio_name(audio: super::capture::RecordingAudio) -> &'static str {
+    use super::capture::RecordingAudio::*;
+    match audio {
+        Disabled => "none",
+        System => "system",
+        Microphone => "microphone",
+        SystemAndMicrophone => "both",
+    }
+}
+
 /// Runs the capture or recording requested on the command line.
 pub fn run_launch_action(flag: &str) {
     match flag {
