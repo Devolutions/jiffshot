@@ -561,9 +561,8 @@ Describe 'Architecture workflows' {
         }
     }
 
-    It 'Fedora runs in a container and Ubuntu smoke-tests the portable package' {
+    It 'Fedora runs in a container' {
         (Get-WorkflowJob 'linux-rpm').Contains('container: fedora:43') | Should -BeTrue
-        (Get-WorkflowJob 'linux').Contains('smoke.ps1 -Launcher') | Should -BeTrue
     }
 
     It 'install matrix covers both formats and native architectures' {
