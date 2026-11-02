@@ -593,6 +593,7 @@ pub(crate) fn run() -> Result<()> {
                             ScreenCaptureOptions {
                                 seconds: OPEN_MENUS_DELAY_SECONDS,
                                 cursor: capture::CaptureCursor::Included,
+                                draw: false,
                             },
                         )
                     }
@@ -713,6 +714,42 @@ pub(crate) fn run() -> Result<()> {
                     }
                 },
             ))
+            .child(action_button("Screen draw (capture, then pen)…", {
+                let canvas = canvas.clone();
+                move |scope| {
+                    capture_screen_with_options(
+                        scope,
+                        canvas.clone(),
+                        status,
+                        captures,
+                        library,
+                        ScreenCaptureOptions {
+                            seconds: 0,
+                            cursor: capture::CaptureCursor::Hidden,
+                            draw: true,
+                        },
+                    )
+                }
+            }))
+            .child(action_button("Toggle pointer effects (X11)", move |_| {
+                status.set_if_changed(match settings::pointer_effects().and_then(|enabled| {
+                    settings::set_pointer_effects(!enabled).map(|()| !enabled)
+                }) {
+                    Ok(true) if !crate::linux::x11::is_x11_session() => {
+                        "Pointer effects saved, but only apply in X11 sessions.".to_owned()
+                    }
+                    Ok(true) => "Pointer effects will be drawn in the next recording.".to_owned(),
+                    Ok(false) => "Pointer effects are off.".to_owned(),
+                    Err(error) => format!("Could not change pointer effects: {error}"),
+                });
+            }))
+            .child(action_button("Show/hide webcam during recording", move |_| {
+                send_recording_command(
+                    capture::RecordingCommand::ToggleWebcam,
+                    "Toggling the webcam overlay…",
+                    status,
+                )
+            }))
             .child(action_button("Restart recording", move |_| {
                 send_recording_command(
                     capture::RecordingCommand::Restart,
@@ -797,7 +834,36 @@ pub(crate) fn run() -> Result<()> {
                 move |_| toggle_video_pause(status)
             }))
             .child(action_button("Export video as GIF…", {
-                move |scope| export_video_dialog(scope, VideoExport::Gif, status)
+                move |scope| {
+                    export_video_dialog(scope, VideoExport::Gif(video::GifPreset::Original), status)
+                }
+            }))
+            .child(action_button("GIF: screen recording…", {
+                move |scope| {
+                    export_video_dialog(
+                        scope,
+                        VideoExport::Gif(video::GifPreset::ScreenRecording),
+                        status,
+                    )
+                }
+            }))
+            .child(action_button("GIF: high motion…", {
+                move |scope| {
+                    export_video_dialog(
+                        scope,
+                        VideoExport::Gif(video::GifPreset::HighMotion),
+                        status,
+                    )
+                }
+            }))
+            .child(action_button("GIF: small file…", {
+                move |scope| {
+                    export_video_dialog(
+                        scope,
+                        VideoExport::Gif(video::GifPreset::SmallFile),
+                        status,
+                    )
+                }
             }))
             .child(action_button("Save .jsd…", {
                 move |scope| save_document(scope, status)
@@ -900,6 +966,7 @@ pub(crate) fn run() -> Result<()> {
         let trim_start = Signal::new("0".to_owned());
         let trim_end = Signal::new("10".to_owned());
         let frame_time = Signal::new("0".to_owned());
+        let slide_seconds = Signal::new("3".to_owned());
         let video_frame_toolbar = WrapPanel::el()
             .orientation(Orientation::Horizontal)
             .child(TextBlock::el().text("Video frame (seconds):"))
@@ -920,6 +987,16 @@ pub(crate) fn run() -> Result<()> {
             }))
             .child(action_button("Export silent MP4…", {
                 move |scope| export_video_dialog(scope, VideoExport::SilentMp4, status)
+            }))
+            .child(
+                TextBox::el()
+                    .width(70.0)
+                    .text(slide_seconds.two_way())
+                    .placeholder_text("Seconds")
+                    .tool_tip_tip("Seconds each image is shown in a slideshow"),
+            )
+            .child(action_button("Slideshow from images…", {
+                move |scope| slideshow_dialog(scope, slide_seconds.get(), status)
             }));
         let video_trim_toolbar = WrapPanel::el()
             .orientation(Orientation::Horizontal)
@@ -2376,6 +2453,7 @@ fn run_capture_preset(
             ScreenCaptureOptions {
                 seconds: preset.delay_seconds(),
                 cursor: preset.cursor(),
+                draw: false,
             },
         ),
         settings::PresetMode::Desktop => capture_interactive(scope, canvas, status, captures, library),
@@ -3692,6 +3770,8 @@ const OPEN_MENUS_DELAY_SECONDS: u64 = 5;
 struct ScreenCaptureOptions {
     seconds: u64,
     cursor: capture::CaptureCursor,
+    /// Open the capture with the pen selected, for drawing over the screen.
+    draw: bool,
 }
 
 fn screen_capture_available(status: Signal<String>) -> bool {
@@ -3747,7 +3827,11 @@ fn capture_screen(
         status,
         captures,
         library,
-        ScreenCaptureOptions { seconds, cursor },
+        ScreenCaptureOptions {
+            seconds,
+            cursor,
+            draw: false,
+        },
     );
 }
 
@@ -3762,7 +3846,11 @@ fn capture_screen_with_options(
     if !screen_capture_available(status) {
         return;
     }
-    let ScreenCaptureOptions { seconds, cursor } = options;
+    let ScreenCaptureOptions {
+        seconds,
+        cursor,
+        draw,
+    } = options;
     let delayed = if seconds == 0 {
         None
     } else {
@@ -3823,7 +3911,11 @@ fn capture_screen_with_options(
                     CompletedCapture {
                         document,
                         pending,
-                        delivery: CaptureDelivery::Screen,
+                        delivery: if draw {
+                            CaptureDelivery::ScreenDraw
+                        } else {
+                            CaptureDelivery::Screen
+                        },
                     },
                     canvas,
                     status,
@@ -3997,6 +4089,7 @@ fn grab_screen_text(scope: &AppScope, status: Signal<String>) {
 #[derive(Clone, Copy)]
 enum CaptureDelivery {
     Screen,
+    ScreenDraw,
     Interactive,
     Scrolling {
         mode: scroll::Mode,
@@ -4014,6 +4107,7 @@ impl CaptureDelivery {
     fn description(self) -> &'static str {
         match self {
             Self::Screen => "Screen captured",
+            Self::ScreenDraw => "Screen captured; draw with the pen",
             Self::Interactive => "Desktop screenshot captured",
             Self::Scrolling {
                 mode: scroll::Mode::Panoramic,
@@ -4084,6 +4178,9 @@ fn deliver_capture(
             let state = DOCUMENT_LOAD_REQUESTS.state(&pending, editor.document());
             if state == editor::DocumentLoadState::Ready {
                 load_editor_document(editor, document, saved_path.as_ref().ok().cloned());
+                if matches!(delivery, CaptureDelivery::ScreenDraw) {
+                    editor.set_tool(Tool::Pen);
+                }
             }
             state
         });
@@ -5187,6 +5284,151 @@ fn toggle_video_pause(status: Signal<String>) {
     }
 }
 
+fn slideshow_dialog(scope: &AppScope, seconds: String, status: Signal<String>) {
+    let seconds = match seconds.trim().parse::<f64>() {
+        Ok(value)
+            if (video::SLIDESHOW_MIN_SECONDS..=video::SLIDESHOW_MAX_SECONDS).contains(&value) =>
+        {
+            value
+        }
+        _ => {
+            status.set_if_changed(format!(
+                "Slide duration must be between {} and {} seconds.",
+                video::SLIDESHOW_MIN_SECONDS,
+                video::SLIDESHOW_MAX_SECONDS
+            ));
+            return;
+        }
+    };
+    let Some(window) = scope.main_window() else {
+        status.set_if_changed("The editor window is not available.".to_owned());
+        return;
+    };
+    let filter = ["png", "jpg", "jpeg", "bmp", "gif", "webp"]
+        .into_iter()
+        .fold(FileTypeFilter::new("Image files"), |filter, extension| {
+            filter.with_extension(extension)
+        });
+    let options = OpenFilePickerOptions::new()
+        .title("Select images for the slideshow (shown in filename order)")
+        .allow_multiple(true)
+        .start_in(WellKnownFolder::Pictures)
+        .file_type(filter);
+    let operation = match file_dialog::open_file_picker(scope, &window, &options) {
+        Ok(operation) => operation,
+        Err(error) => {
+            status.set_if_changed(format!("Could not open image picker: {error}"));
+            return;
+        }
+    };
+    status.set_if_changed("Select the images for the slideshow…".to_owned());
+    let task_scope = scope.clone();
+    if let Err(error) = scope.spawn(async move {
+        let Ok(PickerOutcome::Selected(items)) = operation.await else {
+            return;
+        };
+        let paths = items
+            .iter()
+            .map(|item| item.local_path().map(Path::to_path_buf))
+            .collect::<Option<Vec<_>>>();
+        let message = match paths {
+            None => Some("Every selected image must be a local file.".to_owned()),
+            Some(paths) if paths.is_empty() => Some("Select at least one image.".to_owned()),
+            Some(mut paths) => {
+                order_video_sources(&mut paths);
+                let save_scope = task_scope.clone();
+                if let Err(error) = task_scope.post(move || {
+                    save_slideshow_dialog(&save_scope, paths, seconds, status)
+                }) {
+                    eprintln!("Could not open the slideshow save dialog: {error}");
+                }
+                None
+            }
+        };
+        if let Some(message) = message {
+            if let Err(error) = task_scope.post(move || status.set_if_changed(message)) {
+                eprintln!("Could not report the slideshow selection: {error}");
+            }
+        }
+    }) {
+        status.set_if_changed(format!("Could not start the image picker: {error}"));
+    }
+}
+
+fn save_slideshow_dialog(
+    scope: &AppScope,
+    images: Vec<PathBuf>,
+    seconds: f64,
+    status: Signal<String>,
+) {
+    let Some(window) = scope.main_window() else {
+        status.set_if_changed("The editor window is not available.".to_owned());
+        return;
+    };
+    let options = SaveFilePickerOptions::new()
+        .title("Save slideshow video")
+        .suggested_file_name("Slideshow.mp4")
+        .start_in(WellKnownFolder::Pictures)
+        .default_extension("mp4")
+        .file_type(FileTypeFilter::new("MP4 video").with_extension("mp4"));
+    let operation = match file_dialog::save_file_picker(scope, &window, &options) {
+        Ok(operation) => operation,
+        Err(error) => {
+            status.set_if_changed(format!("Could not open video save dialog: {error}"));
+            return;
+        }
+    };
+    status.set_if_changed("Choose where to save the slideshow…".to_owned());
+    let task_scope = scope.clone();
+    if let Err(error) = scope.spawn(async move {
+        let Ok(PickerOutcome::Selected(items)) = operation.await else {
+            return;
+        };
+        let Some(destination) = items
+            .first()
+            .and_then(|item| item.local_path().map(Path::to_path_buf))
+        else {
+            if let Err(error) = task_scope.post(move || {
+                status.set_if_changed(
+                    "The selected destination is not available as a local file.".to_owned(),
+                )
+            }) {
+                eprintln!("Could not report slideshow destination error: {error}");
+            }
+            return;
+        };
+        let label = destination.display().to_string();
+        let thread_scope = task_scope.clone();
+        if let Err(error) =
+            task_scope.post(move || status.set_if_changed("Creating the slideshow…".to_owned()))
+        {
+            eprintln!("Could not report slideshow progress: {error}");
+        }
+        let started = std::thread::Builder::new()
+            .name("jiffshot-slideshow".to_owned())
+            .spawn(move || {
+                let result = video::create_slideshow(&images, seconds, &destination);
+                if let Err(error) = thread_scope.post(move || match result {
+                    Ok(()) => status.set_if_changed(format!("Saved slideshow to {label}")),
+                    Err(error) => {
+                        status.set_if_changed(format!("Could not create the slideshow: {error}"))
+                    }
+                }) {
+                    eprintln!("Could not report slideshow result: {error}");
+                }
+            });
+        if let Err(error) = started {
+            if let Err(post_error) = task_scope.post(move || {
+                status.set_if_changed(format!("Could not start the slideshow export: {error}"))
+            }) {
+                eprintln!("Could not report slideshow startup error: {post_error}");
+            }
+        }
+    }) {
+        status.set_if_changed(format!("Could not start video save dialog: {error}"));
+    }
+}
+
 fn combine_videos_dialog(scope: &AppScope, status: Signal<String>) {
     let Some(window) = scope.main_window() else {
         status.set_if_changed("The editor window is not available.".to_owned());
@@ -5623,42 +5865,42 @@ fn save_video_range(
 
 #[derive(Clone, Copy)]
 enum VideoExport {
-    Gif,
+    Gif(video::GifPreset),
     SilentMp4,
 }
 
 impl VideoExport {
     fn description(self) -> &'static str {
         match self {
-            Self::Gif => "animated GIF",
+            Self::Gif(_) => "animated GIF",
             Self::SilentMp4 => "silent MP4",
         }
     }
 
     fn extension(self) -> &'static str {
         match self {
-            Self::Gif => "gif",
+            Self::Gif(_) => "gif",
             Self::SilentMp4 => "mp4",
         }
     }
 
     fn suggested_file_name(self) -> &'static str {
         match self {
-            Self::Gif => "Animation.gif",
+            Self::Gif(_) => "Animation.gif",
             Self::SilentMp4 => "Silent video.mp4",
         }
     }
 
     fn thread_name(self) -> &'static str {
         match self {
-            Self::Gif => "jiffshot-video-gif",
+            Self::Gif(_) => "jiffshot-video-gif",
             Self::SilentMp4 => "jiffshot-video-silent",
         }
     }
 
     fn export(self, source: &Path, destination: &Path) -> std::result::Result<(), String> {
         match self {
-            Self::Gif => video::export_gif(source, destination),
+            Self::Gif(preset) => video::export_gif_with_preset(source, destination, preset),
             Self::SilentMp4 => video::export_silent_video(source, destination),
         }
     }

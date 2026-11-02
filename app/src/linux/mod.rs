@@ -14,6 +14,7 @@ mod main;
 mod notification;
 pub(crate) mod overlay;
 pub(crate) mod ocr;
+mod pointer_fx;
 mod portal;
 mod portal_frame;
 pub(crate) mod prefs;
@@ -27,5 +28,6 @@ mod shortcut;
 mod template;
 pub(crate) mod tray;
 mod video;
+pub(crate) mod x11;
 
 pub(super) use main::run;

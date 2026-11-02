@@ -52,7 +52,7 @@ const DRAG_THRESHOLD: i32 = 3;
 
 /// The F1 help, one line each.
 pub const HELP: &[&str] = &[
-    "Click: the whole screen   ·   Drag: region",
+    "Click: the window under the pointer, or the whole screen   ·   Drag: region",
     "Shift: square   ·   Ctrl: 16:9   ·   Ctrl+Shift: 4:3",
     "Arrows: move 1 px (Shift: 10)   ·   Shift+Enter: start a region at the pointer",
     "Enter / Space: capture   ·   F or A: the whole screen",
@@ -99,6 +99,8 @@ pub struct Overlay {
     show_help: bool,
     path: Vec<(i32, i32)>,
     regions: Vec<Rect>,
+    /// Top-level windows, bottom to top; empty where the desktop cannot list them.
+    windows: Vec<(Rect, String)>,
 }
 
 /// The drag rectangle, constrained by modifiers and the desktop bounds.
@@ -152,7 +154,23 @@ impl Overlay {
             show_help: false,
             path: Vec::new(),
             regions: Vec::new(),
+            windows: Vec::new(),
         }
+    }
+
+    /// Lets a click in normal mode pick the window under the pointer.
+    pub fn set_windows(&mut self, windows: Vec<(Rect, String)>) {
+        self.windows = windows;
+    }
+
+    fn window_under_cursor(&self) -> Option<&(Rect, String)> {
+        if self.mode != Mode::Normal {
+            return None;
+        }
+        self.windows
+            .iter()
+            .rev()
+            .find(|(rect, _)| rect.contains(self.cursor.0, self.cursor.1))
     }
 
     pub fn path(&self) -> &[(i32, i32)] {
@@ -179,6 +197,9 @@ impl Overlay {
         if let Mode::Fixed(w, h) = self.mode {
             return (place_fixed(self.bounds, self.cursor, w, h).intersect(self.bounds).unwrap_or_default(), 0);
         }
+        if let Some((rect, _)) = self.window_under_cursor() {
+            return (rect.intersect(self.bounds).unwrap_or_default(), 1);
+        }
         (self.bounds, 2)
     }
 
@@ -189,7 +210,11 @@ impl Overlay {
             cursor: self.cursor,
             lit: area,
             lit_kind,
-            title: (lit_kind == 2).then(|| "Screen".to_owned()),
+            title: match lit_kind {
+                2 => Some("Screen".to_owned()),
+                1 => self.window_under_cursor().map(|(_, title)| title.clone()),
+                _ => None,
+            },
             size: format!("{} × {}", lit.width, lit.height),
             monitor: self.bounds,
             color: self.snapshot.rgb(self.cursor.0, self.cursor.1),
@@ -365,6 +390,29 @@ mod tests {
         o.pointer_pressed(20, 20);
         o.pointer_released(20, 20);
         assert_eq!(o.outcome, Some(Some(Selection::Desktop(Rect::new(0, 0, 200, 100)))));
+    }
+
+    #[test]
+    fn click_selects_the_topmost_window_under_the_pointer() {
+        let mut o = overlay(Mode::Normal);
+        o.set_windows(vec![
+            (Rect::new(0, 0, 150, 80), "Back".to_owned()),
+            (Rect::new(10, 10, 60, 40), "Front".to_owned()),
+        ]);
+        let view = o.view();
+        assert_eq!((view.lit, view.lit_kind), (Rect::new(10, 10, 60, 40), 1));
+        assert_eq!(view.title.as_deref(), Some("Front"));
+        o.pointer_moved(120, 70);
+        assert_eq!(o.view().title.as_deref(), Some("Back"));
+        o.pointer_moved(190, 95);
+        assert_eq!(o.view().lit_kind, 2);
+        o.pointer_moved(20, 20);
+        o.pointer_pressed(20, 20);
+        o.pointer_released(20, 20);
+        assert_eq!(o.outcome, Some(Some(Selection::Region(Rect::new(10, 10, 60, 40)))));
+        let mut freehand = overlay(Mode::Freehand);
+        freehand.set_windows(vec![(Rect::new(0, 0, 50, 50), "Window".to_owned())]);
+        assert_eq!(freehand.view().lit_kind, 2);
     }
 
     #[test]

@@ -32,23 +32,13 @@ pub(super) fn create_template(
 
 /// Decodes an image file for a template zone.
 pub(super) fn load_zone_image(path: &std::path::Path) -> Result<Pixmap, String> {
-    let file = std::fs::File::open(path)
-        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
-    if !file
-        .metadata()
-        .map_err(|error| format!("could not inspect {}: {error}", path.display()))?
-        .is_file()
-    {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
+    if !metadata.is_file() {
         return Err(format!("{} is not a regular file", path.display()));
     }
-    let image = image::ImageReader::new(std::io::BufReader::new(file))
-        .with_guessed_format()
-        .map_err(|error| error.to_string())?
-        .decode()
-        .map_err(|error| format!("could not decode {}: {error}", path.display()))?
-        .into_rgba8();
-    jiffshot_doc::io::from_rgba_image(&image)
-        .ok_or_else(|| format!("{} has no pixels", path.display()))
+    jiffshot_doc::io::load_image(path)
+        .map_err(|error| format!("could not open {}: {error}", path.display()))
 }
 
 pub(super) fn selected_zone(editor: &Editor) -> Result<u64, String> {

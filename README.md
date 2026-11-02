@@ -93,18 +93,19 @@ The detailed feature list below describes the Windows application. The Linux bui
 | Region / monitor capture | Yes | Yes | Yes (portal; frozen-screenshot overlay) |
 | Window and UI-element detection | Yes | Yes | No (Wayland cannot enumerate windows) |
 | Scrolling capture | Automatic | Automatic | Manual only |
+| Window detection in the capture overlay | Yes | Yes | X11 sessions only (Wayland cannot list windows) |
 | Panoramic capture | Yes | Yes | Yes |
 | Open Menus | Yes | Yes | Yes (delayed capture, 5 s) |
 | Step Capture | Yes | Yes | No |
 | Delay, interval and daily scheduled capture | Yes | Yes | Yes |
 | Screen recording (MP4, audio, webcam) | Yes | Yes | Yes (pause/resume, restart, cancel) |
-| Live recording toolbar, pointer effects, Screen Draw | Yes | Yes | Partial: pause, resume, restart, cancel and stop buttons plus pause shortcut in the main window; no floating toolbar, pointer effects or Screen Draw |
-| Video trim, cut, combine, GIF export | Yes | Yes | Yes (no narrated slideshows) |
+| Live recording toolbar, pointer effects, Screen Draw | Yes | Yes | Partial: pause, resume, restart, cancel, stop and show/hide webcam buttons plus pause shortcut in the main window; pointer halo and click ring on X11 sessions (opt-in); **Screen draw** captures the screen and opens it with the pen selected (a snapshot, not a live overlay); no floating toolbar |
+| Video trim, cut, combine, GIF export (with screen-recording, high-motion and small-file presets on Linux) | Yes | Yes | Yes, plus silent slideshows from images (no narration) |
 | OCR / Grab Text | Windows OCR | Yes | Tesseract |
 | Global hotkeys | Print Screen, presets | `Cmd+Shift+1/2/7` | One portal-based shortcut |
 | Tray | Yes | Yes | Opt-in; needs a tray host |
 | Sharing | Clipboard, file, email, Office, Paint, external program, FTP, printer | Clipboard, file, email, printer | Clipboard, file, open-with, email, printer, folder, external program |
-| Drag out / drag into template zones | Yes | Drag out; drop files into template zones | No |
+| Drag out / drag into template zones | Yes | Drag out | Drop files into template zones; no drag out |
 | `jiffshot-cli` | Full | Full | `status`, `screenshot`, `ocr`, `open`, `library list/search/tag/pin`, `record` |
 
 ### Flexible Screen Capture

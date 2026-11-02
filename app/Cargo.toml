@@ -40,6 +40,7 @@ leptess = "0.14"
 png.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 tempfile = "3"
+x11rb = { version = "0.13", default-features = false }
 zbus = { version = "5", default-features = false, features = ["async-io"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]

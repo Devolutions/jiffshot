@@ -15,6 +15,7 @@ const THEME_KEY: &str = "theme";
 const GLOBAL_CAPTURE_SHORTCUT_KEY: &str = "global_capture_shortcut";
 const GLOBAL_RECORDING_SHORTCUTS_KEY: &str = "global_recording_shortcuts";
 const GLOBAL_PRESET_SHORTCUTS_KEY: &str = "linux_global_preset_shortcuts";
+const POINTER_EFFECTS_KEY: &str = "linux_pointer_effects";
 const GLOBAL_RECORDING_START_KEY: &str = "linux_global_recording_start";
 const GLOBAL_SHORTCUTS_ENABLED_KEY: &str = "linux_global_shortcuts_enabled";
 const TRAY_ENABLED_KEY: &str = "linux_tray_enabled";
@@ -90,6 +91,14 @@ pub fn global_recording_shortcuts() -> Result<bool, String> {
 
 pub(super) fn global_preset_shortcuts() -> Result<bool, String> {
     global_preset_shortcuts_from(&settings_path()?)
+}
+
+pub(super) fn pointer_effects() -> Result<bool, String> {
+    pointer_effects_from(&settings_path()?)
+}
+
+pub(super) fn set_pointer_effects(enabled: bool) -> Result<(), String> {
+    set_pointer_effects_in(&settings_path()?, enabled)
 }
 
 pub(super) fn global_recording_start() -> Result<RecordingStartShortcut, String> {
@@ -921,6 +930,22 @@ fn global_preset_shortcuts_from(path: &Path) -> Result<bool, String> {
             .as_bool()
             .ok_or_else(|| "the global preset shortcuts preference must be a boolean".to_owned()),
     }
+}
+
+fn pointer_effects_from(path: &Path) -> Result<bool, String> {
+    match read_settings(path)?.get(POINTER_EFFECTS_KEY) {
+        None => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "the pointer effects preference must be a boolean".to_owned()),
+    }
+}
+
+fn set_pointer_effects_in(path: &Path, enabled: bool) -> Result<(), String> {
+    let _lock = lock_settings(path)?;
+    let mut settings = read_settings(path)?;
+    settings.insert(POINTER_EFFECTS_KEY.to_owned(), Value::Bool(enabled));
+    write_settings(path, &settings)
 }
 
 fn global_recording_start_from(path: &Path) -> Result<RecordingStartShortcut, String> {
@@ -2519,6 +2544,19 @@ mod tests {
         assert!(global_recording_shortcuts_from(&path).is_err());
         std::fs::write(&path, br#"{"linux_global_shortcuts_enabled":"yes"}"#).unwrap();
         assert!(global_shortcuts_enabled_from(&path).is_err());
+    }
+
+    #[test]
+    fn pointer_effects_default_off_and_persist() {
+        let directory = tempfile::tempdir().expect("temporary directory should be available");
+        let path = directory.path().join(SETTINGS_FILE);
+        assert!(!pointer_effects_from(&path).unwrap());
+        set_theme_in(&path, "Dark").unwrap();
+        set_pointer_effects_in(&path, true).unwrap();
+        assert!(pointer_effects_from(&path).unwrap());
+        assert_eq!(read_settings(&path).unwrap()[THEME_KEY], "Dark");
+        std::fs::write(&path, br#"{"linux_pointer_effects":"yes"}"#).unwrap();
+        assert!(pointer_effects_from(&path).is_err());
     }
 
     #[test]
