@@ -814,6 +814,11 @@ impl Drop for ReopenCaptureWindow {
     }
 }
 
+fn select_create_mode(choice: Option<usize>) -> Option<usize> {
+    const MODES: [usize; 4] = [MODE_IMAGE, MODE_VIDEO, MODE_SCROLLING, MODE_PANORAMIC];
+    choice.and_then(|index| MODES.get(index).copied())
+}
+
 /// Freezes the screen and runs the selection overlay; `mode` says what to
 /// do with the selection.
 fn capture_interactive(mode: usize) {
@@ -1035,20 +1040,17 @@ fn capture_interactive(mode: usize) {
         });
         publish_state();
     }
-    // All-in-One asks what to make of the area once it is selected.
+    // Choose asks what to make of the area once it is selected.
     let mode = if mode == MODE_ALL {
-        match crate::hud::run_panel(
+        match select_create_mode(crate::hud::run_panel(
             rect,
-            "Capture this area as",
-            &["Image", "Video", "Scrolling", "Panoramic"],
+            crate::panel::SELECT_CREATE_PROMPT,
+            &crate::panel::SELECT_CREATE_CHOICES,
             1000,
             || None,
-        ) {
-            Some(0) => MODE_IMAGE,
-            Some(1) => MODE_VIDEO,
-            Some(2) => MODE_SCROLLING,
-            Some(3) => MODE_PANORAMIC,
-            _ => {
+        )) {
+            Some(mode) => mode,
+            None => {
                 with_app(|app| app.busy = false);
                 return;
             }
@@ -1905,6 +1907,22 @@ pub(crate) fn scheduled_capture(
     workflow::immediate_in_layout(CaptureKind::Region, rect, false, &layout)
 }
 
+fn arm_interval_timer(hwnd: HWND, seconds: u32) -> bool {
+    // SAFETY: the timer belongs to our capture-thread window.
+    unsafe { SetTimer(hwnd, TIMER_TIMELAPSE, seconds.max(1).saturating_mul(1000), None) != 0 }
+}
+
+fn rearm_interval_timer(hwnd: HWND, seconds: u32) -> Result<(), String> {
+    if arm_interval_timer(hwnd, seconds) {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    // SAFETY: the timer belongs to our capture-thread window.
+    unsafe { KillTimer(hwnd, TIMER_TIMELAPSE) };
+    with_app(|app| app.timelapse = None);
+    Err(format!("Could not update the interval; capture stopped: {error}"))
+}
+
 /// Starts or stops the time-lapse (an interval capture of the last area,
 /// or the screen under the pointer).
 pub fn toggle_timelapse() {
@@ -1964,6 +1982,10 @@ pub fn toggle_timelapse() {
         publish_state();
         return;
     }
+    if !arm_interval_timer(hwnd, seconds) {
+        notify(hwnd, "Time-lapse", &format!("Could not start interval capture: {}", std::io::Error::last_os_error()), true);
+        return;
+    }
     with_app(|app| {
         app.timelapse = Some(TimeLapse {
             region,
@@ -1973,13 +1995,22 @@ pub fn toggle_timelapse() {
     notify(
         hwnd,
         "Time-lapse",
-        &format!("Capturing every {seconds} s; choose Time-lapse again to stop"),
+        &format!("Capturing every {seconds} s. Stop it in Choose or from the tray menu."),
         false,
     );
-    // SAFETY: as above.
-    unsafe { SetTimer(hwnd, TIMER_TIMELAPSE, seconds * 1000, None) };
-    publish_state();
     timelapse_tick();
+    publish_state();
+}
+
+pub(crate) fn set_timelapse(action: crate::capture::IntervalAction) {
+    if let Some(true) = with_app(|app| action.should_toggle(app.timelapse.is_some())) {
+        toggle_timelapse();
+    }
+}
+
+/// Stops interval capture if it is still running.
+pub fn stop_timelapse() {
+    set_timelapse(crate::capture::IntervalAction::Stop);
 }
 
 fn timelapse_tick() {
@@ -2052,11 +2083,12 @@ pub fn start_from_panel(s: Settings) {
         match s.capture_window.timing.as_str() {
             "interval" => return toggle_timelapse(),
             "schedule" => {
-                let at = match s.schedule {
-                    Some(_) => None,
-                    None => Some(s.schedule_default.clone().unwrap_or_else(|| "09:00".into())),
+                let action = if s.schedule.is_some() {
+                    crate::capture::ScheduleAction::Stop
+                } else {
+                    crate::capture::ScheduleAction::Start
                 };
-                return set_schedule(at);
+                return set_schedule_action(action);
             }
             _ => {}
         }
@@ -2071,11 +2103,12 @@ pub fn start_from_panel(s: Settings) {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn start_from_current_panel() {
-    let Some(settings) = with_app(|app| app.settings.clone()) else {
+pub(crate) fn start_from_current_panel(tab: usize) {
+    let Some(mut settings) = with_app(|app| app.settings.clone()) else {
         log("Capture not started: the capture service is unavailable");
         return;
     };
+    settings.capture_window.tab = tab.min(2);
     start_from_panel(settings);
 }
 
@@ -2085,7 +2118,7 @@ fn commit_window_settings_with(
     changes: geometry::SavedAreaChanges,
     save: impl FnOnce(&Settings) -> std::io::Result<()>,
 ) -> Result<Vec<String>, String> {
-    let (hwnd, previous_schedule) = with_app(|app| {
+    let (hwnd, previous_schedule, rearm) = with_app(|app| {
         (
             app.hwnd,
             (
@@ -2093,6 +2126,7 @@ fn commit_window_settings_with(
                 app.settings.schedule_area,
                 app.schedule_armed,
             ),
+            interval_to_rearm(app.timelapse.is_some(), app.settings.interval_seconds, settings.interval_seconds),
         )
     })
     .ok_or_else(|| "The capture service is unavailable.".to_owned())?;
@@ -2126,6 +2160,11 @@ fn commit_window_settings_with(
             warnings.push(format!("Scheduled capture paused: {error}"));
         }
     }
+    if let Some(seconds) = rearm {
+        if let Err(error) = rearm_interval_timer(hwnd, seconds) {
+            warnings.push(error);
+        }
+    }
     publish_state();
     Ok(warnings)
 }
@@ -2150,7 +2189,7 @@ pub(crate) fn edit_window(
     let (effect, warnings) = match edit {
         WindowEdit::Pick(id) => {
             let previous_fixed = settings.capture_window.fixed_at;
-            let result = crate::panel::pick(&mut settings, &id);
+            let result = crate::panel::pick_unified(&mut settings, &id);
             let warnings = match &result {
                 Pick::Changed => {
                     let mut changes = geometry::SavedAreaChanges::default();
@@ -2177,8 +2216,12 @@ pub(crate) fn edit_window(
             (WindowEffect::Changed, warnings)
         }
         WindowEdit::Apply { id, values } => {
+            let (tab, name) = crate::panel::capture_context(&id);
+            let previous = settings.capture_window.tab;
+            settings.capture_window.tab = tab.unwrap_or(1);
             let (result, changes) =
-                crate::panel::prepare_apply(&mut settings, &id, &values, runs_at_startup());
+                crate::panel::prepare_apply(&mut settings, name, &values, runs_at_startup());
+            settings.capture_window.tab = previous;
             let warnings = match &result {
                 Applied::Problem(_) => Vec::new(),
                 Applied::Presets(presets) => {
@@ -2320,12 +2363,50 @@ pub fn set_schedule(at: Option<String>) {
     publish_state();
 }
 
+fn schedule_update(action: crate::capture::ScheduleAction, running: bool, at: Option<&str>) -> Option<Option<String>> {
+    if action.should_toggle(running) {
+        Some(match action {
+            crate::capture::ScheduleAction::Start => Some(at.unwrap_or("09:00").to_owned()),
+            crate::capture::ScheduleAction::Stop => None,
+        })
+    } else {
+        None
+    }
+}
+
+pub(crate) fn set_schedule_action(action: crate::capture::ScheduleAction) {
+    let Some(at) = with_app(|app| schedule_update(action, app.settings.schedule.is_some(), app.settings.schedule_default.as_deref())).flatten() else { return };
+    set_schedule(at);
+}
+
+pub(crate) fn move_schedule(at: String) {
+    if let Some(true) = with_app(|app| app.settings.schedule.is_some()) {
+        set_schedule(Some(at));
+    }
+}
+
 pub fn current_settings() -> Settings {
     with_app(|app| app.settings.clone()).unwrap_or_default()
 }
 
+#[cfg(any(windows, test))]
+fn replace_capture_settings(current: &mut Settings, settings: Settings) {
+    let presets = std::mem::take(&mut current.presets);
+    let schedule = current.schedule.take();
+    *current = Settings { presets, schedule, ..settings };
+}
+
+fn interval_to_rearm(running: bool, old_seconds: u32, new_seconds: u32) -> Option<u32> {
+    let new_seconds = new_seconds.max(1);
+    (running && old_seconds.max(1) != new_seconds).then_some(new_seconds)
+}
+
 /// Keeps and saves settings edited in the Capture window.
 pub fn apply_settings(settings: Settings) {
+    #[cfg(target_os = "macos")]
+    let rearm = with_app(|app| {
+        (app.hwnd, interval_to_rearm(app.timelapse.is_some(), app.settings.interval_seconds, settings.interval_seconds))
+    });
     #[cfg(target_os = "macos")]
     let previous_schedule = with_app(|app| {
         (
@@ -2355,13 +2436,11 @@ pub fn apply_settings(settings: Settings) {
         )
     });
     #[cfg(windows)]
-    with_app(|app| {
-        let presets = std::mem::take(&mut app.settings.presets);
-        app.settings = Settings {
-            presets,
-            ..settings
-        };
+    let rearm = with_app(|app| {
+        let rearm = interval_to_rearm(app.timelapse.is_some(), app.settings.interval_seconds, settings.interval_seconds);
+        replace_capture_settings(&mut app.settings, settings);
         app.settings.save();
+        (app.hwnd, rearm)
     });
     #[cfg(target_os = "macos")]
     if let Some((hwnd, error, cancelled_pending)) = save_error {
@@ -2390,6 +2469,11 @@ pub fn apply_settings(settings: Settings) {
             }) {
                 notify(hwnd, "Scheduled capture paused", &error.to_string(), true);
             }
+        }
+    }
+    if let Some((hwnd, Some(seconds))) = rearm {
+        if let Err(error) = rearm_interval_timer(hwnd, seconds) {
+            notify(hwnd, "Time-lapse", &error, true);
         }
     }
     publish_state();
@@ -3306,6 +3390,10 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    use jiffshot_capture::wide;
+    #[cfg(windows)]
+    use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, PeekMessageW, HWND_MESSAGE, PM_REMOVE};
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -4239,5 +4327,119 @@ mod tests {
         std::fs::remove_file(editable).unwrap();
         std::fs::remove_file(blocked).unwrap();
         std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn select_create_choices_dispatch_or_cancel() {
+        for (index, label, mode) in [
+            (0, "Image", MODE_IMAGE),
+            (1, "Video", MODE_VIDEO),
+            (2, "Scrolling (auto)", MODE_SCROLLING),
+            (3, "Panoramic (manual)", MODE_PANORAMIC),
+        ] {
+            assert_eq!(crate::panel::SELECT_CREATE_CHOICES[index], label);
+            assert_eq!(select_create_mode(Some(index)), Some(mode), "{label}");
+        }
+        assert_eq!(crate::panel::SELECT_CREATE_CHOICES[4], "Cancel");
+        assert_eq!(select_create_mode(Some(4)), None);
+        assert_eq!(select_create_mode(Some(5)), None);
+        assert_eq!(select_create_mode(None), None);
+    }
+
+    #[test]
+    fn interval_actions_are_idempotent_when_state_changes_before_dispatch() {
+        use crate::capture::IntervalAction::{Start, Stop};
+        for (action, running, should_toggle) in [(Start, false, true), (Start, true, false), (Stop, true, true), (Stop, false, false)] {
+            assert_eq!(action.should_toggle(running), should_toggle, "{action:?} while running={running}");
+        }
+    }
+
+    #[test]
+    fn schedule_actions_are_idempotent_when_state_changes_before_dispatch() {
+        use crate::capture::ScheduleAction::{Start, Stop};
+        assert_eq!(schedule_update(Start, false, Some("12:45")), Some(Some("12:45".into())));
+        assert_eq!(schedule_update(Start, false, None), Some(Some("09:00".into())));
+        assert_eq!(schedule_update(Start, true, Some("12:45")), None, "a stale Start must not cancel an active schedule");
+        assert_eq!(schedule_update(Stop, true, Some("12:45")), Some(None));
+        assert_eq!(schedule_update(Stop, false, Some("12:45")), None, "a stale Cancel must not start a schedule");
+    }
+
+    #[test]
+    fn applying_stale_capture_settings_preserves_the_live_schedule() {
+        let mut current = Settings { schedule: Some("12:45".into()), ..Settings::default() };
+        let presets = current.presets.clone();
+        let incoming = Settings { schedule: None, share: "email".into(), presets: Vec::new(), ..Settings::default() };
+        replace_capture_settings(&mut current, incoming);
+        assert_eq!(current.schedule.as_deref(), Some("12:45"));
+        assert_eq!(current.share, "email");
+        assert_eq!(current.presets, presets);
+
+        current.schedule = None;
+        let incoming = Settings { schedule: Some("08:00".into()), ..Settings::default() };
+        replace_capture_settings(&mut current, incoming);
+        assert_eq!(current.schedule, None, "a canceled schedule is not restored by a stale view");
+    }
+
+    #[test]
+    fn changing_a_running_interval_rearms_only_when_its_cadence_changes() {
+        assert_eq!(interval_to_rearm(false, 10, 30), None);
+        assert_eq!(interval_to_rearm(true, 10, 10), None);
+        assert_eq!(interval_to_rearm(true, 0, 1), None);
+        assert_eq!(interval_to_rearm(true, 10, 30), Some(30));
+        assert_eq!(interval_to_rearm(true, 10, 0), Some(1));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rearming_interval_changes_the_next_timer_tick() {
+        struct TestWindow(HWND);
+        impl Drop for TestWindow {
+            fn drop(&mut self) {
+                // SAFETY: this test owns the timer and its message-only window.
+                unsafe {
+                    KillTimer(self.0, TIMER_TIMELAPSE);
+                    DestroyWindow(self.0);
+                }
+            }
+        }
+
+        // SAFETY: a hidden message-only window using the system STATIC class.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        assert!(!hwnd.is_null(), "the test window should be created");
+        let window = TestWindow(hwnd);
+        let has_timer_message = || {
+            // SAFETY: the message is initialized and queried only for this test's window.
+            unsafe {
+                let mut message: MSG = std::mem::zeroed();
+                PeekMessageW(&mut message, window.0, WM_TIMER, WM_TIMER, PM_REMOVE) != 0 && message.wParam == TIMER_TIMELAPSE
+            }
+        };
+
+        assert!(arm_interval_timer(window.0, 1), "the first interval should start");
+        assert!(arm_interval_timer(window.0, 10), "the longer interval should replace it");
+        std::thread::sleep(std::time::Duration::from_millis(1300));
+        assert!(!has_timer_message(), "the original one-second interval must no longer fire");
+
+        assert!(arm_interval_timer(window.0, 1), "the shorter interval should replace it");
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while !has_timer_message() {
+            assert!(Instant::now() < deadline, "the new one-second interval should fire");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }

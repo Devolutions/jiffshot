@@ -630,8 +630,9 @@ function New-E2EPrivateDirectory {
 function Start-E2EXvfb {
     <# Starts a private Xvfb; returns @{ Process; Display }. #>
     param([Parameter(Mandatory)][string]$LogPath, [string]$Screen = '1280x900x24')
+    # Window probes are short-lived; their disconnects must not reset the test display.
     $process = [JiffshotE2E.ChildProcess]::StartCapturing(
-        @('Xvfb', '-displayfd', '1', '-screen', '0', $Screen, '-nolisten', 'tcp'), $null, $null, $LogPath)
+        @('Xvfb', '-displayfd', '1', '-screen', '0', $Screen, '-nolisten', 'tcp', '-noreset'), $null, $null, $LogPath)
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
     while ($process.Lines().Count -eq 0) {
         if ($clock.Elapsed.TotalSeconds -ge 10 -or $process.OutputClosed) {

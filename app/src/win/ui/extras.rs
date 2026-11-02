@@ -5,6 +5,7 @@
 //! and hidden, instead of being closed and made again.
 
 use super::capture_view::parts::{self, post, rgb, Subscriptions, GLYPHS, SIZE_TO_CONTENT};
+use super::dark_blue;
 use rustolonia::{
     AnyEl, AppScope, Border, Button, Color, Dock, DockPanel, Effect, HorizontalAlignment, NodeRef, Orientation, Result, Signal, StackPanel, TextBlock,
     TextBox, TextWrapping, Window, WindowDecorations, WindowStartupLocation,
@@ -338,7 +339,11 @@ fn build_widget(scope: &AppScope) -> Result<Widget> {
                 super::main().model.run(|m| m.run(format!("widget:{mode}")));
             })
         }));
-    let strip = Border::el().width(90.0).height(6.0).background(STRIP).corner_radius((0.0, 0.0, 3.0, 3.0));
+    let strip = Border::el()
+        .width(90.0)
+        .height(6.0)
+        .background(move || if dark.get() && cfg!(windows) { rgb(dark_blue::ACCENT_TEXT) } else { STRIP })
+        .corner_radius((0.0, 0.0, 3.0, 3.0));
     let resize_scope = scope.clone();
     let window = Window::el()
         .title("Jiffshot Capture Widget")
@@ -347,7 +352,7 @@ fn build_widget(scope: &AppScope) -> Result<Widget> {
         .show_in_taskbar(false)
         .can_resize(false)
         .size_to_content(SIZE_TO_CONTENT)
-        .background(move || if dark.get() { rgb(0x2B2D31) } else { rgb(0xFFFFFF) })
+        .background(move || if dark.get() { rgb(dark_blue::windows_or(dark_blue::CARD, 0x2B2D31)) } else { rgb(0xFFFFFF) })
         .on_pointer_entered(|_| hovered(true))
         .on_pointer_exited(|_| hovered(false))
         // Opening and closing changes its width: keep it centered.

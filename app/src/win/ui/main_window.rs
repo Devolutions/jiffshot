@@ -149,6 +149,12 @@ fn with_flyout(button: El<Button>, flyout: El<MenuFlyout>) -> El<Button> {
 /// "System") sets the application's theme variant, and the window's own
 /// colors follow the variant it ends up with.
 fn follow_theme(scope: &AppScope, window: &Window, sink: MainViewModelSink, theme: Theme) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let app = scope.clone();
+        let native_window = UiOnly::new(window.clone());
+        window.clone().on_loaded(scope, move |_| super::native_theme::apply(&app, native_window.get()))?;
+    }
     let app = scope.clone();
     Effect::new(move || {
         let variant = match sink.theme.get().as_str() {
@@ -162,10 +168,14 @@ fn follow_theme(scope: &AppScope, window: &Window, sink: MainViewModelSink, them
     })?;
     // The system's theme can change under "System".
     let app = scope.clone();
+    #[cfg(windows)]
+    let native_window = UiOnly::new(window.clone());
     window.clone().on_actual_theme_variant_changed(scope, move |_| {
         if let Ok(variant) = app.actual_theme_variant() {
             theme.dark.set_if_changed(variant == ThemeVariant::Dark);
         }
+        #[cfg(windows)]
+        super::native_theme::apply(&app, native_window.get());
     })?;
     Ok(())
 }

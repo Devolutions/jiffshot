@@ -8,6 +8,7 @@
 //! again for each notice.
 
 use super::capture_view::parts::{self, post, rgb, SIZE_TO_CONTENT};
+use super::dark_blue;
 use rustolonia::{AppScope, Border, Color, Dock, DockPanel, Effect, FontWeight, Result, Signal, StackPanel, TextBlock, TextWrapping, Window, WindowDecorations};
 use std::cell::RefCell;
 use std::time::Duration;
@@ -19,10 +20,10 @@ const ACCENT: Color = rgb(0x3D8BFF);
 const PROBLEM: Color = rgb(0xE5534B);
 
 /// Card, border, title and text colors: light, dark.
-const CARD: [Color; 2] = [rgb(0xFFFFFF), rgb(0x2B2D31)];
-const EDGE: [Color; 2] = [rgb(0xD5D8DD), rgb(0x3A3C40)];
-const TITLE: [Color; 2] = [rgb(0x1F2328), rgb(0xF2F3F5)];
-const TEXT: [Color; 2] = [rgb(0x4B5563), rgb(0xC8CACE)];
+const CARD: [Color; 2] = [rgb(0xFFFFFF), rgb(dark_blue::windows_or(dark_blue::TOAST, 0x2B2D31))];
+const EDGE: [Color; 2] = [rgb(0xD5D8DD), rgb(dark_blue::windows_or(dark_blue::STRONG_BORDER, 0x3A3C40))];
+const TITLE: [Color; 2] = [rgb(0x1F2328), rgb(dark_blue::windows_or(dark_blue::TEXT, 0xF2F3F5))];
+const TEXT: [Color; 2] = [rgb(0x4B5563), rgb(dark_blue::windows_or(dark_blue::SECONDARY_TEXT, 0xC8CACE))];
 
 /// The toast window and what it shows. UI thread only.
 struct Toast {

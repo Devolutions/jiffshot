@@ -252,6 +252,9 @@ jobs:
       - name: Build Linux app
         run: cargo build --release --locked -p jiffshot
 
+      - name: Test Linux virtual display isolation
+        run: pwsh -NoProfile -File app/tests/linux_xvfb_e2e.ps1
+
       - name: Test Linux global shortcut portal integration
         run: |
           dbus-run-session -- pwsh -NoProfile -File app/tests/linux_shortcuts_e2e.ps1 \

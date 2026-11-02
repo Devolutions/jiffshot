@@ -48,6 +48,9 @@ const NEAREST_ZOOM: f64 = 2.0;
 const HIT_TOLERANCE: f64 = 6.0;
 
 /// The backdrop around the document (the main window's `SwChip`).
+#[cfg(windows)]
+const BACKDROP_DARK: u32 = crate::ui::dark_blue::CARD;
+#[cfg(not(windows))]
 const BACKDROP_DARK: u32 = 0xFF26_282C;
 const BACKDROP_LIGHT: u32 = 0xFFE8_EAED;
 

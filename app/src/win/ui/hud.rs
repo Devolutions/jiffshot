@@ -258,7 +258,7 @@ fn hud_window() -> Result<Window> {
         .can_resize(false)
 }
 
-/// A capture panel: the status (live) and a row of buttons, the first one
+/// A capture panel: the status (live) and its buttons, the first one
 /// the main action. It sits below the area, or above it, or inside its
 /// bottom edge when neither fits on the screen.
 struct HudPanel {
@@ -281,33 +281,42 @@ impl HudPanel {
             .text_wrapping(TextWrapping::Wrap)?
             .foreground(Brush::solid(Color::rgb(0xE8, 0xEA, 0xED)))?;
         let mut subscriptions = Vec::new();
-        let row = StackPanel::new()?
-            .orientation(Orientation::Horizontal)?
-            .spacing(8.0)?
-            .horizontal_alignment(HorizontalAlignment::Right)?;
-        for (index, label) in buttons.iter().enumerate() {
-            let button = Button::new()?
-                .content_text(label)?
-                .min_width(76.0)?
-                .height(30.0)?
-                .padding((12.0, 0.0))?
-                .corner_radius(6.0)?
-                .horizontal_content_alignment(HorizontalAlignment::Center)?
-                .vertical_content_alignment(VerticalAlignment::Center)?
-                .foreground(Brush::solid(Color::rgb(255, 255, 255)))?
-                .background(Brush::solid(if index == 0 {
-                    Color::rgb(0x2F, 0x5D, 0xA8)
-                } else {
-                    Color::rgb(0x3A, 0x3C, 0x42)
-                }))?;
-            subscriptions.push(button.subscribe_click(move |_| run(format!("hud:{id}:{index}")))?);
-            row.children()?.add(&button)?;
+        let rows = StackPanel::new()?.spacing(8.0)?;
+        let columns = if buttons.len() > 4 { 2 } else { buttons.len().max(1) };
+        for (row_index, labels) in buttons.chunks(columns).enumerate() {
+            let row = StackPanel::new()?
+                .orientation(Orientation::Horizontal)?
+                .spacing(8.0)?
+                .horizontal_alignment(HorizontalAlignment::Right)?;
+            for (column, label) in labels.iter().enumerate() {
+                let index = row_index * columns + column;
+                let mut button = Button::new()?
+                    .content_text(label)?
+                    .min_width(76.0)?
+                    .height(30.0)?
+                    .padding((12.0, 0.0))?
+                    .corner_radius(6.0)?
+                    .horizontal_content_alignment(HorizontalAlignment::Center)?
+                    .vertical_content_alignment(VerticalAlignment::Center)?
+                    .foreground(Brush::solid(Color::rgb(255, 255, 255)))?
+                    .background(Brush::solid(if index == 0 {
+                        Color::rgb(0x2F, 0x5D, 0xA8)
+                    } else {
+                        Color::rgb(0x3A, 0x3C, 0x42)
+                    }))?;
+                if buttons.len() > 4 && labels.len() > 1 {
+                    button = button.width(156.0)?;
+                }
+                subscriptions.push(button.subscribe_click(move |_| run(format!("hud:{id}:{index}")))?);
+                row.children()?.add(&button)?;
+            }
+            rows.children()?.add(&row)?;
         }
         let content = Border::new()?
             .border_brush(Brush::solid(Color::rgb(0x3A, 0x3C, 0x42)))?
             .border_thickness(1.0)?
             .padding((12.0, 9.0, 12.0, 10.0))?
-            .child(Some(&StackPanel::new()?.spacing(10.0)?.child(&text)?.child(&row)?))?;
+            .child(Some(&StackPanel::new()?.spacing(10.0)?.child(&text)?.child(&rows)?))?;
         let themed = ThemeVariantScope::new()?.requested_theme_variant("Dark")?.child(Some(&content))?;
         let window = hud_window()?
             .width(360.0)?

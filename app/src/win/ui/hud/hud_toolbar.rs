@@ -7,6 +7,7 @@
 //! captures.
 
 use super::{native, place_beside, run};
+use crate::ui::{capture_view::parts::rgb, dark_blue};
 use jiffshot_capture::Rect;
 use rustolonia::{
     size_to_content, AppScope, AsControl, Border, Brush, Color, Control, Ellipse, EventSubscription, FontWeight, HorizontalAlignment, Line, MenuFlyout,
@@ -19,9 +20,9 @@ use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-const PILL: Color = Color::rgb(0x1B, 0x1C, 0x1F);
-const GREY: Color = Color::rgb(0x47, 0x4A, 0x51);
-const BLUE: Color = Color::rgb(0x2F, 0x80, 0xED);
+const PILL: Color = rgb(dark_blue::windows_or(dark_blue::CHROME, 0x1B1C1F));
+const GREY: Color = rgb(dark_blue::windows_or(dark_blue::STRONG_BORDER, 0x474A51));
+const BLUE: Color = rgb(dark_blue::windows_or(dark_blue::ACCENT, 0x2F80ED));
 const GREEN: Color = Color::rgb(0x2E, 0xA0, 0x43);
 const LIVE: Color = Color::rgb(0xFF, 0x52, 0x52);
 const HELD: Color = Color::rgb(0xFF, 0xC1, 0x07);

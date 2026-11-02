@@ -16,11 +16,11 @@ use rustolonia::{
     WindowDecorations,
 };
 
-const ACCENT: Color = Color::rgb(0x2F, 0x8C, 0xFF);
+const ACCENT: Color = crate::ui::capture_view::parts::rgb(crate::ui::dark_blue::windows_or(crate::ui::dark_blue::ACCENT_TEXT, 0x2F8CFF));
 const CROSSHAIR: Color = Color::rgb(0xFF, 0xC1, 0x07);
-const LABEL_BACK: Color = Color::rgb(0x1F, 0x20, 0x24);
-const LABEL_TEXT: Color = Color::rgb(0xF1, 0xF3, 0xF4);
-const LABEL_MUTED: Color = Color::rgb(0xA8, 0xAD, 0xB4);
+const LABEL_BACK: Color = crate::ui::capture_view::parts::rgb(crate::ui::dark_blue::windows_or(crate::ui::dark_blue::PANEL, 0x1F2024));
+const LABEL_TEXT: Color = crate::ui::capture_view::parts::rgb(crate::ui::dark_blue::windows_or(crate::ui::dark_blue::TEXT, 0xF1F3F4));
+const LABEL_MUTED: Color = crate::ui::capture_view::parts::rgb(crate::ui::dark_blue::windows_or(crate::ui::dark_blue::SECONDARY_TEXT, 0xA8ADB4));
 const DIM: Color = Color::new(140, 2, 6, 16);
 const FONT: &str = "Segoe UI";
 /// The magnifier shows this many pixels across.

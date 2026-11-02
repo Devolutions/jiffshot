@@ -9,11 +9,14 @@
 #[path = "../../ui/canvas_view.rs"]
 pub mod canvas_view;
 mod capture_view;
+mod dark_blue;
 pub mod dialogs;
 mod extras;
 mod hud;
 mod icons;
 mod main_window;
+#[cfg(windows)]
+mod native_theme;
 mod overlay;
 mod prefs_window;
 mod selftest;
@@ -143,6 +146,10 @@ pub fn mount_main_window(scope: &AppScope, model: impl MainViewModel, show: bool
     let binding = MainBinding::new(model)?;
     MAIN.with(|m| *m.borrow_mut() = Some(binding.clone()));
     let window = main_window::build(scope, &binding)?;
+    #[cfg(windows)]
+    if std::env::var_os("JIFFSHOT_UITEST").is_some() {
+        window.set_show_activated(false)?;
+    }
     MAIN_WINDOW.with(|m| *m.borrow_mut() = Some((scope.clone(), window.clone())));
     if show {
         scope.mount(window)?;

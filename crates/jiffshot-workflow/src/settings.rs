@@ -120,7 +120,7 @@ pub struct Settings {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptureWindow {
-    /// 0 All-in-One, 1 Image, 2 Video.
+    /// 0 Choose, 1 Image, 2 Video.
     pub tab: usize,
     /// The Image tab's selection, as a preset mode name.
     pub selection: String,
@@ -161,7 +161,7 @@ impl Default for CaptureWindow {
 #[serde(default)]
 pub struct Preset {
     pub name: String,
-    /// all (All-in-One), image, window, fullscreen, scrolling, horizontal,
+    /// all (Choose), image, window, fullscreen, scrolling, horizontal,
     /// both, panoramic, freehand, multi, fixed, menu, text, clipboard,
     /// file, video, video-fullscreen or steps.
     pub mode: String,
