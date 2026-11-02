@@ -301,8 +301,11 @@ Describe 'macOS packaging' {
             [void][IO.Directory]::CreateDirectory($frameworks)
             $script:SignedFixtureBinary = Join-Path $macos 'jiffshot'
             $script:SignedFixtureHost = Join-Path $frameworks 'librustolonia_host.dylib'
-            [IO.File]::Copy('/usr/bin/true', $script:SignedFixtureBinary)
-            [IO.File]::Copy('/usr/bin/true', $script:SignedFixtureHost)
+            # Avoid inheriting signing metadata from an Apple system executable.
+            $source = Join-Path $script:Work 'fixture.c'
+            [IO.File]::WriteAllText($source, "int main(void) { return 0; }`n")
+            Invoke-MacRun '/usr/bin/clang' @('-x', 'c', $source, '-o', $script:SignedFixtureBinary)
+            Invoke-MacRun '/usr/bin/clang' @('-x', 'c', '-dynamiclib', $source, '-o', $script:SignedFixtureHost)
             Invoke-MacRun '/usr/bin/codesign' @('--force', '--sign', '-', $script:SignedFixtureHost)
             Write-MacPlist (Join-Path $app 'Contents/Info.plist') ([ordered]@{
                 CFBundleIdentifier = 'com.devolutions.jiffshot.package-test'
@@ -743,14 +746,19 @@ Export-ModuleMember -Function Invoke-MacPackage
         $packaging | Should -Match 'package/macos/build\.ps1'
     }
 
-    It 'builds and tests macOS with the release host before recording its checksums' {
+    It 'builds both macOS architectures and tests arm64 with the release host before recording its checksums' {
         $workflow = [IO.File]::ReadAllText((Join-Path $script:Repository '.github/workflows/ci.yml'))
         $macos = [regex]::Match($workflow, '(?s)\r?\n  macos:\r?\n(.*?)\r?\n  msi:\r?\n').Groups[1].Value
+        $macos | Should -Match '(?m)^[ \t]*- arch: arm64\r?\n[ \t]+target: aarch64-apple-darwin\r?$'
+        $macos | Should -Match '(?m)^[ \t]*- arch: x86_64\r?\n[ \t]+target: x86_64-apple-darwin\r?$'
         $build = [regex]::Match($macos, '- name: Build\r?\n\s+run: cargo build --release --locked -p jiffshot -p jiffshot-cli --target')
-        $test = [regex]::Match($macos, '- name: Test\r?\n\s+run: \|\r?\n\s+cargo test --release --locked --workspace --target')
+        $test = [regex]::Match($macos, "- name: Test\r?\n\s+if: matrix\.arch == 'arm64'\r?\n\s+run: \|\r?\n\s+cargo test --release --locked --workspace --target")
+        $scriptTests = [regex]::Match($macos, "- name: Test macOS PowerShell scripts\r?\n\s+if: matrix\.arch == 'arm64'\r?\n\s+shell: pwsh")
         $build.Success | Should -BeTrue
         $test.Success | Should -BeTrue
+        $scriptTests.Success | Should -BeTrue
         $build.Index | Should -BeLessThan $test.Index
+        $test.Index | Should -BeLessThan $scriptTests.Index
         $macos | Should -Match 'RUSTOLONIA_HOST_LIB: \$\{\{ github\.workspace \}\}/target/\$\{\{ matrix\.target \}\}/release/librustolonia_host\.dylib'
         $macos | Should -Not -Match 'build-host\.ps1|RUSTOLONIA_HOST_DIR|\.ci/rustolonia'
         $macos | Should -Match 'shasum -a 256'
@@ -763,7 +771,7 @@ Export-ModuleMember -Function Invoke-MacPackage
     It 'uses the shared Apple secrets only for release signing and notarizes both artifacts' {
         $workflow = [IO.File]::ReadAllText((Join-Path $script:Repository '.github/workflows/ci.yml'))
         $macos = [regex]::Match($workflow, '(?s)\r?\n  macos:\r?\n(.*?)\r?\n  msi:\r?\n').Groups[1].Value
-        $selection = [regex]::Match($macos, '(?s)- name: Select macOS signing(.*?)- name: Enable Intel').Groups[1].Value
+        $selection = [regex]::Match($macos, '(?s)- name: Select macOS signing(.*?)(?=\r?\n      - )').Groups[1].Value
         $selection | Should -Match "github\.event_name != 'pull_request' && inputs\.signing_environment != ''"
         foreach ($secret in 'APPLE_APP_DEV_ID_APP_CERTIFICATE', 'APPLE_APP_DEV_ID_APP_CERTIFICATE_PASSWORD',
                             'APPLE_BOT_PASSWORD', 'DEVOLUTIONSBOT_TOKEN') {
