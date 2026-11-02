@@ -75,6 +75,19 @@ pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
     follow_theme(scope, &window, sink, theme)?;
     wire_canvas(&ctx, zoom)?;
     wire_window(&ctx, &window)?;
+    #[cfg(windows)]
+    {
+        let app = scope.clone();
+        let editor = UiOnly::new(window.clone());
+        window.clone().on_loaded(scope, move |_| {
+            let result = app.platform_handle(editor.get()).map_err(std::io::Error::other).and_then(|handle| {
+                super::editor_placement::install(handle as windows_sys::Win32::Foundation::HWND)
+            });
+            if let Err(error) = result {
+                eprintln!("Could not position the editor: {error}");
+            }
+        })?;
+    }
     Ok(window)
 }
 

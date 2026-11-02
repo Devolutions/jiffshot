@@ -88,6 +88,14 @@ at the top, so captures are saved where the editor lists them and every
 window has the same theme. Reads and writes share one lock.
 `JIFFSHOT_LIBRARY` overrides the library for both sides without being saved.
 
+The Windows editor keeps its normal outer bounds, display DPI and maximized state
+in a separate `editor_window` section so ordinary editor preference saves do not
+overwrite window placement. On first opening it centers on the pointer's monitor,
+using at most 90% of the work area and the preferred 1500 by 960 logical-pixel size.
+Later openings restore its placement within one monitor's work area. Monitor,
+taskbar and DPI changes refit the window without spanning displays; minimized
+bounds never replace the normal placement (`app/src/win/ui/editor_placement.rs`).
+
 ## Windows preferences
 
 One dialog (`app/src/win/ui/prefs_window.rs`): Capture, Editor, Library, Share and
