@@ -92,6 +92,7 @@ jobs:
     with:
       version: ${{ needs.preflight.outputs.version }}
       signing_environment: ${{ needs.preflight.outputs.signing_environment }}
+      require_macos_notarization: ${{ !inputs.dry_run }}
     secrets: inherit
 
   test-signing-root:

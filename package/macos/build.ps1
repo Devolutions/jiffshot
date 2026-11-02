@@ -15,7 +15,8 @@ param(
     [switch]$RequireNativePopupGate,
     [switch]$RequireNativeTermination,
     [switch]$RequireNativeFileDrag,
-    [switch]$AllowUncheckedHost
+    [switch]$AllowUncheckedHost,
+    [switch]$PrepareForExternalNotarization
 )
 
 Set-StrictMode -Version Latest
@@ -29,7 +30,8 @@ $checked = -not $AllowUncheckedHost
 try {
     Invoke-MacPackage -Binary $Binary -Output $Output -Arch $Arch -Identity $Identity `
         -Keychain $Keychain -NotaryProfile $NotaryProfile `
-        -RequirePopupGate $checked -RequireTermination $checked -RequireFileDrag $checked
+        -RequirePopupGate $checked -RequireTermination $checked -RequireFileDrag $checked `
+        -PrepareForExternalNotarization:$PrepareForExternalNotarization
 }
 catch {
     [Console]::Error.WriteLine("macOS packaging failed: $($_.Exception.Message)")
