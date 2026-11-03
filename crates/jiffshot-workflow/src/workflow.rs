@@ -1194,6 +1194,107 @@ mod tests {
     use super::*;
 
     #[cfg(windows)]
+    struct TestSecurityDescriptor(*mut core::ffi::c_void);
+
+    #[cfg(windows)]
+    impl Drop for TestSecurityDescriptor {
+        fn drop(&mut self) {
+            // SAFETY: Windows allocated the descriptor and this guard owns it.
+            unsafe { windows_sys::Win32::Foundation::LocalFree(self.0) };
+        }
+    }
+
+    #[cfg(windows)]
+    fn test_security_descriptor(sddl: &str) -> TestSecurityDescriptor {
+        use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+
+        let text = jiffshot_capture::wide(sddl);
+        let mut descriptor = std::ptr::null_mut();
+        // SAFETY: the SDDL string is NUL-terminated and the descriptor is owned below.
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    text.as_ptr(),
+                    1,
+                    &mut descriptor,
+                    std::ptr::null_mut(),
+                )
+            },
+            0,
+            "could not create test ACL {sddl}: {}",
+            io::Error::last_os_error()
+        );
+        TestSecurityDescriptor(descriptor)
+    }
+
+    #[cfg(windows)]
+    fn dacl_grants_only_sid(descriptor: &TestSecurityDescriptor, sid: &str) -> io::Result<bool> {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+        use windows_sys::Win32::Security::{
+            EqualSid, GetAce, GetSecurityDescriptorDacl, IsValidSid, ACCESS_ALLOWED_ACE,
+            ACE_HEADER, ACL,
+        };
+
+        // WinNT.h defines ACCESS_ALLOWED_ACE_TYPE as zero.
+        const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut acl: *mut ACL = std::ptr::null_mut();
+        // SAFETY: descriptor is live and the output pointers are valid.
+        if unsafe {
+            GetSecurityDescriptorDacl(
+                descriptor.0,
+                &mut present,
+                &mut acl,
+                &mut defaulted,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if present == 0 || acl.is_null() {
+            return Ok(false);
+        }
+        // SAFETY: the DACL belongs to the live security descriptor.
+        if unsafe { (*acl).AceCount } != 1 {
+            return Ok(false);
+        }
+        let mut entry = std::ptr::null_mut();
+        // SAFETY: the DACL is live and the output pointer is valid.
+        if unsafe { GetAce(acl, 0, &mut entry) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: GetAce returned a valid ACE within the DACL.
+        let header = unsafe { &*entry.cast::<ACE_HEADER>() };
+        if header.AceType != ACCESS_ALLOWED_ACE_TYPE
+            || usize::from(header.AceSize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>()
+        {
+            return Ok(false);
+        }
+        // SAFETY: the ACE is an access-allowed ACE of at least the fixed size.
+        let actual = unsafe { std::ptr::addr_of!((*entry.cast::<ACCESS_ALLOWED_ACE>()).SidStart) }
+            .cast_mut()
+            .cast();
+        // SAFETY: the SID is part of the access-allowed ACE returned by Windows.
+        if unsafe { IsValidSid(actual) } == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid ACL trustee SID"));
+        }
+        let mut expected = std::ptr::null_mut();
+        let sid = jiffshot_capture::wide(sid);
+        // SAFETY: the SID string is NUL-terminated and the output pointer is valid.
+        if unsafe { ConvertStringSidToSidW(sid.as_ptr(), &mut expected) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: both SIDs are valid and live; Windows allocated expected.
+        let matches = unsafe { EqualSid(actual, expected) } != 0;
+        // SAFETY: Windows allocated the expected SID.
+        unsafe { LocalFree(expected) };
+        Ok(matches)
+    }
+
+    #[cfg(windows)]
     fn windows_test_library(name: &str) -> (Library, PathBuf) {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1335,11 +1436,7 @@ mod tests {
     #[test]
     fn windows_temporary_shares_are_private_to_the_current_user() {
         use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Foundation::LocalFree;
-        use windows_sys::Win32::Security::Authorization::{
-            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
-            SE_FILE_OBJECT,
-        };
+        use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
         use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
 
         assert!(windows_temporary_export_path("../capture", "png").is_err());
@@ -1363,33 +1460,36 @@ mod tests {
                 )
             };
             assert_eq!(status, 0, "could not read ACL for {}", path.display());
-            let mut text = std::ptr::null_mut();
-            // SAFETY: the descriptor is live; Windows allocates the returned string.
-            let converted = unsafe {
-                ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                    descriptor,
-                    1,
-                    DACL_SECURITY_INFORMATION,
-                    &mut text,
-                    std::ptr::null_mut(),
-                )
-            };
-            assert_ne!(converted, 0, "could not format ACL for {}", path.display());
-            // SAFETY: Windows returned a NUL-terminated UTF-16 string.
-            let acl = unsafe {
-                let len = (0..).take_while(|&index| *text.add(index) != 0).count();
-                String::from_utf16_lossy(std::slice::from_raw_parts(text, len))
-            };
-            // SAFETY: both pointers are allocations returned by Windows.
-            unsafe {
-                LocalFree(text.cast());
-                LocalFree(descriptor);
-            }
-            assert_eq!(acl.matches("(A;").count(), 1, "{acl}");
-            assert!(acl.contains(&format!(";;;{sid})")), "{acl}");
+            let descriptor = TestSecurityDescriptor(descriptor);
+            assert!(
+                dacl_grants_only_sid(&descriptor, &sid).unwrap(),
+                "ACL for {} does not grant access only to {sid}",
+                path.display()
+            );
         }
         std::fs::remove_file(&target).unwrap();
         std::fs::remove_dir(target.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_acl_matches_well_known_sid_aliases() {
+        let descriptor = test_security_descriptor("D:P(A;OICI;FA;;;BA)");
+        assert!(dacl_grants_only_sid(&descriptor, "S-1-5-32-544").unwrap());
+        assert!(!dacl_grants_only_sid(&descriptor, "S-1-5-18").unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_acl_rejects_additional_or_missing_trustees() {
+        for sddl in [
+            "D:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)",
+            "D:P(D;OICI;FA;;;BA)",
+            "D:P",
+        ] {
+            let descriptor = test_security_descriptor(sddl);
+            assert!(!dacl_grants_only_sid(&descriptor, "S-1-5-32-544").unwrap(), "{sddl}");
+        }
     }
 
     #[test]
