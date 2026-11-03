@@ -1,33 +1,26 @@
 //! PCM playback through GStreamer's default audio sink.
 
-use super::{hns, seconds};
+use super::{PlaybackAudio, Span};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
-use jiffshot_capture::media::Reader;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 fn play_inner(
     path: &Path,
-    from: f64,
-    end: f64,
+    pieces: &[Span],
     stop: &AtomicBool,
     volume: &AtomicU32,
 ) -> Result<(), String> {
-    let mut reader = Reader::open(path)?;
-    let Some(spec) = reader.audio else {
-        return Ok(());
-    };
-    reader.select_video(false)?;
-    reader.select_audio(true)?;
-    reader.seek(hns(from))?;
+    let mut reader = PlaybackAudio::open(path, pieces)?;
+    let spec = reader.spec;
     let pipeline = gst::parse::launch(&format!(
         "appsrc name=src format=time is-live=false block=true max-bytes=65536 \
-         caps=audio/x-raw,format=S16LE,layout=interleaved,rate={},channels=2 \
+         caps=audio/x-raw,format=S16LE,layout=interleaved,rate={},channels={} \
          ! audioconvert ! volume name=volume ! autoaudiosink",
-        spec.sample_rate
+        spec.sample_rate, spec.channels
     ))
     .map_err(|e| e.to_string())?
     .downcast::<gst::Pipeline>()
@@ -44,12 +37,9 @@ fn play_inner(
     let rate = u64::from(spec.sample_rate);
     while !stop.load(Ordering::Acquire) {
         gain.set_property("volume", f64::from(volume.load(Ordering::Relaxed)) / 65535.0);
-        let Some((at, pcm)) = reader.next_audio()? else {
+        let Some(pcm) = reader.next()? else {
             break;
         };
-        if seconds(at) >= end {
-            break;
-        }
         let mut buffer = gst::Buffer::from_slice(
             pcm.iter()
                 .flat_map(|s| s.to_le_bytes())
@@ -59,7 +49,7 @@ fn play_inner(
             let buffer = buffer.get_mut().expect("a new buffer is writable");
             buffer.set_pts(gst::ClockTime::from_nseconds(sent * 1_000_000_000 / rate));
         }
-        sent += pcm.len() as u64 / 2;
+        sent += pcm.len() as u64 / u64::from(spec.channels);
         if src.push_buffer(buffer).is_err() {
             break;
         }
@@ -86,8 +76,8 @@ fn play_inner(
     Ok(())
 }
 
-pub fn play(path: &Path, from: f64, end: f64, stop: &AtomicBool, volume: &AtomicU32) {
-    if let Err(error) = play_inner(path, from, end, stop, volume) {
-        eprintln!("video sound playback: {error}");
+pub fn play(path: &Path, pieces: &[Span], stop: &AtomicBool, volume: &AtomicU32) {
+    if let Err(error) = play_inner(path, pieces, stop, volume) {
+        crate::app::post(move |app| app.set_status(format!("Audio playback failed: {error}")));
     }
 }

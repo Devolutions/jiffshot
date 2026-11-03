@@ -97,7 +97,7 @@ pub enum Tone {
 
 impl Tone {
     /// `#AARRGGBB` in the dark and the light theme.
-    fn argb(self, dark: bool) -> u32 {
+    pub(super) fn argb(self, dark: bool) -> u32 {
         let (dark_argb, light_argb) = match self {
             Tone::Window => (dark_blue::windows_or(dark_blue::WINDOW, 0xFF1B1C1F), 0xFFF3F4F6),
             Tone::Panel => (dark_blue::windows_or(dark_blue::PANEL, 0xFF232428), 0xFFFFFFFF),

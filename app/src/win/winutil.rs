@@ -113,8 +113,70 @@ fn shell(verb: &str, file: &Path, args: Option<&str>) -> bool {
 
 /// Opens Explorer with `path` selected.
 #[cfg(windows)]
-pub fn reveal(path: &Path) {
-    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+pub fn reveal(path: &Path) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::RPC_E_CHANGED_MODE;
+    use windows_sys::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows_sys::Win32::UI::Shell::SHOpenFolderAndSelectItems;
+
+    let item = ShellItem::parse(path)?;
+    // SAFETY: initializes COM on this thread; an existing apartment is also usable.
+    let initialized =
+        unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+    if initialized < 0 && initialized != RPC_E_CHANGED_MODE {
+        return Err(format!(
+            "Could not initialize the Windows shell (HRESULT {initialized:#010x})"
+        ));
+    }
+    // With no child items, the shell selects this absolute item in its parent folder.
+    // SAFETY: item owns a valid absolute PIDL, which outlives the synchronous call.
+    let result = unsafe { SHOpenFolderAndSelectItems(item.0, 0, std::ptr::null(), 0) };
+    if initialized >= 0 {
+        // SAFETY: balances this call's successful COM initialization.
+        unsafe { CoUninitialize() };
+    }
+    if result < 0 {
+        return Err(format!(
+            "Could not select the capture in Explorer (HRESULT {result:#010x})"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+struct ShellItem(*mut windows_sys::Win32::UI::Shell::Common::ITEMIDLIST);
+
+#[cfg(windows)]
+impl ShellItem {
+    fn parse(path: &Path) -> Result<Self, String> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::Shell::{ILCreateFromPathW, PathCchStripPrefix};
+
+        path.metadata().map_err(|error| error.to_string())?;
+        let absolute = std::path::absolute(path).map_err(|error| error.to_string())?;
+        let mut path: Vec<u16> = absolute.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: path is a writable, NUL-terminated buffer with the supplied capacity.
+        // Explorer needs normal DOS/UNC paths, not canonicalize's extended-length prefix.
+        let result = unsafe { PathCchStripPrefix(path.as_mut_ptr(), path.len()) };
+        if result < 0 {
+            return Err(format!(
+                "Could not prepare the capture's shell path (HRESULT {result:#010x})"
+            ));
+        }
+        // SAFETY: path is a NUL-terminated absolute filesystem path.
+        let item = unsafe { ILCreateFromPathW(path.as_ptr()) };
+        if item.is_null() {
+            return Err("Could not resolve the capture's Windows shell location".to_owned());
+        }
+        Ok(Self(item))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ShellItem {
+    fn drop(&mut self) {
+        // SAFETY: this PIDL was allocated by ILCreateFromPathW and is freed exactly once.
+        unsafe { windows_sys::Win32::UI::Shell::ILFree(self.0) };
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -133,12 +195,11 @@ pub(crate) fn file_url(path: &Path) -> Result<objc2::rc::Retained<objc2_foundati
 
 /// Opens Finder with `path` selected.
 #[cfg(target_os = "macos")]
-pub fn reveal(path: &Path) {
-    match file_url(path) {
-        Ok(url) => objc2_app_kit::NSWorkspace::sharedWorkspace()
-            .activateFileViewerSelectingURLs(&objc2_foundation::NSArray::from_retained_slice(&[url])),
-        Err(error) => eprintln!("Could not reveal {}: {error}", path.display()),
-    }
+pub fn reveal(path: &Path) -> Result<(), String> {
+    let url = file_url(path)?;
+    objc2_app_kit::NSWorkspace::sharedWorkspace()
+        .activateFileViewerSelectingURLs(&objc2_foundation::NSArray::from_retained_slice(&[url]));
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -311,8 +372,9 @@ pub fn bring_forward(_handle: isize) {}
 pub fn minimize() {}
 
 #[cfg(target_os = "linux")]
-pub fn reveal(path: &Path) {
-    open_folder(path.parent().unwrap_or(path));
+pub fn reveal(path: &Path) -> Result<(), String> {
+    jiffshot_capture::os::open_path(path.parent().unwrap_or(path))
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -361,5 +423,73 @@ mod tests {
             0, 0, 255, 128, 255, 0, 0, 255,
             0, 0, 0, 0, 0, 255, 0, 64,
         ]);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::UI::Shell::SHGetPathFromIDListW;
+
+    #[test]
+    fn shell_item_preserves_capture_folder_and_filename() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the system clock is after the Unix epoch")
+            .as_nanos();
+        let folder = std::env::temp_dir().join(format!(
+            "jiffshot reveal test {} {unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&folder).expect("create the isolated capture folder");
+        for name in [
+            "Capture 2026-11-03 093441.png",
+            "Capture, selected.mp4",
+            "Capture \u{00e9}\u{4e2d}.png",
+        ] {
+            let path = folder.join(name);
+            std::fs::write(&path, []).expect("create the capture fixture");
+            let canonical = std::fs::canonicalize(&path).expect("resolve the expected capture");
+            for input in [&path, &canonical] {
+                let item = ShellItem::parse(input).expect("resolve the capture's shell item");
+                let mut buffer = [0_u16; 260];
+                // SAFETY: item is a valid PIDL and buffer has the required MAX_PATH capacity.
+                assert_ne!(
+                    unsafe { SHGetPathFromIDListW(item.0, buffer.as_mut_ptr()) },
+                    0,
+                    "read the shell path for {input:?}"
+                );
+                let length = buffer
+                    .iter()
+                    .position(|&c| c == 0)
+                    .expect("terminated shell path");
+                let selected = PathBuf::from(OsString::from_wide(&buffer[..length]));
+                assert_eq!(
+                    std::fs::canonicalize(selected).expect("resolve the shell's selected file"),
+                    canonical,
+                    "the shell must select the capture in its actual folder for {input:?}"
+                );
+            }
+            std::fs::remove_file(path).expect("remove the capture fixture");
+        }
+        std::fs::remove_dir(folder).expect("remove the isolated capture folder");
+    }
+
+    #[test]
+    fn reveal_missing_capture_reports_an_error() {
+        let missing = std::env::temp_dir()
+            .join(format!("jiffshot-missing-capture-{}", std::process::id()))
+            .join("Capture.png");
+        let error = reveal(&missing).expect_err("a missing capture must not open a default folder");
+        assert_eq!(
+            error,
+            missing
+                .metadata()
+                .expect_err("the fixture must not exist")
+                .to_string(),
+            "the reveal error must report the missing capture"
+        );
     }
 }

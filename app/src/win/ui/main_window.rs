@@ -13,6 +13,7 @@ mod main_library;
 mod main_menu;
 mod main_panel;
 mod main_tools;
+mod video_timeline;
 
 use super::canvas_view::{CanvasView, FLAG_CHANGED};
 use self::main_bars::{narration_bar, status_bar, video_bar, ZoomView};

@@ -8,24 +8,32 @@ use super::main_common::{
 };
 use crate::vm::{LibraryItemFields, LibraryItemViewModel, MainViewModelSink};
 use rustolonia::{
-    AnyEl, Border, Button, Dock, DockPanel, El, Ellipse, FontWeight, HorizontalAlignment, Image,
-    MenuItem, Orientation, Panel, Result, ScrollBarVisibility, ScrollViewer, Separator, Signal,
-    Slider, StackPanel, Stretch, TextBlock, TextBox, ToggleButton, VerticalAlignment, WrapPanel,
+    AnyEl, Border, Button, Dock, DockPanel, El, Ellipse, FontWeight, Grid, HorizontalAlignment,
+    Image, MenuItem, Orientation, Panel, Result, ScrollBarVisibility, ScrollViewer, Separator,
+    Signal, Slider, StackPanel, Stretch, TextBlock, TextBox, ToggleButton, VerticalAlignment,
+    WrapPanel,
 };
 
 /// The library panel, docked along the bottom.
 pub fn library_panel(ctx: &Ctx) -> El<Border> {
     let (s, theme, window_height) = (ctx.sink, ctx.theme, ctx.window_height);
     let expanded = s.library_expanded;
-    let small = |button: El<Button>| button.padding((8.0, 2.0)).font_size(11.0);
-    let header = DockPanel::el()
+    let small = |button: El<Button>| {
+        button
+            .padding((8.0, 2.0))
+            .font_size(11.0)
+            .vertical_alignment(VerticalAlignment::Center)
+    };
+    let header = Grid::el()
         .dock_panel_dock(Dock::Top)
+        .column_definitions("Auto,*,Auto")
         .margin((10.0, 6.0, 10.0, 0.0))
         .child(
             StackPanel::el()
-                .dock_panel_dock(Dock::Right)
+                .grid_column(2)
                 .orientation(Orientation::Horizontal)
                 .spacing(6.0)
+                .vertical_alignment(VerticalAlignment::Center)
                 .child(
                     TextBox::el()
                         .width(170.0)
@@ -36,18 +44,21 @@ pub fn library_panel(ctx: &Ctx) -> El<Border> {
                         .min_height(0.0)
                         .height(26.0)
                         .accepts_return(false)
+                        .vertical_alignment(VerticalAlignment::Center)
                         .vertical_content_alignment(VerticalAlignment::Center),
                 )
                 .child(
                     choice_box(theme, move || s.library_filters.get(), s.library_filter)
                         .min_width(120.0)
                         .font_size(11.0)
+                        .vertical_alignment(VerticalAlignment::Center)
                         .tool_tip_tip("Show only"),
                 )
                 .child(
                     choice_box(theme, move || s.library_sorts.get(), s.library_sort)
                         .min_width(90.0)
                         .font_size(11.0)
+                        .vertical_alignment(VerticalAlignment::Center)
                         .tool_tip_tip("Sort by"),
                 )
                 .child(
@@ -74,6 +85,7 @@ pub fn library_panel(ctx: &Ctx) -> El<Border> {
                         .checked(expanded.two_way())
                         .padding((8.0, 2.0))
                         .font_size(11.0)
+                        .vertical_alignment(VerticalAlignment::Center)
                         .tool_tip_tip(crate::ui::shortcut("Show the whole library (Ctrl+L)")),
                 )
                 .child(
@@ -91,6 +103,7 @@ pub fn library_panel(ctx: &Ctx) -> El<Border> {
         )
         .child(
             TextBlock::el()
+                .grid_column(1)
                 .text(s.library_info)
                 .margin((10.0, 0.0))
                 .foreground(theme.brush(Tone::Muted))

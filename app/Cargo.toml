@@ -19,7 +19,7 @@ jiffshot-doc = { path = "../crates/jiffshot-doc" }
 [target.'cfg(windows)'.dependencies]
 jiffshot-capture = { path = "../crates/jiffshot-capture" }
 jiffshot-workflow = { path = "../crates/jiffshot-workflow" }
-windows-sys = { workspace = true, features = ["Win32_Media_Audio", "Win32_Security_Credentials"] }
+windows-sys = { workspace = true, features = ["Win32_Media_Audio", "Win32_Security_Credentials", "Win32_UI_Shell_Common"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { version = "3.7", default-features = false, features = ["image-data", "wayland-data-control"] }

@@ -130,24 +130,22 @@ pub fn video_bar(ctx: &Ctx) -> El<Border> {
         .dock_panel_dock(Dock::Left)
         .orientation(Orientation::Horizontal)
         .spacing(6.0)
+        .child(Button::el().content("◀|").tool_tip_tip("Previous frame").command(command(s.prev_frame_enabled, |m| m.prev_frame())))
         .child(Button::el().width(40.0).content(TextBlock::el().text(move || if s.playing.get() { "⏸" } else { "▶" })).command(command(s.play_pause_enabled, |m| m.play_pause())))
-        .child(TextBlock::el().vertical_alignment(VerticalAlignment::Center).width(60.0).text(move || time_text(s.video_position.get())));
+        .child(Button::el().content("|▶").tool_tip_tip("Next frame").command(command(s.next_frame_enabled, |m| m.next_frame())))
+        .child(TextBlock::el().vertical_alignment(VerticalAlignment::Center).text(move || format!("{} / {}", time_text(s.video_position.get()), time_text(s.video_duration.get()))));
     let editing = StackPanel::el()
         .dock_panel_dock(Dock::Right)
         .orientation(Orientation::Horizontal)
         .spacing(6.0)
-        .child(TextBlock::el().vertical_alignment(VerticalAlignment::Center).foreground(theme.brush(Tone::Muted)).text(move || time_text(s.video_duration.get())))
-        .child(Button::el().content("Set start").tool_tip_tip("Trim everything before the playhead").command(command(s.set_trim_start_enabled, |m| m.set_trim_start())))
-        .child(Button::el().content("Set end").tool_tip_tip("Trim everything after the playhead").command(command(s.set_trim_end_enabled, |m| m.set_trim_end())))
-        .child(Button::el().content("◀|").tool_tip_tip("Previous frame").command(command(s.prev_frame_enabled, |m| m.prev_frame())))
-        .child(Button::el().content("|▶").tool_tip_tip("Next frame").command(command(s.next_frame_enabled, |m| m.next_frame())))
-        .child(Button::el().content("Cut selection…").tool_tip_tip("Save the video without the part between start and end").command(command(s.cut_selection_enabled, |m| m.cut_selection())))
-        .child(Button::el().content("Save selection…").tool_tip_tip("Save the part between start and end as a new MP4").command(command(s.export_video_enabled, |m| m.export_video())))
-        .child(Button::el().content("Edit frame").tool_tip_tip("Open the current frame as an image").command(command(s.frame_to_image_enabled, |m| m.frame_to_image())));
+        .child(Button::el().content("Mark start").tool_tip_tip("Set the selection start at the playhead").command(command(s.set_trim_start_enabled, |m| m.set_trim_start())))
+        .child(Button::el().content("Mark end").tool_tip_tip("Set the selection end at the playhead").command(command(s.set_trim_end_enabled, |m| m.set_trim_end())))
+        .child(Button::el().content("Cut selection").tool_tip_tip("Remove the selected section immediately (Delete). The original is unchanged.").command(command(s.cut_selection_enabled, |m| m.cut_selection())))
+        .child(Button::el().content("↶").tool_tip_tip(crate::ui::shortcut("Undo cut (Ctrl+Z)")).command(command(s.undo_enabled, |m| m.undo())))
+        .child(Button::el().content("↷").tool_tip_tip(crate::ui::shortcut("Redo cut (Ctrl+Y)")).command(command(s.redo_enabled, |m| m.redo())))
+        .child(Button::el().content(TextBlock::el().text(move || if s.video_saving.get() { "Saving…" } else { "Save video" })).enabled(move || !s.video_saving.get()).tool_tip_tip("Save an edited library copy, keeping the original (Ctrl+S)").command(command(s.save_enabled, |m| m.save())));
     let timeline = StackPanel::el()
-        .margin((10.0, 0.0))
-        .vertical_alignment(VerticalAlignment::Center)
-        .child(Slider::el().minimum(0.0).maximum(s.video_duration).value(s.video_position.two_way()))
+        .child(super::video_timeline::timeline(s, theme))
         .child(TextBlock::el().text(s.video_info).font_size(11.0).foreground(theme.brush(Tone::Muted)));
     Border::el()
         .dock_panel_dock(Dock::Bottom)
@@ -156,5 +154,10 @@ pub fn video_bar(ctx: &Ctx) -> El<Border> {
         .border_brush(theme.brush(Tone::Border))
         .border_thickness((0.0, 1.0, 0.0, 0.0))
         .visible(move || s.mode.with(|m| m == "Video"))
-        .child(DockPanel::el().child(gif).child(playback).child(editing).child(timeline))
+        .child(
+            DockPanel::el()
+                .child(gif)
+                .child(DockPanel::el().dock_panel_dock(Dock::Top).child(editing).child(playback))
+                .child(timeline),
+        )
 }

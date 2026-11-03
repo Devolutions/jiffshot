@@ -415,11 +415,20 @@ impl MainViewModel for Model {
     command!(combine_images, |app| app.combine_images());
     command!(open_library_folder, |app| app.open_library_folder());
     command!(exit, |app| app.exit());
-    command!(undo, |_app| canvas::with_editor(|e| e.undo()));
-    command!(redo, |_app| canvas::with_editor(|e| e.redo()));
+    command!(undo, |app| {
+        if app.video.is_some() { app.video_action("undo"); }
+        else { canvas::with_editor(|e| e.undo()); }
+    });
+    command!(redo, |app| {
+        if app.video.is_some() { app.video_action("redo"); }
+        else { canvas::with_editor(|e| e.redo()); }
+    });
     command!(copy, |app| app.copy());
     command!(cut, |app| app.cut());
-    command!(delete, |_app| canvas::with_editor(|e| e.delete_selected()));
+    command!(delete, |app| {
+        if app.video.is_some() { app.video_action("cut"); }
+        else { canvas::with_editor(|e| e.delete_selected()); }
+    });
     command!(duplicate, |_app| canvas::with_editor(
         |e| e.duplicate_selected()
     ));
