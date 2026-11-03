@@ -2848,18 +2848,9 @@ impl App {
                     Some(arg.to_ascii_lowercase()).filter(|f| !f.is_empty());
                 self.settings.save();
             }
-            "ftp" => {
-                #[cfg(target_os = "macos")]
-                self.save_share_preferences(Some(arg), &[]);
-                #[cfg(windows)]
-                {
-                    self.settings.ftp = Some(arg.trim().to_owned()).filter(|u| !u.is_empty());
-                    self.settings.save();
-                }
-            }
             "program-remove" => {
                 #[cfg(target_os = "macos")]
-                self.save_share_preferences(None, &[arg.to_owned()]);
+                self.save_share_preferences(&[arg.to_owned()]);
                 #[cfg(windows)]
                 {
                     self.settings.programs.retain(|(n, _)| n != arg);
@@ -3104,21 +3095,6 @@ impl App {
             return;
         }
         #[cfg(target_os = "macos")]
-        if to == "FTP" {
-            let Some(url) = self.settings.ftp.clone() else {
-                self.set_status("Share failed: Set an FTP destination in Preferences and add a \"Jiffshot FTP\" password for the username in Keychain Access.");
-                return;
-            };
-            let file = match self.temp_export("png") {
-                Ok(file) => file,
-                Err(error) => return self.set_status(format!("Share failed: {error}")),
-            };
-            self.share_work("Uploading to FTP…", move || {
-                crate::share::ftp(&url, &file).map(|at| format!("Uploaded to {at}"))
-            });
-            return;
-        }
-        #[cfg(target_os = "macos")]
         if matches!(to, "Preview" | "Paint" | "Folder…") {
             let file = match self.temp_export("png") {
                 Ok(file) => file,
@@ -3162,11 +3138,6 @@ impl App {
             "Paint" => office("mspaint.exe")(&self.temp_export("png")?).map(|_| "Opened in Paint".into()),
             "Preview" => office("mspaint.exe")(&self.temp_export("png")?).map(|_| "Opened in Preview".into()),
             "Print" => share::print(&self.temp_export("png")?).map(|opened| if opened { "Sent to the printer dialog" } else { "Print cancelled" }.into()),
-            "FTP" => match self.settings.ftp.clone() {
-                Some(url) => share::ftp(&url, &self.temp_export("png")?).map(|at| format!("Uploaded to {at}")),
-                None if cfg!(target_os = "macos") => Err("Set an FTP destination in Preferences and add a \"Jiffshot FTP\" password for the username in Keychain Access.".into()),
-                None => Err("Set \"ftp\": \"ftp://user@host/folder\" in %APPDATA%\\Jiffshot\\editor.json, and the password as the \"Jiffshot FTP\" credential (cmdkey /generic:\"Jiffshot FTP\" /user:USER /pass)".into()),
-            },
             "Folder…" => {
                 let file = self.temp_export("png")?;
                 let Some(window) = self.window() else { return Err("no window".into()) };
@@ -3359,21 +3330,16 @@ impl App {
     }
 
     #[cfg(target_os = "macos")]
-    pub(crate) fn save_share_preferences(&mut self, ftp: Option<&str>, names: &[String]) -> bool {
-        let previous_ftp = self.settings.ftp.clone();
+    pub(crate) fn save_share_preferences(&mut self, names: &[String]) -> bool {
         let previous_programs = self.settings.programs.clone();
-        if let Some(ftp) = ftp {
-            self.settings.ftp = Some(ftp.trim().to_owned()).filter(|value| !value.is_empty());
-        }
         self.settings
             .programs
             .retain(|(name, _)| !names.contains(name));
         let removed = previous_programs.len() - self.settings.programs.len();
-        if removed == 0 && self.settings.ftp == previous_ftp {
+        if removed == 0 {
             return true;
         }
         if let Err(error) = self.settings.try_save() {
-            self.settings.ftp = previous_ftp;
             self.settings.programs = previous_programs;
             self.set_status(format!("Could not save Share preferences: {error}"));
             return false;

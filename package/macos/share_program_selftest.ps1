@@ -36,10 +36,9 @@ $markers = @(
     'malformed settings were not overwritten by unrelated preferences',
     'failed Editor preferences preserved the previous settings',
     'Editor preferences saved together without changing Share',
-    'FTP and multiple destination removals were saved together',
+    'multiple destination removals were saved together',
     'the UI remained responsive while a share was blocked',
     'the sharing worker reported completion',
-    'FTP errors were reported by the sharing worker',
     'folder picker cancellation was reported',
     'folder sharing copied the image without replacing an existing file'
 )
@@ -111,9 +110,7 @@ try {
     Invoke-ShareCase $preferences $binaryPath $hostPath $fixture.Driver "prefs:$preferences" `
         'JIFFSHOT_UITEST_SHARE_PREFS' @(
             'the Preferences window rejected a stale Share removal',
-            'the Preferences window removed only the selected destination',
-            'the Preferences window corrected the legacy FTP value',
-            'the Preferences window cleared the FTP value'
+            'the Preferences window removed only the selected destination'
         ) 90 25
     Write-Host 'Custom application sharing passed.'
 }

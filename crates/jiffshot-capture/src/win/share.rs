@@ -5,6 +5,79 @@ use crate::wide;
 use std::path::{Path, PathBuf};
 use windows_sys::Win32::Foundation::HWND;
 
+fn app_path_value(value: &str) -> Option<PathBuf> {
+    let value = value.trim_end_matches('\0').trim().trim_matches('"');
+    let path = PathBuf::from(value);
+    path.is_absolute().then_some(path)
+}
+
+fn registered_program(program: &str) -> Option<PathBuf> {
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegGetValueW,
+    };
+
+    let key = wide(&format!(
+        r"Software\Microsoft\Windows\CurrentVersion\App Paths\{program}"
+    ));
+    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        let mut size = 0;
+        // SAFETY: the key is NUL-terminated; a null output buffer requests its size.
+        let status = unsafe {
+            RegGetValueW(
+                root,
+                key.as_ptr(),
+                std::ptr::null(),
+                RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        };
+        if status != ERROR_SUCCESS || size < 2 || size % 2 != 0 {
+            continue;
+        }
+
+        let mut value = vec![0u16; size as usize / 2];
+        // SAFETY: `value` has the queried byte capacity and all strings live through the call.
+        let status = unsafe {
+            RegGetValueW(
+                root,
+                key.as_ptr(),
+                std::ptr::null(),
+                RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+                std::ptr::null_mut(),
+                value.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        if status != ERROR_SUCCESS {
+            continue;
+        }
+        let value = String::from_utf16_lossy(&value[..size as usize / 2]);
+        let Some(path) = app_path_value(&value) else {
+            continue;
+        };
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn executable_path(program: &str) -> Result<PathBuf, String> {
+    let path = Path::new(program);
+    if path.is_absolute() && path.is_file() {
+        return Ok(path.to_owned());
+    }
+    if path.components().count() == 1 {
+        if let Some(path) = registered_program(program) {
+            return Ok(path);
+        }
+    }
+    Err(format!("{program} is not installed or could not start"))
+}
+
 fn shell(owner: isize, verb: &str, file: &str, args: Option<&str>) -> bool {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -28,9 +101,15 @@ fn quoted(p: &Path) -> String {
     format!("\"{}\"", p.display())
 }
 
-/// Opens `file` in a program found on the App Paths list (`winword.exe`…).
+/// Opens `file` in an absolute executable path or an executable registered in App Paths.
 pub fn open_in(owner: isize, program: &str, file: &Path) -> Result<(), String> {
-    if shell(owner, "open", program, Some(&quoted(file))) {
+    let executable = executable_path(program)?;
+    if shell(
+        owner,
+        "open",
+        &executable.to_string_lossy(),
+        Some(&quoted(file)),
+    ) {
         Ok(())
     } else {
         Err(format!("{program} is not installed or could not start"))
@@ -163,5 +242,20 @@ pub fn email(owner: isize, file: &Path, subject: &str) -> Result<bool, String> {
                 "the mail program refused the message (MAPI error {code})"
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_paths_reject_bare_names_and_relative_paths() {
+        assert!(app_path_value("mspaint.exe").is_none());
+        assert!(app_path_value(r".\mspaint.exe").is_none());
+        assert_eq!(
+            app_path_value("\"C:\\Windows\\System32\\mspaint.exe\"\0"),
+            Some(PathBuf::from(r"C:\Windows\System32\mspaint.exe"))
+        );
     }
 }
