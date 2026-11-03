@@ -23,9 +23,6 @@ pub struct Settings {
     pub style_lists: BTreeMap<String, Vec<Style>>,
     /// Favorite quick styles, by tool name; shown first.
     pub favorite_styles: BTreeMap<String, Vec<Style>>,
-    /// Share destination `ftp://user@host/folder`; the password is the
-    /// "Jiffshot FTP" generic credential in Windows Credential Manager.
-    pub ftp: Option<String>,
     /// Programs added as share destinations (name, executable).
     pub programs: Vec<(String, PathBuf)>,
     /// The shared color theme, "Dark", "Light" or "System", as loaded

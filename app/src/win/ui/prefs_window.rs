@@ -72,19 +72,13 @@ fn share_checkbox(value: std::result::Result<Option<bool>, String>) -> std::resu
 }
 
 #[cfg(target_os = "macos")]
-fn share_text(value: std::result::Result<Option<String>, String>) -> std::result::Result<Value, String> {
-    Ok(Value::String(value?.unwrap_or_default()))
-}
-
-#[cfg(target_os = "macos")]
 fn share_values(inputs: &[Input]) -> std::result::Result<Value, String> {
-    if inputs.len() < 3 {
+    if inputs.is_empty() {
         return Err("the Share preference fields are incomplete".into());
     }
     let values = inputs.iter().enumerate().map(|(index, input)| match (index, input) {
-        (0, Input::Text(control)) => share_text(control.get_text().map_err(|error| format!("could not read the FTP destination: {error}"))),
-        (1 | 2, Input::Nothing) => Ok(Value::Null),
-        (3.., Input::Check(control)) => share_checkbox(control.get_is_checked().map_err(|error| format!("could not read a Share destination: {error}"))),
+        (0, Input::Nothing) => Ok(Value::Null),
+        (1.., Input::Check(control)) => share_checkbox(control.get_is_checked().map_err(|error| format!("could not read a Share destination: {error}"))),
         _ => Err("the Share preference fields are invalid".into()),
     }).collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(Value::Array(values))
@@ -232,9 +226,6 @@ mod tests {
         assert_eq!(share_checkbox(Ok(Some(false))).unwrap(), Value::Bool(false));
         assert!(share_checkbox(Ok(None)).is_err());
         assert_eq!(share_checkbox(Err("checkbox failed".into())).unwrap_err(), "checkbox failed");
-        assert_eq!(share_text(Ok(None)).unwrap(), Value::String(String::new()));
-        assert_eq!(share_text(Ok(Some("ftp://example".into()))).unwrap(), Value::String("ftp://example".into()));
-        assert_eq!(share_text(Err("text failed".into())).unwrap_err(), "text failed");
         assert!(share_values(&[]).is_err());
         assert!(share_values(&[Input::Nothing, Input::Nothing, Input::Nothing]).is_err());
     }

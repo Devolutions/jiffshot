@@ -983,22 +983,22 @@ fn share_program_script() -> Script {
             let third = test.path("applications/Concurrent Fixture.app");
             std::fs::create_dir(&third).expect("create the concurrent scratch bundle");
             app.add_share_program(third);
-            let current = (app.settings.ftp.clone(), app.settings.programs.clone());
-            assert_eq!(current.1.len(), 3);
+            let current = app.settings.programs.clone();
+            assert_eq!(current.len(), 3);
 
             let unchanged = serde_json::json!({
                 "_share_initial": initial,
-                "share": ["", null, null, true, true]
+                "share": [null, true, true, true]
             });
             crate::prefs::apply(app, &unchanged.to_string());
-            assert_eq!((app.settings.ftp.clone(), app.settings.programs.clone()), current);
+            assert_eq!(app.settings.programs, current);
 
             let stale = serde_json::json!({
                 "_share_initial": unchanged["_share_initial"],
-                "share": ["ftp://user@example.test/images", null, null, false, true]
+                "share": [null, false, true, true]
             });
             crate::prefs::apply(app, &stale.to_string());
-            assert_eq!((app.settings.ftp.clone(), app.settings.programs.clone()), current);
+            assert_eq!(app.settings.programs, current);
         }).expect("apply stale Share preferences");
         150
     });
@@ -1006,8 +1006,7 @@ fn share_program_script() -> Script {
         assert!(sink().status.get_untracked().contains("Share destinations changed while Preferences was open"));
         let saved = crate::settings::Settings::load();
         assert_eq!(saved.programs.len(), 3);
-        assert!(saved.ftp.is_none());
-        crate::app::act(|app| assert!(app.save_share_preferences(None, &["Concurrent Fixture".into()])))
+        crate::app::act(|app| assert!(app.save_share_preferences(&["Concurrent Fixture".into()])))
             .expect("remove the concurrent scratch destination");
         test.line("stale Share preferences preserved concurrent destination changes");
         150
@@ -1019,13 +1018,13 @@ fn share_program_script() -> Script {
         std::fs::rename(&config, &backup).expect("save the scratch settings");
         std::fs::create_dir(&config).expect("block the scratch settings file");
         crate::app::act(|app| {
-            let previous = (app.settings.ftp.clone(), app.settings.programs.clone());
+            let previous = app.settings.programs.clone();
             let request = share_request(app, serde_json::json!({
                 "capture": [0], "editor": [0, true, true, true, 0],
-                "share": ["ftp://user@example.test/images", null, null, false, false]
+                "share": [null, false, false]
             }));
             crate::prefs::apply(app, &request);
-            assert_eq!((app.settings.ftp.clone(), app.settings.programs.clone()), previous, "a failed save changed Share preferences");
+            assert_eq!(app.settings.programs, previous, "a failed save changed Share preferences");
         }).expect("attempt to remove both destinations");
         std::fs::remove_dir(&config).expect("unblock the scratch settings file");
         std::fs::rename(&backup, &config).expect("restore the scratch settings");
@@ -1043,13 +1042,13 @@ fn share_program_script() -> Script {
         std::fs::rename(&config, &backup).expect("save the scratch settings");
         std::fs::write(&config, b"{invalid").expect("write malformed scratch settings");
         crate::app::act(|app| {
-            let previous = (app.settings.ftp.clone(), app.settings.programs.clone());
+            let previous = app.settings.programs.clone();
             let request = share_request(app, serde_json::json!({
                 "capture": [0], "editor": [0, true, true, true, 0],
-                "share": ["ftp://user@example.test/images", null, null, false, false]
+                "share": [null, false, false]
             }));
             crate::prefs::apply(app, &request);
-            assert_eq!((app.settings.ftp.clone(), app.settings.programs.clone()), previous);
+            assert_eq!(app.settings.programs, previous);
         }).expect("attempt Preferences with malformed settings");
         assert_eq!(std::fs::read(&config).expect("read malformed settings"), b"{invalid");
         std::fs::remove_file(&config).expect("remove malformed scratch settings");
@@ -1059,7 +1058,6 @@ fn share_program_script() -> Script {
     script.step(|test| {
         assert!(sink().status.get_untracked().starts_with("Could not save Share preferences:"));
         let saved = crate::settings::Settings::load();
-        assert!(saved.ftp.is_none());
         assert_eq!(saved.programs.len(), 2);
         test.line("malformed settings were not overwritten by changed Share preferences");
         let config = PathBuf::from(std::env::var_os("JIFFSHOT_CONFIG_DIR").unwrap()).join(jiffshot_capture::config::FILE);
@@ -1070,7 +1068,7 @@ fn share_program_script() -> Script {
             let previous = (app.settings.theme.clone(), app.settings.layout.labels, app.settings.layout.side_bar, app.settings.layout.tray);
             let request = share_request(app, serde_json::json!({
                 "editor": [1, false, false, false, 2],
-                "share": ["", null, null, true, true]
+                "share": [null, true, true]
             }));
             crate::prefs::apply(app, &request);
             assert_eq!((app.settings.theme.clone(), app.settings.layout.labels, app.settings.layout.side_bar, app.settings.layout.tray), previous);
@@ -1091,7 +1089,7 @@ fn share_program_script() -> Script {
             let previous = (app.settings.theme.clone(), app.settings.layout.labels, app.settings.layout.side_bar, app.settings.layout.tray, app.settings.export_format.clone());
             let request = share_request(app, serde_json::json!({
                 "editor": [1, false, false, false, 2],
-                "share": ["", null, null, true, true]
+                "share": [null, true, true]
             }));
             crate::prefs::apply(app, &request);
             assert_eq!((app.settings.theme.clone(), app.settings.layout.labels, app.settings.layout.side_bar, app.settings.layout.tray, app.settings.export_format.clone()), previous);
@@ -1104,12 +1102,11 @@ fn share_program_script() -> Script {
         assert!(sink().status.get_untracked().starts_with("Could not save Editor preferences:"));
         let saved = crate::settings::Settings::load();
         assert_eq!(saved.programs.len(), 2);
-        assert!(saved.ftp.is_none());
         test.line("failed Editor preferences preserved the previous settings");
         crate::app::act(|app| {
             let request = share_request(app, serde_json::json!({
                 "editor": [1, false, true, false, 2],
-                "share": ["", null, null, true, true]
+                "share": [null, true, true]
             }));
             crate::prefs::apply(app, &request);
         }).expect("save Editor preferences");
@@ -1121,14 +1118,13 @@ fn share_program_script() -> Script {
         assert!(!saved.layout.labels && saved.layout.side_bar && !saved.layout.tray);
         assert_eq!(saved.export_format.as_deref(), Some("jpg"));
         assert_eq!(saved.programs.len(), 2);
-        assert!(saved.ftp.is_none());
         test.line("Editor preferences saved together without changing Share");
         crate::app::act(|app| {
             let request = share_request(app, serde_json::json!({
-                "share": ["ftp://user@example.test/images", null, null, false, false]
+                "share": [null, false, false]
             }));
             crate::prefs::apply(app, &request);
-        }).expect("save FTP and remove both destinations");
+        }).expect("remove both destinations");
         150
     });
     let release_sender = release.clone();
@@ -1136,12 +1132,11 @@ fn share_program_script() -> Script {
     script.step(move |test| {
         assert_eq!(sink().status.get_untracked(), "Share preferences saved");
         let saved = crate::settings::Settings::load();
-        assert_eq!(saved.ftp.as_deref(), Some("ftp://user@example.test/images"));
         assert!(saved.programs.is_empty());
         for name in [NAME, "Second Fixture"] {
             assert!(!sink().shares.get_untracked().iter().any(|item| item == name));
         }
-        test.line("FTP and multiple destination removals were saved together");
+        test.line("multiple destination removals were saved together");
         let (sender, receiver) = std::sync::mpsc::channel();
         *release_sender.borrow_mut() = Some(sender);
         crate::app::act(|app| app.share_work("Waiting for the synthetic share…", move || {
@@ -1160,16 +1155,7 @@ fn share_program_script() -> Script {
     });
     script.step(|test| {
         assert_eq!(sink().status.get_untracked(), "Synthetic share completed");
-        crate::app::act(|app| {
-            app.settings.ftp = Some("invalid://fixture".into());
-            app.share("FTP");
-        }).expect("start an invalid FTP share");
         test.line("the sharing worker reported completion");
-        500
-    });
-    script.step(|test| {
-        assert!(sink().status.get_untracked().contains("the FTP address must start with ftp://"));
-        test.line("FTP errors were reported by the sharing worker");
         crate::app::act(|app| app.share("Folder…")).expect("open the folder picker");
         20_000
     });
@@ -1195,7 +1181,6 @@ fn share_program_script() -> Script {
 
 #[cfg(target_os = "macos")]
 fn share_preferences_window_script() -> Script {
-    const LEGACY_FTP: &str = "  ftp://fixture@example.test/captures  ";
     let mut script = Script(VecDeque::new());
     script.wait(800).step(|test| {
         empty_scratch_library(test);
@@ -1207,8 +1192,6 @@ fn share_preferences_window_script() -> Script {
         crate::app::act(|app| {
             app.add_share_program(applications.join("First Fixture.app"));
             app.add_share_program(applications.join("Second Fixture.app"));
-            app.settings.ftp = Some(LEGACY_FTP.into());
-            app.settings.try_save().expect("save the legacy scratch FTP value");
             app.open_prefs("share");
         }).expect("open Share preferences");
         1_000
@@ -1225,7 +1208,6 @@ fn share_preferences_window_script() -> Script {
         let saved = crate::settings::Settings::load();
         assert_eq!(saved.programs.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
             ["First Fixture", "Second Fixture", "Concurrent Fixture"]);
-        assert_eq!(saved.ftp.as_deref(), Some(LEGACY_FTP));
         assert!(!super::prefs_window::showing_for_selftest(), "Preferences did not close");
         test.line("the Preferences window rejected a stale Share removal");
         crate::app::act(|app| app.open_prefs("share")).expect("reopen Share preferences");
@@ -1240,39 +1222,8 @@ fn share_preferences_window_script() -> Script {
         let saved = crate::settings::Settings::load();
         assert_eq!(saved.programs.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
             ["Second Fixture", "Concurrent Fixture"]);
-        assert_eq!(saved.ftp.as_deref(), Some(LEGACY_FTP));
         assert!(!super::prefs_window::showing_for_selftest(), "Preferences did not close");
         test.line("the Preferences window removed only the selected destination");
-        crate::app::act(|app| app.open_prefs("share")).expect("reopen Share preferences to correct FTP");
-        1_000
-    });
-    script.step(|test| {
-        assert!(super::prefs_window::showing_for_selftest(), "Preferences did not reopen");
-        test.line("ready to correct the legacy FTP value");
-        15_000
-    });
-    script.step(|test| {
-        let saved = crate::settings::Settings::load();
-        assert_eq!(saved.ftp.as_deref(), Some("ftp://fixture@example.test/captures"));
-        assert_eq!(saved.programs.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
-            ["Second Fixture", "Concurrent Fixture"]);
-        assert!(!super::prefs_window::showing_for_selftest(), "Preferences did not close");
-        test.line("the Preferences window corrected the legacy FTP value");
-        crate::app::act(|app| app.open_prefs("share")).expect("reopen Share preferences to clear FTP");
-        1_000
-    });
-    script.step(|test| {
-        assert!(super::prefs_window::showing_for_selftest(), "Preferences did not reopen");
-        test.line("ready to clear the FTP value");
-        15_000
-    });
-    script.step(|test| {
-        let saved = crate::settings::Settings::load();
-        assert!(saved.ftp.is_none());
-        assert_eq!(saved.programs.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
-            ["Second Fixture", "Concurrent Fixture"]);
-        assert!(!super::prefs_window::showing_for_selftest(), "Preferences did not close");
-        test.line("the Preferences window cleared the FTP value");
         0
     });
     script

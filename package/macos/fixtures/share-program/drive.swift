@@ -118,31 +118,7 @@ if folderName.hasPrefix("prefs:") {
     }
     submitPreferences(whenReady: "ready to submit stale Share preferences")
     submitPreferences(whenReady: "ready to submit current Share preferences")
-    func setFTP(whenReady marker: String, from old: String, to new: String) {
-        let preferences = preferences(whenReady: marker)
-        let ftp = wait("FTP field") {
-            firstElement(preferences) { element in
-                let role = value(element, kAXRoleAttribute as String) as? String
-                let text = value(element, kAXValueAttribute as String) as? String
-                return (role == "AXTextField" || role == "AXTextArea") && text == old
-            }
-        }
-        guard AXUIElementSetAttributeValue(ftp, kAXValueAttribute as CFString, new as CFString) == .success else {
-            print("could not update the FTP value")
-            exit(1)
-        }
-        _ = wait("updated FTP field", timeout: 8) {
-            var observed: CFTypeRef?
-            let status = AXUIElementCopyAttributeValue(ftp, kAXValueAttribute as CFString, &observed)
-            if status == .noValue && new.isEmpty { return true }
-            return status == .success && (observed as? String) == new ? true : nil
-        }
-        _ = wait("Preferences OK") { press("OK", attribute: kAXDefaultButtonAttribute as String, in: preferences) ? true : nil }
-    }
-    setFTP(whenReady: "ready to correct the legacy FTP value",
-           from: "  ftp://fixture@example.test/captures  ", to: "ftp://fixture@example.test/captures")
-    setFTP(whenReady: "ready to clear the FTP value", from: "ftp://fixture@example.test/captures", to: "")
-    print("submitted stale and current Share preferences and updated FTP")
+    print("submitted stale and current Share preferences")
     exit(0)
 }
 
