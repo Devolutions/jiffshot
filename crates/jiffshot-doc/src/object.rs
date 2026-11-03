@@ -384,6 +384,128 @@ pub fn arrow_head(width: f32) -> f32 {
     width * 2.6 + 8.0
 }
 
+fn shape_contains(rect: &Box2, shape: ShapeKind, p: Pt) -> bool {
+    if !rect.contains(p) {
+        return false;
+    }
+    match shape {
+        ShapeKind::Rectangle => true,
+        ShapeKind::Ellipse => {
+            let rx = rect.width() / 2.0;
+            let ry = rect.height() / 2.0;
+            rx > 0.0
+                && ry > 0.0
+                && ((p.x - rect.center().x) / rx).powi(2)
+                    + ((p.y - rect.center().y) / ry).powi(2)
+                    <= 1.0
+        }
+        ShapeKind::Rounded => {
+            let radius = (rect.width().min(rect.height()) * 0.18).min(40.0);
+            let closest = Pt::new(
+                p.x.clamp(rect.x0 + radius, rect.x1 - radius),
+                p.y.clamp(rect.y0 + radius, rect.y1 - radius),
+            );
+            p.dist(closest) <= radius
+        }
+        ShapeKind::Triangle => point_in_polygon(
+            p,
+            &[
+                Pt::new(rect.center().x, rect.y0),
+                Pt::new(rect.x1, rect.y1),
+                Pt::new(rect.x0, rect.y1),
+            ],
+        ),
+    }
+}
+
+fn shape_edge_distance(rect: &Box2, shape: ShapeKind, p: Pt) -> f32 {
+    let points = match shape {
+        ShapeKind::Rectangle => vec![
+            Pt::new(rect.x0, rect.y0),
+            Pt::new(rect.x1, rect.y0),
+            Pt::new(rect.x1, rect.y1),
+            Pt::new(rect.x0, rect.y1),
+        ],
+        ShapeKind::Triangle => vec![
+            Pt::new(rect.center().x, rect.y0),
+            Pt::new(rect.x1, rect.y1),
+            Pt::new(rect.x0, rect.y1),
+        ],
+        ShapeKind::Ellipse => (0..64)
+            .map(|i| {
+                let angle = std::f32::consts::TAU * i as f32 / 64.0;
+                Pt::new(
+                    rect.center().x + rect.width() / 2.0 * angle.cos(),
+                    rect.center().y + rect.height() / 2.0 * angle.sin(),
+                )
+            })
+            .collect(),
+        ShapeKind::Rounded => {
+            let radius = (rect.width().min(rect.height()) * 0.18).min(40.0);
+            let corners = [
+                (Pt::new(rect.x1 - radius, rect.y0 + radius), -90.0_f32),
+                (Pt::new(rect.x1 - radius, rect.y1 - radius), 0.0),
+                (Pt::new(rect.x0 + radius, rect.y1 - radius), 90.0),
+                (Pt::new(rect.x0 + radius, rect.y0 + radius), 180.0),
+            ];
+            corners
+                .into_iter()
+                .flat_map(|(center, start)| {
+                    (0..=16).map(move |i| {
+                        let angle = (start + i as f32 * 90.0 / 16.0).to_radians();
+                        center.offset(radius * angle.cos(), radius * angle.sin())
+                    })
+                })
+                .collect()
+        }
+    };
+    (0..points.len())
+        .map(|i| dist_to_segment(p, points[i], points[(i + 1) % points.len()]))
+        .fold(f32::INFINITY, f32::min)
+}
+
+fn line_cap_hit(p: Pt, cap: Cap, tip: Pt, direction: Pt, head: f32, width: f32, reach: f32) -> bool {
+    let perpendicular = Pt::new(-direction.y, direction.x);
+    match cap {
+        Cap::Arrow => {
+            let base = tip.sub(direction.scale(head));
+            let left = base.add(perpendicular.scale(head * 0.55));
+            let right = base.sub(perpendicular.scale(head * 0.55));
+            let triangle = [tip, left, right];
+            point_in_polygon(p, &triangle)
+                || (0..3).any(|i| dist_to_segment(p, triangle[i], triangle[(i + 1) % 3]) <= reach)
+        }
+        Cap::OpenArrow => {
+            let base = tip.sub(direction.scale(head));
+            let left = base.add(perpendicular.scale(head * 0.55));
+            let right = base.sub(perpendicular.scale(head * 0.55));
+            dist_to_segment(p, left, tip) <= reach || dist_to_segment(p, tip, right) <= reach
+        }
+        Cap::Dot => p.dist(tip) <= width * 1.3 + reach,
+        Cap::Square | Cap::Diamond => {
+            let r = width * 1.4;
+            let points = if cap == Cap::Square {
+                [
+                    tip.add(direction.add(perpendicular).scale(r)),
+                    tip.add(direction.sub(perpendicular).scale(r)),
+                    tip.sub(direction.add(perpendicular).scale(r)),
+                    tip.sub(direction.sub(perpendicular).scale(r)),
+                ]
+            } else {
+                [
+                    tip.add(direction.scale(r * 1.4)),
+                    tip.add(perpendicular.scale(r)),
+                    tip.sub(direction.scale(r * 1.4)),
+                    tip.sub(perpendicular.scale(r)),
+                ]
+            };
+            point_in_polygon(p, &points)
+                || (0..4).any(|i| dist_to_segment(p, points[i], points[(i + 1) % 4]) <= reach)
+        }
+        _ => false,
+    }
+}
+
 fn text_padding(style: &Style) -> f32 {
     if style.padding >= 0.0 {
         style.padding
@@ -587,13 +709,22 @@ impl Object {
                 rect,
                 tail,
                 more_tails,
+                arrow,
                 ..
-            } => more_tails
-                .iter()
-                .fold(rect.union(&Box2::from_points(*tail, *tail)), |b, t| {
-                    b.union(&Box2::from_points(*t, *t))
-                })
-                .inflate(w),
+            } => {
+                let tails = more_tails
+                    .iter()
+                    .fold(rect.union(&Box2::from_points(*tail, *tail)), |b, t| {
+                        b.union(&Box2::from_points(*t, *t))
+                    });
+                let margin = if *arrow {
+                    let line_width = (self.style.font_size * 0.18).max(3.0);
+                    (arrow_head(line_width) * self.style.head_size.clamp(0.3, 4.0)).max(w)
+                } else {
+                    w
+                };
+                tails.inflate(margin)
+            }
             Kind::Step { center, radius, .. } => {
                 Box2::around(*center, *radius, *radius).inflate(w / 2.0)
             }
@@ -640,44 +771,106 @@ impl Object {
                     (0..n).any(|i| dist_to_segment(p, points[i], points[(i + 1) % n]) <= reach);
                 edge || (self.style.fill.is_visible() && point_in_polygon(p, points))
             }
-            Kind::Magnify { rect, offset, .. } => {
-                rect.inflate(tolerance).contains(p)
-                    || rect
-                        .offset(offset.x, offset.y)
-                        .inflate(tolerance)
-                        .contains(p)
+            Kind::Magnify {
+                rect,
+                offset,
+                ellipse,
+                ..
+            } => {
+                let shape = if *ellipse {
+                    ShapeKind::Ellipse
+                } else {
+                    ShapeKind::Rectangle
+                };
+                [*rect, rect.offset(offset.x, offset.y)].into_iter().any(|r| {
+                    shape_contains(&r, shape, p) || shape_edge_distance(&r, shape, p) <= reach
+                })
             }
-            Kind::Line { a, b, control } => match control {
-                None => dist_to_segment(p, *a, *b) <= reach,
-                Some(c) => (0..24).any(|i| {
+            Kind::Line { a, b, control } => {
+                let shaft_hit = match control {
+                    None => dist_to_segment(p, *a, *b) <= reach,
+                    Some(c) => (0..24).any(|i| {
                     let t0 = i as f32 / 24.0;
                     let t1 = (i + 1) as f32 / 24.0;
                     dist_to_segment(p, quad_at(*a, *c, *b, t0), quad_at(*a, *c, *b, t1)) <= reach
-                }),
-            },
+                    }),
+                };
+                let head = arrow_head(self.style.width.max(0.5))
+                    * self.style.head_size.clamp(0.3, 4.0);
+                let width = self.style.width.max(0.5);
+                let end_dir = b.sub((*control).unwrap_or(*a)).normalized();
+                let start_dir = a.sub((*control).unwrap_or(*b)).normalized();
+                let fits = a.dist(*b) > head * 1.2;
+                let end_hit = line_cap_hit(
+                        p,
+                        self.style.end_cap,
+                        *b,
+                        end_dir,
+                        head,
+                        width,
+                        reach,
+                    ) && (!matches!(self.style.end_cap, Cap::Arrow | Cap::OpenArrow) || fits);
+                let start_hit = line_cap_hit(
+                        p,
+                        self.style.start_cap,
+                        *a,
+                        start_dir,
+                        head,
+                        width,
+                        reach,
+                    ) && (!matches!(self.style.start_cap, Cap::Arrow | Cap::OpenArrow) || fits);
+                shaft_hit || end_hit || start_hit
+            }
             Kind::Pen { points } => {
                 points
                     .windows(2)
                     .any(|s| dist_to_segment(p, s[0], s[1]) <= reach)
                     || points.first().is_some_and(|q| q.dist(p) <= reach)
             }
-            Kind::Shape { rect, .. } if !self.style.fill.is_visible() => {
-                rect.inflate(reach).contains(p) && !rect.inflate(-reach).contains(p)
+            Kind::Shape { rect, shape } => {
+                shape_edge_distance(rect, *shape, p) <= reach
+                    || (self.style.fill.is_visible() && shape_contains(rect, *shape, p))
             }
-            Kind::Step { center, radius, .. } => center.dist(p) <= radius + tolerance,
+            Kind::Step {
+                center,
+                radius,
+                shape,
+                ..
+            } => {
+                let rect = Box2::around(*center, *radius, *radius);
+                shape_edge_distance(&rect, *shape, p) <= reach
+                    || shape_contains(&rect, *shape, p)
+            }
+            Kind::Highlight { rect, shape } => {
+                shape_contains(rect, *shape, p) || shape_edge_distance(rect, *shape, p) <= tolerance
+            }
             Kind::Callout {
                 rect,
                 tail,
                 more_tails,
+                shape,
                 ..
             } => {
-                rect.inflate(tolerance).contains(p)
+                shape_contains(rect, *shape, p)
+                    || shape_edge_distance(rect, *shape, p) <= reach
                     || std::iter::once(tail)
                         .chain(more_tails)
                         .any(|t| dist_to_segment(p, rect.center(), *t) <= tolerance + 4.0)
             }
-            Kind::Spotlight { rect, .. } => {
-                rect.inflate(tolerance).contains(p) && !rect.inflate(-tolerance * 2.0).contains(p)
+            Kind::Spotlight {
+                rect,
+                ellipse,
+                rounded,
+                ..
+            } => {
+                let shape = if *ellipse {
+                    ShapeKind::Ellipse
+                } else if *rounded {
+                    ShapeKind::Rounded
+                } else {
+                    ShapeKind::Rectangle
+                };
+                shape_edge_distance(rect, shape, p) <= tolerance * 2.0
             }
             _ => self
                 .rect()
@@ -2066,6 +2259,7 @@ mod tests {
     fn hit_and_handles() {
         let a = arrow();
         assert!(a.hit(Pt::new(50.0, 12.0), 2.0));
+        assert!(a.hit(Pt::new(78.0, 16.0), 2.0), "arrowhead wings should be selectable");
         assert!(!a.hit(Pt::new(50.0, 30.0), 2.0));
         assert_eq!(a.kind_name(), "Arrow");
         let mut a = a;
@@ -2099,6 +2293,142 @@ mod tests {
             ),
             Box2::new(0.0, 0.0, 20.0, 20.0)
         );
+    }
+
+    #[test]
+    fn line_end_caps_are_selectable_outside_the_stroke() {
+        let line = |cap| {
+            Object::new(
+                8,
+                Kind::Line {
+                    a: Pt::new(10.0, 10.0),
+                    b: Pt::new(90.0, 10.0),
+                    control: None,
+                },
+                Style {
+                    end_cap: cap,
+                    width: 2.0,
+                    ..Style::default()
+                },
+            )
+        };
+        assert!(line(Cap::Dot).hit(Pt::new(90.0, 15.0), 2.0));
+        assert!(line(Cap::Square).hit(Pt::new(92.5, 12.5), 2.0));
+        assert!(line(Cap::Diamond).hit(Pt::new(92.5, 10.0), 2.0));
+    }
+
+    #[test]
+    fn shape_hit_testing_follows_the_rendered_shape() {
+        let filled_ellipse = Object::new(
+            3,
+            Kind::Shape {
+                rect: Box2::new(0.0, 0.0, 100.0, 50.0),
+                shape: ShapeKind::Ellipse,
+            },
+            Style {
+                fill: Rgba::RED,
+                ..Style::default()
+            },
+        );
+        assert!(filled_ellipse.hit(Pt::new(50.0, 25.0), 2.0));
+        assert!(!filled_ellipse.hit(Pt::new(2.0, 2.0), 2.0));
+
+        let filled_triangle = Object::new(
+            4,
+            Kind::Shape {
+                rect: Box2::new(0.0, 0.0, 100.0, 50.0),
+                shape: ShapeKind::Triangle,
+            },
+            Style {
+                fill: Rgba::RED,
+                ..Style::default()
+            },
+        );
+        assert!(filled_triangle.hit(Pt::new(50.0, 40.0), 2.0));
+        assert!(!filled_triangle.hit(Pt::new(5.0, 5.0), 2.0));
+    }
+
+    #[test]
+    fn callout_arrow_bounds_include_large_arrowheads() {
+        let callout = Object::new(
+            5,
+            Kind::Callout {
+                rect: Box2::new(100.0, 40.0, 150.0, 90.0),
+                tail: Pt::new(0.0, 0.0),
+                text: String::new(),
+                shape: ShapeKind::Rectangle,
+                arrow: true,
+                more_tails: Vec::new(),
+            },
+            Style {
+                font_size: 100.0,
+                ..Style::default()
+            },
+        );
+        assert!(callout.bounds().y0 < -5.0);
+    }
+
+    #[test]
+    fn callout_and_magnifier_hit_testing_respects_ellipse_clipping() {
+        let ellipse_callout = Object::new(
+            6,
+            Kind::Callout {
+                rect: Box2::new(0.0, 0.0, 100.0, 50.0),
+                tail: Pt::new(150.0, 25.0),
+                text: String::new(),
+                shape: ShapeKind::Ellipse,
+                arrow: false,
+                more_tails: Vec::new(),
+            },
+            Style::default(),
+        );
+        assert!(ellipse_callout.hit(Pt::new(50.0, 25.0), 2.0));
+        assert!(!ellipse_callout.hit(Pt::new(2.0, 2.0), 2.0));
+
+        let ellipse_lens = Object::new(
+            7,
+            Kind::Magnify {
+                rect: Box2::new(0.0, 0.0, 100.0, 50.0),
+                zoom: 2.0,
+                ellipse: true,
+                offset: Pt::new(100.0, 0.0),
+            },
+            Style::default(),
+        );
+        assert!(!ellipse_lens.hit(Pt::new(2.0, 2.0), 2.0));
+        assert!(ellipse_lens.hit(Pt::new(150.0, 25.0), 2.0));
+        assert!(!ellipse_lens.hit(Pt::new(102.0, 2.0), 2.0));
+    }
+
+    #[test]
+    fn highlight_and_spotlight_hit_testing_respects_ellipse_shapes() {
+        let highlight = Object::new(
+            9,
+            Kind::Highlight {
+                rect: Box2::new(0.0, 0.0, 100.0, 50.0),
+                shape: ShapeKind::Ellipse,
+            },
+            Style {
+                fill: Rgba::YELLOW,
+                ..Style::default()
+            },
+        );
+        assert!(highlight.hit(Pt::new(50.0, 25.0), 2.0));
+        assert!(!highlight.hit(Pt::new(2.0, 2.0), 2.0));
+
+        let spotlight = Object::new(
+            10,
+            Kind::Spotlight {
+                rect: Box2::new(0.0, 0.0, 100.0, 50.0),
+                ellipse: true,
+                dim: 0.5,
+                blur: 0.0,
+                rounded: false,
+            },
+            Style::default(),
+        );
+        assert!(spotlight.hit(Pt::new(50.0, 0.0), 2.0));
+        assert!(!spotlight.hit(Pt::new(0.0, 0.0), 2.0));
     }
 
     #[test]

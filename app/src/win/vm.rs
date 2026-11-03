@@ -1150,7 +1150,6 @@ pub trait LibraryItemViewModel: Send + 'static {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LibraryItemFields {
     pub path: String,
-    #[cfg(target_os = "macos")]
     pub path_identity: std::path::PathBuf,
     pub label: String,
     pub thumbnail: String,
@@ -1170,7 +1169,6 @@ impl Default for LibraryItemFields {
     fn default() -> Self {
         Self {
             path: String::new(),
-            #[cfg(target_os = "macos")]
             path_identity: std::path::PathBuf::new(),
             label: String::new(),
             thumbnail: String::new(),
@@ -1199,7 +1197,6 @@ impl LibraryItemViewModelSink {
         let value = value.into();
         self.0.update(move |f| f.path = value)
     }
-    #[cfg(target_os = "macos")]
     pub fn set_path_identity(&self, value: std::path::PathBuf) -> Result<()> {
         self.0.update(move |f| f.path_identity = value)
     }

@@ -23,8 +23,8 @@ const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_IMAGE_BYTES: u64 = 160 * 1024 * 1024;
 const MAX_TOTAL_UNCOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
 // 33,177,600 pixels is a 7680x4320 frame; this also caps total document image pixels.
-const MAX_DOCUMENT_PIXELS: u64 = 33_177_600;
-const MAX_DOCUMENT_OBJECTS: usize = 10_000;
+pub const MAX_DOCUMENT_PIXELS: u64 = 33_177_600;
+pub(crate) const MAX_DOCUMENT_OBJECTS: usize = 10_000;
 const MAX_DOCUMENT_ENTRIES: usize = MAX_DOCUMENT_OBJECTS + 2;
 // Bounds geometry and style values before they reach rendering calculations.
 const MAX_DOCUMENT_NUMBER: f64 = 1_000_000.0;
@@ -129,8 +129,10 @@ fn validate_manifest_numbers(value: &serde_json::Value) -> Result<()> {
             }
         }
         serde_json::Value::Object(values) => {
-            for value in values.values() {
-                validate_manifest_numbers(value)?;
+            for (key, value) in values {
+                if key != "id" {
+                    validate_manifest_numbers(value)?;
+                }
             }
         }
         _ => {}
@@ -287,6 +289,11 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    let existing_permissions = match std::fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
     static NEXT: AtomicU64 = AtomicU64::new(0);
     for _ in 0..100 {
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -304,7 +311,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
             Err(error) => return Err(format!("{}: {error}", staging.display())),
         };
         let staging = StagingFile(staging);
-        let written = file.write_all(bytes).and_then(|()| file.sync_all());
+        let written = file
+            .write_all(bytes)
+            .and_then(|()| {
+                if let Some(permissions) = existing_permissions.clone() {
+                    file.set_permissions(permissions)?;
+                }
+                file.sync_all()
+            });
         drop(file);
         written.map_err(|e| format!("{}: {e}", staging.0.display()))?;
         return std::fs::rename(&staging.0, path).map_err(|e| format!("{}: {e}", path.display()));
@@ -699,6 +713,25 @@ mod tests {
     }
 
     #[test]
+    fn preserves_large_object_ids() {
+        let mut document = Document::blank(2, 2, Rgba::WHITE);
+        let id = document.add(
+            Kind::Step {
+                center: Pt::new(1.0, 1.0),
+                radius: 1.0,
+                label: "1".into(),
+                shape: Default::default(),
+            },
+            Style::default(),
+        );
+        document.get_mut(id).unwrap().id = 1_000_001;
+
+        let bytes = document_bytes(&document).expect("large object IDs are valid");
+        let reopened = document_from_bytes(bytes).expect("saved large object IDs should reopen");
+        assert_eq!(reopened.objects[0].id, 1_000_001);
+    }
+
+    #[test]
     fn rejects_too_many_nested_objects() {
         let step = serde_json::json!({
             "id": 1,
@@ -848,6 +881,18 @@ mod tests {
         std::fs::write(&other, b"unrelated file").unwrap();
         write_atomic(&target, b"first").unwrap();
         assert_eq!(std::fs::read(&other).unwrap(), b"unrelated file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+            write_atomic(&target, b"private").unwrap();
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "replacing a file should preserve its permissions"
+            );
+        }
 
         let barrier = Arc::new(Barrier::new(4));
         let writers: Vec<_> = (0_u8..4)

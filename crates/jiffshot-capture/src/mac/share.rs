@@ -9,7 +9,7 @@ use objc2_app_kit::{NSSharingService, NSSharingServiceDelegate, NSSharingService
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSString, NSUserCancelledError};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -141,8 +141,7 @@ pub fn print(_owner: isize, file: &Path) -> Result<bool, String> {
 }
 
 /// Copies the file into `folder` (an iCloud Drive, OneDrive, Dropbox or
-/// network folder), never overwriting. A failed copy may leave an incomplete
-/// file at the destination named in the error.
+/// network folder), never overwriting. A failed copy removes its partial file.
 pub fn to_folder(file: &Path, folder: &Path) -> Result<PathBuf, String> {
     let mut source = std::fs::File::open(file)
         .map_err(|error| format!("could not open {}: {error}", file.display()))?;
@@ -152,15 +151,17 @@ pub fn to_folder(file: &Path, folder: &Path) -> Result<PathBuf, String> {
         return Err(format!("the share source is not a regular file: {}", file.display()));
     }
 
-    let name = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Capture".into());
-    let ext = file.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "png".into());
+    let name = file.file_stem().unwrap_or_else(|| OsStr::new("Capture"));
+    let ext = file.extension().unwrap_or_else(|| OsStr::new("png"));
     let mut n = 1u64;
     loop {
-        let target = if n == 1 {
-            folder.join(format!("{name}.{ext}"))
-        } else {
-            folder.join(format!("{name} ({n}).{ext}"))
-        };
+        let mut target_name = OsString::from(name);
+        if n != 1 {
+            target_name.push(format!(" ({n})"));
+        }
+        target_name.push(".");
+        target_name.push(ext);
+        let target = folder.join(target_name);
         let mut output = match std::fs::OpenOptions::new().write(true).create_new(true).open(&target) {
             Ok(output) => output,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -180,9 +181,20 @@ fn write_shared_file(
     permissions: std::fs::Permissions,
     target: &Path,
 ) -> Result<(), String> {
-    io::copy(source, &mut *output)
+    if let Err(error) = io::copy(source, &mut *output)
         .and_then(|_| output.set_permissions(permissions))
-        .map_err(|error| format!("could not finish sharing to {}: {error}; an incomplete file may remain there", target.display()))?;
+    {
+        return match std::fs::remove_file(target) {
+            Ok(()) => Err(format!("could not finish sharing to {}: {error}", target.display())),
+            Err(cleanup) if cleanup.kind() == io::ErrorKind::NotFound => {
+                Err(format!("could not finish sharing to {}: {error}", target.display()))
+            }
+            Err(cleanup) => Err(format!(
+                "could not finish sharing to {}: {error}; could not remove partial file: {cleanup}",
+                target.display()
+            )),
+        };
+    }
     Ok(())
 }
 
@@ -460,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn folder_share_reports_incomplete_output_after_a_copy_error() {
+    fn folder_share_removes_partial_output_after_a_copy_error() {
         struct Interrupted(bool);
         impl Read for Interrupted {
             fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -484,10 +496,9 @@ mod tests {
         let permissions = output.metadata().unwrap().permissions();
         let error = write_shared_file(&mut Interrupted(false), &mut output, permissions, &target).unwrap_err();
         assert!(error.contains("injected read error"));
-        assert!(error.contains("incomplete file"));
         assert!(error.contains(target.to_str().unwrap()));
         drop(output);
-        assert_eq!(std::fs::read(&target).unwrap(), b"part");
+        assert!(!target.exists());
     }
 
     #[test]

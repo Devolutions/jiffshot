@@ -162,6 +162,28 @@ impl Drop for OwnedPipe {
     }
 }
 
+fn encode_path_message(path: &Path) -> Option<Vec<u8>> {
+    let wide = crate::wide_path(path);
+    if wide[..wide.len() - 1].contains(&0) {
+        return None;
+    }
+    Some(wide.into_iter().flat_map(u16::to_le_bytes).collect())
+}
+
+fn decode_path_message(bytes: &[u8]) -> Option<PathBuf> {
+    if bytes.len() < 2 || bytes.len() % 2 != 0 {
+        return None;
+    }
+    let wide: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    if wide.last() != Some(&0) || wide[..wide.len() - 1].contains(&0) {
+        return None;
+    }
+    Some(crate::path_from_wide(&wide))
+}
+
 /// Sends `path` to a running editor. Returns false if no trusted editor listens.
 /// The editor may take the foreground because this process received the hotkey.
 pub fn send_to_editor(path: &Path) -> bool {
@@ -196,7 +218,10 @@ fn send_on(name: &str, identity: &Identity, path: &Path) -> bool {
             return false;
         }
         AllowSetForegroundWindow(server);
-        let message = path.to_string_lossy().into_owned().into_bytes();
+        let Some(message) = encode_path_message(path) else {
+            CloseHandle(pipe);
+            return false;
+        };
         let Ok(message_len) = u32::try_from(message.len()) else {
             CloseHandle(pipe);
             return false;
@@ -286,7 +311,9 @@ fn serve_on(
                                 && read > 0
                             {
                                 buf.truncate(read as usize);
-                                handler(PathBuf::from(String::from_utf8_lossy(&buf).into_owned()));
+                                if let Some(path) = decode_path_message(&buf) {
+                                    handler(path);
+                                }
                             }
                         }
                     }
@@ -378,6 +405,28 @@ mod tests {
                 .expect("handler receives the path"),
             path
         );
+    }
+
+    #[test]
+    fn editor_pipe_paths_round_trip_losslessly() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let path = PathBuf::from(std::ffi::OsString::from_wide(&[
+            b'C' as u16,
+            b':' as u16,
+            b'\\' as u16,
+            0xD800,
+            b'.' as u16,
+            b'p' as u16,
+            b'n' as u16,
+            b'g' as u16,
+        ]));
+        assert_eq!(
+            decode_path_message(&encode_path_message(&path).unwrap()),
+            Some(path)
+        );
+        assert!(decode_path_message(&[0x41]).is_none());
+        assert!(decode_path_message(&[0x41, 0x00, 0x42, 0x00]).is_none());
     }
 
     #[test]

@@ -68,7 +68,15 @@ pub fn cursor() -> (i32, i32) {
 }
 
 /// Moves the pointer to `to`, gliding (eased) over `glide` when non-zero.
-pub fn move_to(to: (i32, i32), glide: Duration) {
+/// Returns false when Windows rejects any cursor-position update.
+pub fn move_to(to: (i32, i32), glide: Duration) -> bool {
+    move_to_with(to, glide, |x, y| {
+        // SAFETY: plain call.
+        unsafe { SetCursorPos(x, y) != 0 }
+    })
+}
+
+fn move_to_with(to: (i32, i32), glide: Duration, mut set_cursor: impl FnMut(i32, i32) -> bool) -> bool {
     let from = cursor();
     if !glide.is_zero() && from != to {
         let started = Instant::now();
@@ -77,20 +85,22 @@ pub fn move_to(to: (i32, i32), glide: Duration) {
             let e = if t < 0.5 { 2.0 * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(2) / 2.0 };
             let x = from.0 + ((to.0 - from.0) as f32 * e).round() as i32;
             let y = from.1 + ((to.1 - from.1) as f32 * e).round() as i32;
-            // SAFETY: plain call.
-            unsafe { SetCursorPos(x, y) };
+            if !set_cursor(x, y) {
+                return false;
+            }
             if t >= 1.0 {
                 break;
             }
             std::thread::sleep(Duration::from_millis(8));
         }
     }
-    // SAFETY: plain call.
-    unsafe { SetCursorPos(to.0, to.1) };
+    set_cursor(to.0, to.1)
 }
 
 pub fn click(at: (i32, i32), button: Button, count: u32, glide: Duration) -> bool {
-    move_to(at, glide);
+    if !move_to(at, glide) {
+        return false;
+    }
     std::thread::sleep(Duration::from_millis(40));
     let (down, up) = button.flags();
     let mut ok = true;
@@ -106,15 +116,26 @@ pub fn click(at: (i32, i32), button: Button, count: u32, glide: Duration) -> boo
 }
 
 pub fn drag(from: (i32, i32), to: (i32, i32), button: Button, glide: Duration) -> bool {
-    move_to(from, glide / 2);
+    if !move_to(from, glide / 2) {
+        return false;
+    }
     std::thread::sleep(Duration::from_millis(60));
     let (down, up) = button.flags();
     let mut ok = send(&[mouse(down, 0)]);
     std::thread::sleep(Duration::from_millis(80));
     // A small first step, so the target sees a drag start.
-    move_to((from.0 + (to.0 - from.0).signum() * 4, from.1 + (to.1 - from.1).signum() * 4), Duration::ZERO);
+    if !move_to(
+        (from.0 + (to.0 - from.0).signum() * 4, from.1 + (to.1 - from.1).signum() * 4),
+        Duration::ZERO,
+    ) {
+        let _ = send(&[mouse(up, 0)]);
+        return false;
+    }
     std::thread::sleep(Duration::from_millis(40));
-    move_to(to, glide.max(Duration::from_millis(250)));
+    if !move_to(to, glide.max(Duration::from_millis(250))) {
+        let _ = send(&[mouse(up, 0)]);
+        return false;
+    }
     std::thread::sleep(Duration::from_millis(80));
     ok &= send(&[mouse(up, 0)]);
     ok
@@ -167,7 +188,16 @@ fn tap(modifiers: &[u16], vk: u16) -> bool {
     inputs.push(key(vk, 0, flags(vk)));
     inputs.push(key(vk, 0, flags(vk) | KEYEVENTF_KEYUP));
     inputs.extend(modifiers.iter().rev().map(|&m| key(m, 0, flags(m) | KEYEVENTF_KEYUP)));
-    send(&inputs)
+    if send(&inputs) {
+        return true;
+    }
+
+    let mut releases = vec![key(vk, 0, flags(vk) | KEYEVENTF_KEYUP)];
+    releases.extend(modifiers.iter().rev().map(|&m| key(m, 0, flags(m) | KEYEVENTF_KEYUP)));
+    if !send(&releases) {
+        crate::log("control: Windows rejected key-release cleanup after a partial key press");
+    }
+    false
 }
 
 fn named_key(name: &str) -> Option<u16> {
@@ -203,6 +233,21 @@ fn named_key(name: &str) -> Option<u16> {
     })
 }
 
+fn key_from_scan(scan: u16) -> (u16, Vec<u16>) {
+    let state = scan >> 8;
+    let mut modifiers = Vec::new();
+    for (flag, vk) in [(1, 0x10), (2, 0x11), (4, 0x12)] {
+        if state & flag != 0 {
+            modifiers.push(vk);
+        }
+    }
+    (scan & 0xFF, modifiers)
+}
+
+fn utf16_key_unit(character: char) -> Option<u16> {
+    u16::try_from(character as u32).ok()
+}
+
 /// A key combination such as `ctrl+shift+s`, `alt+f4` or `enter`: modifier
 /// keys plus one key.
 pub fn parse_combo(combo: &str) -> Result<(Vec<u16>, u16), String> {
@@ -211,6 +256,7 @@ pub fn parse_combo(combo: &str) -> Result<(Vec<u16>, u16), String> {
         return Err(format!("bad key combination {combo:?}"));
     }
     let mut modifiers = Vec::new();
+    let mut scan_modifiers = Vec::new();
     let mut main = 0;
     for (i, part) in parts.iter().enumerate() {
         let vk = match named_key(part) {
@@ -220,12 +266,17 @@ pub fn parse_combo(combo: &str) -> Result<(Vec<u16>, u16), String> {
                 match (chars.next(), chars.next()) {
                     (Some(c), None) if c.is_ascii_alphanumeric() => c.to_ascii_uppercase() as u16,
                     (Some(c), None) => {
+                        let Some(unit) = utf16_key_unit(c) else {
+                            return Err(format!("no key types {c:?}"));
+                        };
                         // SAFETY: plain call.
-                        let scan = unsafe { VkKeyScanW(c as u16) };
+                        let scan = unsafe { VkKeyScanW(unit) };
                         if scan == -1 {
                             return Err(format!("no key types {c:?}"));
                         }
-                        (scan as u16) & 0xFF
+                        let (vk, required) = key_from_scan(scan as u16);
+                        scan_modifiers = required;
+                        vk
                     }
                     _ => return Err(format!("unknown key {part:?} in {combo:?}")),
                 }
@@ -235,9 +286,17 @@ pub fn parse_combo(combo: &str) -> Result<(Vec<u16>, u16), String> {
             if !matches!(vk, 0x10 | 0x11 | 0x12 | 0x5B) {
                 return Err(format!("{part:?} is not a modifier (ctrl, shift, alt, win) in {combo:?}"));
             }
+            if modifiers.contains(&vk) {
+                return Err(format!("duplicate modifier {part:?} in {combo:?}"));
+            }
             modifiers.push(vk);
         } else {
             main = vk;
+        }
+    }
+    for modifier in scan_modifiers {
+        if !modifiers.contains(&modifier) {
+            modifiers.push(modifier);
         }
     }
     Ok((modifiers, main))
@@ -267,6 +326,26 @@ mod tests {
         assert_eq!(parse_combo("win+up").unwrap(), (vec![0x5B], 0x26));
         assert!(parse_combo("ctrl+").is_err());
         assert!(parse_combo("s+ctrl").is_err());
+        assert!(parse_combo("ctrl+ctrl+s").is_err());
         assert!(parse_combo("ctrl+nosuchkey").is_err());
+    }
+
+    #[test]
+    fn scan_codes_preserve_required_modifier_keys() {
+        assert_eq!(key_from_scan(0x0123), (0x23, vec![0x10]));
+        assert_eq!(key_from_scan(0x0623), (0x23, vec![0x11, 0x12]));
+        assert_eq!(key_from_scan(0x0723), (0x23, vec![0x10, 0x11, 0x12]));
+        assert_eq!(key_from_scan(0x0023), (0x23, Vec::new()));
+    }
+
+    #[test]
+    fn supplementary_characters_are_not_truncated_to_key_codes() {
+        assert_eq!(utf16_key_unit('é'), Some('é' as u16));
+        assert_eq!(utf16_key_unit('💩'), None);
+    }
+
+    #[test]
+    fn pointer_move_reports_positioning_failures() {
+        assert!(!move_to_with((10, 20), Duration::ZERO, |_, _| false));
     }
 }

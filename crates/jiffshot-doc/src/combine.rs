@@ -19,6 +19,25 @@ pub enum Arrangement {
     Grid,
 }
 
+fn document_pixels_fit(
+    width: f32,
+    height: f32,
+    images: impl IntoIterator<Item = (u32, u32)>,
+) -> bool {
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return false;
+    }
+    let Some(canvas_pixels) = (width.ceil() as u64).checked_mul(height.ceil() as u64) else {
+        return false;
+    };
+    images
+        .into_iter()
+        .try_fold(canvas_pixels, |total, (width, height)| {
+            total.checked_add(u64::from(width) * u64::from(height))
+        })
+        .is_some_and(|total| total <= crate::io::MAX_DOCUMENT_PIXELS)
+}
+
 /// Places `images` side by side, stacked, or in a near-square grid with
 /// `gap` pixels between them on a `background` canvas.
 pub fn combine(
@@ -27,7 +46,11 @@ pub fn combine(
     gap: f32,
     background: Rgba,
 ) -> Option<Document> {
-    if images.is_empty() || !gap.is_finite() || gap < 0.0 {
+    if images.is_empty()
+        || images.len() > crate::io::MAX_DOCUMENT_OBJECTS
+        || !gap.is_finite()
+        || gap < 0.0
+    {
         return None;
     }
     let n = images.len();
@@ -61,6 +84,11 @@ pub fn combine(
     let height = cell_h.iter().sum::<f32>() + gap * (rows as f32 + 1.0);
     if !width.is_finite() || !height.is_finite()
         || width > i32::MAX as f32 || height > i32::MAX as f32
+        || !document_pixels_fit(
+            width.ceil(),
+            height.ceil(),
+            images.iter().map(|image| (image.width(), image.height())),
+        )
     {
         return None;
     }
@@ -317,6 +345,25 @@ pub fn template(name: &str, images: &[Pixmap]) -> Option<Document> {
 
 /// Builds a template layout; pictures beyond `images` are empty drop zones.
 pub fn template_with(name: &str, images: &[Pixmap], options: &Options) -> Option<Document> {
+    if name == "Step by step" {
+        let footer_objects = if options
+            .footer
+            .as_deref()
+            .is_some_and(|footer| !footer.trim().is_empty())
+        {
+            2
+        } else {
+            0
+        };
+        let objects_per_step = 3
+            + if options.captions { 1 } else { 0 }
+            + if options.numbers { 1 } else { 0 };
+        let max_steps = crate::io::MAX_DOCUMENT_OBJECTS.saturating_sub(footer_objects)
+            / objects_per_step;
+        if images.len().max(3) > max_steps {
+            return None;
+        }
+    }
     let theme = options.theme;
     let (ink, accent) = (theme.ink, theme.accent);
     let max_w = images
@@ -333,6 +380,20 @@ pub fn template_with(name: &str, images: &[Pixmap], options: &Options) -> Option
         .clamp(250, 1000) as f32;
     let pad = 40.0;
     let cap = if options.captions { 44.0 } else { 0.0 };
+    if name == "Step by step" {
+        let n = images.len().max(3);
+        let row = max_h.min(420.0) + pad + cap;
+        let shot_w = max_w.min(1000.0);
+        let width = pad * 3.0 + 80.0 + shot_w + 360.0;
+        let height = pad + row * n as f32;
+        if !document_pixels_fit(
+            width,
+            height,
+            images.iter().map(|image| (image.width(), image.height())),
+        ) {
+            return None;
+        }
+    }
     let new = |w: f32, h: f32| Document::blank(w as u32, h as u32, theme.background);
     let b = |doc: Document| Builder {
         doc,
@@ -484,7 +545,15 @@ pub fn template_with(name: &str, images: &[Pixmap], options: &Options) -> Option
         }
         _ => return None,
     };
-    Some(doc)
+    let (width, height) = doc.size();
+    let image_dimensions = doc.objects.iter().filter_map(|object| match &object.kind {
+        Kind::Image { image, .. } => image
+            .pixmap
+            .as_deref()
+            .map(|pixmap| (pixmap.width(), pixmap.height())),
+        _ => None,
+    });
+    document_pixels_fit(width as f32, height as f32, image_dimensions).then_some(doc)
 }
 
 #[cfg(test)]
@@ -532,6 +601,35 @@ mod tests {
                 "gap {gap:?}"
             );
         }
+        assert!(
+            combine(
+                std::slice::from_ref(&image),
+                Arrangement::Horizontal,
+                10_000.0,
+                Rgba::WHITE
+            )
+            .is_none(),
+            "a canvas over the document pixel limit should be rejected"
+        );
+    }
+
+    #[test]
+    fn generated_documents_stay_within_object_and_pixel_limits() {
+        let image = raster::solid(1, 1, Rgba::RED).unwrap();
+        let too_many_for_combine = vec![image.clone(); crate::io::MAX_DOCUMENT_OBJECTS + 1];
+        assert!(combine(
+            &too_many_for_combine,
+            Arrangement::Grid,
+            0.0,
+            Rgba::WHITE
+        )
+        .is_none());
+
+        let too_many_for_step_template = vec![image; 200];
+        assert!(
+            template("Step by step", &too_many_for_step_template).is_none(),
+            "a step template over the pixel limit should fail before allocating its canvas"
+        );
     }
 
     #[test]

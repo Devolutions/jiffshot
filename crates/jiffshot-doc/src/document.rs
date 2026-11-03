@@ -75,7 +75,11 @@ impl Document {
         let start = self.next_id.max(1);
         let mut id = start;
         loop {
-            if !self.objects.iter().any(|object| object.id == id) {
+            let mut used = false;
+            for object in &self.objects {
+                object.walk(&mut |nested| used |= nested.id == id);
+            }
+            if !used {
                 self.next_id = id.wrapping_add(1).max(1);
                 return id;
             }
@@ -98,7 +102,15 @@ impl Document {
 
     /// Adds an existing object under a fresh id.
     pub fn insert(&mut self, mut object: Object) -> u64 {
-        object.id = self.allocate_id();
+        fn assign_ids(document: &mut Document, object: &mut Object) {
+            object.id = document.allocate_id();
+            if let Kind::Group { objects } = &mut object.kind {
+                for child in objects {
+                    assign_ids(document, child);
+                }
+            }
+        }
+        assign_ids(self, &mut object);
         let id = object.id;
         self.objects.push(object);
         id
@@ -132,14 +144,11 @@ impl Document {
 
     /// Restores ids after loading, so new objects never reuse one.
     pub fn renumber_from_objects(&mut self) {
-        self.next_id = self
-            .objects
-            .iter()
-            .map(|o| o.id)
-            .max()
-            .unwrap_or(0)
-            .wrapping_add(1)
-            .max(1);
+        let mut max_id = 0;
+        for object in &self.objects {
+            object.walk(&mut |nested| max_id = max_id.max(nested.id));
+        }
+        self.next_id = max_id.wrapping_add(1).max(1);
     }
 
     /// The label for the next step in `format` ("Numbers", "Letters",
@@ -148,20 +157,38 @@ impl Document {
         let labels = self.step_labels();
         match format {
             "Letters" | "Lowercase" => {
-                let next = labels
-                    .iter()
-                    .filter_map(|label| {
-                        let c = label.chars().next()?;
-                        (label.len() == 1
-                            && c.is_ascii_alphabetic()
-                            && (format == "Letters") == c.is_ascii_uppercase())
-                        .then(|| c.to_ascii_uppercase() as u8 - b'A' + 1)
-                    })
-                    .max()
-                    .unwrap_or(0)
-                    + 1;
                 let base = if format == "Letters" { b'A' } else { b'a' };
-                char::from(base + (next - 1) % 26).to_string()
+                let mut next = labels
+                    .iter()
+                    .filter(|label| {
+                        !label.is_empty()
+                            && label
+                                .bytes()
+                                .all(|byte| (base..=base + 25).contains(&byte))
+                    })
+                    .max_by(|left, right| {
+                        left.len()
+                            .cmp(&right.len())
+                            .then_with(|| left.cmp(right))
+                    })
+                    .map(|label| label.as_bytes().to_vec())
+                    .unwrap_or_default();
+                let mut carry = !next.is_empty();
+                for digit in next.iter_mut().rev() {
+                    if *digit < base + 25 {
+                        *digit += 1;
+                        carry = false;
+                        break;
+                    }
+                    *digit = base;
+                }
+                if carry {
+                    next.insert(0, base);
+                }
+                if next.is_empty() {
+                    next.push(base);
+                }
+                String::from_utf8(next).expect("ASCII letters are UTF-8")
             }
             "Roman" => {
                 let (thousands, remainder) = labels
@@ -179,10 +206,7 @@ impl Document {
         }
     }
 
-    /// The label for the next step: one past the highest number used, or
-    /// the next letter when the last step used letters.
-    pub fn next_step_label(&self) -> String {
-        let labels = self.step_labels();
+    fn next_step_label_from(labels: &[&str]) -> String {
         if let Some(last) = labels.last() {
             let mut chars = last.chars();
             if let (Some(c), None) = (chars.next(), chars.next()) {
@@ -191,7 +215,25 @@ impl Document {
                 }
             }
         }
-        Self::next_number_label(labels.into_iter())
+        Self::next_number_label(labels.iter().copied())
+    }
+
+    /// The label for the next step: one past the highest number used, or
+    /// the next letter when the last step used letters.
+    pub fn next_step_label(&self) -> String {
+        Self::next_step_label_from(&self.step_labels())
+    }
+
+    pub(crate) fn next_step_labels(&self, count: usize) -> Vec<String> {
+        let mut labels: Vec<String> = self.step_labels().into_iter().map(str::to_owned).collect();
+        let mut next = Vec::with_capacity(count);
+        for _ in 0..count {
+            let current: Vec<&str> = labels.iter().map(String::as_str).collect();
+            let label = Self::next_step_label_from(&current);
+            labels.push(label.clone());
+            next.push(label);
+        }
+        next
     }
 
     fn step_labels(&self) -> Vec<&str> {
@@ -362,6 +404,21 @@ impl Document {
 
     /// Quarter turn, clockwise or not.
     pub fn rotate(&mut self, clockwise: bool) {
+        fn rotate_object(object: &mut Object, map: &dyn Fn(Pt) -> Pt, angle: f32) {
+            if let Kind::Group { objects } = &mut object.kind {
+                for child in objects {
+                    rotate_object(child, map, angle);
+                }
+            } else if object.rotatable() {
+                let center = object.pivot();
+                let rotated = map(center);
+                object.translate(rotated.x - center.x, rotated.y - center.y);
+                object.rotation += angle;
+            } else {
+                object.map_points(map, 1.0);
+            }
+        }
+
         let (w, h) = (self.width as usize, self.height as usize);
         let Some(mut out) = Pixmap::new(self.height, self.width) else {
             return;
@@ -381,12 +438,16 @@ impl Document {
             }
         }
         let (wf, hf) = (w as f32, h as f32);
-        for o in &mut self.objects {
+        let map = |p: Pt| {
             if clockwise {
-                o.map_points(&|p| Pt::new(hf - p.y, p.x), 1.0);
+                Pt::new(hf - p.y, p.x)
             } else {
-                o.map_points(&|p| Pt::new(p.y, wf - p.x), 1.0);
+                Pt::new(p.y, wf - p.x)
             }
+        };
+        let angle = if clockwise { 90.0 } else { -90.0 };
+        for o in &mut self.objects {
+            rotate_object(o, &map, angle);
         }
         self.set_background(out);
     }
@@ -471,6 +532,7 @@ fn from_roman(s: &str) -> Option<(usize, u32)> {
 mod tests {
     use super::*;
     use crate::object::{BlurMode, ShapeKind};
+    use std::collections::HashSet;
 
     fn doc() -> Document {
         let mut d = Document::blank(200, 100, Rgba::WHITE);
@@ -505,6 +567,75 @@ mod tests {
         );
         assert_eq!(id, 1);
         assert_eq!(d.objects.iter().filter(|object| object.id == id).count(), 1);
+    }
+
+    #[test]
+    fn allocating_after_loading_a_group_skips_nested_object_ids() {
+        let mut d = Document::blank(2, 2, Rgba::WHITE);
+        d.objects.push(Object::new(
+            1,
+            Kind::Group {
+                objects: vec![Object::new(
+                    2,
+                    Kind::Text {
+                        rect: Box2::default(),
+                        text: String::new(),
+                    },
+                    Style::default(),
+                )],
+            },
+            Style::default(),
+        ));
+        d.renumber_from_objects();
+        let id = d.add(
+            Kind::Text {
+                rect: Box2::default(),
+                text: String::new(),
+            },
+            Style::default(),
+        );
+        assert_eq!(id, 3);
+    }
+
+    #[test]
+    fn inserting_a_duplicate_group_assigns_fresh_nested_ids() {
+        let mut d = Document::blank(2, 2, Rgba::WHITE);
+        let group = Kind::Group {
+            objects: vec![
+                Object::new(
+                    2,
+                    Kind::Text {
+                        rect: Box2::default(),
+                        text: "first".into(),
+                    },
+                    Style::default(),
+                ),
+                Object::new(
+                    3,
+                    Kind::Group {
+                        objects: vec![Object::new(
+                            4,
+                            Kind::Text {
+                                rect: Box2::default(),
+                                text: "nested".into(),
+                            },
+                            Style::default(),
+                        )],
+                    },
+                    Style::default(),
+                ),
+            ],
+        };
+        let id = d.add(group, Style::default());
+        let duplicate = d.get(id).unwrap().clone();
+        d.insert(duplicate);
+
+        let mut ids = HashSet::new();
+        let mut duplicate_found = false;
+        for object in &d.objects {
+            object.walk(&mut |nested| duplicate_found |= !ids.insert(nested.id));
+        }
+        assert!(!duplicate_found, "every object in every group must have a unique id");
     }
 
     #[test]
@@ -675,6 +806,111 @@ mod tests {
     }
 
     #[test]
+    fn quarter_turn_updates_rotated_objects_and_group_children() {
+        let mut d = doc();
+        let object = Object::new(
+            1,
+            Kind::Shape {
+                rect: Box2::new(1.0, 1.0, 6.0, 4.0),
+                shape: crate::object::ShapeKind::Rectangle,
+            },
+            Style::default(),
+        );
+        let mut group = Object::new(
+            2,
+            Kind::Group {
+                objects: vec![object],
+            },
+            Style::default(),
+        );
+        if let Kind::Group { objects } = &mut group.kind {
+            objects[0].rotation = 35.0;
+        }
+        d.insert(group);
+        d.rotate(true);
+        let Kind::Group { objects } = &d.objects[0].kind else {
+            panic!("group should remain a group");
+        };
+        assert_eq!(objects[0].rotation, 125.0);
+        assert_eq!(objects[0].rect(), Some(Box2::new(95.0, 2.0, 100.0, 5.0)));
+        d.rotate(false);
+        let Kind::Group { objects } = &d.objects[0].kind else {
+            panic!("group should remain a group");
+        };
+        assert_eq!(objects[0].rotation, 35.0);
+    }
+
+    #[test]
+    fn quarter_turn_preserves_rectangular_annotation_orientation() {
+        for (clockwise, inside, outside) in [
+            (true, (35, 35), (45, 25)),
+            (false, (25, 65), (15, 55)),
+        ] {
+            let mut d = Document::blank(80, 60, Rgba::WHITE);
+            d.add(
+                Kind::Shape {
+                    rect: Box2::new(10.0, 20.0, 40.0, 30.0),
+                    shape: ShapeKind::Rectangle,
+                },
+                Style {
+                    fill: Rgba::RED,
+                    width: 0.0,
+                    ..Style::default()
+                },
+            );
+            d.rotate(clockwise);
+            let image = d.flatten();
+            assert_eq!(raster::pixel(&image, inside.0, inside.1), Rgba::RED);
+            assert_eq!(raster::pixel(&image, outside.0, outside.1), Rgba::WHITE);
+        }
+    }
+
+    #[test]
+    fn quarter_turn_of_group_matches_rotated_render() {
+        for clockwise in [true, false] {
+            let mut d = Document::blank(80, 60, Rgba::WHITE);
+            let mut child = Object::new(
+                1,
+                Kind::Shape {
+                    rect: Box2::new(15.0, 15.0, 45.0, 35.0),
+                    shape: ShapeKind::Triangle,
+                },
+                Style {
+                    fill: Rgba::RED,
+                    width: 0.0,
+                    ..Style::default()
+                },
+            );
+            child.rotation = 31.0;
+            d.add(
+                Kind::Group {
+                    objects: vec![child],
+                },
+                Style::default(),
+            );
+            let before = d.flatten();
+            d.rotate(clockwise);
+            let after = d.flatten();
+            let mut filled = 0;
+            let mut mismatches = 0;
+            for y in 0..60 {
+                for x in 0..80 {
+                    let (nx, ny) = if clockwise { (59 - y, x) } else { (y, 79 - x) };
+                    let expected = raster::pixel(&before, x, y).g < 128;
+                    let actual = raster::pixel(&after, nx, ny).g < 128;
+                    filled += usize::from(expected);
+                    mismatches += usize::from(expected != actual);
+                }
+            }
+            assert!(filled > 100);
+            assert!(
+                mismatches <= filled / 10,
+                "rotated render differed at {mismatches} of {filled} filled pixels"
+            );
+        }
+    }
+
+    #[test]
     fn step_labels_continue() {
         let mut d = doc();
         assert_eq!(d.next_step_label(), "1");
@@ -693,6 +929,25 @@ mod tests {
         d.add(step("iii"), Style::default());
         assert_eq!(d.next_step_label_as("Roman"), "iv");
         assert_eq!(d.next_step_label_as("Numbers"), "8");
+    }
+
+    #[test]
+    fn letter_labels_continue_past_single_letters() {
+        let mut d = doc();
+        let step = |label: &str| Kind::Step {
+            center: Pt::new(5.0, 5.0),
+            radius: 10.0,
+            label: label.into(),
+            shape: crate::object::ShapeKind::Ellipse,
+        };
+        d.add(step("Z"), Style::default());
+        assert_eq!(d.next_step_label_as("Letters"), "AA");
+        d.add(step("AZ"), Style::default());
+        assert_eq!(d.next_step_label_as("Letters"), "BA");
+        d.add(step("ZZ"), Style::default());
+        assert_eq!(d.next_step_label_as("Letters"), "AAA");
+        d.add(step("z"), Style::default());
+        assert_eq!(d.next_step_label_as("Lowercase"), "aa");
     }
 
     #[test]

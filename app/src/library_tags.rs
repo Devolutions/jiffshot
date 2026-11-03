@@ -7,10 +7,8 @@ pub(crate) fn parse_tags(text: &str) -> Vec<String> {
         .map(str::trim)
         .filter(|tag| !tag.is_empty())
     {
-        if !tags
-            .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(tag))
-        {
+        let folded = tag.to_lowercase();
+        if !tags.iter().any(|existing| existing.to_lowercase() == folded) {
             tags.push(tag.to_owned());
         }
     }
@@ -31,6 +29,11 @@ mod tests {
         assert!(
             parse_tags(" , ; ").is_empty(),
             "empty tags should be removed"
+        );
+        assert_eq!(
+            parse_tags("École,éCOLE"),
+            ["École"],
+            "Unicode case variants should not create duplicate tags"
         );
     }
 }

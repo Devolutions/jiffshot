@@ -38,7 +38,6 @@ fn object_font_substitutions<'a>(
 const MAX_DOCUMENTS: usize = 8;
 const MAX_OBJECTS: usize = 4096;
 const MAX_POINTS: usize = 10_000;
-const MAX_PIXELS: u64 = 64_000_000;
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static DOCUMENTS: Mutex<BTreeMap<String, Session>> = Mutex::new(BTreeMap::new());
 
@@ -52,10 +51,10 @@ fn dimensions(width: u32, height: u32) -> Result<(), Error> {
         || height == 0
         || width > 16_384
         || height > 16_384
-        || u64::from(width) * u64::from(height) > MAX_PIXELS
+        || u64::from(width) * u64::from(height) > io::MAX_DOCUMENT_PIXELS
     {
         return Err(invalid(
-            "canvas must be 1..16384 pixels per side and at most 64 million pixels",
+            "canvas must be 1..16384 pixels per side and at most 33,177,600 pixels",
         ));
     }
     Ok(())
@@ -845,6 +844,8 @@ mod tests {
         .is_err());
         assert!(kind(&json!({"type":"Blur","rect":{"x0":0,"y0":0,"x1":10,"y1":10},"mode":"Blur","amount":1000})).is_err());
         assert!(dimensions(16_384, 16_384).is_err());
+        assert!(dimensions(8_000, 5_000).is_err());
+        assert!(dimensions(7_680, 4_320).is_ok());
         assert!(e.document().objects.is_empty());
     }
 

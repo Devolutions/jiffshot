@@ -69,8 +69,47 @@ pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Encodes an OS path as NUL-terminated UTF-16 without lossy conversion.
+#[cfg(windows)]
+pub fn wide_path(path: &std::path::Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+/// Decodes a NUL-terminated UTF-16 path without replacing unpaired surrogates.
+#[cfg(windows)]
+pub fn path_from_wide(buffer: &[u16]) -> std::path::PathBuf {
+    use std::os::windows::ffi::OsStringExt;
+    let len = buffer.iter().position(|&unit| unit == 0).unwrap_or(buffer.len());
+    std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len]))
+}
+
 /// Decodes a UTF-16 buffer up to its first NUL.
 pub fn from_wide(buffer: &[u16]) -> String {
     let len = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
     String::from_utf16_lossy(&buffer[..len])
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::os::windows::ffi::OsStringExt;
+
+    #[test]
+    fn windows_paths_round_trip_unpaired_utf16() {
+        let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&[
+            b'C' as u16,
+            b':' as u16,
+            b'\\' as u16,
+            0xD800,
+            b'.' as u16,
+            b'p' as u16,
+            b'n' as u16,
+            b'g' as u16,
+        ]));
+        assert_eq!(path_from_wide(&wide_path(&path)), path);
+    }
 }

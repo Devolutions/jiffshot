@@ -55,7 +55,14 @@ impl Entry {
     pub fn site(&self) -> Option<&str> {
         let url = self.meta.as_ref()?.url.as_deref()?;
         let rest = url.split_once("://").map_or(url, |(_, r)| r);
-        rest.split(['/', '?', '#']).next().filter(|h| !h.is_empty())
+        let authority = rest.split(['/', '?', '#']).next()?;
+        let host_port = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+        let host = if host_port.starts_with('[') {
+            host_port.find(']').map(|end| &host_port[..=end])?
+        } else {
+            host_port.split_once(':').map_or(host_port, |(host, _)| host)
+        };
+        (!host.is_empty()).then_some(host)
     }
 
     fn name(&self) -> String {
@@ -300,7 +307,6 @@ impl Item {
 impl LibraryItemViewModel for Item {
     fn attach(&mut self, sink: LibraryItemViewModelSink) -> Result<()> {
         sink.set_path(self.path.to_string_lossy())?;
-        #[cfg(target_os = "macos")]
         sink.set_path_identity(self.path.clone())?;
         sink.set_label(self.label())?;
         sink.set_is_current(*self.current.lock().unwrap())?;
@@ -384,17 +390,22 @@ fn cache_dir() -> PathBuf {
 /// Where the thumbnail for a capture lives. The name hashes the path, so
 /// moving the library never shows stale thumbnails.
 pub fn thumbnail_path(capture: &Path) -> PathBuf {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     let bytes = {
         use std::os::unix::ffi::OsStrExt;
         capture.as_os_str().as_bytes()
     };
-    #[cfg(not(target_os = "macos"))]
-    let lowercase = capture.to_string_lossy().to_lowercase();
-    #[cfg(not(target_os = "macos"))]
-    let bytes = lowercase.as_bytes();
+    #[cfg(windows)]
+    let bytes: Vec<u8> = {
+        use std::os::windows::ffi::OsStrExt;
+        capture
+            .as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    };
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &byte in bytes {
+    for byte in bytes.iter().copied() {
         h = (h ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
     }
     cache_dir().join(format!("{h:016x}.png"))
@@ -584,6 +595,21 @@ mod tests {
     }
 
     #[test]
+    fn site_filters_use_the_url_host_without_userinfo_or_port() {
+        let mut item = entry(
+            "capture",
+            1,
+            None,
+            Some("https://agent:secret@docs.example.com:8443/page"),
+            &[],
+            false,
+        );
+        assert_eq!(item.site(), Some("docs.example.com"));
+        item.meta.as_mut().unwrap().url = Some("https://[2001:db8::1]:8443/page".into());
+        assert_eq!(item.site(), Some("[2001:db8::1]"));
+    }
+
+    #[test]
     fn labels_accept_unicode_in_date_like_names() {
         let renamed = entry("notes-for-review 雪雪", 1, None, None, &[], false);
         assert_eq!(
@@ -597,7 +623,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
     fn thumbnail_keys_preserve_case_and_native_path_bytes() {
         use std::ffi::OsString;
@@ -616,5 +642,26 @@ mod tests {
             thumbnail_path(&invalid(0xfe)),
             thumbnail_path(&invalid(0xff))
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn thumbnail_keys_preserve_unpaired_utf16() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let path = |unit| {
+            PathBuf::from(OsString::from_wide(&[
+                b'C' as u16,
+                b':' as u16,
+                b'\\' as u16,
+                unit,
+                b'.' as u16,
+                b'p' as u16,
+                b'n' as u16,
+                b'g' as u16,
+            ]))
+        };
+        assert_ne!(thumbnail_path(&path(0xD800)), thumbnail_path(&path(0xD801)));
     }
 }
