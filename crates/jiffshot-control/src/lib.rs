@@ -230,6 +230,24 @@ fn response_for(bytes: &[u8], handler: impl FnOnce(Request) -> Response) -> Resp
     }
 }
 
+fn decode_response(request: &Request, bytes: &[u8]) -> Result<Response, Error> {
+    let response: Response = serde_json::from_slice(bytes)
+        .map_err(|error| Error::new(ErrorCode::Transport, format!("unreadable response: {error}")))?;
+    if response.id != request.id {
+        return Err(Error::new(
+            ErrorCode::Transport,
+            "the control response has a different request ID",
+        ));
+    }
+    if response.protocol != PROTOCOL {
+        return Err(Error::new(
+            ErrorCode::Unsupported,
+            format!("Jiffshot uses control protocol {}, this client uses {PROTOCOL}; use matching versions", response.protocol),
+        ));
+    }
+    Ok(response)
+}
+
 #[cfg(windows)]
 mod windows {
     use super::*;
@@ -623,8 +641,7 @@ mod windows {
                 ))
             }
         };
-        serde_json::from_slice(&bytes)
-            .map_err(|e| Error::new(ErrorCode::Transport, format!("unreadable response: {e}")))
+        decode_response(request, &bytes)
     }
 
     /// Runs `command` on the running Jiffshot: its result, or the error.
@@ -675,6 +692,28 @@ mod tests {
             ErrorCode::NotFound
         );
         assert_eq!(Response::ok("1", json!(3)).into_result().unwrap(), json!(3));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_rejects_responses_for_other_requests_or_protocols() {
+        let request = Request::new("status", Value::Null);
+        let wrong_id = Response::ok("another-request", Value::Null);
+        assert_eq!(
+            decode_response(&request, &serde_json::to_vec(&wrong_id).unwrap()).unwrap_err().code,
+            ErrorCode::Transport
+        );
+        let mut wrong_protocol = Response::ok(&request.id, Value::Null);
+        wrong_protocol.protocol += 1;
+        assert_eq!(
+            decode_response(&request, &serde_json::to_vec(&wrong_protocol).unwrap()).unwrap_err().code,
+            ErrorCode::Unsupported
+        );
+        let correct = Response::ok(&request.id, json!({"running": true}));
+        assert_eq!(
+            decode_response(&request, &serde_json::to_vec(&correct).unwrap()).unwrap(),
+            correct
+        );
     }
 
     #[test]

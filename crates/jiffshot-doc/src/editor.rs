@@ -12,7 +12,7 @@ use crate::object::*;
 use crate::raster;
 use crate::stamps::Stamp;
 use crate::text::Align;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tiny_skia::Pixmap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -291,6 +291,7 @@ enum Drag {
     Create {
         id: u64,
         start: Pt,
+        history: std::sync::Arc<CreationHistory>,
     },
     Move {
         id: u64,
@@ -372,6 +373,13 @@ struct Snapshot {
     doc: Document,
     label: String,
     key: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct CreationHistory {
+    redo: Vec<Snapshot>,
+    evicted: Option<Snapshot>,
+    modified: bool,
 }
 
 pub struct Editor {
@@ -623,19 +631,32 @@ impl Editor {
 
     /// Replaces the selection; the first id is the panel's.
     pub fn set_selection(&mut self, ids: Vec<u64>) {
+        let mut seen = HashSet::new();
         let mut ids: Vec<u64> = ids
             .into_iter()
-            .filter(|id| self.doc.get(*id).is_some())
+            .filter(|id| self.doc.get(*id).is_some() && seen.insert(*id))
             .collect();
-        ids.dedup();
         let first = if ids.is_empty() {
             None
         } else {
             Some(ids.remove(0))
         };
         self.select(first);
-        self.others = ids;
+        self.others = ids
+            .into_iter()
+            .filter(|id| self.doc.get(*id).is_some())
+            .collect();
         self.events |= EVENT_SELECTION;
+    }
+
+    fn prune_selection(&mut self) {
+        self.others.retain(|id| self.doc.get(*id).is_some());
+        if self.selection.is_some_and(|id| self.doc.get(id).is_none()) {
+            self.selection = None;
+        }
+        if self.selection.is_none() && !self.others.is_empty() {
+            self.selection = Some(self.others.remove(0));
+        }
     }
 
     pub fn select_all(&mut self) {
@@ -722,6 +743,7 @@ impl Editor {
                 continue;
             };
             let group = self.doc.objects.remove(i);
+            self.invalidate_box(group.bounds());
             if let Kind::Group { objects } = group.kind {
                 for (k, mut o) in objects.into_iter().enumerate() {
                     o.id = self.doc.allocate_id();
@@ -858,7 +880,7 @@ impl Editor {
     pub fn checkpoint(&mut self, label: &str, key: Option<String>) {
         self.modified = true;
         self.events |= EVENT_DOCUMENT;
-        if key.is_some() && self.undo.last().is_some_and(|s| s.key == key) {
+        if self.redo.is_empty() && key.is_some() && self.undo.last().is_some_and(|s| s.key == key) {
             return;
         }
         self.undo.push(Snapshot {
@@ -917,9 +939,7 @@ impl Editor {
 
     fn after_history(&mut self) {
         self.drag = None;
-        if self.selection.is_some_and(|id| self.doc.get(id).is_none()) {
-            self.selection = None;
-        }
+        self.prune_selection();
         self.modified = true;
         self.refresh_all();
         self.events |= EVENT_SELECTION | EVENT_DOCUMENT;
@@ -979,6 +999,7 @@ impl Editor {
     ) -> bool {
         let saved = self.doc.clone();
         if !change(&mut self.doc) {
+            self.doc = saved;
             return false;
         }
         self.undo.push(Snapshot {
@@ -991,9 +1012,7 @@ impl Editor {
         }
         self.redo.clear();
         self.modified = true;
-        if self.selection.is_some_and(|id| self.doc.get(id).is_none()) {
-            self.selection = None;
-        }
+        self.prune_selection();
         self.events |= EVENT_DOCUMENT | EVENT_SELECTION;
         self.refresh_all();
         true
@@ -1038,6 +1057,9 @@ impl Editor {
             let mut ids = Vec::new();
             for mut c in copies {
                 c.translate(20.0, 20.0);
+                if let Kind::Step { label, .. } = &mut c.kind {
+                    *label = self.doc.next_step_label();
+                }
                 let id = self.doc.insert(c);
                 let b = self.doc.get(id).unwrap().bounds();
                 self.invalidate_box(b);
@@ -1646,6 +1668,11 @@ impl Editor {
         let label = format!("Add {}", self.tool.name());
         let step = matches!(kind, Kind::Step { .. }) || self.tool == Tool::Stamp;
         let polygon = matches!(kind, Kind::Polygon { .. });
+        let history = (!step && !polygon).then(|| CreationHistory {
+            redo: std::mem::take(&mut self.redo),
+            evicted: (self.undo.len() >= HISTORY_LIMIT).then(|| self.undo.remove(0)),
+            modified: self.modified,
+        });
         let id = self.add_object(&label, kind, style);
         if polygon {
             self.building = Some(id);
@@ -1659,7 +1686,11 @@ impl Editor {
                 moved: true,
             }
         } else {
-            Drag::Create { id, start: p }
+            Drag::Create {
+                id,
+                start: p,
+                history: std::sync::Arc::new(history.expect("creation history")),
+            }
         });
     }
 
@@ -1710,7 +1741,7 @@ impl Editor {
             return;
         };
         match drag {
-            Drag::Create { id, start } => {
+            Drag::Create { id, start, .. } => {
                 let Some(o) = self.doc.get(id) else { return };
                 let before = o.bounds();
                 let pen = matches!(o.kind, Kind::Pen { .. });
@@ -1842,7 +1873,7 @@ impl Editor {
         self.pointer_move(p, m);
         let Some(drag) = self.drag.take() else { return };
         match drag {
-            Drag::Create { id, start } => {
+            Drag::Create { id, start, history } => {
                 let small = start.dist(p) < MIN_DRAG;
                 let Some(o) = self.doc.get(id) else { return };
                 let text = matches!(o.kind, Kind::Text { .. } | Kind::Callout { .. });
@@ -1862,6 +1893,13 @@ impl Editor {
                         if let Some(s) = self.undo.pop() {
                             self.doc = s.doc;
                         }
+                        let history = std::sync::Arc::try_unwrap(history)
+                            .unwrap_or_else(|history| (*history).clone());
+                        if let Some(evicted) = history.evicted {
+                            self.undo.insert(0, evicted);
+                        }
+                        self.redo = history.redo;
+                        self.modified = history.modified;
                         self.events |= EVENT_SELECTION;
                         return;
                     }
@@ -2662,6 +2700,163 @@ mod tests {
             raster::pixel(e.document().background(), 399, 299),
             Rgba::YELLOW
         );
+    }
+
+    fn square(x: f32, color: Rgba) -> (Kind, Style) {
+        (
+            Kind::Shape {
+                rect: Box2::from_xywh(x, 10.0, 30.0, 30.0),
+                shape: ShapeKind::Rectangle,
+            },
+            Style {
+                fill: color,
+                width: 0.0,
+                ..Style::default()
+            },
+        )
+    }
+
+    #[test]
+    fn selection_discards_nonadjacent_duplicate_ids() {
+        let mut e = editor();
+        let (kind, style) = square(10.0, Rgba::RED);
+        let a = e.add_object("Add", kind, style);
+        let (kind, style) = square(60.0, Rgba::BLACK);
+        let b = e.add_object("Add", kind, style);
+        e.set_selection(vec![a, b, a, b]);
+        assert_eq!(e.selected_ids(), vec![a, b]);
+        e.duplicate_selected().unwrap();
+        assert_eq!(e.document().objects.len(), 4);
+    }
+
+    #[test]
+    fn duplicating_multiple_steps_assigns_distinct_next_labels() {
+        let mut e = editor();
+        let step = |label: &str, x| Kind::Step {
+            center: Pt::new(x, 30.0),
+            radius: 10.0,
+            label: label.into(),
+            shape: ShapeKind::Ellipse,
+        };
+        let first = e.add_object("Add", step("1", 30.0), Style::default());
+        let second = e.add_object("Add", step("2", 60.0), Style::default());
+        e.set_selection(vec![first, second]);
+        e.duplicate_selected().unwrap();
+        let labels: Vec<_> = e.document().objects.iter().filter_map(|object| {
+            if let Kind::Step { label, .. } = &object.kind { Some(label.as_str()) } else { None }
+        }).collect();
+        assert_eq!(labels, ["1", "2", "3", "4"]);
+    }
+
+    #[test]
+    fn selection_drops_missing_objects_after_history_and_document_edits() {
+        let mut e = editor();
+        let (kind, style) = square(10.0, Rgba::RED);
+        let a = e.add_object("Add", kind, style);
+        let (kind, style) = square(60.0, Rgba::BLACK);
+        let b = e.add_object("Add", kind, style);
+        e.set_selection(vec![b, a]);
+        assert!(e.undo());
+        assert_eq!(e.selection(), Some(a));
+        assert_eq!(e.selected_ids(), vec![a]);
+        assert!(e.redo());
+        e.set_selection(vec![a, b]);
+        assert!(e.edit_document("Remove", |doc| doc.remove(b).is_some()));
+        assert_eq!(e.selected_ids(), vec![a]);
+    }
+
+    #[test]
+    fn editing_after_undo_starts_a_new_coalescing_branch() {
+        let mut e = editor();
+        let (kind, style) = square(10.0, Rgba::RED);
+        let id = e.add_object("Add", kind, style);
+        let key = Some("move".to_string());
+        e.edit(id, "Move", key.clone(), |o| o.translate(10.0, 0.0));
+        e.edit(id, "Other", None, |o| o.translate(20.0, 0.0));
+        assert!(e.undo());
+        e.edit(id, "Move", key, |o| o.translate(5.0, 0.0));
+        assert_eq!(e.redo_label(), None);
+        assert!(e.undo());
+        assert_eq!(e.document().get(id).unwrap().rect().unwrap().x0, 20.0);
+    }
+
+    #[test]
+    fn cancelled_creation_keeps_redo_and_saved_state() {
+        let mut e = editor();
+        let (kind, style) = square(10.0, Rgba::RED);
+        e.add_object("Add", kind, style);
+        assert!(e.undo());
+        e.mark_saved();
+        e.set_tool(Tool::Shape);
+        e.pointer_down(Pt::new(200.0, 150.0), NONE, 4.0);
+        e.pointer_up(Pt::new(200.0, 150.0), NONE);
+        assert!(!e.is_modified());
+        assert_eq!(e.redo_label(), Some("Add"));
+        assert!(e.redo());
+        assert_eq!(e.document().objects.len(), 1);
+    }
+
+    #[test]
+    fn cancelled_creation_preserves_the_oldest_full_history_entry() {
+        let mut e = editor();
+        for i in 0..HISTORY_LIMIT {
+            e.checkpoint(&format!("Edit {i}"), None);
+        }
+        assert!(e.is_modified());
+        e.set_tool(Tool::Shape);
+        e.pointer_down(Pt::new(200.0, 150.0), NONE, 4.0);
+        e.pointer_up(Pt::new(200.0, 150.0), NONE);
+        assert!(e.is_modified());
+        assert_eq!(e.undo.len(), HISTORY_LIMIT);
+        assert_eq!(e.undo[0].label, "Edit 0");
+        assert_eq!(e.undo_label(), Some("Edit 99"));
+    }
+
+    #[test]
+    fn completed_creation_still_discards_the_redo_branch() {
+        let mut e = editor();
+        let (kind, style) = square(10.0, Rgba::RED);
+        e.add_object("Add", kind, style);
+        assert!(e.undo());
+        e.set_tool(Tool::Shape);
+        drag(&mut e, (200.0, 150.0), (250.0, 180.0));
+        assert_eq!(e.redo_label(), None);
+        assert_eq!(e.document().objects.len(), 1);
+        assert!(e.undo());
+        assert!(e.document().objects.is_empty());
+    }
+
+    #[test]
+    fn failed_document_edit_restores_the_original_document() {
+        let mut e = editor();
+        e.mark_saved();
+        assert!(!e.edit_document("Failed", |doc| {
+            raster::set_pixel(doc.background_mut(), 0, 0, Rgba::RED);
+            false
+        }));
+        assert_eq!(raster::pixel(e.document().background(), 0, 0), Rgba::WHITE);
+        assert!(!e.is_modified());
+        assert_eq!(e.undo_label(), None);
+        assert!(e.take_damage().is_none());
+    }
+
+    #[test]
+    fn ungroup_invalidates_the_previously_rendered_group() {
+        let mut e = editor();
+        let (kind, style) = square(10.0, Rgba::RED);
+        let a = e.add_object("Add", kind, style);
+        let (kind, style) = square(20.0, Rgba::BLACK);
+        let b = e.add_object("Add", kind, style);
+        e.set_selection(vec![a, b]);
+        let group = e.group_selected().unwrap();
+        e.edit(group, "Opacity", None, |o| o.style.opacity = 0.25);
+        e.take_damage();
+        let before = e.display().data().to_vec();
+        assert!(e.ungroup_selected());
+        let (_, expected) = e.document().render_area(e.document().bounds(), true).unwrap();
+        assert_ne!(before, expected.data());
+        assert!(e.take_damage().is_some());
+        assert_eq!(e.display().data(), expected.data());
     }
 }
 

@@ -64,7 +64,17 @@ impl Rgba {
 
     /// Black or white, whichever reads better on this color.
     pub fn contrasting(self) -> Rgba {
-        if self.luminance() > 0.6 {
+        let linear = |channel: u8| {
+            let value = f32::from(channel) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let luminance =
+            0.2126 * linear(self.r) + 0.7152 * linear(self.g) + 0.0722 * linear(self.b);
+        if (luminance + 0.05) / 0.05 >= 1.05 / (luminance + 0.05) {
             Rgba::BLACK
         } else {
             Rgba::WHITE
@@ -73,7 +83,8 @@ impl Rgba {
 
     /// Parses `#RGB`, `#RRGGBB` or `#AARRGGBB` (the `#` is optional).
     pub fn parse(text: &str) -> Option<Rgba> {
-        let hex = text.trim().trim_start_matches('#');
+        let text = text.trim();
+        let hex = text.strip_prefix('#').unwrap_or(text);
         let digits: Vec<u8> = hex
             .chars()
             .map(|c| c.to_digit(16).map(|d| d as u8))
@@ -140,5 +151,18 @@ mod tests {
         let json = serde_json::to_string(&Rgba::RED).unwrap();
         assert_eq!(json, "\"#FFE53935\"");
         assert_eq!(serde_json::from_str::<Rgba>(&json).unwrap(), Rgba::RED);
+    }
+
+    #[test]
+    fn rejects_multiple_hex_prefixes() {
+        assert_eq!(Rgba::parse("##fff"), None);
+    }
+
+    #[test]
+    fn contrasting_color_uses_the_higher_srgb_contrast() {
+        assert_eq!(Rgba::rgb(128, 128, 128).contrasting(), Rgba::BLACK);
+        assert_eq!(Rgba::rgb(255, 0, 0).contrasting(), Rgba::BLACK);
+        assert_eq!(Rgba::BLACK.contrasting(), Rgba::WHITE);
+        assert_eq!(Rgba::WHITE.contrasting(), Rgba::BLACK);
     }
 }

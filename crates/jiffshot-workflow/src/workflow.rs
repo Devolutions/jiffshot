@@ -11,10 +11,8 @@ use jiffshot_capture::library::{
 use jiffshot_capture::screen::CursorSnapshot;
 use jiffshot_capture::targets::process_name;
 use jiffshot_capture::{clipboard, CaptureMapping, Frame, Rect};
-#[cfg(target_os = "macos")]
 use std::borrow::Cow;
 use std::io;
-#[cfg(target_os = "macos")]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -29,7 +27,6 @@ pub struct Capture {
     pub window: Option<isize>,
 }
 
-#[cfg(target_os = "macos")]
 fn pixmap_for_frame(frame: &Frame) -> io::Result<tiny_skia::Pixmap> {
     frame.validate()?;
     let size = tiny_skia::IntSize::from_wh(frame.width, frame.height)
@@ -49,7 +46,6 @@ fn pixmap_for_frame(frame: &Frame) -> io::Result<tiny_skia::Pixmap> {
         .ok_or_else(|| io::Error::other("could not create an image for capture output"))
 }
 
-#[cfg(target_os = "macos")]
 fn image_for_delivery(
     capture: &Capture,
     placement: Option<CursorPlacement>,
@@ -85,7 +81,6 @@ fn image_for_delivery(
     Ok(Cow::Owned(frame_from_pixmap(&image)))
 }
 
-#[cfg(target_os = "macos")]
 fn apply_capture_effects(
     capture: &mut Capture,
     names: &[String],
@@ -144,13 +139,15 @@ fn apply_capture_effects(
     Ok(placement)
 }
 
-#[cfg(target_os = "macos")]
 fn temporary_flattened_share(path: &Path, image: &Frame) -> Result<PathBuf, String> {
     let stem = path
         .file_stem()
         .and_then(|stem| stem.to_str())
         .ok_or("the capture filename is unavailable")?;
+    #[cfg(target_os = "macos")]
     let target = jiffshot_capture::share::temporary_export_path(stem, "png")?;
+    #[cfg(windows)]
+    let target = windows_temporary_export_path(stem, "png")?;
     let output = std::fs::File::options()
         .write(true)
         .create_new(true)
@@ -171,7 +168,79 @@ fn temporary_flattened_share(path: &Path, image: &Frame) -> Result<PathBuf, Stri
     Ok(target)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(windows)]
+fn windows_temporary_export_path(stem: &str, ext: &str) -> Result<PathBuf, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+
+    if stem.is_empty()
+        || matches!(stem, "." | "..")
+        || stem.contains(['/', '\\', ':', '\0'])
+        || ext.is_empty()
+        || ext.contains(['/', '\\', ':', '\0'])
+    {
+        return Err("invalid temporary sharing filename".into());
+    }
+
+    struct Descriptor(*mut core::ffi::c_void);
+    impl Drop for Descriptor {
+        fn drop(&mut self) {
+            // SAFETY: the descriptor was allocated by Windows and is owned here.
+            unsafe { LocalFree(self.0) };
+        }
+    }
+
+    let sid = jiffshot_control::user_sid()
+        .map_err(|error| format!("could not identify the sharing user: {error}"))?;
+    let sddl = jiffshot_capture::wide(&format!("D:P(A;OICI;FA;;;{sid})"));
+    let mut descriptor = std::ptr::null_mut();
+    // SAFETY: the SDDL string is NUL-terminated and the output is freed by Descriptor.
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(format!("could not protect the temporary share: {}", io::Error::last_os_error()));
+    }
+    let descriptor = Descriptor(descriptor);
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("could not prepare a temporary share: {error}"))?
+        .as_nanos();
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..32 {
+        let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "jiffshot-share-{}-{timestamp}-{sequence}",
+            std::process::id()
+        ));
+        let wide: Vec<u16> = directory.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: the path is NUL-terminated and the descriptor outlives this call.
+        if unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) } != 0 {
+            return Ok(directory.join(format!("{stem}.{ext}")));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::AlreadyExists {
+            return Err(format!("could not prepare a temporary sharing folder: {error}"));
+        }
+    }
+    Err("could not create a unique temporary sharing folder".into())
+}
+
 fn encode_and_flush(image: &Frame, output: &mut impl Write) -> io::Result<()> {
     image.encode_png(&mut *output)?;
     output.flush()
@@ -511,29 +580,14 @@ pub(crate) fn immediate_in_layout_with_cursor(
 }
 
 /// Applies effects (by the editor's names) to a capture.
-pub fn apply_effects(frame: &mut Frame, names: &[String]) {
+pub fn apply_effects(frame: &mut Frame, names: &[String]) -> io::Result<()> {
     if names.is_empty() {
-        return;
+        return Ok(());
     }
-    let mut rgba = Vec::with_capacity(frame.pixels.len());
-    for p in frame.pixels.chunks_exact(4) {
-        rgba.extend_from_slice(&[p[2], p[1], p[0], if frame.alpha { p[3] } else { 255 }]);
-    }
-    let Some(pm) = tiny_skia::IntSize::from_wh(frame.width, frame.height)
-        .and_then(|s| tiny_skia::Pixmap::from_vec(rgba, s))
-    else {
-        return;
-    };
-    let mut doc = jiffshot_doc::Document::new(pm);
+    let mut doc = jiffshot_doc::Document::new(pixmap_for_frame(frame)?);
     apply_named_effects(&mut doc, names);
-    let flat = doc.flatten();
-    let mut out = Frame::new(flat.width(), flat.height());
-    out.alpha = flat.pixels().iter().any(|p| p.alpha() < 255);
-    for (d, p) in out.pixels.chunks_exact_mut(4).zip(flat.pixels()) {
-        let c = p.demultiply();
-        d.copy_from_slice(&[c.blue(), c.green(), c.red(), c.alpha()]);
-    }
-    *frame = out;
+    *frame = frame_from_pixmap(&doc.flatten());
+    Ok(())
 }
 
 fn apply_named_effects(doc: &mut jiffshot_doc::Document, names: &[String]) {
@@ -672,7 +726,6 @@ fn finish_in_library_with(
     share_capture: impl Fn(&str, &Path, &Path, isize) -> Result<Option<String>, String>,
 ) -> Outcome {
     let started = Instant::now();
-    #[cfg(target_os = "macos")]
     let (cursor_placement, effect_error) =
         match apply_capture_effects(&mut capture, &settings.capture_effects) {
             Ok(placement) => (placement, None),
@@ -684,17 +737,6 @@ fn finish_in_library_with(
                 Some(error),
             ),
         };
-    #[cfg(windows)]
-    let (cursor_placement, effect_error): (Option<CursorPlacement>, Option<io::Error>) = {
-        apply_effects(&mut capture.frame, &settings.capture_effects);
-        (
-            capture
-                .cursor
-                .as_ref()
-                .map(|(_, position)| CursorPlacement::pixels(*position)),
-            None,
-        )
-    };
     capture.meta.width = capture.frame.width;
     capture.meta.height = capture.frame.height;
     if let (Some(hwnd), Some(process)) = (capture.window, capture.meta.process.as_deref()) {
@@ -740,7 +782,6 @@ fn finish_in_library_with(
             path.display()
         ));
     }
-    #[cfg(target_os = "macos")]
     let delivery = if settings.copy_to_clipboard || !matches!(settings.share.as_str(), "" | "none")
     {
         match image_for_delivery(&capture, cursor_placement) {
@@ -756,10 +797,7 @@ fn finish_in_library_with(
     } else {
         None
     };
-    #[cfg(target_os = "macos")]
     let clipboard_frame = delivery.as_deref();
-    #[cfg(windows)]
-    let clipboard_frame = Some(&capture.frame);
     if settings.copy_to_clipboard {
         if let Some(frame) = clipboard_frame {
             match copy(frame, owner) {
@@ -791,7 +829,6 @@ fn finish_in_library_with(
             None => notes.push("editor not found".to_owned()),
         }
     }
-    #[cfg(target_os = "macos")]
     let share_result = if matches!(settings.share.as_str(), "" | "none") {
         None
     } else {
@@ -809,8 +846,6 @@ fn finish_in_library_with(
             None => None,
         }
     };
-    #[cfg(windows)]
-    let share_result = Some(share_capture(&settings.share, &path, &path, owner));
     if let Some(result) = share_result {
         match result {
             Ok(Some(note)) => notes.push(note),
@@ -932,7 +967,6 @@ fn share_from(
         "" | "none" => Ok(None),
         "file" => match save_copy_dialog(owner, suggested_path)? {
             Some(target) => {
-                #[cfg(target_os = "macos")]
                 if path != suggested_path {
                     return copy_flattened_share(path, suggested_path, &target)
                         .map(|()| Some(format!("copied to {}", target.display())));
@@ -988,48 +1022,45 @@ fn share_from(
     }
 }
 
-#[cfg(target_os = "macos")]
 fn copy_flattened_share(source: &Path, original: &Path, target: &Path) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt;
-
     let mut source_file = std::fs::File::open(source)
         .map_err(|error| format!("could not open {}: {error}", source.display()))?;
     let source_meta = source_file
         .metadata()
         .map_err(|error| format!("could not inspect {}: {error}", source.display()))?;
-    let mut protected = vec![std::fs::metadata(original)
-        .map_err(|error| format!("could not inspect {}: {error}", original.display()))?];
     let mut protected_paths = vec![original.to_path_buf()];
     protected_paths.extend(jiffshot_capture::library::companions(original));
-    if protected_paths.iter().any(|path| path == target) {
-        return Err(
-            "Choose a different file: the capture and its editable pointer must remain separate."
-                .to_owned(),
-        );
+    for path in &protected_paths {
+        if same_protected_path(path, target).map_err(|error| {
+            format!("could not inspect {}: {error}", target.display())
+        })? {
+            return Err(
+                "Choose a different file: the capture and its editable pointer must remain separate."
+                    .to_owned(),
+            );
+        }
     }
-    for path in protected_paths.iter().skip(1) {
-        match std::fs::metadata(path) {
-            Ok(metadata) => protected.push(metadata),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+    let mut protected = Vec::new();
+    for (index, path) in protected_paths.iter().enumerate() {
+        match std::fs::File::open(path) {
+            Ok(file) => protected.push(file_identity(&file).map_err(|error| {
+                format!("could not inspect {}: {error}", path.display())
+            })?),
+            Err(error) if index != 0 && error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(format!("could not inspect {}: {error}", path.display())),
         }
     }
+    let source_identity = file_identity(&source_file)
+        .map_err(|error| format!("could not inspect {}: {error}", source.display()))?;
     let mut target_file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
         .open(target)
         .map_err(|error| format!("could not open {}: {error}", target.display()))?;
-    let target_meta = target_file
-        .metadata()
+    let target_identity = file_identity(&target_file)
         .map_err(|error| format!("could not inspect {}: {error}", target.display()))?;
-    let same_file =
-        |a: &std::fs::Metadata, b: &std::fs::Metadata| a.dev() == b.dev() && a.ino() == b.ino();
-    if protected
-        .iter()
-        .any(|metadata| same_file(&target_meta, metadata))
-        || same_file(&target_meta, &source_meta)
-    {
+    if protected.contains(&target_identity) || target_identity == source_identity {
         return Err(
             "Choose a different file: the capture and its editable pointer must remain separate."
                 .to_owned(),
@@ -1045,6 +1076,59 @@ fn copy_flattened_share(source: &Path, original: &Path, target: &Path) -> Result
                 target.display()
             )
         })
+}
+
+fn same_protected_path(path: &Path, target: &Path) -> io::Result<bool> {
+    if path == target {
+        return Ok(true);
+    }
+    #[cfg(windows)]
+    {
+        let (Some(name), Some(target_name)) = (path.file_name(), target.file_name()) else {
+            return Ok(false);
+        };
+        if name.to_string_lossy().to_lowercase() != target_name.to_string_lossy().to_lowercase() {
+            return Ok(false);
+        }
+        let parent = |path: &Path| {
+            path.parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new("."))
+                .canonicalize()
+        };
+        let first = parent(path)?;
+        let second = parent(target)?;
+        return Ok(first.to_string_lossy().to_lowercase() == second.to_string_lossy().to_lowercase());
+    }
+    #[cfg(target_os = "macos")]
+    Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+fn file_identity(file: &std::fs::File) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn file_identity(file: &std::fs::File) -> io::Result<(u64, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    // SAFETY: the live file handle and output buffer remain valid during the call.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), info.as_mut_ptr()) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a successful call initializes the complete structure.
+    let info = unsafe { info.assume_init() };
+    Ok((
+        u64::from(info.dwVolumeSerialNumber),
+        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    ))
 }
 
 /// Asks where to save a copy of `path` (same type).
@@ -1109,7 +1193,205 @@ fn save_copy_dialog(_owner: isize, path: &Path) -> Result<Option<PathBuf>, Strin
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(windows)]
+    fn windows_test_library(name: &str) -> (Library, PathBuf) {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "jiffshot-{name}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        (Library::new(root.clone()), root)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_capture_effects_keep_straight_alpha_colors() {
+        let mut frame = Frame {
+            width: 1,
+            height: 1,
+            pixels: vec![20, 40, 120, 128],
+            alpha: true,
+        };
+        apply_effects(&mut frame, &["Invert".into()]).unwrap();
+        let (red, green, blue) = frame.rgb(0, 0).unwrap();
+        assert!((i16::from(red) - 135).abs() <= 2, "red was {red}");
+        assert!((i16::from(green) - 215).abs() <= 2, "green was {green}");
+        assert!((i16::from(blue) - 235).abs() <= 2, "blue was {blue}");
+        assert_eq!(frame.pixels[3], 128);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_capture_effects_move_the_editable_cursor() {
+        let (library, root) = windows_test_library("cursor-effects");
+        let frame = Frame::new(40, 20);
+        let mut capture = from_frame(CaptureKind::Region, frame.bounds(), frame);
+        capture.cursor = Some((Frame::new(2, 2), (3, 4)));
+        let settings = Settings {
+            copy_to_clipboard: false,
+            open_in_editor: false,
+            capture_effects: vec!["Border".into()],
+            share: "none".into(),
+            ..Settings::default()
+        };
+        let outcome = finish_in_library(capture, &settings, 0, &library);
+        assert!(!outcome.is_error, "{}", outcome.message);
+        let path = library.recent(10).pop().unwrap();
+        let placement: CursorPlacement =
+            serde_json::from_slice(&std::fs::read(path.with_extension("cursor.json")).unwrap())
+                .unwrap();
+        assert_eq!(placement.geometry((2, 2)).unwrap(), [11.0, 12.0, 2.0, 2.0]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_delivery_flattens_the_cursor_without_changing_the_library_image() {
+        use std::cell::RefCell;
+
+        let (library, root) = windows_test_library("cursor-delivery");
+        let frame = Frame {
+            width: 3,
+            height: 1,
+            pixels: vec![10, 20, 30, 0].repeat(3),
+            alpha: false,
+        };
+        let mut capture = from_frame(CaptureKind::Region, frame.bounds(), frame);
+        capture.cursor = Some((
+            Frame { width: 1, height: 1, pixels: vec![0, 0, 255, 255], alpha: true },
+            (1, 0),
+        ));
+        let settings = Settings {
+            copy_to_clipboard: true,
+            open_in_editor: false,
+            share: "file".into(),
+            ..Settings::default()
+        };
+        let copied = RefCell::new(None);
+        let shared = RefCell::new(None);
+        let outcome = finish_in_library_with(
+            capture,
+            &settings,
+            0,
+            &library,
+            |image, _| {
+                *copied.borrow_mut() = Some(image.clone());
+                Ok(())
+            },
+            |_, source, suggestion, _| {
+                *shared.borrow_mut() = Some((
+                    source.to_path_buf(),
+                    suggestion.to_path_buf(),
+                    Frame::load_png(source).unwrap(),
+                ));
+                Ok(Some("shared".into()))
+            },
+        );
+        assert!(!outcome.is_error, "{}", outcome.message);
+        let copied = copied.into_inner().unwrap();
+        let (source, suggestion, shared) = shared.into_inner().unwrap();
+        assert_eq!(copied.rgb(1, 0), Some((255, 0, 0)));
+        assert_eq!(shared.rgb(1, 0), Some((255, 0, 0)));
+        assert_ne!(source, suggestion);
+        assert_eq!(Frame::load_png(&suggestion).unwrap().rgb(1, 0), Some((30, 20, 10)));
+        std::fs::remove_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_flattened_share_protects_the_capture_and_its_companions() {
+        let (_, root) = windows_test_library("cursor-share-protection");
+        let source = root.join("flattened.png");
+        let original = root.join("original.png");
+        let pointer = original.with_extension("cursor.png");
+        let hardlink = root.join("hardlink.png");
+        let pointer_link = root.join("pointer-link.png");
+        let absent_sidecar = original.with_extension("JSD");
+        std::fs::write(&source, b"flattened").unwrap();
+        std::fs::write(&original, b"background").unwrap();
+        std::fs::write(&pointer, b"editable pointer").unwrap();
+        std::fs::hard_link(&original, &hardlink).unwrap();
+        std::fs::hard_link(&pointer, &pointer_link).unwrap();
+        for target in [&original, &hardlink, &pointer, &pointer_link, &source, &absent_sidecar] {
+            assert!(copy_flattened_share(&source, &original, target).is_err(), "{}", target.display());
+            assert_eq!(std::fs::read(&original).unwrap(), b"background");
+            assert_eq!(std::fs::read(&pointer).unwrap(), b"editable pointer");
+            assert_eq!(std::fs::read(&source).unwrap(), b"flattened");
+        }
+        assert!(!absent_sidecar.exists());
+        let target = root.join("copy.png");
+        std::fs::write(&target, b"existing longer file").unwrap();
+        copy_flattened_share(&source, &original, &target).unwrap();
+        assert_eq!(std::fs::read(target).unwrap(), b"flattened");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_temporary_shares_are_private_to_the_current_user() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
+            SE_FILE_OBJECT,
+        };
+        use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+
+        assert!(windows_temporary_export_path("../capture", "png").is_err());
+        let target = windows_temporary_export_path("capture", "png").unwrap();
+        std::fs::write(&target, b"private").unwrap();
+        let sid = jiffshot_control::user_sid().unwrap();
+        for path in [target.parent().unwrap(), target.as_path()] {
+            let mut name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            let mut descriptor = std::ptr::null_mut();
+            // SAFETY: name is NUL-terminated and the returned descriptor is freed below.
+            let status = unsafe {
+                GetNamedSecurityInfoW(
+                    name.as_mut_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut descriptor,
+                )
+            };
+            assert_eq!(status, 0, "could not read ACL for {}", path.display());
+            let mut text = std::ptr::null_mut();
+            // SAFETY: the descriptor is live; Windows allocates the returned string.
+            let converted = unsafe {
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    descriptor,
+                    1,
+                    DACL_SECURITY_INFORMATION,
+                    &mut text,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_ne!(converted, 0, "could not format ACL for {}", path.display());
+            // SAFETY: Windows returned a NUL-terminated UTF-16 string.
+            let acl = unsafe {
+                let len = (0..).take_while(|&index| *text.add(index) != 0).count();
+                String::from_utf16_lossy(std::slice::from_raw_parts(text, len))
+            };
+            // SAFETY: both pointers are allocations returned by Windows.
+            unsafe {
+                LocalFree(text.cast());
+                LocalFree(descriptor);
+            }
+            assert_eq!(acl.matches("(A;").count(), 1, "{acl}");
+            assert!(acl.contains(&format!(";;;{sid})")), "{acl}");
+        }
+        std::fs::remove_file(&target).unwrap();
+        std::fs::remove_dir(target.parent().unwrap()).unwrap();
+    }
+
     #[test]
     fn cursor_finish_reports_a_pointer_save_failure_and_keeps_the_capture() {
         let nonce = std::time::SystemTime::now()
@@ -1156,7 +1438,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn cursor_finish_saves_a_reopenable_pointer() {
         let nonce = std::time::SystemTime::now()
@@ -1301,7 +1582,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn cursor_clipboard_share_uses_the_flattened_frame_without_a_file_share() {
         use std::cell::RefCell;
@@ -1350,7 +1630,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn invalid_cursor_is_not_silently_omitted_from_delivery() {
         let nonce = std::time::SystemTime::now()
@@ -1392,7 +1671,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn cursor_moves_with_border_and_shadow_effects() {
         use std::cell::RefCell;
@@ -1451,7 +1729,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn cursor_scale_effect_preserves_fractional_editor_geometry_in_delivery() {
         use std::cell::RefCell;
@@ -1529,7 +1806,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn capture_without_a_cursor_shares_the_original_file() {
         use std::cell::RefCell;
@@ -1623,7 +1899,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn capture_effects_convert_straight_alpha_before_processing() {
         let frame = Frame {
@@ -1716,7 +1991,6 @@ mod tests {
         assert_eq!(frame.rgb(0, 0), Some((0, 0, 0)));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn temporary_share_reports_a_flush_failure() {
         struct FailingFlush {

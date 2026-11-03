@@ -252,26 +252,69 @@ fn channel(v: f32) -> u8 {
 
 /// Applies `effect` to the document. Returns false when it changed nothing.
 pub fn apply(doc: &mut Document, effect: Effect) -> bool {
+    let (width, height) = doc.size();
+    let unchanged = match &effect {
+        Effect::Border { width, .. } => *width == 0,
+        Effect::Edges { sides, .. } => sides.iter().all(|side| !side),
+        Effect::Perspective { amount, .. } => *amount == 0.0,
+        Effect::HueShift(degrees) => degrees.rem_euclid(360.0) == 0.0,
+        Effect::Gamma(gamma) => *gamma == 1.0,
+        Effect::Watermark { opacity, .. } => *opacity <= 0.0,
+        Effect::Adjust {
+            brightness,
+            contrast,
+        } => *brightness == 0.0 && *contrast == 0.0,
+        Effect::Saturation(saturation) => *saturation == 1.0,
+        Effect::BlurImage(radius) => *radius == 0,
+        Effect::RoundedCorners { radius } => *radius == 0,
+        Effect::ScaleTo(max) => *max == 0,
+        Effect::Sharpen => width < 3 || height < 3,
+        Effect::Reflection => (height as f32 * 0.35) as u32 == 0,
+        _ => false,
+    };
+    if unchanged {
+        return false;
+    }
+
     match effect {
         Effect::Border { width, color } => {
             let (w, h) = doc.size();
-            doc.resize_canvas(
-                w + 2 * width,
-                h + 2 * width,
-                width as i32,
-                width as i32,
-                color,
-            );
+            let Some(padding) = width.checked_mul(2) else {
+                return false;
+            };
+            let (Some(new_width), Some(new_height)) =
+                (w.checked_add(padding), h.checked_add(padding))
+            else {
+                return false;
+            };
+            if new_width > i32::MAX as u32 || new_height > i32::MAX as u32 {
+                return false;
+            }
+            doc.resize_canvas(new_width, new_height, width as i32, width as i32, color);
         }
         Effect::Shadow { size } => {
             let (w, h) = doc.size();
-            let blur = size / 2 + 1;
-            let margin = blur * 2;
-            let (nw, nh) = (w + margin + size, h + margin + size);
+            let Some(blur) = (size / 2).checked_add(1) else {
+                return false;
+            };
+            let Some(margin) = blur.checked_mul(2) else {
+                return false;
+            };
+            let (Some(nw), Some(nh)) = (
+                w.checked_add(margin).and_then(|width| width.checked_add(size)),
+                h.checked_add(margin).and_then(|height| height.checked_add(size)),
+            ) else {
+                return false;
+            };
+            if nw > i32::MAX as u32 || nh > i32::MAX as u32 {
+                return false;
+            }
             let Some(mut out) = Pixmap::new(nw, nh) else {
                 return false;
             };
-            let mut shadow = Pixmap::new(nw, nh).unwrap();
+            let Some(mut shadow) = Pixmap::new(nw, nh) else {
+                return false;
+            };
             for (i, p) in doc.background().pixels().iter().enumerate() {
                 let (x, y) = (
                     (i as u32 % w) + margin / 2 + size,
@@ -522,7 +565,7 @@ pub fn apply(doc: &mut Document, effect: Effect) -> bool {
             for p in doc.background_mut().pixels_mut() {
                 let c = Rgba::from_premultiplied(*p);
                 if c.a > 0 && near(c) {
-                    *p = to.with_alpha(c.a).premultiplied();
+                    *p = to.faded(c.a as f32 / 255.0).premultiplied();
                     changed = true;
                 }
             }
@@ -703,11 +746,12 @@ pub fn cut_out_with(doc: &mut Document, r: IRect, vertical: bool, edge: Edge) ->
         return cut_out(doc, r, vertical);
     }
     const GAP: i32 = 14;
-    let (start, len) = if vertical {
-        (r.x.max(0), r.w)
+    let (origin, extent, total) = if vertical {
+        (r.x, r.w, doc.width() as i32)
     } else {
-        (r.y.max(0), r.h)
+        (r.y, r.h, doc.height() as i32)
     };
+    let (start, len) = clipped_band(origin, extent, total);
     if len <= GAP {
         return false;
     }
@@ -745,12 +789,12 @@ pub fn cut_out_with(doc: &mut Document, r: IRect, vertical: bool, edge: Edge) ->
 /// closes the gap. Objects past the band move with the image.
 pub fn cut_out(doc: &mut Document, r: IRect, vertical: bool) -> bool {
     let (w, h) = doc.size();
-    let (start, len, total) = if vertical {
-        (r.x.max(0), r.w, w as i32)
+    let (origin, extent, total) = if vertical {
+        (r.x, r.w, w as i32)
     } else {
-        (r.y.max(0), r.h, h as i32)
+        (r.y, r.h, h as i32)
     };
-    let len = len.min(total - start);
+    let (start, len) = clipped_band(origin, extent, total);
     if len <= 0 || len >= total {
         return false;
     }
@@ -803,6 +847,12 @@ pub fn cut_out(doc: &mut Document, r: IRect, vertical: bool) -> bool {
     true
 }
 
+fn clipped_band(origin: i32, extent: i32, total: i32) -> (i32, i32) {
+    let start = i64::from(origin).clamp(0, i64::from(total));
+    let end = (i64::from(origin) + i64::from(extent)).clamp(0, i64::from(total));
+    (start as i32, (end - start).max(0) as i32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -850,5 +900,129 @@ mod tests {
         assert_eq!(raster::pixel(red.background(), 5, 5), Rgba::BLUE);
         assert_eq!(raster::pixel(d.background(), 0, 0).a, 0);
         assert_eq!(raster::pixel(d.background(), 50, 35), Rgba::WHITE);
+    }
+
+    #[test]
+    fn replacing_a_color_applies_the_replacement_alpha() {
+        let mut d = Document::blank(2, 1, Rgba::RED);
+        raster::set_pixel(d.background_mut(), 1, 0, Rgba::RED.with_alpha(128));
+        assert!(apply(
+            &mut d,
+            Effect::ReplaceColor {
+                from: Rgba::RED,
+                to: Rgba::BLUE.with_alpha(128),
+            },
+        ));
+        assert_eq!(raster::pixel(d.background(), 0, 0).a, 128);
+        assert_eq!(raster::pixel(d.background(), 1, 0).a, 64);
+        assert!(apply(
+            &mut d,
+            Effect::ReplaceColor {
+                from: Rgba::BLUE,
+                to: Rgba::TRANSPARENT,
+            },
+        ));
+        assert_eq!(raster::pixel(d.background(), 0, 0).a, 0);
+        assert_eq!(raster::pixel(d.background(), 1, 0).a, 0);
+    }
+
+    #[test]
+    fn cut_out_clips_a_band_that_starts_before_the_canvas() {
+        let mut d = Document::blank(10, 2, Rgba::WHITE);
+        let mut pixels = d.background().clone();
+        for x in 0..10 {
+            for y in 0..2 {
+                raster::set_pixel(&mut pixels, x, y, Rgba::rgb(x as u8, 0, 0));
+            }
+        }
+        d.set_background(pixels);
+
+        assert!(cut_out(&mut d, IRect::new(-3, 0, 7, 2), true));
+
+        assert_eq!(d.size(), (6, 2));
+        assert_eq!(raster::pixel(d.background(), 0, 0), Rgba::rgb(4, 0, 0));
+    }
+
+    #[test]
+    fn clipped_cut_out_edges_use_the_clipped_band() {
+        let mut d = Document::blank(40, 2, Rgba::WHITE);
+        let mut pixels = d.background().clone();
+        for x in 0..40 {
+            for y in 0..2 {
+                raster::set_pixel(&mut pixels, x, y, Rgba::rgb(x as u8, 0, 0));
+            }
+        }
+        d.set_background(pixels);
+
+        assert!(cut_out_with(
+            &mut d,
+            IRect::new(-3, 0, 30, 2),
+            true,
+            Edge::Sawtooth
+        ));
+
+        assert_eq!(d.width(), 27);
+    }
+
+    #[test]
+    fn identity_effects_report_no_change_and_preserve_the_document() {
+        let image = std::sync::Arc::new(raster::solid(2, 2, Rgba::WHITE).unwrap());
+        let effects = [
+            Effect::Border {
+                width: 0,
+                color: Rgba::BLACK,
+            },
+            Effect::Edges {
+                style: EdgeStyle::Wave,
+                depth: 10,
+                sides: [false; 4],
+            },
+            Effect::Perspective {
+                amount: 0.0,
+                tilt: false,
+            },
+            Effect::HueShift(360.0),
+            Effect::Gamma(1.0),
+            Effect::Watermark {
+                image,
+                opacity: 0.0,
+            },
+            Effect::Adjust {
+                brightness: 0.0,
+                contrast: 0.0,
+            },
+            Effect::Saturation(1.0),
+            Effect::BlurImage(0),
+            Effect::RoundedCorners { radius: 0 },
+            Effect::ScaleTo(0),
+            Effect::Sharpen,
+            Effect::Reflection,
+        ];
+        let mut d = Document::blank(2, 2, Rgba::WHITE);
+        let before = d.background().data().to_vec();
+        for effect in effects {
+            assert!(!apply(&mut d, effect), "identity effect must report no change");
+            assert_eq!(d.size(), (2, 2));
+            assert_eq!(d.background().data(), before);
+        }
+    }
+
+    #[test]
+    fn oversized_canvas_effects_fail_without_panicking_or_changing_the_document() {
+        let mut d = Document::blank(2, 2, Rgba::WHITE);
+        let before = d.background().data().to_vec();
+        assert!(!apply(
+            &mut d,
+            Effect::Border {
+                width: u32::MAX,
+                color: Rgba::BLACK,
+            }
+        ));
+        assert_eq!(d.size(), (2, 2));
+        assert_eq!(d.background().data(), before);
+
+        assert!(!apply(&mut d, Effect::Shadow { size: u32::MAX }));
+        assert_eq!(d.size(), (2, 2));
+        assert_eq!(d.background().data(), before);
     }
 }

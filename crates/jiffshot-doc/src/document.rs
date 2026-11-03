@@ -72,9 +72,16 @@ impl Document {
     }
 
     pub fn allocate_id(&mut self) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
+        let start = self.next_id.max(1);
+        let mut id = start;
+        loop {
+            if !self.objects.iter().any(|object| object.id == id) {
+                self.next_id = id.wrapping_add(1).max(1);
+                return id;
+            }
+            id = id.wrapping_add(1).max(1);
+            assert_ne!(id, start, "document object id space exhausted");
+        }
     }
 
     pub fn add(&mut self, kind: Kind, style: Style) -> u64 {
@@ -125,53 +132,57 @@ impl Document {
 
     /// Restores ids after loading, so new objects never reuse one.
     pub fn renumber_from_objects(&mut self) {
-        self.next_id = self.objects.iter().map(|o| o.id).max().unwrap_or(0) + 1;
+        self.next_id = self
+            .objects
+            .iter()
+            .map(|o| o.id)
+            .max()
+            .unwrap_or(0)
+            .wrapping_add(1)
+            .max(1);
     }
 
     /// The label for the next step in `format` ("Numbers", "Letters",
     /// "Lowercase" or "Roman"), continuing from the steps of that format.
     pub fn next_step_label_as(&self, format: &str) -> String {
-        let labels: Vec<&str> = self
-            .objects
-            .iter()
-            .filter_map(|o| match &o.kind {
-                Kind::Step { label, .. } => Some(label.as_str()),
-                _ => None,
-            })
-            .collect();
-        let value = |l: &str| -> Option<u32> {
-            match format {
-                "Letters" | "Lowercase" => {
-                    let c = l.chars().next()?;
-                    (l.len() == 1
-                        && c.is_ascii_alphabetic()
-                        && (format == "Letters") == c.is_ascii_uppercase())
-                    .then(|| (c.to_ascii_uppercase() as u8 - b'A' + 1) as u32)
-                }
-                "Roman" => from_roman(l),
-                _ => l.parse().ok(),
-            }
-        };
-        let next = labels.iter().filter_map(|l| value(l)).max().unwrap_or(0) + 1;
+        let labels = self.step_labels();
         match format {
-            "Letters" => char::from(b'A' + ((next - 1) % 26) as u8).to_string(),
-            "Lowercase" => char::from(b'a' + ((next - 1) % 26) as u8).to_string(),
-            "Roman" => to_roman(next),
-            _ => next.to_string(),
+            "Letters" | "Lowercase" => {
+                let next = labels
+                    .iter()
+                    .filter_map(|label| {
+                        let c = label.chars().next()?;
+                        (label.len() == 1
+                            && c.is_ascii_alphabetic()
+                            && (format == "Letters") == c.is_ascii_uppercase())
+                        .then(|| c.to_ascii_uppercase() as u8 - b'A' + 1)
+                    })
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                let base = if format == "Letters" { b'A' } else { b'a' };
+                char::from(base + (next - 1) % 26).to_string()
+            }
+            "Roman" => {
+                let (thousands, remainder) = labels
+                    .iter()
+                    .filter_map(|label| from_roman(label))
+                    .max()
+                    .unwrap_or((0, 0));
+                if remainder == 999 {
+                    "m".repeat(thousands + 1)
+                } else {
+                    format!("{}{}", "m".repeat(thousands), to_roman(remainder + 1))
+                }
+            }
+            _ => Self::next_number_label(labels.into_iter()),
         }
     }
 
     /// The label for the next step: one past the highest number used, or
     /// the next letter when the last step used letters.
     pub fn next_step_label(&self) -> String {
-        let labels: Vec<&str> = self
-            .objects
-            .iter()
-            .filter_map(|o| match &o.kind {
-                Kind::Step { label, .. } => Some(label.as_str()),
-                _ => None,
-            })
-            .collect();
+        let labels = self.step_labels();
         if let Some(last) = labels.last() {
             let mut chars = last.chars();
             if let (Some(c), None) = (chars.next(), chars.next()) {
@@ -180,12 +191,46 @@ impl Document {
                 }
             }
         }
-        let max = labels
-            .iter()
-            .filter_map(|l| l.parse::<u32>().ok())
-            .max()
-            .unwrap_or(0);
-        (max + 1).to_string()
+        Self::next_number_label(labels.into_iter())
+    }
+
+    fn step_labels(&self) -> Vec<&str> {
+        fn collect<'a>(objects: &'a [Object], labels: &mut Vec<&'a str>) {
+            for object in objects {
+                match &object.kind {
+                    Kind::Step { label, .. } => labels.push(label),
+                    Kind::Group { objects } => collect(objects, labels),
+                    _ => {}
+                }
+            }
+        }
+        let mut labels = Vec::new();
+        collect(&self.objects, &mut labels);
+        labels
+    }
+
+    fn next_number_label<'a>(labels: impl Iterator<Item = &'a str>) -> String {
+        let largest = labels
+            .filter_map(|label| {
+                let digits = label.strip_prefix('+').unwrap_or(label);
+                if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                let trimmed = digits.trim_start_matches('0');
+                Some(if trimmed.is_empty() { "0" } else { trimmed })
+            })
+            .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
+            .unwrap_or("0");
+        let mut digits = largest.as_bytes().to_vec();
+        for digit in digits.iter_mut().rev() {
+            if *digit != b'9' {
+                *digit += 1;
+                return String::from_utf8(digits).expect("decimal digits are UTF-8");
+            }
+            *digit = b'0';
+        }
+        digits.insert(0, b'1');
+        String::from_utf8(digits).expect("decimal digits are UTF-8")
     }
 
     /// Grows `area` until it includes every pixel that objects touching it
@@ -404,9 +449,22 @@ fn to_roman(mut n: u32) -> String {
     out
 }
 
-fn from_roman(s: &str) -> Option<u32> {
-    let n = (1..4000).find(|&n| to_roman(n) == s)?;
-    Some(n)
+fn from_roman(s: &str) -> Option<(usize, u32)> {
+    if s.is_empty() {
+        return None;
+    }
+    let thousands = s.bytes().take_while(|b| *b == b'm').count();
+    let suffix = &s[thousands..];
+    let mut rest = suffix;
+    let mut value = 0_u32;
+    for &(number, numeral) in ROMAN.iter().filter(|(number, _)| *number < 1000) {
+        while let Some(next) = rest.strip_prefix(numeral) {
+            value = value.checked_add(number)?;
+            rest = next;
+        }
+    }
+    (rest.is_empty() && value < 1000 && to_roman(value) == suffix)
+        .then_some((thousands, value))
 }
 
 #[cfg(test)]
@@ -424,6 +482,46 @@ mod tests {
             }
         }
         d
+    }
+
+    #[test]
+    fn allocating_after_maximum_object_id_does_not_wrap_or_duplicate() {
+        let mut d = Document::blank(2, 2, Rgba::WHITE);
+        d.objects.push(Object::new(
+            u64::MAX,
+            Kind::Text {
+                rect: Box2::default(),
+                text: String::new(),
+            },
+            Style::default(),
+        ));
+        d.renumber_from_objects();
+        let id = d.add(
+            Kind::Text {
+                rect: Box2::default(),
+                text: String::new(),
+            },
+            Style::default(),
+        );
+        assert_eq!(id, 1);
+        assert_eq!(d.objects.iter().filter(|object| object.id == id).count(), 1);
+    }
+
+    #[test]
+    fn scaling_to_zero_preserves_the_document() {
+        let mut d = Document::blank(2, 2, Rgba::WHITE);
+        d.add(
+            Kind::Text {
+                rect: Box2::new(0.0, 0.0, 2.0, 2.0),
+                text: "keep".into(),
+            },
+            Style::default(),
+        );
+        let before = d.clone();
+        d.scale(0, 2);
+        assert_eq!(d.size(), before.size());
+        assert_eq!(d.objects, before.objects);
+        assert_eq!(d.background().data(), before.background().data());
     }
 
     #[cfg(target_os = "macos")]
@@ -595,5 +693,122 @@ mod tests {
         d.add(step("iii"), Style::default());
         assert_eq!(d.next_step_label_as("Roman"), "iv");
         assert_eq!(d.next_step_label_as("Numbers"), "8");
+    }
+
+    #[test]
+    fn grouped_step_labels_continue_including_nested_groups() {
+        let step = |label: &str| Object::new(
+            1,
+            Kind::Step {
+                center: Pt::new(5.0, 5.0),
+                radius: 2.0,
+                label: label.into(),
+                shape: ShapeKind::Ellipse,
+            },
+            Style::default(),
+        );
+        let nested = Object::new(
+            2,
+            Kind::Group { objects: vec![step("7")] },
+            Style::default(),
+        );
+        let mut d = Document::blank(10, 10, Rgba::WHITE);
+        d.add(Kind::Group { objects: vec![nested] }, Style::default());
+        assert_eq!(d.next_step_label_as("Numbers"), "8");
+        assert_eq!(d.next_step_label(), "8");
+    }
+
+    #[test]
+    fn scaling_a_group_scales_nested_styles_like_ungrouped_objects() {
+        let kind = Kind::Step {
+            center: Pt::new(5.0, 5.0),
+            radius: 2.0,
+            label: "1".into(),
+            shape: ShapeKind::Ellipse,
+        };
+        let style = Style { width: 4.0, font_size: 12.0, ..Style::default() };
+        let grouped_step = Object::new(1, kind.clone(), style.clone());
+        let nested = Object::new(
+            2,
+            Kind::Group { objects: vec![grouped_step] },
+            Style::default(),
+        );
+        let mut d = Document::blank(10, 10, Rgba::WHITE);
+        let individual = d.add(kind, style);
+        let group = d.add(Kind::Group { objects: vec![nested] }, Style::default());
+        d.scale(20, 20);
+        let Kind::Group { objects } = &d.get(group).unwrap().kind else { panic!("expected group") };
+        let Kind::Group { objects } = &objects[0].kind else { panic!("expected nested group") };
+        let grouped = &objects[0];
+        let individual = d.get(individual).unwrap();
+        assert_eq!(grouped.style.width, individual.style.width);
+        assert_eq!(grouped.style.font_size, individual.style.font_size);
+        assert_eq!(grouped.style.width, 8.0);
+        assert_eq!(grouped.style.font_size, 24.0);
+        assert_eq!(grouped.rect(), individual.rect());
+    }
+
+    #[test]
+    fn resizing_a_group_scales_child_stroke_and_font_sizes() {
+        let child = Object::new(
+            1,
+            Kind::Step {
+                center: Pt::new(5.0, 5.0),
+                radius: 2.0,
+                label: "1".into(),
+                shape: ShapeKind::Ellipse,
+            },
+            Style { width: 4.0, font_size: 12.0, ..Style::default() },
+        );
+        let mut group = Object::new(
+            2,
+            Kind::Group { objects: vec![child] },
+            Style::default(),
+        );
+        group.move_handle(crate::object::H_BR, Pt::new(11.0, 11.0), false);
+        let Kind::Group { objects } = &group.kind else { panic!("expected group") };
+        assert_eq!(objects[0].style.width, 8.0);
+        assert_eq!(objects[0].style.font_size, 24.0);
+    }
+
+    #[test]
+    fn numeric_step_labels_continue_past_integer_limits() {
+        let mut d = Document::blank(10, 10, Rgba::WHITE);
+        d.add(
+            Kind::Step {
+                center: Pt::new(5.0, 5.0),
+                radius: 2.0,
+                label: "18446744073709551615".into(),
+                shape: ShapeKind::Ellipse,
+            },
+            Style::default(),
+        );
+        assert_eq!(d.next_step_label(), "18446744073709551616");
+        assert_eq!(d.next_step_label_as("Numbers"), "18446744073709551616");
+        assert_eq!(
+            Document::next_number_label(["+0004294967295", "99"].into_iter()),
+            "4294967296"
+        );
+        assert_eq!(
+            Document::next_number_label(["999999999999999999999999999999"].into_iter()),
+            "1000000000000000000000000000000"
+        );
+    }
+
+    #[test]
+    fn roman_step_labels_continue_after_three_thousand_nine_hundred_ninety_nine() {
+        let mut d = Document::blank(10, 10, Rgba::WHITE);
+        let step = |label: &str| Kind::Step {
+            center: Pt::new(5.0, 5.0),
+            radius: 2.0,
+            label: label.into(),
+            shape: ShapeKind::Ellipse,
+        };
+        d.add(step("mmmcmxcix"), Style::default());
+        assert_eq!(d.next_step_label_as("Roman"), "mmmm");
+        d.add(step("mmmm"), Style::default());
+        assert_eq!(d.next_step_label_as("Roman"), "mmmmi");
+        assert_eq!(from_roman("iiii"), None);
+        assert_eq!(from_roman(""), None);
     }
 }

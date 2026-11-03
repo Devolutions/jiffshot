@@ -38,20 +38,31 @@ pub fn copy_area(src: &Pixmap, area: IRect, dst: &mut Pixmap, dx: i32, dy: i32) 
     let Some(a) = area.intersect(&IRect::of_size(src.width(), src.height())) else {
         return;
     };
-    let (dx, dy) = (dx + a.x - area.x, dy + a.y - area.y);
-    let Some(d) =
-        IRect::new(dx, dy, a.w, a.h).intersect(&IRect::of_size(dst.width(), dst.height()))
-    else {
+    let (dx, dy) = (
+        i64::from(dx) + i64::from(a.x) - i64::from(area.x),
+        i64::from(dy) + i64::from(a.y) - i64::from(area.y),
+    );
+    let (left, top) = (dx.max(0), dy.max(0));
+    let (right, bottom) = (
+        (dx + i64::from(a.w)).min(i64::from(dst.width())),
+        (dy + i64::from(a.h)).min(i64::from(dst.height())),
+    );
+    if right <= left || bottom <= top {
         return;
-    };
-    let (sx, sy) = (a.x + d.x - dx, a.y + d.y - dy);
+    }
+    let (sx, sy) = (
+        i64::from(a.x) + left - dx,
+        i64::from(a.y) + top - dy,
+    );
+    let (left, top, sx, sy) = (left as usize, top as usize, sx as usize, sy as usize);
+    let (width, height) = ((right - left as i64) as usize, (bottom - top as i64) as usize);
     let (ss, ds) = (src.width() as usize * 4, dst.width() as usize * 4);
-    let row_bytes = d.w as usize * 4;
+    let row_bytes = width * 4;
     let src = src.data();
     let dst = dst.data_mut();
-    for row in 0..d.h as usize {
-        let s = (sy as usize + row) * ss + sx as usize * 4;
-        let t = (d.y as usize + row) * ds + d.x as usize * 4;
+    for row in 0..height {
+        let s = (sy + row) * ss + sx * 4;
+        let t = (top + row) * ds + left * 4;
         dst[t..t + row_bytes].copy_from_slice(&src[s..s + row_bytes]);
     }
 }
@@ -95,17 +106,16 @@ pub fn blur_area(pixmap: &mut Pixmap, area: IRect, radius: u32) {
     }
     let mut buf = extract(pixmap, a).expect("non-empty area");
     let (w, h) = (buf.width() as usize, buf.height() as usize);
-    let r = radius as usize;
     let mut tmp = vec![0u8; w * h * 4];
     for _ in 0..3 {
-        box_pass(buf.data(), &mut tmp, w, h, r, true);
-        box_pass(&tmp, buf.data_mut(), w, h, r, false);
+        box_pass(buf.data(), &mut tmp, w, h, radius, true);
+        box_pass(&tmp, buf.data_mut(), w, h, radius, false);
     }
     copy_area(&buf, IRect::new(0, 0, a.w, a.h), pixmap, a.x, a.y);
 }
 
 /// One horizontal (or vertical) running-sum box blur from `src` to `dst`.
-fn box_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize, horizontal: bool) {
+fn box_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, radius: u32, horizontal: bool) {
     let (n, lines) = if horizontal { (w, h) } else { (h, w) };
     let at = |line: usize, i: usize| {
         if horizontal {
@@ -114,14 +124,20 @@ fn box_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize, horizontal
             (i * w + line) * 4
         }
     };
-    let window = (2 * r + 1) as u32;
+    let radius = u64::from(radius);
+    let window = 2 * radius + 1;
     for line in 0..lines {
-        let mut sum = [0u32; 4];
-        for k in 0..=2 * r {
-            let i = (k as isize - r as isize).clamp(0, n as isize - 1) as usize;
+        let first = at(line, 0);
+        let last = at(line, n - 1);
+        let mut sum = [0u64; 4];
+        for c in 0..4 {
+            sum[c] = u64::from(src[first + c]) * (radius + 1);
+            sum[c] += u64::from(src[last + c]) * radius.saturating_sub((n - 1) as u64);
+        }
+        for i in 1..=radius.min((n - 1) as u64) as usize {
             let p = at(line, i);
             for c in 0..4 {
-                sum[c] += src[p + c] as u32;
+                sum[c] += u64::from(src[p + c]);
             }
         }
         for i in 0..n {
@@ -129,13 +145,10 @@ fn box_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize, horizontal
             for c in 0..4 {
                 dst[p + c] = ((sum[c] + window / 2) / window) as u8;
             }
-            let out = at(
-                line,
-                (i as isize - r as isize).clamp(0, n as isize - 1) as usize,
-            );
-            let inn = at(line, (i + r + 1).min(n - 1));
+            let out = at(line, (i as u64).saturating_sub(radius) as usize);
+            let inn = at(line, (i as u64 + radius + 1).min((n - 1) as u64) as usize);
             for c in 0..4 {
-                sum[c] = sum[c] + src[inn + c] as u32 - src[out + c] as u32;
+                sum[c] = sum[c] + u64::from(src[inn + c]) - u64::from(src[out + c]);
             }
         }
     }
@@ -146,7 +159,7 @@ pub fn pixelate_area(pixmap: &mut Pixmap, area: IRect, block: u32) {
     let Some(a) = area.intersect(&IRect::of_size(pixmap.width(), pixmap.height())) else {
         return;
     };
-    let block = block.max(2) as i32;
+    let block = block.max(2).min(i32::MAX as u32) as i32;
     let stride = pixmap.width() as usize * 4;
     let data = pixmap.data_mut();
     let mut y = a.y;
@@ -155,16 +168,16 @@ pub fn pixelate_area(pixmap: &mut Pixmap, area: IRect, block: u32) {
         let mut x = a.x;
         while x < a.right() {
             let bw = block.min(a.right() - x);
-            let mut sum = [0u32; 4];
+            let mut sum = [0u64; 4];
             for row in y..y + bh {
                 for col in x..x + bw {
                     let i = row as usize * stride + col as usize * 4;
                     for c in 0..4 {
-                        sum[c] += data[i + c] as u32;
+                        sum[c] += u64::from(data[i + c]);
                     }
                 }
             }
-            let n = (bw * bh) as u32;
+            let n = (bw as u64) * (bh as u64);
             let avg = sum.map(|s| ((s + n / 2) / n) as u8);
             for row in y..y + bh {
                 for col in x..x + bw {
@@ -172,9 +185,9 @@ pub fn pixelate_area(pixmap: &mut Pixmap, area: IRect, block: u32) {
                     data[i..i + 4].copy_from_slice(&avg);
                 }
             }
-            x += block;
+            x = x.saturating_add(bw);
         }
-        y += block;
+        y = y.saturating_add(bh);
     }
 }
 
@@ -194,7 +207,10 @@ pub fn checkerboard_under(pixmap: &mut Pixmap, area: IRect, origin: (i32, i32)) 
             if alpha == 255 {
                 continue;
             }
-            let light = (((x + origin.0) >> 3) + ((y + origin.1) >> 3)) % 2 == 0;
+            let light = (((i64::from(x) + i64::from(origin.0)) >> 3)
+                + ((i64::from(y) + i64::from(origin.1)) >> 3))
+                & 1
+                == 0;
             let bg = if light { 0xFF } else { 0xCC } as f32;
             let inv = 1.0 - alpha as f32 / 255.0;
             for c in 0..3 {
@@ -286,6 +302,20 @@ mod tests {
     }
 
     #[test]
+    fn copy_area_handles_destination_coordinates_outside_i32() {
+        let src = solid(2, 2, Rgba::RED).unwrap();
+        let mut dst = solid(2, 2, Rgba::WHITE).unwrap();
+        copy_area(
+            &src,
+            IRect::new(-1, 0, 2, 2),
+            &mut dst,
+            i32::MAX,
+            0,
+        );
+        assert!(dst.pixels().iter().all(|pixel| *pixel == Rgba::WHITE.premultiplied()));
+    }
+
+    #[test]
     fn blur_and_pixelate_average() {
         let mut p = solid(20, 1, Rgba::BLACK).unwrap();
         for x in 10..20 {
@@ -299,6 +329,60 @@ mod tests {
         pixelate_area(&mut q, IRect::new(0, 0, 4, 4), 2);
         assert_eq!(pixel(&q, 1, 1).r, 64);
         assert_eq!(pixel(&q, 3, 3).r, 0);
+    }
+
+    #[test]
+    fn blur_preserves_large_radius_weights_without_unbounded_work() {
+        let mut image = solid(2, 1, Rgba::BLACK).unwrap();
+        set_pixel(&mut image, 1, 0, Rgba::WHITE);
+        blur_area(&mut image, IRect::of_size(2, 1), u32::MAX);
+        assert_eq!(pixel(&image, 0, 0), Rgba::rgb(127, 127, 127));
+        assert_eq!(pixel(&image, 1, 0), Rgba::rgb(128, 128, 128));
+    }
+
+    #[test]
+    fn pixelate_handles_maximum_block_size() {
+        let mut image = solid(2, 2, Rgba::WHITE).unwrap();
+        set_pixel(&mut image, 0, 0, Rgba::BLACK);
+        pixelate_area(&mut image, IRect::of_size(2, 2), u32::MAX);
+        assert_eq!(pixel(&image, 0, 0), pixel(&image, 1, 1));
+        assert_eq!(pixel(&image, 0, 0), Rgba::rgb(191, 191, 191));
+    }
+
+    #[test]
+    fn pixelate_averages_large_opaque_block_without_sum_overflow() {
+        let side = 4_105;
+        let mut image = solid(side, side, Rgba::WHITE).unwrap();
+        pixelate_area(&mut image, IRect::of_size(side, side), side);
+        assert_eq!(pixel(&image, 0, 0), Rgba::WHITE);
+        assert_eq!(pixel(&image, side as i32 - 1, side as i32 - 1), Rgba::WHITE);
+    }
+
+    #[test]
+    fn checkerboard_handles_extreme_document_origins() {
+        let mut image = solid(2, 2, Rgba::TRANSPARENT).unwrap();
+        checkerboard_under(&mut image, IRect::of_size(2, 2), (i32::MAX, i32::MAX));
+        assert_eq!(pixel(&image, 0, 0), Rgba::WHITE);
+        assert_eq!(pixel(&image, 1, 0), Rgba::rgb(0xCC, 0xCC, 0xCC));
+        assert_eq!(pixel(&image, 1, 1), Rgba::WHITE);
+    }
+
+    #[test]
+    fn flood_fill_replaces_nearby_colors_when_the_seed_already_matches_fill() {
+        let mut image = solid(3, 1, Rgba::WHITE).unwrap();
+        set_pixel(&mut image, 0, 0, Rgba::BLACK);
+        set_pixel(&mut image, 1, 0, Rgba::rgb(5, 5, 5));
+        assert_eq!(
+            flood_fill(&mut image, 0, 0, Rgba::BLACK, 8),
+            Some(IRect::new(0, 0, 2, 1))
+        );
+        assert_eq!(pixel(&image, 1, 0), Rgba::BLACK);
+    }
+
+    #[test]
+    fn global_fill_reports_no_change_when_all_matching_pixels_already_match() {
+        let mut image = solid(2, 1, Rgba::BLACK).unwrap();
+        assert!(!replace_color(&mut image, 0, 0, Rgba::BLACK, 0));
     }
 }
 
@@ -318,9 +402,6 @@ pub fn flood_fill(
     }
     let seed = pixmap.pixels()[(y * w + x) as usize];
     let fill = color.premultiplied();
-    if seed == fill {
-        return None;
-    }
     let close = |p: PremultipliedColorU8| {
         let t = tolerance as i32;
         (p.red() as i32 - seed.red() as i32).abs() <= t
@@ -331,6 +412,7 @@ pub fn flood_fill(
     let mut done = vec![false; (w * h) as usize];
     let mut stack = vec![(x, y)];
     let (mut x0, mut y0, mut x1, mut y1) = (x, y, x, y);
+    let mut changed = false;
     let pixels = pixmap.pixels_mut();
     while let Some((sx, sy)) = stack.pop() {
         let row = sy * w;
@@ -347,7 +429,10 @@ pub fn flood_fill(
         }
         for i in l..=r {
             done[(row + i) as usize] = true;
-            pixels[(row + i) as usize] = fill;
+            if pixels[(row + i) as usize] != fill {
+                pixels[(row + i) as usize] = fill;
+                changed = true;
+            }
         }
         (x0, x1, y0, y1) = (x0.min(l), x1.max(r), y0.min(sy), y1.max(sy));
         for ny in [sy - 1, sy + 1] {
@@ -370,7 +455,7 @@ pub fn flood_fill(
             }
         }
     }
-    Some(IRect::new(x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+    changed.then_some(IRect::new(x0, y0, x1 - x0 + 1, y1 - y0 + 1))
 }
 
 /// The area connected to (`x`, `y`) whose colors are within `tolerance` of
@@ -455,18 +540,26 @@ pub fn replace_color(pixmap: &mut Pixmap, x: i32, y: i32, color: Rgba, tolerance
     let fill = color.premultiplied();
     let w = pixmap.width() as i32;
     let px = pixmap.pixels_mut();
+    let mut changed = false;
     for (i, on) in mask.iter().enumerate() {
         if *on {
             let (xx, yy) = (area.x + i as i32 % area.w, area.y + i as i32 / area.w);
-            px[(yy * w + xx) as usize] = fill;
+            let pixel = &mut px[(yy * w + xx) as usize];
+            if *pixel != fill {
+                *pixel = fill;
+                changed = true;
+            }
         }
     }
-    true
+    changed
 }
 
 /// Resamples `src` to `width` x `height` with bicubic filtering.
 pub fn resample(src: &Pixmap, width: u32, height: u32) -> Option<Pixmap> {
-    let mut out = Pixmap::new(width.max(1), height.max(1))?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut out = Pixmap::new(width, height)?;
     let t = tiny_skia::Transform::from_scale(
         width as f32 / src.width() as f32,
         height as f32 / src.height() as f32,

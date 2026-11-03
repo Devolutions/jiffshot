@@ -562,6 +562,7 @@ pub fn layout(text: &str, style: &TextStyle, max_width: Option<f32>) -> Layout {
     for paragraph in text.split('\n') {
         let paragraph = paragraph.trim_end_matches('\r');
         let mut line = Line::default();
+        let mut visible_width = 0.0;
         let mut prev: Option<(usize, GlyphId)> = None;
         // Split into words that keep their trailing spaces.
         let mut words: Vec<&str> = Vec::new();
@@ -588,17 +589,22 @@ pub fn layout(text: &str, style: &TextStyle, max_width: Option<f32>) -> Layout {
                 })
                 .collect();
             let visible: f32 = word.trim_end().chars().zip(&glyphs).map(|(_, g)| g.2).sum();
-            if line.width > 0.0 && line.width + visible > max {
+            if visible > 0.0 && line.width > 0.0 && line.width + visible > max {
+                line.width = visible_width;
                 lines.push(std::mem::take(&mut line));
+                visible_width = 0.0;
                 prev = None;
             }
-            for (f, id, adv) in glyphs {
-                if line.width > 0.0
+            for (c, (f, id, adv)) in word.chars().zip(glyphs) {
+                if !c.is_whitespace()
+                    && line.width > 0.0
                     && line.width + adv > max
                     && word.trim_end().len() > 1
                     && visible > max
                 {
+                    line.width = visible_width;
                     lines.push(std::mem::take(&mut line));
+                    visible_width = 0.0;
                     prev = None;
                 }
                 let kern = match prev {
@@ -611,19 +617,13 @@ pub fn layout(text: &str, style: &TextStyle, max_width: Option<f32>) -> Layout {
                     x: line.width + kern,
                 });
                 line.width += adv + kern;
+                if !c.is_whitespace() {
+                    visible_width = line.width;
+                }
                 prev = Some((f, id));
             }
         }
-        // Trailing spaces do not count toward alignment.
-        let trailing: f32 = paragraph
-            .chars()
-            .rev()
-            .take_while(|c| *c == ' ')
-            .map(|c| advance(pick(c).0, pick(c).1))
-            .sum();
-        if line.glyphs.len() > 0 && trailing > 0.0 && trailing < line.width {
-            line.width -= trailing;
-        }
+        line.width = visible_width;
         lines.push(line);
     }
     Layout {
@@ -781,6 +781,23 @@ mod tests {
             p.data().chunks(4).any(|px| px[3] > 200),
             "glyphs were drawn"
         );
+    }
+
+    #[test]
+    fn wrapped_lines_ignore_trailing_spaces_without_adding_empty_lines() {
+        if font(DEFAULT_FAMILY, false, false).is_none() {
+            return;
+        }
+        let style = style(20.0);
+        let hello = layout("Hello", &style, None);
+        let world = layout("world", &style, None);
+        let wrapped = layout("Hello   world", &style, Some(hello.width().max(world.width()) + 1.0));
+        assert_eq!(wrapped.line_count(), 2);
+        assert!((wrapped.lines[0].width - hello.width()).abs() < 0.01);
+        let without_spaces = layout("longlonglong", &style, Some(40.0));
+        let with_spaces = layout("longlonglong   ", &style, Some(40.0));
+        assert_eq!(with_spaces.line_count(), without_spaces.line_count());
+        assert!((with_spaces.width() - without_spaces.width()).abs() < 0.01);
     }
 
     #[cfg(target_os = "macos")]

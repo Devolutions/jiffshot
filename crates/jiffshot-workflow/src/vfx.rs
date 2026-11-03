@@ -137,10 +137,11 @@ pub fn picture_in_picture(
         fh - h - margin
     };
     // Circles show the middle square of the camera picture.
-    let (sx0, sw) = if circle {
-        ((cw.saturating_sub(ch)) / 2, cw.min(ch))
+    let (sx0, sy0, sw, sh) = if circle {
+        let square = cw.min(ch);
+        ((cw - square) / 2, (ch - square) / 2, square, square)
     } else {
-        (0, cw)
+        (0, 0, cw, ch)
     };
     let (cx, cy, radius) = (w as f32 / 2.0, h as f32 / 2.0, w.min(h) as f32 / 2.0);
     let stride = frame.stride();
@@ -149,7 +150,7 @@ pub fn picture_in_picture(
         if fy < 0 || fy >= fh {
             continue;
         }
-        let sy = (y as u32 * ch / h as u32).min(ch - 1);
+        let sy = sy0 + (y as u32 * sh / h as u32).min(sh - 1);
         for x in 0..w {
             let fx = x0 + x;
             if fx < 0 || fx >= fw {
@@ -347,5 +348,20 @@ mod tests {
         assert_eq!(px(339, 239), 0x80);
         assert_eq!(px(295, 195), 0, "outside the circle stays");
         assert_eq!(px(10, 10), 0);
+    }
+
+    #[test]
+    fn portrait_webcam_circle_uses_the_center_square_without_stretching() {
+        let mut frame = Frame::new(120, 100);
+        let mut cam = vec![0u8; 8 * 16 * 4];
+        for y in 0..16 {
+            for x in 0..8 {
+                cam[(y * 8 + x) * 4] = (y * 10) as u8;
+            }
+        }
+        picture_in_picture(&mut frame, &cam, (8, 16), "top-left", 0.5, true);
+        let pixel = |x: usize, y: usize| frame.pixels[(y * 120 + x) * 4];
+        assert_eq!(pixel(16 + 25, 16 + 5), 40);
+        assert_eq!(pixel(16 + 25, 16 + 44), 110);
     }
 }

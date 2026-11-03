@@ -8,9 +8,11 @@ use crate::color::Rgba;
 use crate::document::Document;
 use crate::object::{Kind, Object};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tiny_skia::Pixmap;
 
 pub type Result<T> = std::result::Result<T, String>;
@@ -195,12 +197,38 @@ pub fn export(doc: &Document, path: &Path) -> Result<()> {
 /// Writes through a temporary file so a failed save never truncates the
 /// previous version.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    struct StagingFile(std::path::PathBuf);
+    impl Drop for StagingFile {
+        fn drop(&mut self) {
+            if let Err(error) = std::fs::remove_file(&self.0) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("could not remove {}: {error}", self.0.display());
+                }
+            }
+        }
     }
-    let tmp = path.with_extension("tmp~");
-    std::fs::write(&tmp, bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..100 {
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let staging = parent.join(format!(".jiffshot-write-{}-{id}.tmp", std::process::id()));
+        if staging.file_name() == path.file_name() {
+            continue;
+        }
+        let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(&staging) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("{}: {error}", staging.display())),
+        };
+        let staging = StagingFile(staging);
+        let written = file.write_all(bytes).and_then(|()| file.sync_all());
+        drop(file);
+        written.map_err(|e| format!("{}: {e}", staging.0.display()))?;
+        return std::fs::rename(&staging.0, path).map_err(|e| format!("{}: {e}", path.display()));
+    }
+    Err(format!("cannot reserve a staging file in {}", parent.display()))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -215,13 +243,50 @@ struct Manifest {
 const FORMAT: &str = "jiffshot-document";
 
 pub fn document_bytes(doc: &Document) -> Result<Vec<u8>> {
-    let manifest = Manifest {
+    let mut manifest = Manifest {
         format: FORMAT.to_owned(),
         version: 1,
         width: doc.width(),
         height: doc.height(),
         objects: doc.objects.clone(),
     };
+    let mut reserved = HashSet::new();
+    for object in &manifest.objects {
+        object.walk(&mut |object| {
+            if let Kind::Image { image, .. } = &object.kind {
+                if !image.key.is_empty() {
+                    reserved.insert(image.key.clone());
+                }
+            }
+        });
+    }
+    let mut images: BTreeMap<String, Arc<Pixmap>> = BTreeMap::new();
+    let mut suffix = 1_u64;
+    for object in &mut manifest.objects {
+        object.walk_mut(&mut |object| {
+            let Kind::Image { image, .. } = &mut object.kind else { return };
+            let Some(pm) = &image.pixmap else { return };
+            let conflict = image.key.is_empty()
+                || images.get(&image.key).is_some_and(|existing| {
+                    !Arc::ptr_eq(existing, pm)
+                        && (existing.width() != pm.width()
+                            || existing.height() != pm.height()
+                            || existing.data() != pm.data())
+                });
+            if conflict {
+                let base = if image.key.is_empty() { "image" } else { &image.key };
+                loop {
+                    let candidate = format!("{base}-{suffix}");
+                    suffix += 1;
+                    if reserved.insert(candidate.clone()) {
+                        image.key = candidate;
+                        break;
+                    }
+                }
+            }
+            images.entry(image.key.clone()).or_insert_with(|| pm.clone());
+        });
+    }
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let stored =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
@@ -235,18 +300,6 @@ pub fn document_bytes(doc: &Document) -> Result<Vec<u8>> {
         .map_err(|e| e.to_string())?;
     zip.write_all(&encode(doc.background(), Format::Png, 0)?)
         .map_err(|e| e.to_string())?;
-    let mut images: Vec<(String, Arc<Pixmap>)> = Vec::new();
-    for o in &doc.objects {
-        o.walk(&mut |o| {
-            if let Kind::Image { image, .. } = &o.kind {
-                if let Some(pm) = &image.pixmap {
-                    if !images.iter().any(|(k, _)| *k == image.key) {
-                        images.push((image.key.clone(), pm.clone()));
-                    }
-                }
-            }
-        });
-    }
     for (key, pm) in images {
         zip.start_file(format!("images/{key}.png"), stored)
             .map_err(|e| e.to_string())?;
@@ -274,7 +327,16 @@ pub fn document_from_bytes(bytes: Vec<u8>) -> Result<Document> {
     if manifest.format != FORMAT {
         return Err(format!("not a Jiffshot document ({})", manifest.format));
     }
+    if manifest.version != 1 {
+        return Err(format!(
+            "unsupported Jiffshot document version {}",
+            manifest.version
+        ));
+    }
     let background = decode_image(&entry(&mut zip, "background.png")?)?;
+    if (manifest.width, manifest.height) != (background.width(), background.height()) {
+        return Err("document canvas dimensions do not match background.png".into());
+    }
     let mut doc = Document::new(background);
     let mut cache: std::collections::HashMap<String, Arc<Pixmap>> = Default::default();
     for mut o in manifest.objects {
@@ -330,6 +392,36 @@ mod tests {
     use crate::geom::{Box2, Pt};
     use crate::object::{ImageRef, Style};
 
+    fn document_archive(version: u32, width: u32, height: u32) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        let manifest = serde_json::json!({
+            "format": FORMAT,
+            "version": version,
+            "width": width,
+            "height": height,
+            "objects": []
+        });
+        zip.start_file("document.json", options).unwrap();
+        zip.write_all(&serde_json::to_vec(&manifest).unwrap())
+            .unwrap();
+        zip.start_file("background.png", options).unwrap();
+        let background = crate::raster::solid(2, 2, Rgba::WHITE).unwrap();
+        zip.write_all(&encode(&background, Format::Png, 0).unwrap())
+            .unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn rejects_unsupported_document_versions_and_mismatched_canvas_size() {
+        assert!(document_from_bytes(document_archive(2, 2, 2))
+            .unwrap_err()
+            .contains("unsupported Jiffshot document version 2"));
+        assert!(document_from_bytes(document_archive(1, 3, 2))
+            .unwrap_err()
+            .contains("canvas dimensions do not match"));
+    }
+
     #[test]
     fn documents_round_trip() {
         let mut d = Document::blank(64, 32, Rgba::rgb(10, 20, 30));
@@ -367,6 +459,85 @@ mod tests {
             ),
             3
         );
+    }
+
+    #[test]
+    fn document_round_trip_keeps_distinct_images_with_the_same_key() {
+        let mut d = Document::blank(10, 10, Rgba::WHITE);
+        for (key, color) in [
+            ("shared", Rgba::RED),
+            ("shared", Rgba::BLACK),
+            ("shared-1", Rgba::YELLOW),
+            ("", Rgba::WHITE),
+        ] {
+            d.add(
+                Kind::Image {
+                    rect: Box2::new(0.0, 0.0, 1.0, 1.0),
+                    image: ImageRef::new(key, crate::raster::solid(1, 1, color).unwrap()),
+                },
+                Style::default(),
+            );
+        }
+        let back = document_from_bytes(document_bytes(&d).unwrap()).unwrap();
+        let colors: Vec<_> = back
+            .objects
+            .iter()
+            .map(|object| {
+                let Kind::Image { image, .. } = &object.kind else {
+                    panic!("expected image");
+                };
+                crate::raster::pixel(image.pixmap.as_deref().unwrap(), 0, 0)
+            })
+            .collect();
+        assert_eq!(colors, [Rgba::RED, Rgba::BLACK, Rgba::YELLOW, Rgba::WHITE]);
+    }
+
+    #[test]
+    fn atomic_write_preserves_unrelated_temporary_files_and_concurrent_writes() {
+        use std::sync::{Arc, Barrier};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        struct TestDir(std::path::PathBuf);
+        impl Drop for TestDir {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        let dir = TestDir(std::env::temp_dir().join(format!(
+            "jiffshot-doc-write-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        )));
+        std::fs::create_dir(&dir.0).unwrap();
+        let target = dir.0.join("drawing.jsd");
+        let other = target.with_extension("tmp~");
+        std::fs::write(&other, b"unrelated file").unwrap();
+        write_atomic(&target, b"first").unwrap();
+        assert_eq!(std::fs::read(&other).unwrap(), b"unrelated file");
+
+        let barrier = Arc::new(Barrier::new(4));
+        let writers: Vec<_> = (0_u8..4)
+            .map(|value| {
+                let target = target.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    write_atomic(&target, &vec![value; 128 * 1024])
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap().unwrap();
+        }
+        let result = std::fs::read(&target).unwrap();
+        assert_eq!(result.len(), 128 * 1024);
+        assert!(result.iter().all(|byte| *byte == result[0]));
+        assert_eq!(std::fs::read(&other).unwrap(), b"unrelated file");
+        let directory = dir.0.join("not-a-file.jsd");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(write_atomic(&directory, b"cannot replace a directory").is_err());
+        assert!(directory.is_dir());
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 3);
     }
 
     #[test]

@@ -25,18 +25,19 @@ fn distance(a: Rgba, b: Rgba) -> u32 {
     (a.r as i32 - b.r as i32).unsigned_abs()
         + (a.g as i32 - b.g as i32).unsigned_abs()
         + (a.b as i32 - b.b as i32).unsigned_abs()
+        + (a.a as i32 - b.a as i32).unsigned_abs()
 }
 
 /// The most common color (to within 8 levels) on the one-pixel ring
 /// around `r`, or along its inside edge where `r` touches the image edge.
 pub fn border_color(pm: &Pixmap, r: IRect) -> Rgba {
     let (w, h) = (pm.width() as i32, pm.height() as i32);
-    let mut counts: HashMap<(u8, u8, u8), (u32, [u32; 4])> = HashMap::new();
+    let mut counts: HashMap<(u8, u8, u8, u8), (u32, [u32; 4])> = HashMap::new();
     let mut visit = |x: i32, y: i32| {
         let (x, y) = (x.clamp(0, w - 1), y.clamp(0, h - 1));
         let c = raster::pixel(pm, x, y);
         let e = counts
-            .entry((c.r >> 3, c.g >> 3, c.b >> 3))
+            .entry((c.r >> 3, c.g >> 3, c.b >> 3, c.a >> 3))
             .or_insert((0, [0; 4]));
         e.0 += 1;
         e.1[0] += c.r as u32;
@@ -108,12 +109,33 @@ pub fn fill_mask(pm: &mut Pixmap, area: IRect, mask: &[bool]) {
         .into_iter()
         .filter(move |&(nx, ny)| nx < aw && ny < ah)
     };
+    let (width, height) = (i64::from(pm.width()), i64::from(pm.height()));
+    let outside = |x: usize, y: usize| {
+        let (x, y) = (x as i64, y as i64);
+        [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+            .into_iter()
+            .filter(move |&(nx, ny)| nx < 0 || ny < 0 || nx >= aw as i64 || ny >= ah as i64)
+            .map(|(nx, ny)| (i64::from(area.x) + nx, i64::from(area.y) + ny))
+            .filter(move |&(nx, ny)| nx >= 0 && ny >= 0 && nx < width && ny < height)
+    };
     for y in 0..ah {
         for x in 0..aw {
-            if !known[y * aw + x] && neighbors(x, y).any(|(nx, ny)| known[ny * aw + nx]) {
+            if !known[y * aw + x]
+                && (neighbors(x, y).any(|(nx, ny)| known[ny * aw + nx])
+                    || outside(x, y).next().is_some())
+            {
                 queue.push_back((x, y));
             }
         }
+    }
+    if queue.is_empty() && known.iter().all(|known| !known) {
+        let background = border_color(pm, area);
+        for y in 0..ah {
+            for x in 0..aw {
+                raster::set_pixel(pm, area.x + x as i32, area.y + y as i32, background);
+            }
+        }
+        return;
     }
     let mut queued: Vec<bool> = vec![false; aw * ah];
     for &(x, y) in &queue {
@@ -134,6 +156,14 @@ pub fn fill_mask(pm: &mut Pixmap, area: IRect, mask: &[bool]) {
                     sum[3] += c.a as u32;
                     n += 1;
                 }
+            }
+            for (nx, ny) in outside(x, y) {
+                let c = raster::pixel(pm, nx as i32, ny as i32);
+                sum[0] += c.r as u32;
+                sum[1] += c.g as u32;
+                sum[2] += c.b as u32;
+                sum[3] += c.a as u32;
+                n += 1;
             }
             colors.push((n > 0).then(|| {
                 Rgba::new(
@@ -474,6 +504,67 @@ mod tests {
             IRect::new(5, 5, 20, 20)
         )
         .is_none());
+    }
+
+    #[test]
+    fn smart_move_fills_a_fully_masked_selection_from_outside() {
+        let mut bg = raster::solid(10, 10, Rgba::WHITE).unwrap();
+        for y in 2..8 {
+            for x in 2..8 {
+                raster::set_pixel(&mut bg, x, y, Rgba::BLACK);
+            }
+        }
+        let (_, _, filled) = lift(&bg, IRect::new(2, 2, 6, 6)).unwrap();
+        for y in 2..8 {
+            for x in 2..8 {
+                assert_eq!(raster::pixel(&filled, x, y), Rgba::WHITE);
+            }
+        }
+    }
+
+    #[test]
+    fn smart_move_distinguishes_opaque_black_from_transparent_black() {
+        let mut bg = raster::solid(10, 10, Rgba::TRANSPARENT).unwrap();
+        for y in 3..7 {
+            for x in 3..7 {
+                raster::set_pixel(&mut bg, x, y, Rgba::BLACK);
+            }
+        }
+        let (piece, at, _) = lift(&bg, IRect::new(3, 3, 4, 4)).unwrap();
+        assert_eq!(at, IRect::new(3, 3, 4, 4));
+        assert_eq!(raster::pixel(&piece, 1, 1), Rgba::BLACK);
+    }
+
+    #[test]
+    fn fill_mask_uses_only_existing_neighbors_at_image_edges() {
+        let mut bg = raster::solid(5, 5, Rgba::TRANSPARENT).unwrap();
+        for y in 1..4 {
+            for x in 0..3 {
+                raster::set_pixel(&mut bg, x, y, Rgba::BLACK);
+            }
+        }
+        fill_mask(&mut bg, IRect::new(0, 1, 3, 3), &[true; 9]);
+        for y in 1..4 {
+            for x in 0..3 {
+                assert_eq!(raster::pixel(&bg, x, y), Rgba::TRANSPARENT);
+            }
+        }
+    }
+
+    #[test]
+    fn smart_move_fills_an_entirely_masked_canvas_from_its_border() {
+        let mut bg = raster::solid(5, 5, Rgba::WHITE).unwrap();
+        for y in 1..4 {
+            for x in 1..4 {
+                raster::set_pixel(&mut bg, x, y, Rgba::BLACK);
+            }
+        }
+        let (_, _, filled) = lift(&bg, IRect::new(0, 0, 5, 5)).unwrap();
+        for y in 0..5 {
+            for x in 0..5 {
+                assert_eq!(raster::pixel(&filled, x, y), Rgba::WHITE);
+            }
+        }
     }
 
     #[test]

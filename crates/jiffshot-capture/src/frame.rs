@@ -39,8 +39,9 @@ impl Frame {
         Ok(())
     }
 
-    /// Returns `(r, g, b)` at a pixel, or `None` outside the frame.
+    /// Returns `(r, g, b)` at a pixel, or `None` for an invalid frame or position.
     pub fn rgb(&self, x: i32, y: i32) -> Option<(u8, u8, u8)> {
+        self.validate().ok()?;
         if !self.bounds().contains(x, y) {
             return None;
         }
@@ -77,7 +78,9 @@ impl Frame {
     }
 
     /// Copies out `r` (frame coordinates), clipped to the frame.
+    /// Returns `None` for an invalid frame or an empty intersection.
     pub fn crop(&self, r: Rect) -> Option<Frame> {
+        self.validate().ok()?;
         let r = r.intersect(self.bounds())?;
         let mut out = Frame::new(r.width as u32, r.height as u32);
         out.alpha = self.alpha;
@@ -89,11 +92,12 @@ impl Frame {
         Some(out)
     }
 
-    /// Returns a nearest-neighbor copy at the requested size.
+    /// Returns a nearest-neighbor copy, or `None` for invalid input dimensions or pixels.
     pub fn resized_nearest(&self, width: u32, height: u32) -> Option<Frame> {
-        if width == 0 || height == 0 || self.width == 0 || self.height == 0 {
+        if width == 0 || height == 0 {
             return None;
         }
+        self.validate().ok()?;
         let mut out = Frame::new(width, height);
         out.alpha = self.alpha;
         for y in 0..height as usize {
@@ -230,6 +234,15 @@ mod tests {
         assert_eq!(&enlarged.pixels[..16], &[0, 0, 7, 100, 0, 0, 7, 100, 1, 0, 7, 200, 1, 0, 7, 200]);
         assert_eq!(&enlarged.pixels[16..], &enlarged.pixels[..16]);
         assert!(frame.resized_nearest(0, 1).is_none());
+    }
+
+    #[test]
+    fn pixel_crop_and_resize_reject_malformed_frame_buffers() {
+        let mut frame = gradient(2, 2);
+        frame.pixels.truncate(3);
+        assert_eq!(frame.rgb(0, 0), None);
+        assert!(frame.crop(Rect::new(0, 0, 1, 1)).is_none());
+        assert!(frame.resized_nearest(1, 1).is_none());
     }
 
     #[test]

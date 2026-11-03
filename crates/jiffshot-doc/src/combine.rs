@@ -8,6 +8,7 @@ use crate::document::Document;
 use crate::editor::{default_style, Tool};
 use crate::geom::{Box2, Pt};
 use crate::object::{ImageRef, Kind, ShapeKind, Style, Zone};
+use crate::raster;
 use crate::text::Align;
 use tiny_skia::Pixmap;
 
@@ -26,7 +27,7 @@ pub fn combine(
     gap: f32,
     background: Rgba,
 ) -> Option<Document> {
-    if images.is_empty() {
+    if images.is_empty() || !gap.is_finite() || gap < 0.0 {
         return None;
     }
     let n = images.len();
@@ -58,7 +59,12 @@ pub fn combine(
         .collect();
     let width = cell_w.iter().sum::<f32>() + gap * (cols as f32 + 1.0);
     let height = cell_h.iter().sum::<f32>() + gap * (rows as f32 + 1.0);
-    let mut doc = Document::blank(width.ceil() as u32, height.ceil() as u32, background);
+    if !width.is_finite() || !height.is_finite()
+        || width > i32::MAX as f32 || height > i32::MAX as f32
+    {
+        return None;
+    }
+    let mut doc = Document::new(raster::solid(width.ceil() as u32, height.ceil() as u32, background)?);
     let mut y = gap;
     for (r, h) in cell_h.iter().enumerate() {
         let mut x = gap;
@@ -512,6 +518,18 @@ mod tests {
             assert!(
                 d.objects.iter().filter(|o| o.zone.is_some()).count() >= 1,
                 "{t}"
+            );
+        }
+    }
+
+    #[test]
+    fn combine_rejects_invalid_gaps_and_unrepresentable_canvases() {
+        let image = raster::solid(1, 1, Rgba::RED).unwrap();
+        for gap in [-1.0, f32::NAN, f32::INFINITY, f32::MAX] {
+            assert!(
+                combine(std::slice::from_ref(&image), Arrangement::Horizontal, gap, Rgba::WHITE)
+                    .is_none(),
+                "gap {gap:?}"
             );
         }
     }

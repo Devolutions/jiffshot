@@ -6,7 +6,7 @@ use crate::geometry::CaptureLayout;
 use crate::hud::{self, Border};
 use crate::sys;
 use jiffshot_capture::stitch;
-use jiffshot_capture::{Frame, Rect};
+use jiffshot_capture::{CaptureMapping, Frame, Rect};
 use std::cell::RefCell;
 use std::io;
 use std::rc::Rc;
@@ -85,6 +85,7 @@ pub(crate) fn scrolling_in_layout(rect: Rect, layout: &CaptureLayout) -> io::Res
 /// can use the vertical stitcher.
 pub(crate) fn transpose(f: &Frame) -> Frame {
     let mut out = Frame::new(f.height, f.width);
+    out.alpha = f.alpha;
     for y in 0..f.height as usize {
         for x in 0..f.width as usize {
             let s = y * f.stride() + x * 4;
@@ -330,6 +331,16 @@ pub fn menus() -> io::Result<Option<Frame>> {
     };
     let mapping = layout.mapping(bounds)?;
     let mut frame = layout.grab(bounds)?;
+    mask_menus(&mut frame, mapping, &rects)?;
+    layout.validate()?;
+    Ok(Some(frame))
+}
+
+fn mask_menus(frame: &mut Frame, mapping: CaptureMapping, rects: &[Rect]) -> io::Result<()> {
+    frame.validate()?;
+    if mapping.size() != (frame.width, frame.height) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "menu capture mapping does not match the image"));
+    }
     frame.alpha = true;
     let stride = frame.stride();
     for y in 0..frame.height as i32 {
@@ -338,11 +349,15 @@ pub fn menus() -> io::Result<Option<Frame>> {
             let inside = rects
                 .iter()
                 .any(|r| r.contains(screen_x.floor() as i32, screen_y.floor() as i32));
-            frame.pixels[y as usize * stride + x as usize * 4 + 3] = if inside { 255 } else { 0 };
+            let at = y as usize * stride + x as usize * 4;
+            if inside {
+                frame.pixels[at + 3] = 255;
+            } else {
+                frame.pixels[at..at + 4].fill(0);
+            }
         }
     }
-    layout.validate()?;
-    Ok(Some(frame))
+    Ok(())
 }
 
 /// Recognized text in a frame, one line per line.
@@ -353,4 +368,30 @@ pub fn text(frame: &Frame) -> Result<String, String> {
         .map(|l| l.text)
         .collect::<Vec<_>>()
         .join(jiffshot_capture::os::LINE_END))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transposing_a_frame_preserves_alpha() {
+        let mut frame = Frame::new(2, 1);
+        frame.alpha = true;
+        frame.pixels.copy_from_slice(&[1, 2, 3, 0, 4, 5, 6, 128]);
+        let transposed = transpose(&frame);
+        assert!(transposed.alpha);
+        assert_eq!((transposed.width, transposed.height), (1, 2));
+        assert_eq!(transposed.pixels, frame.pixels);
+    }
+
+    #[test]
+    fn menu_capture_removes_hidden_screen_pixels() {
+        let mut frame = Frame::new(3, 1);
+        frame.pixels.copy_from_slice(&[1, 2, 3, 0, 50, 60, 70, 0, 4, 5, 6, 0]);
+        let mapping = CaptureMapping::identity(Rect::new(0, 0, 3, 1)).unwrap();
+        mask_menus(&mut frame, mapping, &[Rect::new(0, 0, 1, 1), Rect::new(2, 0, 1, 1)]).unwrap();
+        assert!(frame.alpha);
+        assert_eq!(frame.pixels, [1, 2, 3, 255, 0, 0, 0, 0, 4, 5, 6, 255]);
+    }
 }

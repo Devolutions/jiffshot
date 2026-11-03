@@ -8,6 +8,12 @@ use std::collections::HashMap;
 /// Pixels at the right edge left out of row matching: scrollbars move.
 const SCROLLBAR: usize = 24;
 
+fn valid_frame(frame: &Frame) -> bool {
+    frame.width <= i32::MAX as u32
+        && frame.height <= i32::MAX as u32
+        && frame.validate().is_ok()
+}
+
 fn row_hashes(f: &Frame, left: usize, right: usize) -> Vec<u64> {
     (0..f.height as usize)
         .map(|y| {
@@ -42,7 +48,10 @@ pub struct Step {
 /// Finds how far the content scrolled between two frames of the same area.
 /// `None` when nothing moved (the end was reached) or no overlap is found.
 pub fn vertical_step(prev: &Frame, next: &Frame) -> Option<Step> {
-    if (prev.width, prev.height) != (next.width, next.height) {
+    if !valid_frame(prev)
+        || !valid_frame(next)
+        || (prev.width, prev.height) != (next.width, next.height)
+    {
         return None;
     }
     if prev.pixels == next.pixels {
@@ -118,30 +127,48 @@ pub fn vertical_step(prev: &Frame, next: &Frame) -> Option<Step> {
 /// the bands that stayed put across every step.
 pub fn stitch_vertical(frames: &[Frame]) -> Option<Frame> {
     let first = frames.first()?;
+    if frames.iter().any(|frame| !valid_frame(frame)) {
+        return None;
+    }
     let (w, h) = (first.width as usize, first.height as usize);
-    let stride = w * 4;
+    let stride = w.checked_mul(4)?;
     let steps: Vec<Step> = frames
         .windows(2)
         .map_while(|p| vertical_step(&p[0], &p[1]))
         .collect();
     let used = &frames[..steps.len() + 1];
     let footer = steps.iter().map(|s| s.footer).min().unwrap_or(0);
-    let mut rows: Vec<u8> =
-        Vec::with_capacity(stride * (h + steps.iter().map(|s| s.dy).sum::<usize>()));
-    rows.extend_from_slice(&first.pixels[..(h - footer) * stride]);
+    let height = steps.iter().try_fold(h, |height, step| height.checked_add(step.dy))?;
+    let output_height = u32::try_from(height).ok()?;
+    if output_height > i32::MAX as u32 {
+        return None;
+    }
+    let capacity = stride.checked_mul(height)?;
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(capacity).ok()?;
+    let alpha = used.iter().any(|frame| frame.alpha);
+    let mut append = |frame: &Frame, start: usize, end: usize| {
+        let before = rows.len();
+        rows.extend_from_slice(&frame.pixels[start * stride..end * stride]);
+        if alpha && !frame.alpha {
+            for pixel in rows[before..].chunks_exact_mut(4) {
+                pixel[3] = 255;
+            }
+        }
+    };
+    append(first, 0, h - footer);
     for (frame, step) in used[1..].iter().zip(&steps) {
         let end = h - footer;
         let start = end - step.dy;
-        rows.extend_from_slice(&frame.pixels[start * stride..end * stride]);
+        append(frame, start, end);
     }
     let last = used.last().unwrap();
-    rows.extend_from_slice(&last.pixels[(h - footer) * stride..h * stride]);
-    let height = rows.len() / stride;
+    append(last, h - footer, h);
     Some(Frame {
         width: w as u32,
-        height: height as u32,
+        height: output_height,
         pixels: rows,
-        alpha: false,
+        alpha,
     })
 }
 
@@ -188,7 +215,10 @@ fn sad(a: &[u8], b: &[u8], w: usize, h: usize, dx: i32, dy: i32, step: usize) ->
 /// Where `next` sits relative to `prev` (content moved by the opposite
 /// amount), found coarse to fine. `None` when no placement matches well.
 pub fn translation(prev: &Frame, next: &Frame) -> Option<(i32, i32)> {
-    if (prev.width, prev.height) != (next.width, next.height) {
+    if !valid_frame(prev)
+        || !valid_frame(next)
+        || (prev.width, prev.height) != (next.width, next.height)
+    {
         return None;
     }
     let k = 4;
@@ -210,11 +240,17 @@ pub fn translation(prev: &Frame, next: &Frame) -> Option<(i32, i32)> {
     let (bf, _, _) = gray(next, 1);
     let r = k as i32 + 1;
     let mut fine = (f32::MAX, 0, 0);
+    let better = |score: f32, dx: i32, dy: i32, best: (f32, i32, i32)| {
+        score < best.0
+            || (score == best.0
+                && u64::from(dx.unsigned_abs()) + u64::from(dy.unsigned_abs())
+                    < u64::from(best.1.unsigned_abs()) + u64::from(best.2.unsigned_abs()))
+    };
     for &(_, cx, cy) in coarse.iter().take(12) {
         for dy in cy * k as i32 - r..=cy * k as i32 + r {
             for dx in cx * k as i32 - r..=cx * k as i32 + r {
                 if let Some(d) = sad(&af, &bf, wf, hf, dx, dy, 2) {
-                    if d < fine.0 {
+                    if better(d, dx, dy, fine) {
                         fine = (d, dx, dy);
                     }
                 }
@@ -226,7 +262,7 @@ pub fn translation(prev: &Frame, next: &Frame) -> Option<(i32, i32)> {
     for dy in fine.2 - 1..=fine.2 + 1 {
         for dx in fine.1 - 1..=fine.1 + 1 {
             if let Some(d) = sad(&af, &bf, wf, hf, dx, dy, 1) {
-                if d < exact.0 {
+                if better(d, dx, dy, exact) {
                     exact = (d, dx, dy);
                 }
             }
@@ -237,34 +273,46 @@ pub fn translation(prev: &Frame, next: &Frame) -> Option<(i32, i32)> {
 
 /// Paints frames at their offsets onto one canvas (later frames on top).
 pub fn compose(frames: &[(Frame, (i32, i32))]) -> Option<Frame> {
-    let (f0, _) = frames.first()?;
-    let (fw, fh) = (f0.width as i32, f0.height as i32);
-    let same = frames
+    if frames.iter().any(|(frame, _)| !valid_frame(frame)) {
+        return None;
+    }
+    let x0 = frames.iter().map(|(_, (x, _))| i64::from(*x)).min()?;
+    let y0 = frames.iter().map(|(_, (_, y))| i64::from(*y)).min()?;
+    let x1 = frames
         .iter()
-        .all(|(f, _)| f.width == f0.width && f.height == f0.height);
-    let x0 = frames.iter().map(|(_, (x, _))| *x).min()?;
-    let y0 = frames.iter().map(|(_, (_, y))| *y).min()?;
-    let x1 = frames.iter().map(|(f, (x, _))| *x + f.width as i32).max()?;
+        .map(|(f, (x, _))| i64::from(*x) + i64::from(f.width))
+        .max()?;
     let y1 = frames
         .iter()
-        .map(|(f, (_, y))| *y + f.height as i32)
+        .map(|(f, (_, y))| i64::from(*y) + i64::from(f.height))
         .max()?;
-    let mut out = Frame::new((x1 - x0) as u32, (y1 - y0) as u32);
-    // A path that moved both ways (or frames of different sizes) leaves
-    // places no frame covered; they stay transparent.
-    out.alpha = !same || (x1 - x0 > fw && y1 - y0 > fh);
+    let width = u32::try_from(x1 - x0).ok()?;
+    let height = u32::try_from(y1 - y0).ok()?;
+    if width > i32::MAX as u32 || height > i32::MAX as u32 {
+        return None;
+    }
+    let size = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+    let mut pixels = Vec::new();
+    pixels.try_reserve_exact(size).ok()?;
+    pixels.resize(size, 0);
+    let mut out = Frame { width, height, pixels, alpha: true };
     for (f, (x, y)) in frames {
+        let left = usize::try_from(i64::from(*x) - x0).ok()?;
+        let top = usize::try_from(i64::from(*y) - y0).ok()?;
+        if f.alpha {
+            out.composite_over(f, (left as i64, top as i64)).ok()?;
+            continue;
+        }
         for row in 0..f.height as usize {
-            let dst = ((y - y0) as usize + row) * out.stride() + (x - x0) as usize * 4;
+            let dst = (top + row) * out.stride() + left * 4;
             let src = row * f.stride();
             out.pixels[dst..dst + f.stride()].copy_from_slice(&f.pixels[src..src + f.stride()]);
-            if out.alpha {
-                for px in out.pixels[dst..dst + f.stride()].chunks_exact_mut(4) {
-                    px[3] = 255;
-                }
+            for px in out.pixels[dst..dst + f.stride()].chunks_exact_mut(4) {
+                px[3] = 255;
             }
         }
     }
+    out.alpha = out.pixels.chunks_exact(4).any(|pixel| pixel[3] != 255);
     Some(out)
 }
 
@@ -394,5 +442,96 @@ mod tests {
         assert_eq!(translation(&a, &c), Some((-60, -70)));
         let out = compose(&[(a, (0, 0)), (b, (160, 50))]).unwrap();
         assert_eq!((out.width, out.height), (560, 350));
+    }
+
+    #[test]
+    fn translation_prefers_no_motion_when_uniform_frames_have_equal_scores() {
+        let a = Frame::new(32, 32);
+        let mut b = Frame::new(32, 32);
+        for pixel in b.pixels.chunks_exact_mut(4) {
+            pixel[..3].fill(1);
+        }
+        assert_eq!(translation(&a, &b), Some((0, 0)));
+    }
+
+    #[test]
+    fn compose_preserves_source_transparency_and_uncovered_gaps() {
+        let mut translucent = Frame::new(1, 1);
+        translucent.alpha = true;
+        translucent.pixels.copy_from_slice(&[1, 2, 3, 64]);
+        let result = compose(&[(translucent, (0, 0))]).unwrap();
+        assert!(result.alpha);
+        assert_eq!(result.pixels, [1, 2, 3, 64]);
+
+        let left = Frame::new(2, 1);
+        let right = Frame::new(2, 1);
+        let result = compose(&[(left, (0, 0)), (right, (3, 0))]).unwrap();
+        assert!(result.alpha);
+        assert_eq!(result.pixels[3], 255);
+        assert_eq!(result.pixels[2 * 4 + 3], 0);
+        assert_eq!(result.pixels[3 * 4 + 3], 255);
+    }
+
+    #[test]
+    fn compose_blends_transparent_frames_over_existing_pixels() {
+        let mut bottom = Frame::new(2, 1);
+        bottom.pixels.copy_from_slice(&[0, 0, 255, 0, 0, 0, 255, 0]);
+        let top = Frame {
+            width: 2,
+            height: 1,
+            pixels: vec![255, 0, 0, 128, 99, 99, 99, 0],
+            alpha: true,
+        };
+        let result = compose(&[(bottom, (0, 0)), (top, (0, 0))]).unwrap();
+        assert!(!result.alpha);
+        assert_eq!(result.rgb(0, 0), Some((127, 0, 128)));
+        assert_eq!(result.rgb(1, 0), Some((255, 0, 0)));
+    }
+
+    #[test]
+    fn vertical_stitch_keeps_transparent_source_pixels() {
+        let mut frame = Frame::new(2, 1);
+        frame.alpha = true;
+        frame.pixels.copy_from_slice(&[1, 2, 3, 64, 4, 5, 6, 0]);
+        let result = stitch_vertical(&[frame]).unwrap();
+        assert!(result.alpha);
+        assert_eq!(result.pixels, [1, 2, 3, 64, 4, 5, 6, 0]);
+
+        let p = page(80, 200);
+        let first = view(&p, 0, 60, 4, 4);
+        let mut second = view(&p, 20, 60, 4, 4);
+        second.alpha = true;
+        for pixel in second.pixels.chunks_exact_mut(4) {
+            pixel[3] = 64;
+        }
+        let result = stitch_vertical(&[first, second]).unwrap();
+        assert!(result.alpha);
+        assert_eq!(result.height, 80);
+        assert_eq!(result.pixels[3], 255);
+        assert_eq!(result.pixels[59 * result.stride() + 3], 64);
+    }
+
+    #[test]
+    fn compose_rejects_unrepresentable_extents() {
+        let frame = Frame::new(1, 1);
+        assert!(compose(&[
+            (frame.clone(), (i32::MIN, 0)),
+            (frame, (i32::MAX, 0)),
+        ])
+        .is_none());
+    }
+
+    #[test]
+    fn stitching_rejects_invalid_frame_buffers() {
+        let invalid = Frame {
+            width: 2,
+            height: 2,
+            pixels: vec![],
+            alpha: false,
+        };
+        assert!(stitch_vertical(&[invalid.clone()]).is_none());
+        assert!(vertical_step(&invalid, &Frame::new(2, 2)).is_none());
+        assert!(translation(&invalid, &Frame::new(2, 2)).is_none());
+        assert!(compose(&[(invalid, (0, 0))]).is_none());
     }
 }

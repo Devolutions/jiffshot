@@ -188,47 +188,8 @@ fn text(text: String, rect: Rect) -> Text {
     Text { text, rect, center: rect.center() }
 }
 
-fn normalize(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
-}
-
 pub(super) fn find_text(lines: &[Line], phrase: &str) -> Vec<Text> {
-    let phrase = normalize(phrase);
-    if phrase.is_empty() {
-        return Vec::new();
-    }
-    let mut found = Vec::new();
-    for line in lines {
-        if !normalize(&line.text).contains(&phrase) {
-            continue;
-        }
-        let mut best: Option<(usize, usize)> = None;
-        for start in 0..line.words.len() {
-            let mut joined = String::new();
-            for end in start..line.words.len() {
-                if end > start {
-                    joined.push(' ');
-                }
-                joined.push_str(&line.words[end].text);
-                if normalize(&joined).contains(&phrase) {
-                    if best.is_none_or(|(first, last)| end - start < last - first) {
-                        best = Some((start, end));
-                    }
-                    break;
-                }
-            }
-        }
-        match best {
-            Some((start, end)) => {
-                let words = &line.words[start..=end];
-                let rect = words[1..].iter().fold(words[0].rect, |rect, word| rect.union(word.rect));
-                let content = words.iter().map(|word| word.text.as_str()).collect::<Vec<_>>().join(" ");
-                found.push(text(content, rect));
-            }
-            None => found.push(text(line.text.clone(), line.rect)),
-        }
-    }
-    found
+    ocr::find_text(lines, phrase).into_iter().map(|(content, rect)| text(content, rect)).collect()
 }
 
 pub(super) fn recognize(target: &Target) -> Result<Vec<Line>, Error> {

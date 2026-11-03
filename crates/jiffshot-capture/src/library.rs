@@ -214,8 +214,8 @@ pub fn rename(capture: &Path, name: &str) -> io::Result<PathBuf> {
         ));
     }
     let mut target_name = std::ffi::OsString::from(name);
-    target_name.push(".");
     if let Some(ext) = capture.extension() {
+        target_name.push(".");
         target_name.push(ext);
     }
     let target = capture.with_file_name(target_name);
@@ -1097,6 +1097,11 @@ mod tests {
         assert!(!first.exists() && !first.with_extension("jsd").exists());
         assert_eq!(edits_of(&renamed), Some(renamed.with_extension("jsd")));
         assert!(rename(&renamed, "a/b").is_err());
+        let extensionless = root.join("extensionless");
+        std::fs::write(&extensionless, b"extensionless file").unwrap();
+        let renamed_extensionless = rename(&extensionless, "renamed").unwrap();
+        assert_eq!(renamed_extensionless, root.join("renamed"));
+        assert!(renamed_extensionless.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
