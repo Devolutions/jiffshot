@@ -1,6 +1,8 @@
 # jiffshot-cli: driving Jiffshot from scripts and AI agents
 
-`jiffshot-cli.exe` ships beside `jiffshot.exe` (`C:\Program Files\Devolutions\Jiffshot`).
+`jiffshot-cli.exe` ships beside `jiffshot.exe` (under `C:\Program Files\Devolutions\Jiffshot`
+for the MSI). The MSIX also registers `jiffshot-cli.exe` as a Windows app execution
+alias, available from a terminal when app execution aliases are enabled.
 It lets a script or an AI agent screenshot, record and narrate a demo of any desktop
 software, driving the mouse and keyboard itself, so nobody has to click through the
 demo by hand while recording.

@@ -1016,8 +1016,45 @@ jobs:
           install_test_signing_root: ${{ inputs.signing_environment == 'publish-test' }}
           files: msix/*.msix
 
+      - name: Sign a temporary MSIX for installation testing
+        if: matrix.test && (github.event_name == 'pull_request' || inputs.signing_environment == '')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packages = @(Get-ChildItem -LiteralPath msix -Filter '*.msix' -File)
+          if ($packages.Count -ne 1) { throw "Expected one MSIX, found $($packages.Count)" }
+          $testPackage = Join-Path $env:RUNNER_TEMP 'jiffshot-install-test.msix'
+          Copy-Item -LiteralPath $packages[0].FullName -Destination $testPackage
+          [xml]$manifest = Get-Content -LiteralPath msix\stage\AppxManifest.xml -Raw
+          $publisher = $manifest.Package.Identity.Publisher
+          $certificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject $publisher `
+            -CertStoreLocation 'Cert:\CurrentUser\My' -KeyExportPolicy NonExportable -NotAfter (Get-Date).AddDays(1)
+          "JIFFSHOT_MSIX_TEST_CERT=$($certificate.Thumbprint)" >> $env:GITHUB_ENV
+          $publicCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+          $store = [System.Security.Cryptography.X509Certificates.X509Store]::new('TrustedPeople', 'LocalMachine')
+          try {
+            $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+            $store.Add($publicCertificate)
+          } finally {
+            $store.Dispose()
+            $publicCertificate.Dispose()
+          }
+          $sdkBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+          $signTool = Get-ChildItem -LiteralPath $sdkBin -Directory |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'x64\signtool.exe') } |
+            Sort-Object { [version]$_.Name } -Descending |
+            Select-Object -First 1 |
+            ForEach-Object { Join-Path $_.FullName 'x64\signtool.exe' }
+          if (-not $signTool) { throw "Windows SDK SignTool.exe was not found under $sdkBin" }
+          & $signTool sign /fd SHA256 /s My /sha1 $certificate.Thumbprint $testPackage
+          if ($LASTEXITCODE -ne 0) { throw "SignTool failed with exit code $LASTEXITCODE" }
+          $signature = Get-AuthenticodeSignature -LiteralPath $testPackage
+          if ($signature.Status -ne 'Valid') { throw "Test MSIX signature verification failed: $($signature.StatusMessage)" }
+          "JIFFSHOT_MSIX_TEST_PATH=$testPackage" >> $env:GITHUB_ENV
+
       - name: Install and uninstall
-        if: matrix.test && github.event_name != 'pull_request' && inputs.signing_environment != ''
+        if: matrix.test
         shell: pwsh
         env:
           EXPECTED_VERSION: ${{ inputs.version }}
@@ -1031,25 +1068,51 @@ jobs:
           } else {
             $env:EXPECTED_VERSION
           }
-          $msix = "msix\Devolutions.Jiffshot-x64-$version.msix"
-          Add-AppxPackage -Path $msix -ErrorAction Stop
-          $installed = Get-AppxPackage -Name Devolutions.Jiffshot
-          if ($null -eq $installed -or $installed.Version.ToString() -ne "$version.0") {
-            throw "The installed Jiffshot MSIX does not match version $version"
+          $msix = if ([string]::IsNullOrWhiteSpace($env:JIFFSHOT_MSIX_TEST_PATH)) {
+            "msix\Devolutions.Jiffshot-x64-$version.msix"
+          } else {
+            $env:JIFFSHOT_MSIX_TEST_PATH
           }
-          if (-not (Test-Path -LiteralPath (Join-Path $installed.InstallLocation 'jiffshot.exe'))) {
-            throw 'The installed MSIX does not contain jiffshot.exe'
+          if (Get-AppxPackage -Name Devolutions.Jiffshot) { throw 'Jiffshot MSIX is already installed on the test runner' }
+          $added = $false
+          try {
+            Add-AppxPackage -Path $msix -ErrorAction Stop
+            $added = $true
+            $installed = Get-AppxPackage -Name Devolutions.Jiffshot
+            if ($null -eq $installed -or $installed.Version.ToString() -ne "$version.0") {
+              throw "The installed Jiffshot MSIX does not match version $version"
+            }
+            if (-not (Test-Path -LiteralPath (Join-Path $installed.InstallLocation 'jiffshot.exe'))) {
+              throw 'The installed MSIX does not contain jiffshot.exe'
+            }
+            $cli = Join-Path $installed.InstallLocation 'jiffshot-cli.exe'
+            $alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\jiffshot-cli.exe'
+            foreach ($cliPath in @($cli, $alias)) {
+              if (-not (Test-Path -LiteralPath $cliPath -PathType Leaf)) {
+                throw "The installed Jiffshot CLI is missing: $cliPath"
+              }
+              $help = & $cliPath --help-agent | Out-String
+              if ($LASTEXITCODE -ne 0 -or $help -notmatch '(?m)^jiffshot-cli for AI agents\r?$') {
+                throw "The installed Jiffshot CLI failed to run at ${cliPath} (exit $LASTEXITCODE)"
+              }
+            }
+          } finally {
+            if ($added) {
+              $installed = Get-AppxPackage -Name Devolutions.Jiffshot
+              if ($null -ne $installed) { Remove-AppxPackage -Package $installed.PackageFullName -ErrorAction Stop }
+            }
           }
-          $cli = Join-Path $installed.InstallLocation 'jiffshot-cli.exe'
-          if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) {
-            throw 'The installed MSIX does not contain jiffshot-cli.exe'
-          }
-          $help = & $cli --help-agent
-          if ($LASTEXITCODE -ne 0 -or -not ($help -match '^jiffshot-cli for AI agents$')) {
-            throw "The installed jiffshot-cli.exe failed to run (exit $LASTEXITCODE)"
-          }
-          Remove-AppxPackage -Package $installed.PackageFullName -ErrorAction Stop
           if (Get-AppxPackage -Name Devolutions.Jiffshot) { throw 'Jiffshot MSIX is still installed after removal' }
+
+      - name: Remove MSIX test certificate
+        if: always() && matrix.test && env.JIFFSHOT_MSIX_TEST_CERT != ''
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $trusted = "Cert:\LocalMachine\TrustedPeople\$env:JIFFSHOT_MSIX_TEST_CERT"
+          $personal = "Cert:\CurrentUser\My\$env:JIFFSHOT_MSIX_TEST_CERT"
+          if (Test-Path -LiteralPath $trusted) { Remove-Item -LiteralPath $trusted -ErrorAction Stop }
+          if (Test-Path -LiteralPath $personal) { Remove-Item -LiteralPath $personal -DeleteKey -ErrorAction Stop }
 
       - uses: actions/upload-artifact@v7
         with:
