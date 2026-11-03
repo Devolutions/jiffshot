@@ -648,7 +648,8 @@ fn caption_button(scope: &AppScope, dark: Signal<bool>, visible: Signal<bool>, s
             .on_pointer_entered(move |_| hover.set(true))
             .on_pointer_exited(move |_| hover.set(false))
             .tool_tip_tip(label)
-            .content(label),
+            // The Fluent template changes its foreground on hover and press.
+            .content(TextBlock::el().text(label).foreground(parts::TRANSPARENT)),
         subs,
         move |_| {
             if let Some(window) = with_ui(|ui| ui.window.get()).flatten() {
@@ -1114,6 +1115,132 @@ fn show_problem(text: &str) -> Result<()> {
 #[cfg(all(test, not(target_os = "linux")))]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn caption_buttons_keep_labels_hidden_on_hover() {
+        use rustolonia::{App, PixelPoint, ThemeVariant};
+        use std::{
+            sync::mpsc,
+            time::{Duration, Instant},
+        };
+        use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_MOUSEMOVE};
+
+        struct Observation {
+            dark: bool,
+            label: &'static str,
+            pointer_over: bool,
+            text: Option<String>,
+            tooltip: Option<String>,
+            foreground: Option<Brush>,
+            overridden_foreground: Option<Brush>,
+            background: Option<Brush>,
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        App::load_from_env()
+            .expect("load the Rustolonia host")
+            .without_startup_arguments()
+            .run(move |scope| {
+                let subs = Subscriptions::default();
+                let dark = scope.signal(true);
+                let visible = scope.signal(true);
+                let grid = Grid::el()
+                    .column_definitions("*,*")
+                    .child(caption_button(scope, dark, visible, &subs, 0, "Minimize", false))
+                    .child(caption_button(scope, dark, visible, &subs, 1, "Close", true))
+                    .build(scope)?;
+                let mut buttons = Vec::new();
+                for (index, label) in ["Minimize", "Close"].into_iter().enumerate() {
+                    let wrapper = grid.children()?.get(index)?.cast::<Grid>().expect("caption wrapper");
+                    let background = wrapper.children()?.get(0)?.cast::<Border>().expect("caption background");
+                    let button = wrapper.children()?.get(2)?.cast::<Button>().expect("caption button");
+                    let text = button.get_content()?.and_then(|content| content.cast::<TextBlock>()).expect("caption label");
+                    buttons.push((label, button, text, background));
+                }
+                let window = Window::el()
+                    .title("Jiffshot caption hover test")
+                    .window_decorations(WindowDecorations::None)
+                    .window_startup_location(WindowStartupLocation::Manual)
+                    // Keep the fixture off-screen and never activate it.
+                    .position(PixelPoint::new(-30_000, -30_000))
+                    .show_activated(false)
+                    .width(2.0 * caption::BUTTON_WIDTH)
+                    .height(caption::HEIGHT)
+                    .content(rustolonia::AnyEl::from_control(grid))
+                    .build(scope)?;
+                scope.mount(window.clone())?;
+                let hwnd = scope.platform_handle(&window)?;
+                let app = scope.clone();
+                scope.spawn(async move {
+                    // SAFETY: hwnd belongs to the mounted fixture window on this UI thread.
+                    let dpi = unsafe { GetDpiForWindow(hwnd as windows_sys::Win32::Foundation::HWND) };
+                    let result = if dpi == 0 {
+                        Err(format!("get DPI for the caption fixture: {}", std::io::Error::last_os_error()))
+                    } else {
+                        let scale = f64::from(dpi) / 96.0;
+                        let observations: Result<Vec<Observation>> = async {
+                            let mut observed = Vec::new();
+                            for (theme, is_dark) in [(ThemeVariant::Dark, true), (ThemeVariant::Light, false)] {
+                                app.set_requested_theme_variant(theme)?;
+                                dark.set(is_dark);
+                                for (index, (label, button, text, background)) in buttons.iter().enumerate() {
+                                    let x = (caption::BUTTON_WIDTH * (index as f64 + 0.5) * scale) as isize;
+                                    let y = (caption::HEIGHT / 2.0 * scale) as isize;
+                                    let deadline = Instant::now() + Duration::from_secs(5);
+                                    // The first hit test may precede the window's initial layout.
+                                    let pointer_over = loop {
+                                        // SAFETY: this pointer-free message targets only our fixture's live window.
+                                        unsafe { SendMessageW(hwnd as windows_sys::Win32::Foundation::HWND, WM_MOUSEMOVE, 0, x | (y << 16)) };
+                                        let pointer_over = button.classes()?.contains(":pointerover")?;
+                                        if pointer_over || Instant::now() >= deadline {
+                                            break pointer_over;
+                                        }
+                                        app.delay(Duration::from_millis(25))?.await?;
+                                    };
+                                    let foreground = text.get_foreground()?;
+                                    button.set_foreground(Brush::solid(if is_dark { WHITE } else { parts::rgb(0x000000) }))?;
+                                    observed.push(Observation {
+                                        dark: is_dark,
+                                        label,
+                                        pointer_over,
+                                        text: text.get_text()?,
+                                        tooltip: button.get_tool_tip_tip()?,
+                                        foreground,
+                                        overridden_foreground: text.get_foreground()?,
+                                        background: background.get_background()?,
+                                    });
+                                    if !pointer_over {
+                                        return Ok(observed);
+                                    }
+                                }
+                            }
+                            Ok(observed)
+                        }.await;
+                        observations.map_err(|error| error.to_string())
+                    };
+                    sender.send(result).expect("send caption observations");
+                    app.shutdown().expect("shut down the caption test");
+                })?;
+                Ok(())
+            })
+            .expect("run the caption hover test");
+        let observations = receiver.recv().expect("receive caption observations").expect("inspect caption controls");
+        let count = observations.len();
+        for observed in observations {
+            let theme = if observed.dark { "dark" } else { "light" };
+            let label = observed.label;
+            let background = if label == "Close" { parts::rgb(0xC42B1C) } else if observed.dark { parts::rgb(dark_blue::HOVER) } else { parts::rgb(0xE2E2E2) };
+            assert!(observed.pointer_over, "{theme} {label}: hover did not reach the button");
+            assert_eq!(observed.text.as_deref(), Some(label), "{theme} {label}: accessible text changed");
+            assert_eq!(observed.tooltip.as_deref(), Some(label), "{theme} {label}: tooltip changed");
+            assert_eq!(observed.foreground.map(|brush| brush.color.a), Some(0), "{theme} {label}: hovered text became visible");
+            assert_eq!(observed.overridden_foreground.map(|brush| brush.color.a), Some(0), "{theme} {label}: parent foreground exposed the text");
+            assert_eq!(observed.background.map(|brush| brush.color), Some(background), "{theme} {label}: hover background changed");
+        }
+        assert_eq!(count, 4, "both buttons must be observed in both themes");
+    }
 
     #[test]
     fn scoped_and_unscoped_timing_panels_are_identified() {
