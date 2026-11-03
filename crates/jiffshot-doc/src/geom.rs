@@ -191,11 +191,13 @@ impl Box2 {
     pub fn to_irect(&self) -> IRect {
         let x = self.x0.floor() as i32;
         let y = self.y0.floor() as i32;
+        let right = self.x1.ceil() as i32;
+        let bottom = self.y1.ceil() as i32;
         IRect {
             x,
             y,
-            w: self.x1.ceil() as i32 - x,
-            h: self.y1.ceil() as i32 - y,
+            w: right.saturating_sub(x),
+            h: bottom.saturating_sub(y),
         }
     }
 
@@ -230,7 +232,7 @@ impl IRect {
     }
 
     pub fn of_size(w: u32, h: u32) -> IRect {
-        IRect::new(0, 0, w as i32, h as i32)
+        IRect::new(0, 0, w.min(i32::MAX as u32) as i32, h.min(i32::MAX as u32) as i32)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -238,11 +240,11 @@ impl IRect {
     }
 
     pub fn right(&self) -> i32 {
-        self.x + self.w
+        self.x.saturating_add(self.w)
     }
 
     pub fn bottom(&self) -> i32 {
-        self.y + self.h
+        self.y.saturating_add(self.h)
     }
 
     pub fn union(&self, o: &IRect) -> IRect {
@@ -257,8 +259,8 @@ impl IRect {
         IRect::new(
             x,
             y,
-            self.right().max(o.right()) - x,
-            self.bottom().max(o.bottom()) - y,
+            self.right().max(o.right()).saturating_sub(x),
+            self.bottom().max(o.bottom()).saturating_sub(y),
         )
     }
 
@@ -267,7 +269,14 @@ impl IRect {
         let y = self.y.max(o.y);
         let r = self.right().min(o.right());
         let b = self.bottom().min(o.bottom());
-        (r > x && b > y).then(|| IRect::new(x, y, r - x, b - y))
+        (r > x && b > y).then(|| {
+            IRect::new(
+                x,
+                y,
+                r.saturating_sub(x),
+                b.saturating_sub(y),
+            )
+        })
     }
 
     pub fn contains_rect(&self, o: &IRect) -> bool {
@@ -275,7 +284,12 @@ impl IRect {
     }
 
     pub fn inflate(&self, d: i32) -> IRect {
-        IRect::new(self.x - d, self.y - d, self.w + 2 * d, self.h + 2 * d)
+        IRect::new(
+            self.x.saturating_sub(d),
+            self.y.saturating_sub(d),
+            self.w.saturating_add(d.saturating_mul(2)),
+            self.h.saturating_add(d.saturating_mul(2)),
+        )
     }
 
     pub fn to_box(&self) -> Box2 {
@@ -311,6 +325,25 @@ mod tests {
         assert!(
             (dist_to_segment(Pt::new(5.0, 3.0), Pt::new(0.0, 0.0), Pt::new(10.0, 0.0)) - 3.0).abs()
                 < 1e-5
+        );
+    }
+
+    #[test]
+    fn integer_rectangle_arithmetic_saturates_at_coordinate_limits() {
+        let rect = IRect::new(i32::MAX - 2, i32::MIN + 2, 10, -10);
+        assert_eq!(rect.right(), i32::MAX);
+        assert_eq!(rect.bottom(), i32::MIN);
+        assert_eq!(rect.inflate(i32::MAX).w, i32::MAX);
+        assert_eq!(
+            IRect::new(i32::MIN, 0, i32::MAX, 1)
+                .union(&IRect::new(i32::MAX - 1, 0, 10, 1))
+                .w,
+            i32::MAX
+        );
+        assert_eq!(IRect::of_size(u32::MAX, u32::MAX).w, i32::MAX);
+        assert_eq!(
+            Box2::new(i32::MIN as f32, 0.0, i32::MAX as f32, 1.0).to_irect().w,
+            i32::MAX
         );
     }
 }

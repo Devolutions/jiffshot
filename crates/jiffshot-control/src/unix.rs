@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
 use super::linux_ipc as ipc;
 use super::{
-    read_frame, response_for, write_frame, Error, ErrorCode, Request, Response, Value, PROTOCOL,
+    decode_response, read_frame, response_for, write_frame, Error, ErrorCode, Request, Response, Value,
 };
 #[cfg(target_os = "macos")]
 use jiffshot_capture::ipc;
@@ -447,25 +447,7 @@ fn send_on(
         .map_err(|error| io_error("cannot send the request", error, timeout))?;
     let bytes = read_frame(&mut stream)
         .map_err(|error| io_error("no response from Jiffshot", error, timeout))?;
-    let response: Response = serde_json::from_slice(&bytes).map_err(|error| {
-        Error::new(
-            ErrorCode::Transport,
-            format!("unreadable response: {error}"),
-        )
-    })?;
-    if response.id != request.id {
-        return Err(Error::new(
-            ErrorCode::Transport,
-            "the control response has a different request ID",
-        ));
-    }
-    if response.protocol != PROTOCOL {
-        return Err(Error::new(
-            ErrorCode::Unsupported,
-            format!("Jiffshot uses control protocol {}, this client uses {PROTOCOL}; use matching versions", response.protocol),
-        ));
-    }
-    Ok(response)
+    decode_response(request, &bytes)
 }
 
 /// Sends one request, without retrying a request that may have been delivered.

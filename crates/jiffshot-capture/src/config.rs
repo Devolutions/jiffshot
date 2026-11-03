@@ -12,7 +12,9 @@
 
 use serde_json::{Map, Value};
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 pub const FILE: &str = "jiffshot.json";
@@ -39,15 +41,34 @@ fn read(dir: &Path) -> Map<String, Value> {
 fn write_checked(dir: &Path, root: &Map<String, Value>) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let json = serde_json::to_vec_pretty(root).map_err(io::Error::other)?;
-    // Through a temporary file, so a crash never leaves half a file.
-    let tmp = dir.join(format!("{FILE}.tmp"));
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(tmp, dir.join(FILE))
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..100 {
+        let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+        let tmp = dir.join(format!(".{FILE}.{}-{sequence}.tmp", std::process::id()));
+        let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let staging = StagingFile(tmp);
+        let written = file.write_all(&json).and_then(|()| file.sync_all());
+        drop(file);
+        written?;
+        return std::fs::rename(&staging.0, dir.join(FILE));
+    }
+    Err(io::Error::new(io::ErrorKind::AlreadyExists, "could not reserve a settings staging file"))
 }
 
-#[cfg(any(not(unix), test))]
-fn write(dir: &Path, root: &Map<String, Value>) {
-    let _ = write_checked(dir, root);
+struct StagingFile(PathBuf);
+
+impl Drop for StagingFile {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.0) {
+            if error.kind() != io::ErrorKind::NotFound {
+                eprintln!("Could not remove settings staging file {}: {error}", self.0.display());
+            }
+        }
+    }
 }
 
 fn read_checked(path: &Path) -> io::Result<Map<String, Value>> {
@@ -93,16 +114,9 @@ pub fn section(name: &str) -> Value {
 
 /// Replaces one side's section, keeping everything else.
 pub fn set_section(name: &str, value: Value) {
-    #[cfg(unix)]
     if let Err(error) = try_set_section(name, value) {
         eprintln!("Could not save {name} settings: {error}");
     }
-    #[cfg(not(unix))]
-    with_dir(|dir| {
-        let mut root = read(dir);
-        root.insert(name.to_owned(), value);
-        write(dir, &root);
-    });
 }
 
 /// Replaces a section without discarding unreadable settings or hiding write failures.
@@ -142,30 +156,18 @@ fn top(key: &str) -> Option<String> {
 }
 
 fn set_top(key: &str, value: Option<&str>) {
-    #[cfg(unix)]
-    {
-        let result = with_dir(|dir| {
-            try_update(dir, |root| {
-                match value {
-                    Some(v) => root.insert(key.to_owned(), Value::String(v.to_owned())),
-                    None => root.remove(key),
-                };
-            })
+    let result = with_dir(|dir| {
+        try_update(dir, |root| {
+            match value {
+                Some(v) => root.insert(key.to_owned(), Value::String(v.to_owned())),
+                None => root.remove(key),
+            };
         })
-        .unwrap_or_else(|| Err(io::Error::other("the settings directory is unavailable")));
-        if let Err(error) = result {
-            eprintln!("Could not save {key} setting: {error}");
-        }
+    })
+    .unwrap_or_else(|| Err(io::Error::other("the settings directory is unavailable")));
+    if let Err(error) = result {
+        eprintln!("Could not save {key} setting: {error}");
     }
-    #[cfg(not(unix))]
-    with_dir(|dir| {
-        let mut root = read(dir);
-        match value {
-            Some(v) => root.insert(key.to_owned(), Value::String(v.to_owned())),
-            None => root.remove(key),
-        };
-        write(dir, &root);
-    });
 }
 
 /// The library folder chosen in Preferences, if any. `JIFFSHOT_LIBRARY`
@@ -212,13 +214,24 @@ mod tests {
         let dir = temp("sections");
         let mut root = read(&dir);
         root.insert("editor".into(), serde_json::json!({ "recent": ["a.png"] }));
-        write(&dir, &root);
+        write_checked(&dir, &root).unwrap();
         let mut root = read(&dir);
         root.insert("capture".into(), serde_json::json!({ "countdown": 1 }));
-        write(&dir, &root);
+        write_checked(&dir, &root).unwrap();
         let root = read(&dir);
         assert_eq!(root["editor"]["recent"][0], "a.png");
         assert_eq!(root["capture"]["countdown"], 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_write_preserves_an_existing_temporary_file() {
+        let dir = temp("temporary-file");
+        let other = dir.join(format!("{FILE}.tmp"));
+        std::fs::write(&other, b"another writer's data").unwrap();
+        try_replace_section(&dir, "capture", serde_json::json!({"countdown": 1})).unwrap();
+        assert_eq!(std::fs::read(&other).unwrap(), b"another writer's data");
+        assert_eq!(read(&dir)["capture"]["countdown"], 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

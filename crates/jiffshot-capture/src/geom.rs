@@ -23,8 +23,8 @@ impl Rect {
         Rect {
             x: left,
             y: top,
-            width: right - left,
-            height: bottom - top,
+            width: right.saturating_sub(left),
+            height: bottom.saturating_sub(top),
         }
     }
 
@@ -33,17 +33,17 @@ impl Rect {
         Rect::from_ltrb(
             a.0.min(b.0),
             a.1.min(b.1),
-            a.0.max(b.0) + 1,
-            a.1.max(b.1) + 1,
+            a.0.max(b.0).saturating_add(1),
+            a.1.max(b.1).saturating_add(1),
         )
     }
 
     pub const fn right(self) -> i32 {
-        self.x + self.width
+        self.x.saturating_add(self.width)
     }
 
     pub const fn bottom(self) -> i32 {
-        self.y + self.height
+        self.y.saturating_add(self.height)
     }
 
     pub const fn is_empty(self) -> bool {
@@ -89,19 +89,27 @@ impl Rect {
 
     pub const fn inflate(self, d: i32) -> Rect {
         Rect::new(
-            self.x - d,
-            self.y - d,
-            self.width + 2 * d,
-            self.height + 2 * d,
+            self.x.saturating_sub(d),
+            self.y.saturating_sub(d),
+            self.width.saturating_add(d.saturating_mul(2)),
+            self.height.saturating_add(d.saturating_mul(2)),
         )
     }
 
     pub const fn offset(self, dx: i32, dy: i32) -> Rect {
-        Rect::new(self.x + dx, self.y + dy, self.width, self.height)
+        Rect::new(
+            self.x.saturating_add(dx),
+            self.y.saturating_add(dy),
+            self.width,
+            self.height,
+        )
     }
 
     pub const fn center(self) -> (i32, i32) {
-        (self.x + self.width / 2, self.y + self.height / 2)
+        (
+            self.x.saturating_add(self.width / 2),
+            self.y.saturating_add(self.height / 2),
+        )
     }
 }
 
@@ -361,5 +369,19 @@ mod tests {
         }
         assert!(CaptureMapping::new(Rect::new(i32::MAX, 0, 1, 1), 1, 1).is_none());
         assert!(CaptureMapping::with_desktop_bounds(rect, 0, 4, [0.5, -0.5, 4.5, 3.5]).is_none());
+    }
+
+    #[test]
+    fn rectangle_arithmetic_saturates_at_coordinate_limits() {
+        let rect = Rect::new(i32::MAX - 2, i32::MIN + 2, 10, -10);
+        assert_eq!(rect.right(), i32::MAX);
+        assert_eq!(rect.bottom(), i32::MIN);
+        assert_eq!(rect.offset(10, -10).x, i32::MAX);
+        assert_eq!(rect.offset(10, -10).y, i32::MIN);
+        assert_eq!(rect.inflate(i32::MAX).width, i32::MAX);
+        assert_eq!(
+            Rect::from_ltrb(i32::MIN, 0, i32::MAX, 1).width,
+            i32::MAX
+        );
     }
 }

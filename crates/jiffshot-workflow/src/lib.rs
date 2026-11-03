@@ -952,7 +952,7 @@ fn selftest(dir: &Path) -> std::io::Result<()> {
 
     // Capture effects run on the frame before it is saved.
     let mut frame = capture.frame.clone();
-    workflow::apply_effects(&mut frame, &["Border".to_owned()]);
+    workflow::apply_effects(&mut frame, &["Border".to_owned()])?;
     println!(
         "effects: {}x{} -> {}x{} with a border",
         w, h, frame.width, frame.height

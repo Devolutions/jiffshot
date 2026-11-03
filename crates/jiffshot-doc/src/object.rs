@@ -897,8 +897,10 @@ impl Object {
     pub fn map_geometry(&mut self, from: &Box2, to: &Box2) {
         let scale = to.width() / from.width().max(1e-6);
         self.map_points(&|q| from.map(q, to), scale);
-        self.style.width *= scale;
-        self.style.font_size *= scale;
+        self.walk_mut(&mut |object| {
+            object.style.width *= scale;
+            object.style.font_size *= scale;
+        });
     }
 
     /// Applies `f` to every defining point. Boxes stay axis-aligned, so `f`

@@ -45,7 +45,7 @@ pub(crate) struct State {
     tool: Tool,
     color: usize,
     marks: Vec<Mark>,
-    drawing: Option<Pt>,
+    drawing: Option<(Pt, Tool)>,
     step: u32,
     fade_after: Duration,
     /// The marks as last rendered (premultiplied RGBA, the recording's size),
@@ -157,7 +157,7 @@ impl State {
                 done: Some(Instant::now()),
             });
         } else {
-            self.drawing = Some(p);
+            self.drawing = Some((p, self.tool));
             self.marks.push(Mark {
                 kind: kind_for(self.tool, p, p, 0),
                 style: style(COLORS[self.color], self.tool),
@@ -169,12 +169,12 @@ impl State {
 
     /// The pointer moved; true when that changed a mark.
     pub fn moved(&mut self, p: Pt) -> bool {
-        let (Some(a), Some(last)) = (self.drawing, self.marks.last_mut()) else {
+        let (Some((a, tool)), Some(last)) = (self.drawing, self.marks.last_mut()) else {
             return false;
         };
         match &mut last.kind {
             Kind::Pen { points } => points.push(p),
-            k => *k = kind_for(self.tool, a, p, 0),
+            k => *k = kind_for(tool, a, p, 0),
         }
         self.render();
         true
@@ -361,6 +361,32 @@ mod tests {
         assert_eq!(alpha(&mark, Duration::ZERO), 1.0, "never fades when zero");
         let drawing = Mark { done: None, ..mark };
         assert_eq!(alpha(&drawing, Duration::from_secs(3)), 1.0);
+    }
+
+    #[test]
+    fn changing_tools_during_a_stroke_does_not_change_that_stroke() {
+        let mut draw = State {
+            id: 1,
+            mapping: CaptureMapping::identity(Rect::new(0, 0, 120, 80)).unwrap(),
+            tool: Tool::Box,
+            color: 0,
+            marks: Vec::new(),
+            drawing: None,
+            step: 0,
+            fade_after: Duration::ZERO,
+            image: None,
+            generation: 0,
+        };
+        draw.press(Pt::new(10.0, 10.0));
+        draw.key(b'1' as u16);
+        assert!(draw.moved(Pt::new(50.0, 50.0)));
+        draw.release();
+        assert!(matches!(
+            draw.marks[0].kind,
+            Kind::Shape { shape: ShapeKind::Rectangle, .. }
+        ));
+        draw.press(Pt::new(70.0, 50.0));
+        assert!(matches!(&draw.marks[1].kind, Kind::Step { label, .. } if label == "1"));
     }
 
     #[test]

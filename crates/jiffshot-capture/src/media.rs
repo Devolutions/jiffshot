@@ -33,7 +33,11 @@ impl VideoSpec {
     /// that keeps screen text sharp.
     pub fn for_size(width: u32, height: u32, fps: u32) -> VideoSpec {
         let (w, h) = (width & !1, height & !1);
-        let bitrate = ((w as u64 * h as u64 * fps as u64) / 6).clamp(1_500_000, 40_000_000) as u32;
+        let bitrate = (u64::from(w)
+            .saturating_mul(u64::from(h))
+            .saturating_mul(u64::from(fps))
+            / 6)
+            .clamp(1_500_000, 40_000_000) as u32;
         VideoSpec {
             width: w,
             height: h,
@@ -177,6 +181,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn video_spec_rounds_down_dimensions_and_saturates_bitrate() {
+        let spec = VideoSpec::for_size(1, 0, 0);
+        assert_eq!((spec.width, spec.height, spec.fps), (0, 0, 0));
+        assert_eq!(spec.bitrate, 1_500_000);
+
+        let spec = VideoSpec::for_size(u32::MAX, u32::MAX, u32::MAX);
+        assert_eq!((spec.width, spec.height), (u32::MAX - 1, u32::MAX - 1));
+        assert_eq!(spec.bitrate, 40_000_000);
+    }
 }
 
 #[cfg(test)]

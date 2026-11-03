@@ -589,6 +589,11 @@ pub fn guide(steps: &[Step]) -> std::io::Result<Document> {
 pub fn guide_titled(steps: &[Step], title: &str) -> std::io::Result<Document> {
     const W: f32 = 1400.0;
     const SHOT: (f32, f32) = (1000.0, 560.0);
+    for (index, step) in steps.iter().enumerate() {
+        step.frame.validate().map_err(|error| {
+            std::io::Error::new(error.kind(), format!("invalid screenshot for step {}: {error}", index + 1))
+        })?;
+    }
     let pad = 40.0;
     let row = SHOT.1 + pad * 1.5;
     let h = 140.0 + steps.len() as f32 * row + pad;
@@ -1094,6 +1099,23 @@ mod tests {
             description: String::new(),
         };
         assert!(guide(&[invalid]).is_err());
+    }
+
+    #[test]
+    fn guide_rejects_a_truncated_screenshot() {
+        let mut frame = Frame::new(2, 2);
+        frame.pixels.truncate(4);
+        let step = Step {
+            frame,
+            area: Rect::new(0, 0, 2, 2),
+            mapping: None,
+            click: (0, 0),
+            #[cfg(target_os = "macos")]
+            click_precise: None,
+            right: false,
+            description: String::new(),
+        };
+        assert_eq!(guide(&[step]).unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]

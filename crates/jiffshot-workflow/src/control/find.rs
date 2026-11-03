@@ -176,10 +176,6 @@ fn text(text: String, rect: Rect) -> Text {
     Text { center: (rect.x + rect.width / 2, rect.y + rect.height / 2), text, rect }
 }
 
-fn union(a: Rect, b: Rect) -> Rect {
-    Rect::from_ltrb(a.x.min(b.x), a.y.min(b.y), a.right().max(b.right()), a.bottom().max(b.bottom()))
-}
-
 fn normalize(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
@@ -206,43 +202,7 @@ pub fn lines(lines: &[ocr::Line]) -> Vec<Text> {
 /// Where `phrase` appears (any case and spacing): the smallest run of words
 /// on a line that contains it, in reading order.
 pub fn find_text(lines: &[ocr::Line], phrase: &str) -> Vec<Text> {
-    let phrase = normalize(phrase);
-    let mut found = Vec::new();
-    if phrase.is_empty() {
-        return found;
-    }
-    for line in lines {
-        if !normalize(&line.text).contains(&phrase) {
-            continue;
-        }
-        let words = &line.words;
-        let mut best: Option<(usize, usize)> = None;
-        for start in 0..words.len() {
-            let mut joined = String::new();
-            for end in start..words.len() {
-                if end > start {
-                    joined.push(' ');
-                }
-                joined.push_str(&words[end].text);
-                if normalize(&joined).contains(&phrase) {
-                    if best.is_none_or(|(s, e)| end - start < e - s) {
-                        best = Some((start, end));
-                    }
-                    break;
-                }
-            }
-        }
-        match best {
-            Some((s, e)) => {
-                let rect = words[s + 1..=e].iter().fold(words[s].rect, |r, w| union(r, w.rect));
-                let t = words[s..=e].iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
-                found.push(text(t, rect));
-            }
-            // Joined differently than the words (e.g. punctuation): the line.
-            None => found.push(text(line.text.clone(), line.rect)),
-        }
-    }
-    found
+    ocr::find_text(lines, phrase).into_iter().map(|(content, rect)| text(content, rect)).collect()
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -344,6 +304,15 @@ mod tests {
         assert_eq!(found[0].center, (145, 16));
         assert!(find_text(&lines, "print").is_empty());
         assert!(find_text(&lines, "").is_empty());
+    }
+
+    #[test]
+    fn text_search_returns_each_occurrence_on_one_line() {
+        let lines = [line(&[("Save", 0), ("As", 50), ("Save", 100), ("As", 150)])];
+        let found = find_text(&lines, "save as");
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].rect, Rect::from_ltrb(0, 10, 90, 22));
+        assert_eq!(found[1].rect, Rect::from_ltrb(100, 10, 190, 22));
     }
 
     #[test]

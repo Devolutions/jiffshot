@@ -73,6 +73,18 @@ fn is_ip(w: &str) -> bool {
             .all(|p| !p.is_empty() && p.len() <= 3 && p.parse::<u16>().is_ok_and(|v| v <= 255))
 }
 
+fn word_kind(word: &str) -> Option<Kind> {
+    if is_email(word) {
+        Some(Kind::Email)
+    } else if is_url(word) {
+        Some(Kind::Url)
+    } else if is_ip(word) {
+        Some(Kind::Ip)
+    } else {
+        None
+    }
+}
+
 /// Characters that may sit inside a phone or card number.
 fn joins_number(c: char) -> bool {
     c.is_ascii_digit() || matches!(c, ' ' | '-' | '.' | '(' | ')' | '+' | '/')
@@ -91,17 +103,18 @@ pub fn find(text: &str) -> Vec<(usize, usize, Kind)> {
             (false, None) => start = Some(i),
             (true, Some(s)) => {
                 let w = &text[s..i];
-                let kind = if is_email(w) {
-                    Some(Kind::Email)
-                } else if is_url(w) {
-                    Some(Kind::Url)
-                } else if is_ip(w) {
-                    Some(Kind::Ip)
-                } else {
-                    None
-                };
-                if let Some(k) = kind {
+                if let Some(k) = word_kind(w) {
                     found.push((s, i, k));
+                } else {
+                    let mut part_start = 0;
+                    for (at, c) in w.char_indices().chain(std::iter::once((w.len(), ','))) {
+                        if matches!(c, ',' | ';') {
+                            if let Some(k) = word_kind(&w[part_start..at]) {
+                                found.push((s + part_start, s + at, k));
+                            }
+                            part_start = at + c.len_utf8();
+                        }
+                    }
                 }
                 start = None;
             }
@@ -158,25 +171,21 @@ pub fn find(text: &str) -> Vec<(usize, usize, Kind)> {
 }
 
 /// Areas of `lines` to cover, with what they are. Matches map to the words
-/// they touch; lines without word boxes are covered proportionally.
+/// they touch; incomplete word mappings fall back to covering the whole line.
 pub fn areas(lines: &[TextLine]) -> Vec<(IRect, Kind)> {
     let mut out = Vec::new();
     for line in lines {
         for (s, e, kind) in find(&line.text) {
             if line.words.is_empty() {
-                let n = line.text.chars().count().max(1) as f32;
-                let cs = line.text[..s].chars().count() as f32;
-                let ce = line.text[..e].chars().count() as f32;
-                let a = line.area;
-                let x0 = a.x + (a.w as f32 * cs / n) as i32;
-                let x1 = a.x + (a.w as f32 * ce / n).ceil() as i32;
-                out.push((IRect::new(x0, a.y, x1 - x0, a.h), kind));
+                out.push((line.area, kind));
                 continue;
             }
             // Locate each word in the line text to know which ones the match
             // covers.
             let mut cursor = 0;
             let mut cover: Option<IRect> = None;
+            let mut covered_until = s;
+            let mut complete = true;
             for (rect, word) in &line.words {
                 let Some(found) = line.text[cursor..].find(word.as_str()) else {
                     continue;
@@ -185,12 +194,25 @@ pub fn areas(lines: &[TextLine]) -> Vec<(IRect, Kind)> {
                 let we = ws + word.len();
                 cursor = we;
                 if ws < e && s < we {
-                    cover = Some(cover.map_or(*rect, |c| c.union(rect)));
+                    if covered_until < ws
+                        && line.text[covered_until..ws.min(e)]
+                            .chars()
+                            .any(|c| !c.is_whitespace())
+                    {
+                        complete = false;
+                    }
+                    covered_until = covered_until.max(we.min(e));
+                    if rect.is_empty() {
+                        complete = false;
+                    } else {
+                        cover = Some(cover.map_or(*rect, |c| c.union(rect)));
+                    }
                 }
             }
-            if let Some(c) = cover {
-                out.push((c, kind));
+            if covered_until < e && line.text[covered_until..e].chars().any(|c| !c.is_whitespace()) {
+                complete = false;
             }
+            out.push((if complete { cover.unwrap_or(line.area) } else { line.area }, kind));
         }
     }
     out
@@ -243,6 +265,28 @@ mod tests {
     }
 
     #[test]
+    fn finds_adjacent_addresses_separated_by_punctuation() {
+        assert_eq!(
+            kinds("Mail alice@example.com,bob@example.org"),
+            [
+                ("alice@example.com".into(), Kind::Email),
+                ("bob@example.org".into(), Kind::Email),
+            ]
+        );
+        assert_eq!(
+            kinds("Hosts 192.168.1.1;10.0.0.1"),
+            [
+                ("192.168.1.1".into(), Kind::Ip),
+                ("10.0.0.1".into(), Kind::Ip),
+            ]
+        );
+        assert_eq!(
+            kinds("See https://example.com/a,b"),
+            [("https://example.com/a,b".into(), Kind::Url)]
+        );
+    }
+
+    #[test]
     fn maps_matches_to_word_boxes() {
         let line = TextLine {
             area: IRect::new(0, 0, 300, 20),
@@ -263,5 +307,40 @@ mod tests {
                 (IRect::new(200, 0, 100, 20), Kind::Phone)
             ]
         );
+    }
+
+    #[test]
+    fn missing_word_boxes_cover_the_whole_line() {
+        let line = TextLine {
+            area: IRect::new(10, 20, 200, 15),
+            text: "iii bob@example.com".into(),
+            words: vec![],
+        };
+        assert_eq!(areas(&[line]), vec![(IRect::new(10, 20, 200, 15), Kind::Email)]);
+    }
+
+    #[test]
+    fn incomplete_word_mapping_covers_the_whole_sensitive_line() {
+        let line = TextLine {
+            area: IRect::new(0, 0, 240, 20),
+            text: "Card 4111 1111 1111 1111".into(),
+            words: vec![
+                (IRect::new(0, 0, 35, 20), "Card".into()),
+                (IRect::new(40, 0, 40, 20), "4111".into()),
+                (IRect::new(85, 0, 40, 20), "1111".into()),
+                (IRect::new(130, 0, 40, 20), "1111".into()),
+            ],
+        };
+        assert_eq!(areas(&[line]), vec![(IRect::new(0, 0, 240, 20), Kind::Card)]);
+    }
+
+    #[test]
+    fn empty_word_box_covers_the_whole_sensitive_line() {
+        let line = TextLine {
+            area: IRect::new(0, 0, 100, 20),
+            text: "bob@example.com".into(),
+            words: vec![(IRect::default(), "bob@example.com".into())],
+        };
+        assert_eq!(areas(&[line]), vec![(IRect::new(0, 0, 100, 20), Kind::Email)]);
     }
 }
