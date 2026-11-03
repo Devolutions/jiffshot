@@ -172,8 +172,10 @@ impl TimelineView {
                 w.max(1.0) as f32 * scale,
                 h as f32 * scale,
             ) {
-                let mut paint = tiny_skia::Paint::default();
-                paint.anti_alias = false;
+                let mut paint = tiny_skia::Paint {
+                    anti_alias: false,
+                    ..Default::default()
+                };
                 paint.set_color(color(argb));
                 image.fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
             }
