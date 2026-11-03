@@ -2756,7 +2756,8 @@ mod tests {
             sin.hypot(cos)
         };
         let trimmed = samples(&trim, 1.30);
-        for (start, end) in [(0.02, 0.03), (1.27, 1.28)] {
+        // Check just inside the trim; the AAC encoder may add priming and padding at the edges.
+        for (start, end) in [(0.06, 0.07), (1.23, 1.24)] {
             let level = rms(&trimmed, start, end);
             assert!(
                 level > 2_000.0,
