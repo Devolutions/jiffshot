@@ -15,7 +15,15 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+#[path = "video/preview.rs"]
 mod preview;
+#[cfg(not(target_os = "linux"))]
+mod preview;
+#[cfg(target_os = "linux")]
+#[path = "video/timeline.rs"]
+mod timeline;
+#[cfg(not(target_os = "linux"))]
 mod timeline;
 use preview::Preview;
 use timeline::{Span, Timeline};
@@ -2064,7 +2072,6 @@ mod tests {
         let shutdown = Player {
             stop: stop.clone(),
             thread,
-            sound: None,
         }
         .request_shutdown();
         assert!(stop.load(Ordering::Acquire));
