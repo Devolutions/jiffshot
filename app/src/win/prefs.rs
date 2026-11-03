@@ -306,7 +306,7 @@ mod tests {
         assert_eq!(share_changes(&initial, &current, &unchanged), Ok(None));
 
         let mut remove_first = unchanged.clone();
-        remove_first[3] = json!(false);
+        remove_first[1] = json!(false);
         assert_eq!(share_changes(&initial, &initial, &remove_first), Ok(Some(vec!["First".into()])));
         assert!(share_changes(&initial, &current, &remove_first).is_err());
         current = initial.clone();
