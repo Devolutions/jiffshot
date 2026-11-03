@@ -1,7 +1,6 @@
 //! PCM playback through Core Audio's output queue.
 
-use super::{hns, seconds};
-use jiffshot_capture::media::Reader;
+use super::{PlaybackAudio, Span};
 use std::ffi::c_void;
 use std::path::Path;
 use std::ptr;
@@ -213,46 +212,19 @@ impl Drop for Output {
     }
 }
 
-fn sample_range(at: f64, from: f64, end: f64, rate: u32, channels: usize, samples: usize) -> std::ops::Range<usize> {
-    let frames = samples / channels;
-    let first = (((from - at) * f64::from(rate)).ceil().max(0.0) as usize).min(frames);
-    let last = (((end - at) * f64::from(rate)).ceil().max(0.0) as usize).min(frames);
-    first * channels..last.max(first) * channels
-}
-
-fn play_inner(path: &Path, from: f64, end: f64, stop: &AtomicBool, volume: &AtomicU32) -> Result<(), String> {
-    let mut reader = Reader::open(path)?;
-    let Some(spec) = reader.audio else { return Ok(()) };
-    reader.select_video(false)?;
-    reader.select_audio(true)?;
-    reader.seek(hns(from))?;
+fn play_inner(path: &Path, pieces: &[Span], stop: &AtomicBool, volume: &AtomicU32) -> Result<(), String> {
+    let mut reader = PlaybackAudio::open(path, pieces)?;
+    let spec = reader.spec;
     let mut output = Output::new(spec.sample_rate, spec.channels)?;
     while !stop.load(Ordering::Acquire) {
-        let Some((at, pcm)) = reader.next_audio()? else { break };
-        let at = seconds(at);
-        if at >= end {
-            break;
-        }
-        let range = sample_range(at, from, end, spec.sample_rate, spec.channels as usize, pcm.len());
-        output.write(&pcm[range], spec.channels as usize, stop, volume)?;
+        let Some(pcm) = reader.next()? else { break };
+        output.write(&pcm, spec.channels as usize, stop, volume)?;
     }
     output.drain(stop, volume)
 }
 
-pub fn play(path: &Path, from: f64, end: f64, stop: &AtomicBool, volume: &AtomicU32) {
-    if let Err(error) = play_inner(path, from, end, stop, volume) {
-        eprintln!("video sound playback: {error}");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn clips_pcm_to_the_requested_time_range() {
-        assert_eq!(sample_range(1.0, 1.25, 1.75, 4, 2, 8), 2..6);
-        assert_eq!(sample_range(1.0, 0.0, 1.5, 4, 2, 8), 0..4);
-        assert_eq!(sample_range(1.0, 3.0, 4.0, 4, 2, 8), 8..8);
+pub fn play(path: &Path, pieces: &[Span], stop: &AtomicBool, volume: &AtomicU32) {
+    if let Err(error) = play_inner(path, pieces, stop, volume) {
+        crate::app::post(move |app| app.set_status(format!("Audio playback failed: {error}")));
     }
 }

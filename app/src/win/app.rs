@@ -1289,17 +1289,17 @@ impl App {
             .unwrap_or_else(|| "Untitled".to_owned());
         let title = format!(
             "{}{name} — Jiffshot Editor",
-            if s.modified { "• " } else { "" }
+            if self.video.as_ref().map_or(s.modified, |v| v.is_dirty()) { "• " } else { "" }
         );
         self.put_str("Title", &title, |k, v| k.set_title(v));
         self.mark_unsaved();
         let status = self.status.clone();
         self.put_str("Status", &status, |k, v| k.set_status(v));
         let has_sel = s.kind.is_some();
-        self.put_flag("UndoEnabled", s.undo.is_some(), |k, v| {
+        self.put_flag("UndoEnabled", self.video.as_ref().map_or(s.undo.is_some(), |v| v.can_undo()), |k, v| {
             k.set_undo_enabled(v)
         });
-        self.put_flag("RedoEnabled", s.redo.is_some(), |k, v| {
+        self.put_flag("RedoEnabled", self.video.as_ref().map_or(s.redo.is_some(), |v| v.can_redo()), |k, v| {
             k.set_redo_enabled(v)
         });
         for (name, set) in [
@@ -1326,7 +1326,12 @@ impl App {
                 MainViewModelSink::set_send_to_back_enabled,
             ),
         ] {
-            self.put_flag(name, has_sel, set);
+            let enabled = if matches!(name, "DeleteEnabled" | "CutEnabled") {
+                self.video.as_ref().map_or(has_sel, |v| v.can_cut())
+            } else {
+                has_sel
+            };
+            self.put_flag(name, enabled, set);
         }
         self.put_str("BackgroundFill", s.background_fill, |k, v| {
             k.set_background_fill(v)
@@ -1419,6 +1424,7 @@ impl App {
         if s.damage {
             self.bump_frame();
         }
+        crate::video::publish(self);
     }
 
     /// Tells the canvas to fetch pending damage.
@@ -1445,6 +1451,15 @@ impl App {
     }
 
     fn autosave_checked(&mut self) -> std::result::Result<(), String> {
+        if let Some(video) = &self.video {
+            return if video.is_saving() {
+                Err("Wait for the edited video to finish saving before leaving it.".into())
+            } else if video.is_dirty() {
+                Err("Save the edited video (Ctrl+S) before leaving it, or undo the cuts.".into())
+            } else {
+                Ok(())
+            };
+        }
         let modified = with_editor(|e| e.is_modified())
             .ok_or("The editor is unavailable; unsaved edits cannot be checked.")?;
         if !modified {
@@ -1513,6 +1528,11 @@ impl App {
     }
 
     pub(crate) fn load(&mut self, doc: Document, path: Option<PathBuf>, source: Option<PathBuf>) {
+        if self.video.is_some() {
+            if let Err(error) = self.autosave_checked() {
+                return self.set_status(error);
+            }
+        }
         self.autosave();
         self.stop_video();
         let size = doc.size();
@@ -1628,6 +1648,11 @@ impl App {
     }
 
     pub fn open_path(&mut self, path: &Path) {
+        if self.video.is_some() {
+            if let Err(error) = self.autosave_checked() {
+                return self.set_status(error);
+            }
+        }
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -1776,6 +1801,9 @@ impl App {
     }
 
     pub fn save(&mut self) {
+        if self.video.is_some() {
+            return crate::video::save(self, false);
+        }
         let target = match (&self.path, &self.source) {
             (Some(p), _) => Some(p.clone()),
             (None, Some(src)) if src.starts_with(&self.library.root) => {
@@ -1792,6 +1820,9 @@ impl App {
     }
 
     pub fn save_as(&mut self) {
+        if self.video.is_some() {
+            return crate::video::save(self, true);
+        }
         let name = format!("{}.{EDITS_EXT}", self.stem());
         let kinds = [
             ("Jiffshot document", EDITS_EXT),
@@ -1807,6 +1838,9 @@ impl App {
     }
 
     pub fn export(&mut self) {
+        if self.video.is_some() {
+            return crate::video::save(self, true);
+        }
         let mut kinds = vec![
             ("PNG image", "png"),
             ("JPEG image", "jpg"),
@@ -1902,6 +1936,9 @@ impl App {
     }
 
     pub fn cut(&mut self) {
+        if self.video.is_some() {
+            return self.video_action("cut");
+        }
         self.copy();
         with_editor(|e| e.delete_selected());
     }
@@ -4043,7 +4080,15 @@ impl App {
                 });
                 return;
             }
-            "reveal" => return winutil::reveal(path),
+            "reveal" => {
+                if let Err(error) = winutil::reveal(path) {
+                    self.set_status(format!(
+                        "Could not show {} in its folder: {error}",
+                        path.display()
+                    ));
+                }
+                return;
+            }
             #[cfg(target_os = "macos")]
             "copy" => {
                 if !self.library_items.iter().any(|item| item.path == path) {
@@ -4301,7 +4346,10 @@ impl App {
 
     /// Marks the open capture's tray item while it has unsaved edits.
     fn mark_unsaved(&self) {
-        let dirty = with_editor(|e| e.is_modified()).unwrap_or(false);
+        let dirty = self.video.as_ref().map_or_else(
+            || with_editor(|e| e.is_modified()).unwrap_or(false),
+            crate::video::Session::is_dirty,
+        );
         for item in &self.library_items {
             item.set_unsaved(dirty && self.source.as_deref() == Some(item.path.as_path()));
         }
@@ -4402,13 +4450,13 @@ impl App {
     }
 
     fn open_video(&mut self, path: &Path) {
-        self.autosave();
+        if let Err(error) = self.autosave_checked() {
+            return self.set_status(error);
+        }
         self.stop_video();
         match crate::video::Session::open(path) {
             Ok(mut session) => {
                 let frame = session.frame_at(0.0);
-                let duration = session.duration();
-                let info = session.info();
                 self.video = Some(session);
                 crate::video::apply_volume(self);
                 if let Some(pm) = frame {
@@ -4416,13 +4464,7 @@ impl App {
                 }
                 self.path = None;
                 self.source = Some(path.to_path_buf());
-                if let Some(sink) = &self.sink {
-                    let _ = sink.set_video_duration(duration);
-                    let _ = sink.set_video_position(0.0);
-                    let _ = sink.set_trim_start(0.0);
-                    let _ = sink.set_trim_end(duration);
-                    let _ = sink.set_video_info(&info);
-                }
+                crate::video::publish(self);
                 self.zoom("fit");
                 self.bump_frame();
                 self.mark_current();
@@ -4436,6 +4478,11 @@ impl App {
 
     pub fn video_action(&mut self, what: &str) {
         crate::video::action(self, what);
+    }
+
+    pub(crate) fn video_saved(&mut self, path: PathBuf) {
+        self.source = Some(path);
+        self.refresh_library();
     }
 }
 

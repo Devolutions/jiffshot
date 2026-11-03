@@ -15,6 +15,11 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod preview;
+mod timeline;
+use preview::Preview;
+use timeline::{Span, Timeline};
+
 fn hns(seconds: f64) -> i64 {
     (seconds * HNS_PER_SECOND as f64) as i64
 }
@@ -38,7 +43,6 @@ pub fn to_pixmap(frame: &VideoFrame) -> Option<Pixmap> {
 struct Player {
     stop: Arc<AtomicBool>,
     thread: std::thread::JoinHandle<()>,
-    sound: Option<std::thread::JoinHandle<()>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -55,29 +59,23 @@ pub(crate) struct PlaybackShutdown(Player);
 #[cfg(target_os = "macos")]
 impl PlaybackShutdown {
     pub(crate) fn join(self) -> Result<(), String> {
-        let frame = self
+        self
             .0
             .thread
             .join()
-            .map_err(|_| "the video playback thread panicked".to_owned());
-        let sound = self
-            .0
-            .sound
-            .map(|thread| {
-                thread
-                    .join()
-                    .map_err(|_| "the video audio thread panicked".to_owned())
-            })
-            .unwrap_or(Ok(()));
-        frame.and(sound)
+            .map_err(|_| "the video playback thread panicked".to_owned())
     }
 }
 
 pub struct Session {
     path: PathBuf,
     reader: Reader,
+    preview: Preview,
     position: f64,
     trim: (f64, f64),
+    timeline: Timeline,
+    saved_path: Option<PathBuf>,
+    saving: bool,
     player: Option<Player>,
     current: Option<Pixmap>,
     /// Playback volume as 0..=0xFFFF, read by the sound thread.
@@ -87,12 +85,17 @@ pub struct Session {
 impl Session {
     pub fn open(path: &Path) -> Result<Session, String> {
         let reader = Reader::open(path)?;
-        let duration = seconds(reader.duration);
+        let timeline = Timeline::new(reader.duration)?;
+        let preview = Preview::new(path)?;
         Ok(Session {
             path: path.to_path_buf(),
             reader,
+            preview,
             position: 0.0,
-            trim: (0.0, duration),
+            trim: (0.0, 0.0),
+            timeline,
+            saved_path: None,
+            saving: false,
             player: None,
             current: None,
             volume: Arc::new(AtomicU32::new(0xFFFF)),
@@ -100,7 +103,29 @@ impl Session {
     }
 
     pub fn duration(&self) -> f64 {
-        seconds(self.reader.duration)
+        seconds(self.timeline.duration())
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.timeline.is_dirty()
+    }
+
+    pub fn is_saving(&self) -> bool {
+        self.saving
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.timeline.can_undo() && !self.saving
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.timeline.can_redo() && !self.saving
+    }
+
+    pub fn can_cut(&self) -> bool {
+        let selected = hns((self.trim.1 - self.trim.0).abs());
+        let frame = hns(1.0 / self.reader.fps.max(1.0));
+        !self.saving && selected >= frame && self.timeline.duration() - selected >= frame
     }
 
     pub fn info(&self) -> String {
@@ -118,20 +143,20 @@ impl Session {
     }
 
     pub fn frame_at(&mut self, at: f64) -> Option<Pixmap> {
-        let frame = self.reader.frame_at(hns(at)).ok().flatten()?;
+        self.preview.cancel();
+        let source = self.timeline.source_time(hns(at));
+        let frame = self.reader.frame_at(source.min(self.reader.duration.saturating_sub(1))).ok().flatten()?;
         let pm = to_pixmap(&frame);
         self.current = pm.clone();
         pm
     }
 
     fn stop_playing(&mut self) -> bool {
+        self.preview.cancel();
         match self.player.take() {
             Some(p) => {
                 p.stop.store(true, Ordering::Release);
                 let _ = p.thread.join();
-                if let Some(s) = p.sound {
-                    let _ = s.join();
-                }
                 true
             }
             None => false,
@@ -154,7 +179,7 @@ fn show(app: &mut App, pm: Pixmap) {
     app.bump_frame();
 }
 
-fn publish(app: &mut App) {
+pub(crate) fn publish(app: &mut App) {
     let Some(v) = &app.video else { return };
     let (position, trim, playing) = (v.position, v.trim, v.player.is_some());
     if let Some(sink) = &app.sink {
@@ -162,21 +187,46 @@ fn publish(app: &mut App) {
         let _ = sink.set_trim_start(trim.0);
         let _ = sink.set_trim_end(trim.1);
         let _ = sink.set_playing(playing);
+        let _ = sink.set_video_duration(v.duration());
+        let _ = sink.set_video_info(format!(
+            "{} · Selection {:.2}–{:.2} s ({:.2} s){}",
+            v.info(), trim.0.min(trim.1), trim.0.max(trim.1),
+            (trim.1 - trim.0).abs(),
+            if v.is_dirty() { " · Unsaved cuts" } else { "" },
+        ));
+        let _ = sink.set_video_joins(v.timeline.joins());
+        let _ = sink.set_cut_selection_enabled(v.can_cut());
+        let _ = sink.set_undo_enabled(v.can_undo());
+        let _ = sink.set_redo_enabled(v.can_redo());
+        let _ = sink.set_video_saving(v.saving);
     }
+}
+
+/// Updates the range handles without changing the playhead.
+pub fn select(app: &mut App, from: f64, to: f64) {
+    let Some(v) = app.video.as_mut() else { return };
+    if !from.is_finite() || !to.is_finite() {
+        return app.set_status("The video selection must contain finite times.");
+    }
+    v.stop_playing();
+    v.trim = (from.clamp(0.0, v.duration()), to.clamp(0.0, v.duration()));
+    publish(app);
 }
 
 /// The slider moved.
 pub fn seek(app: &mut App, at: f64) {
+    if !at.is_finite() {
+        return app.set_status("The video position must be finite.");
+    }
     let Some(v) = app.video.as_mut() else { return };
-    if (v.position - at).abs() < 1e-3 {
+    if (v.position - at).abs() < 1e-3 && v.current.is_some() {
         return;
     }
     v.stop_playing();
     v.position = at.clamp(0.0, v.duration());
-    let at = v.position;
-    if let Some(pm) = v.frame_at(at) {
-        show(app, pm);
-    }
+    v.current = None;
+    let source = v.timeline.source_time(hns(v.position));
+    v.preview.request(source.min(v.reader.duration.saturating_sub(1)));
     publish(app);
 }
 
@@ -185,63 +235,91 @@ fn play(app: &mut App) {
     if v.stop_playing() {
         return publish(app);
     }
-    let (path, mut from, end) = (v.path.clone(), v.position, v.trim.1);
-    if from >= end - 0.05 {
-        from = v.trim.0;
+    let (path, mut from, end) = (v.path.clone(), v.position, v.duration());
+    if from >= end - 1.0 / v.reader.fps.max(1.0) {
+        from = 0.0;
     }
+    let pieces = v.timeline.pieces(hns(from), hns(end));
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
     let sound = v.reader.audio.is_some().then(|| {
-        let (path, stop, volume) = (path.clone(), stop.clone(), v.volume.clone());
-        std::thread::spawn(move || sound::play(&path, from, end, &stop, &volume))
+        let (path, stop, volume, pieces) =
+            (path.clone(), stop.clone(), v.volume.clone(), pieces.clone());
+        std::thread::spawn(move || sound::play(&path, &pieces, &stop, &volume))
     });
     // Frames go to the UI thread one at a time; if it is still showing the
     // last one, the next is dropped rather than queued.
     let showing = Arc::new(AtomicBool::new(false));
     let thread = std::thread::spawn(move || {
-        let Ok(mut reader) = Reader::open(&path) else {
-            return;
-        };
-        if reader.seek(hns(from)).is_err() {
-            return;
-        }
         let started = Instant::now();
-        while !flag.load(Ordering::Acquire) {
-            let Ok(Some(frame)) = reader.next_video() else {
-                break;
-            };
-            let t = seconds(frame.time);
-            if t < from - 0.02 {
-                continue;
-            }
-            if t > end {
-                break;
-            }
-            let wait = (t - from) - started.elapsed().as_secs_f64();
-            if wait > 0.0 {
-                std::thread::sleep(Duration::from_secs_f64(wait.min(0.5)));
-            }
-            if showing.swap(true, Ordering::AcqRel) {
-                continue;
-            }
-            let Some(pm) = to_pixmap(&frame) else { break };
-            let done = showing.clone();
-            app::post(move |app| {
-                if let Some(v) = app.video.as_mut() {
-                    v.position = t;
-                    v.current = Some(pm.clone());
-                    show(app, pm);
-                    if let Some(sink) = &app.sink {
-                        let _ = sink.set_video_position(t);
+        let result = (|| -> Result<(), String> {
+            let mut reader = Reader::open(&path)?;
+            let mut offset = from;
+            for piece in pieces {
+                reader.seek(piece.start)?;
+                while !flag.load(Ordering::Acquire) {
+                    let Some(frame) = reader.next_video()? else { break };
+                    if frame.time < piece.start {
+                        continue;
                     }
+                    if frame.time >= piece.end {
+                        break;
+                    }
+                    let t = offset + seconds(frame.time - piece.start);
+                    let wait = (t - from) - started.elapsed().as_secs_f64();
+                    if wait > 0.0 {
+                        std::thread::sleep(Duration::from_secs_f64(wait.min(0.5)));
+                    }
+                    if flag.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                    if showing.swap(true, Ordering::AcqRel) {
+                        continue;
+                    }
+                    let pm = to_pixmap(&frame).ok_or("Could not display the video frame.")?;
+                    let (done, active) = (showing.clone(), flag.clone());
+                    app::post(move |app| {
+                        if !active.load(Ordering::Acquire) {
+                            if let Some(v) = app.video.as_mut() {
+                                v.position = t;
+                                v.current = Some(pm.clone());
+                                show(app, pm);
+                                if let Some(sink) = &app.sink {
+                                    let _ = sink.set_video_position(t);
+                                }
+                            }
+                        }
+                        done.store(false, Ordering::Release);
+                    });
                 }
-                done.store(false, Ordering::Release);
-            });
+                offset += seconds(piece.duration());
+                if flag.load(Ordering::Acquire) {
+                    break;
+                }
+            }
+            Ok(())
+        })();
+        if result.is_ok() {
+            while !flag.load(Ordering::Acquire) && started.elapsed().as_secs_f64() < end - from {
+                std::thread::sleep(Duration::from_millis(5));
+            }
         }
-        app::post(|app| {
+        flag.store(true, Ordering::Release);
+        if let Some(sound) = sound {
+            if sound.join().is_err() {
+                app::post(|app| app.set_status("The video audio playback thread failed."));
+            }
+        }
+        app::post(move |app| {
             if let Some(v) = app.video.as_mut() {
-                if let Some(p) = v.player.take() {
-                    p.stop.store(true, Ordering::Release);
+                if v.player.as_ref().is_some_and(|p| Arc::ptr_eq(&p.stop, &flag)) {
+                    v.player.take();
+                    if result.is_ok() {
+                        v.position = end;
+                    }
+                    if let Err(error) = result {
+                        app.set_status(format!("Playback failed: {error}"));
+                    }
                 }
             }
             publish(app);
@@ -250,9 +328,67 @@ fn play(app: &mut App) {
     v.player = Some(Player {
         stop,
         thread,
-        sound,
     });
     publish(app);
+}
+
+/// PCM reader shared by the platform audio outputs; cuts never reach the device.
+struct PlaybackAudio {
+    reader: Reader,
+    spec: AudioSpec,
+    pieces: Vec<Span>,
+    index: usize,
+    seek: bool,
+}
+
+impl PlaybackAudio {
+    fn open(path: &Path, pieces: &[Span]) -> Result<Self, String> {
+        let mut reader = Reader::open(path)?;
+        let spec = reader.audio.ok_or("The video has no audio stream.")?;
+        if spec.sample_rate == 0 || spec.channels == 0 {
+            return Err("The video has an invalid audio format.".into());
+        }
+        reader.select_video(false)?;
+        reader.select_audio(true)?;
+        Ok(Self { reader, spec, pieces: pieces.to_vec(), index: 0, seek: true })
+    }
+
+    fn next(&mut self) -> Result<Option<Vec<i16>>, String> {
+        while let Some(piece) = self.pieces.get(self.index).copied() {
+            if self.seek {
+                self.reader.seek(piece.start)?;
+                self.seek = false;
+            }
+            let Some((at, pcm)) = self.reader.next_audio()? else {
+                self.index += 1;
+                self.seek = true;
+                continue;
+            };
+            if at >= piece.end {
+                self.index += 1;
+                self.seek = true;
+                continue;
+            }
+            let range = audio_range(at, piece, self.spec, pcm.len());
+            if !range.is_empty() {
+                return Ok(Some(pcm[range].to_vec()));
+            }
+        }
+        Ok(None)
+    }
+}
+
+fn audio_range(at: i64, piece: Span, spec: AudioSpec, samples: usize) -> std::ops::Range<usize> {
+    let channels = spec.channels.max(1) as usize;
+    let frames = samples / channels;
+    let frame_at = |time: i64| {
+        let ticks = i128::from(time) - i128::from(at);
+        ((ticks.max(0) * i128::from(spec.sample_rate) + i128::from(HNS_PER_SECOND) - 1)
+            / i128::from(HNS_PER_SECOND)).min(frames as i128) as usize
+    };
+    let first = frame_at(piece.start);
+    let last = frame_at(piece.end).max(first);
+    first * channels..last * channels
 }
 
 /// Fits a frame into `w` x `h` (BGRA), scaled to fit and centered on
@@ -372,9 +508,14 @@ fn export_segments(
                     pending_audio = Some((at, pcm));
                     break;
                 }
-                if at >= start && at < end {
-                    let n = pcm.len() as i64 / channels;
-                    writer.write_audio(&pcm, base + at - start, n * HNS_PER_SECOND / rate)?;
+                let range = audio_range(
+                    at, Span { start, end },
+                    audio_spec.expect("an audio reader has an audio format"), pcm.len(),
+                );
+                if !range.is_empty() {
+                    let clipped_at = at + range.start as i64 / channels * HNS_PER_SECOND / rate;
+                    let n = range.len() as i64 / channels;
+                    writer.write_audio(&pcm[range], base + (clipped_at - start).max(0), n * HNS_PER_SECOND / rate)?;
                 }
             }
             progress((done + seconds(frame.time - start)) / total);
@@ -386,6 +527,7 @@ fn export_segments(
 }
 
 /// Copies the trimmed range to a new MP4 (re-encoded, audio included).
+#[cfg(test)]
 fn export_mp4(
     source: &Path,
     out: &Path,
@@ -544,7 +686,7 @@ fn slideshow(
 fn export_gif(
     source: &Path,
     out: &Path,
-    (from, to): (f64, f64),
+    pieces: &[Span],
     options: GifOptions,
     progress: impl Fn(f64),
 ) -> Result<(), String> {
@@ -565,45 +707,53 @@ fn export_gif(
             Repeat::Finite(0)
         })
         .map_err(|e| e.to_string())?;
-    reader.seek(hns(from))?;
     let step = 1.0 / fps;
-    let mut next = from;
+    let mut next = 0.0;
+    let total = pieces.iter().map(|piece| seconds(piece.duration())).sum::<f64>();
+    let mut offset = 0.0;
     let delay = image::Delay::from_numer_denom_ms((1000.0 / fps).round() as u32, 1);
-    while let Some(frame) = reader.next_video()? {
-        let t = seconds(frame.time);
-        if t > to {
-            break;
-        }
-        if t + 1e-3 < next {
-            continue;
-        }
-        next += step;
-        let Some(pm) = to_pixmap(&frame) else {
-            continue;
-        };
-        let small = if scale < 1.0 {
-            raster::resample(&pm, w, h).ok_or("resize failed")?
-        } else {
-            pm
-        };
-        let mut rgba = jiffshot_doc::io::to_rgba_image(&small);
-        // The last half second fades to black.
-        let left = to - t;
-        if options.fade && left < 0.5 {
-            let k = (left / 0.5).clamp(0.0, 1.0);
-            for p in rgba.pixels_mut() {
-                for c in 0..3 {
-                    p.0[c] = (p.0[c] as f64 * k) as u8;
+    for piece in pieces {
+        reader.seek(piece.start)?;
+        while let Some(frame) = reader.next_video()? {
+            if frame.time >= piece.end {
+                break;
+            }
+            if frame.time < piece.start {
+                continue;
+            }
+            let t = offset + seconds(frame.time - piece.start);
+            if t + 1e-3 < next {
+                continue;
+            }
+            next += step;
+            let Some(pm) = to_pixmap(&frame) else {
+                continue;
+            };
+            let small = if scale < 1.0 {
+                raster::resample(&pm, w, h).ok_or("resize failed")?
+            } else {
+                pm
+            };
+            let mut rgba = jiffshot_doc::io::to_rgba_image(&small);
+            // The last half second fades to black.
+            let left = total - t;
+            if options.fade && left < 0.5 {
+                let k = (left / 0.5).clamp(0.0, 1.0);
+                for p in rgba.pixels_mut() {
+                    for c in 0..3 {
+                        p.0[c] = (p.0[c] as f64 * k) as u8;
+                    }
                 }
             }
+            if options.dither {
+                dither(&mut rgba);
+            }
+            encoder
+                .encode_frame(image::Frame::from_parts(rgba, 0, 0, delay))
+                .map_err(|e| e.to_string())?;
+            progress(t / total.max(0.01));
         }
-        if options.dither {
-            dither(&mut rgba);
-        }
-        encoder
-            .encode_frame(image::Frame::from_parts(rgba, 0, 0, delay))
-            .map_err(|e| e.to_string())?;
-        progress((t - from) / (to - from).max(0.01));
+        offset += seconds(piece.duration());
     }
     Ok(())
 }
@@ -702,10 +852,26 @@ fn stem_of(path: &Path) -> String {
         .unwrap_or_else(|| "Recording".into())
 }
 
+fn same_file_path(left: &Path, right: &Path) -> bool {
+    left == right || match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn run_export(app: &mut App, gif: bool) {
     let Some(v) = app.video.as_mut() else { return };
     v.stop_playing();
-    let (source, trim) = (v.path.clone(), v.trim);
+    let source = v.path.clone();
+    let (from, to) = if (v.trim.1 - v.trim.0).abs() > 0.001 {
+        (v.trim.0.min(v.trim.1), v.trim.0.max(v.trim.1))
+    } else {
+        (0.0, v.duration())
+    };
+    let pieces = v.timeline.pieces(hns(from), hns(to));
+    let segments: Vec<Segment> = pieces.iter()
+        .map(|piece| (source.clone(), seconds(piece.start), seconds(piece.end)))
+        .collect();
     let (kind, ext) = if gif {
         ("Animated GIF", "gif")
     } else {
@@ -722,7 +888,7 @@ fn run_export(app: &mut App, gif: bool) {
         &name,
         &[(kind, ext)],
         move |app, out| {
-            if out == source {
+            if same_file_path(&out, &source) {
                 return app.set_status("Choose a different file than the one being edited.");
             }
             app.set_status(format!("Exporting {}…", out.display()));
@@ -736,59 +902,254 @@ fn run_export(app: &mut App, gif: bool) {
             };
             in_background(out, false, move |out, progress| {
                 if gif {
-                    export_gif(&source, out, trim, options, progress)
+                    export_gif(&source, out, &pieces, options, progress)
                 } else {
-                    export_mp4(&source, out, trim, progress)
+                    export_segments(&segments, out, true, progress)
                 }
             });
         },
     );
 }
 
-/// Saves the video without the part between the trim marks.
+/// Removes a range from the editable timeline without changing the source file.
 fn cut_selection(app: &mut App) {
     let Some(v) = app.video.as_mut() else { return };
-    v.stop_playing();
-    let (source, (a, b), duration) = (v.path.clone(), v.trim, v.duration());
-    if a <= 0.05 && b >= duration - 0.05 {
-        return app.set_status("Set the start and end of the part to cut first.");
+    if v.saving {
+        return app.set_status("Wait for the video to finish saving.");
     }
-    let segments: Vec<Segment> = [(source.clone(), 0.0, a), (source.clone(), b, duration)]
-        .into_iter()
-        .filter(|(_, x, y)| y - x > 0.05)
-        .collect();
-    let name = format!("{} (cut).mp4", stem_of(&source));
-    app.pick_save(
-        "Save the video without the selection",
-        &name,
-        &[("MP4 video", "mp4")],
-        move |app, out| {
-            if out == source {
-                return app.set_status("Choose a different file than the one being edited.");
+    v.stop_playing();
+    let (a, b) = (v.trim.0.min(v.trim.1), v.trim.0.max(v.trim.1));
+    if let Err(error) = v.timeline.cut(hns(a), hns(b), hns(1.0 / v.reader.fps.max(1.0))) {
+        return app.set_status(error);
+    }
+    v.position = a.min(v.duration());
+    v.trim = (v.position, v.position);
+    let at = v.position;
+    if let Some(pm) = v.frame_at(at) {
+        show(app, pm);
+    }
+    app.set_status(format!("Cut {:.2} s. Play to preview; Ctrl+S saves an edited copy.", b - a));
+    publish(app);
+}
+
+fn history(app: &mut App, redo: bool) {
+    let Some(v) = app.video.as_mut() else { return };
+    if v.saving {
+        return app.set_status("Wait for the video to finish saving.");
+    }
+    v.stop_playing();
+    let changed = if redo { v.timeline.redo() } else { v.timeline.undo() };
+    if !changed {
+        return;
+    }
+    v.position = v.position.min(v.duration());
+    v.trim = (v.position, v.position);
+    let at = v.position;
+    if let Some(pm) = v.frame_at(at) {
+        show(app, pm);
+    }
+    app.set_status(if redo { "Redid the video cut." } else { "Undid the video cut." });
+    publish(app);
+}
+
+/// Saves the edited movie, keeping its original available for further cuts and undo.
+pub fn save(app: &mut App, save_as: bool) {
+    let Some(v) = app.video.as_mut() else { return };
+    if v.saving {
+        return app.set_status("The video is already being saved.");
+    }
+    v.stop_playing();
+    if save_as {
+        let name = format!("{} (edited).mp4", stem_of(&v.path));
+        let source = v.path.clone();
+        let spans = v.timeline.spans().to_vec();
+        app.pick_save("Save edited video as", &name, &[("MP4 video", "mp4")], move |app, out| {
+            if !app.video.as_ref().is_some_and(|v| v.path == source && v.timeline.spans() == spans) {
+                return app.set_status("The video changed while choosing a file. Save it again.");
             }
-            app.set_status(format!("Cutting {a:.1} s to {b:.1} s…"));
-            in_background(out, true, move |out, progress| {
-                export_segments(&segments, out, true, progress)
-            });
-        },
-    );
+            save_to(app, out, None);
+        });
+    } else if let Some(path) = v.saved_path.clone() {
+        save_to(app, path, None);
+    } else {
+        let stem = stem_of(&v.path);
+        let copy = app.library.recording_path().map_err(|error| error.to_string())
+            .and_then(|path| reserve_edited_copy(
+                path.parent().ok_or("The library recording has no parent folder.")?, &stem,
+            ));
+        match copy {
+            Ok(copy) => save_to(app, copy.path.clone(), Some(copy)),
+            Err(error) => app.set_status(format!("Could not save an edited copy: {error}")),
+        }
+    }
+    publish(app);
+}
+
+struct CopyReservation {
+    path: PathBuf,
+    marker: PathBuf,
+}
+
+impl Drop for CopyReservation {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.marker) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("Could not release the edited-copy filename: {error}");
+            }
+        }
+    }
+}
+
+fn reserve_edited_copy(folder: &Path, stem: &str) -> Result<CopyReservation, String> {
+    std::fs::create_dir_all(folder).map_err(|error| error.to_string())?;
+    for index in 1_u64.. {
+        let suffix = if index == 1 { String::new() } else { format!(" {index}") };
+        let path = folder.join(format!("{stem} (edited){suffix}.mp4"));
+        if path.exists() {
+            continue;
+        }
+        let marker = path.with_extension("mp4.jiffshot-saving");
+        match std::fs::File::options().write(true).create_new(true).open(&marker) {
+            Ok(_) => {
+                let copy = CopyReservation { path, marker };
+                if !copy.path.exists() {
+                    return Ok(copy);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("No edited-copy filename is available.".into())
+}
+
+struct SaveStage {
+    folder: PathBuf,
+    file: PathBuf,
+}
+
+impl SaveStage {
+    fn new(out: &Path) -> Result<Self, String> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let parent = out.parent().ok_or("The output has no parent folder.")?;
+        loop {
+            let folder = parent.join(format!(
+                ".jiffshot-video-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&folder) {
+                Ok(()) => return Ok(Self { file: folder.join("edited.mp4"), folder }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+    }
+
+    fn publish(&self, out: &Path, replace: bool) -> Result<(), String> {
+        if replace {
+            std::fs::rename(&self.file, out)
+        } else {
+            #[cfg(windows)]
+            {
+                use std::os::windows::ffi::OsStrExt;
+                let from: Vec<u16> = self.file.as_os_str().encode_wide().chain(Some(0)).collect();
+                let to: Vec<u16> = out.as_os_str().encode_wide().chain(Some(0)).collect();
+                // SAFETY: both paths are live, NUL-terminated buffers; omitting
+                // REPLACE_EXISTING preserves any concurrently created capture.
+                if unsafe {
+                    windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+                        from.as_ptr(), to.as_ptr(),
+                        windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
+                    )
+                } == 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            }
+            #[cfg(not(windows))]
+            std::fs::hard_link(&self.file, out)
+        }.map_err(|error| error.to_string())
+    }
+}
+
+impl Drop for SaveStage {
+    fn drop(&mut self) {
+        for result in [std::fs::remove_file(&self.file), std::fs::remove_dir(&self.folder)] {
+            if let Err(error) = result {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("Could not clean up the video save staging area: {error}");
+                }
+            }
+        }
+    }
+}
+
+fn save_to(app: &mut App, out: PathBuf, reservation: Option<CopyReservation>) {
+    let Some(v) = app.video.as_mut() else { return };
+    if v.saving {
+        return app.set_status("The video is already being saved.");
+    }
+    if same_file_path(&out, &v.path) {
+        return app.set_status("Save an edited copy instead of replacing the original recording.");
+    }
+    v.stop_playing();
+    v.saving = true;
+    let source = v.path.clone();
+    let spans = v.timeline.spans().to_vec();
+    let segments: Vec<Segment> = spans.iter()
+        .map(|span| (source.clone(), seconds(span.start), seconds(span.end)))
+        .collect();
+    app.set_status(format!("Saving edited video to {}…", out.display()));
+    publish(app);
+    #[cfg(target_os = "macos")]
+    let pending = PendingWork::new(&PENDING_EXPORTS);
+    std::thread::spawn(move || {
+        let result = (|| {
+            let stage = SaveStage::new(&out)?;
+            export_segments(&segments, &stage.file, true, |_| {})?;
+            stage.publish(&out, reservation.is_none())
+        })();
+        drop(reservation);
+        app::post(move |app| {
+            #[cfg(target_os = "macos")]
+            let _pending = pending;
+            if let Some(v) = app.video.as_mut().filter(|v| v.path == source) {
+                v.saving = false;
+                if result.is_ok() {
+                    v.timeline.mark_saved(spans);
+                    v.saved_path = Some(out.clone());
+                }
+            }
+            match result {
+                Ok(()) => {
+                    app.video_saved(out.clone());
+                    app.set_status(format!("Saved edited video to {}. Original kept.", out.display()));
+                }
+                Err(error) => app.set_status(format!("Video save failed; cuts are still editable: {error}")),
+            }
+            publish(app);
+        });
+    });
 }
 
 fn silent_copy(app: &mut App) {
     let Some(v) = app.video.as_mut() else { return };
     v.stop_playing();
-    let (source, duration) = (v.path.clone(), v.duration());
+    let source = v.path.clone();
+    let segments: Vec<Segment> = v.timeline.spans().iter()
+        .map(|piece| (source.clone(), seconds(piece.start), seconds(piece.end)))
+        .collect();
     let name = format!("{} (silent).mp4", stem_of(&source));
     app.pick_save(
         "Save a silent copy",
         &name,
         &[("MP4 video", "mp4")],
         move |app, out| {
-            if out == source {
+            if same_file_path(&out, &source) {
                 return app.set_status("Choose a different file than the one being edited.");
             }
             in_background(out, false, move |out, progress| {
-                export_segments(&[(source, 0.0, duration)], out, false, progress)
+                export_segments(&segments, out, false, progress)
             });
         },
     );
@@ -803,12 +1164,22 @@ pub fn combine_files(app: &mut App, files: Vec<PathBuf>) {
             Err(error) => return app.set_status(format!("{}: {error}", f.display())),
         }
     }
-    let name = format!("{} (combined).mp4", stem_of(&files[0]));
+    save_combined(app, segments);
+}
+
+fn save_combined(app: &mut App, segments: Vec<Segment>) {
+    let Some(first) = segments.first() else {
+        return app.set_status("Pick videos to combine.");
+    };
+    let name = format!("{} (combined).mp4", stem_of(&first.0));
     app.pick_save(
         "Save the combined video",
         &name,
         &[("MP4 video", "mp4")],
         move |app, out| {
+            if segments.iter().any(|(source, ..)| same_file_path(&out, source)) {
+                return app.set_status("Choose a different file than the videos being combined.");
+            }
             app.set_status(format!("Combining {} videos…", segments.len()));
             in_background(out, true, move |out, progress| {
                 export_segments(&segments, out, true, progress)
@@ -821,20 +1192,30 @@ pub fn combine_files(app: &mut App, files: Vec<PathBuf>) {
 fn combine(app: &mut App) {
     let current = app.video.as_mut().map(|v| {
         v.stop_playing();
-        v.path.clone()
-    });
+        v.timeline.spans().iter().map(|piece| {
+            (v.path.clone(), seconds(piece.start), seconds(piece.end))
+        }).collect::<Vec<Segment>>()
+    }).unwrap_or_default();
     app.pick_files(
         "Videos to add at the end",
         true,
         "MP4 videos",
         &["mp4"],
         move |app, picked| {
-            let mut files: Vec<PathBuf> = current.into_iter().collect();
-            files.extend(picked);
-            if files.len() < 2 {
+            if current.is_empty() && picked.len() < 2 {
                 return app.set_status("Pick at least two videos to combine.");
             }
-            combine_files(app, files);
+            if picked.is_empty() {
+                return;
+            }
+            let mut segments = current;
+            for path in picked {
+                match Reader::open(&path) {
+                    Ok(reader) => segments.push((path, 0.0, seconds(reader.duration))),
+                    Err(error) => return app.set_status(format!("{}: {error}", path.display())),
+                }
+            }
+            save_combined(app, segments);
         },
     );
 }
@@ -1542,18 +1923,20 @@ pub fn action(app: &mut App, what: &str) {
             if let Some(v) = app.video.as_mut() {
                 let p = v.position;
                 if what == "start" {
-                    v.trim = (p.min(v.trim.1 - 0.1).max(0.0), v.trim.1);
+                    v.trim.0 = p;
                 } else {
-                    v.trim = (v.trim.0, p.max(v.trim.0 + 0.1));
+                    v.trim.1 = p;
                 }
                 let (a, b) = v.trim;
-                app.set_status(format!("Keeping {a:.1} s to {b:.1} s"));
+                app.set_status(format!("Selected {:.2} s to {:.2} s", a.min(b), a.max(b)));
                 publish(app);
             }
         }
         "export-mp4" => run_export(app, false),
         "export-gif" => run_export(app, true),
         "cut" => cut_selection(app),
+        "undo" => history(app, false),
+        "redo" => history(app, true),
         "silent" => silent_copy(app),
         "combine" => combine(app),
         "slideshow" => from_images(app),
@@ -1574,6 +1957,9 @@ pub fn action(app: &mut App, what: &str) {
             app.set_status(state);
         }
         "frame" => {
+            if app.video.as_ref().is_some_and(|v| v.is_dirty() || v.is_saving()) {
+                return app.set_status("Save the edited video (Ctrl+S) before editing a frame.");
+            }
             let frame = app.video.as_mut().and_then(|v| {
                 v.stop_playing();
                 v.current.clone().or_else(|| {
@@ -1606,6 +1992,47 @@ pub fn thumbnail(path: &Path) -> Option<Pixmap> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clips_pcm_to_retained_source_ranges_on_sample_boundaries() {
+        let spec = AudioSpec { sample_rate: 4, channels: 2 };
+        assert_eq!(audio_range(hns(1.0), Span { start: hns(1.25), end: hns(1.75) }, spec, 8), 2..6);
+        assert_eq!(audio_range(hns(1.0), Span { start: 0, end: hns(1.5) }, spec, 8), 0..4);
+        assert_eq!(audio_range(hns(1.0), Span { start: hns(3.0), end: hns(4.0) }, spec, 8), 8..8);
+        assert_eq!(audio_range(0, Span { start: 1, end: hns(0.5) + 1 }, spec, 8), 2..6);
+    }
+
+    #[test]
+    fn edited_copy_reservations_and_failed_saves_preserve_existing_files() {
+        let scratch = SaveStage::new(&std::env::temp_dir().join("jiffshot-save-test.mp4")).unwrap();
+        let first = reserve_edited_copy(&scratch.folder, "Recording").unwrap();
+        let second = reserve_edited_copy(&scratch.folder, "Recording").unwrap();
+        assert_ne!(first.path, second.path, "concurrent saves must reserve different names");
+        assert!(!first.path.exists(), "an incomplete video must not appear in the library");
+        assert!(first.marker.exists());
+        drop(second);
+
+        let stage = SaveStage::new(&first.path).unwrap();
+        std::fs::write(&stage.file, b"finished video").unwrap();
+        std::fs::write(&first.path, b"another capture").unwrap();
+        assert!(stage.publish(&first.path, false).is_err(), "a new save must not overwrite a concurrent capture");
+        assert_eq!(std::fs::read(&first.path).unwrap(), b"another capture");
+        stage.publish(&first.path, true).unwrap();
+        assert_eq!(std::fs::read(&first.path).unwrap(), b"finished video");
+        drop(stage);
+
+        let failed = SaveStage::new(&first.path).unwrap();
+        let result = export_segments(&[(scratch.folder.join("missing.mp4"), 0.0, 1.0)], &failed.file, true, |_| {});
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&first.path).unwrap(), b"finished video", "failed rendering must preserve the previous save");
+        assert!(same_file_path(&first.path, &scratch.folder.join(".").join(first.path.file_name().unwrap())));
+        drop(failed);
+        let marker = first.marker.clone();
+        std::fs::remove_file(&first.path).unwrap();
+        drop(first);
+        assert!(!marker.exists(), "reservations must be cleaned after success or failure");
+        assert_eq!(std::fs::read_dir(&scratch.folder).unwrap().count(), 0, "staging must be cleaned");
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -2212,13 +2639,12 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn edited_video_preserves_audio_at_trim_and_cut_boundaries() {
         struct Scratch(PathBuf);
         impl Drop for Scratch {
             fn drop(&mut self) {
-                for name in ["slide.png", "source.mp4", "trim.mp4", "cut.mp4"] {
+                for name in ["slide.png", "blue.png", "source.mp4", "trim.mp4", "cut.mp4", "multiple.mp4", "cuts.gif"] {
                     let _ = std::fs::remove_file(self.0.join(name));
                 }
                 let _ = std::fs::remove_dir(&self.0);
@@ -2236,9 +2662,12 @@ mod tests {
         let scratch = Scratch(std::env::temp_dir().join(name));
         std::fs::create_dir(&scratch.0).unwrap();
         let image = scratch.0.join("slide.png");
-        let mut picture = Pixmap::new(32, 24).unwrap();
-        picture.fill(tiny_skia::Color::from_rgba8(30, 90, 160, 255));
+        let mut picture = Pixmap::new(160, 120).unwrap();
+        picture.fill(tiny_skia::Color::from_rgba8(220, 20, 20, 255));
         picture.save_png(&image).unwrap();
+        let blue = scratch.0.join("blue.png");
+        picture.fill(tiny_skia::Color::from_rgba8(20, 20, 220, 255));
+        picture.save_png(&blue).unwrap();
         let spec = AudioSpec {
             sample_rate: 48_000,
             channels: 2,
@@ -2258,13 +2687,13 @@ mod tests {
             })
             .collect();
         let source = scratch.0.join("source.mp4");
-        slideshow(&[image], &source, &[3.0], Some((spec, pcm)), |_| {}).unwrap();
+        slideshow(&[image, blue], &source, &[1.5, 1.5], Some((spec, pcm)), |_| {}).unwrap();
 
         let trim = scratch.0.join("trim.mp4");
         export_mp4(&source, &trim, (0.413, 1.713), |_| {}).expect("export trimmed audio");
         let cut = scratch.0.join("cut.mp4");
         export_segments(
-            &[(source.clone(), 0.0, 0.91), (source, 1.73, 2.77)],
+            &[(source.clone(), 0.0, 0.91), (source.clone(), 1.73, 2.77)],
             &cut,
             true,
             |_| {},
@@ -2345,6 +2774,50 @@ mod tests {
         }
         assert!(tone(&cut_audio, 0.70, 0.80, 440.0) > 3.0 * tone(&cut_audio, 0.70, 0.80, 880.0));
         assert!(tone(&cut_audio, 1.00, 1.10, 880.0) > 3.0 * tone(&cut_audio, 1.00, 1.10, 440.0));
+
+        let mut edits = Timeline::new(hns(3.0)).unwrap();
+        edits.cut(hns(0.4), hns(0.8), 1).unwrap();
+        edits.cut(hns(0.8), hns(1.4), 1).unwrap();
+        let mut preview = PlaybackAudio::open(&source, edits.spans()).unwrap();
+        let mut preview_pcm = Vec::new();
+        while let Some(pcm) = preview.next().unwrap() {
+            preview_pcm.extend(pcm);
+        }
+        assert!(
+            (preview_pcm.len() as i64 - i64::from(spec.sample_rate) * 4).abs() < 4_800,
+            "preview must contain two seconds of stereo audio, not the removed sections"
+        );
+        assert!(tone(&preview_pcm, 0.6, 0.7, 440.0) > 3.0 * tone(&preview_pcm, 0.6, 0.7, 880.0));
+        assert!(tone(&preview_pcm, 1.0, 1.1, 880.0) > 3.0 * tone(&preview_pcm, 1.0, 1.1, 440.0));
+        let multiple = scratch.0.join("multiple.mp4");
+        let pieces = edits.spans().iter().map(|piece| {
+            (source.clone(), seconds(piece.start), seconds(piece.end))
+        }).collect::<Vec<_>>();
+        export_segments(&pieces, &multiple, true, |_| {}).unwrap();
+        let exported_audio = samples(&multiple, 2.0);
+        assert!(tone(&exported_audio, 0.6, 0.7, 440.0) > 3.0 * tone(&exported_audio, 0.6, 0.7, 880.0));
+        assert!(tone(&exported_audio, 1.0, 1.1, 880.0) > 3.0 * tone(&exported_audio, 1.0, 1.1, 440.0));
+        let mut movie = Reader::open(&multiple).unwrap();
+        assert!((seconds(movie.duration) - 2.0).abs() < 0.12, "edited duration must match the preview");
+        for (at, channel) in [(0.2, 2), (1.4, 0)] {
+            let frame = movie.frame_at(hns(at)).unwrap().expect("an edited video frame");
+            let pixel = &frame.bgra[(12 * frame.width as usize + 16) * 4..][..4];
+            assert!(pixel[channel] > 170, "the expected source clip must appear at {at}: {pixel:?}");
+            assert!(pixel[2 - channel] < 70, "removed source content must not appear at {at}: {pixel:?}");
+        }
+        let gif = scratch.0.join("cuts.gif");
+        export_gif(&source, &gif, edits.spans(), GifOptions {
+            fps: 10.0, max_width: 160, looped: false, fade: false, dither: false,
+        }, |_| {}).unwrap();
+        use image::AnimationDecoder;
+        let decoder = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(std::fs::File::open(gif).unwrap())).unwrap();
+        let frames = decoder.into_frames().collect_frames().unwrap();
+        assert_eq!(frames.len(), 20, "GIF must contain only the two retained seconds");
+        let red = frames[0].buffer().get_pixel(16, 12).0;
+        let blue = frames[15].buffer().get_pixel(16, 12).0;
+        assert!(red[0] > 170 && red[2] < 70, "the first retained clip must be red: {red:?}");
+        assert!(blue[2] > 170 && blue[0] < 70, "the last retained clip must be blue: {blue:?}");
+        assert!((seconds(Reader::open(&source).unwrap().duration) - 3.0).abs() < 0.12, "the source must remain unchanged");
     }
 
 }
@@ -2364,8 +2837,7 @@ pub(crate) mod narration_selftest;
 /// Playback sound through the wave-out API.
 #[cfg(windows)]
 mod sound {
-    use super::{hns, seconds};
-    use jiffshot_capture::media::Reader;
+    use super::{PlaybackAudio, Span};
     use std::collections::VecDeque;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -2383,17 +2855,15 @@ mod sound {
     type Block = (Box<WAVEHDR>, Vec<i16>);
 
     /// Plays `path`'s sound from `from` to `end` seconds until `stop`.
-    pub fn play(path: &Path, from: f64, end: f64, stop: &AtomicBool, volume: &AtomicU32) {
-        let Ok(mut reader) = Reader::open(path) else {
-            return;
-        };
-        let Some(spec) = reader.audio else { return };
-        if reader.select_video(false).is_err()
-            || reader.select_audio(true).is_err()
-            || reader.seek(hns(from)).is_err()
-        {
-            return;
+    pub fn play(path: &Path, pieces: &[Span], stop: &AtomicBool, volume: &AtomicU32) {
+        if let Err(error) = play_inner(path, pieces, stop, volume) {
+            crate::app::post(move |app| app.set_status(format!("Audio playback failed: {error}")));
         }
+    }
+
+    fn play_inner(path: &Path, pieces: &[Span], stop: &AtomicBool, volume: &AtomicU32) -> Result<(), String> {
+        let mut reader = PlaybackAudio::open(path, pieces)?;
+        let spec = reader.spec;
 
         let channels = spec.channels as u16;
         let format = WAVEFORMATEX {
@@ -2407,8 +2877,9 @@ mod sound {
         };
         let mut out: HWAVEOUT = std::ptr::null_mut();
         // SAFETY: the format outlives the call; no callback.
-        if unsafe { waveOutOpen(&mut out, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) } != 0 {
-            return;
+        let status = unsafe { waveOutOpen(&mut out, WAVE_MAPPER, &format, 0, 0, CALLBACK_NULL) };
+        if status != 0 {
+            return Err(format!("Could not open the audio device (status {status})."));
         }
         let header_size = std::mem::size_of::<WAVEHDR>() as u32;
         let mut queued: VecDeque<Block> = VecDeque::new();
@@ -2423,6 +2894,7 @@ mod sound {
             }
         };
         let mut level = u32::MAX;
+        let mut failure = None;
         while !stop.load(Ordering::Acquire) {
             let v = volume.load(Ordering::Acquire).min(0xFFFF);
             if v != level {
@@ -2435,15 +2907,14 @@ mod sound {
                 std::thread::sleep(Duration::from_millis(10));
                 continue;
             }
-            let Ok(Some((at, pcm))) = reader.next_audio() else {
-                break;
+            let pcm = match reader.next() {
+                Ok(Some(pcm)) => pcm,
+                Ok(None) => break,
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
             };
-            if seconds(at) < from - 0.05 {
-                continue;
-            }
-            if seconds(at) > end {
-                break;
-            }
             // SAFETY: a zeroed header is valid before it is filled in.
             let mut header: Box<WAVEHDR> = Box::new(unsafe { std::mem::zeroed() });
             header.lpData = pcm.as_ptr() as *mut u8;
@@ -2456,6 +2927,7 @@ mod sound {
             };
             queued.push_back((header, pcm));
             if !ok {
+                failure = Some("Could not queue the video's audio.".into());
                 break;
             }
         }
@@ -2469,5 +2941,6 @@ mod sound {
         unsafe { waveOutReset(out) };
         release(&mut queued, true);
         unsafe { waveOutClose(out) };
+        failure.map_or(Ok(()), Err)
     }
 }

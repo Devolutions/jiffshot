@@ -445,6 +445,10 @@ fn editor_walk(s: &mut Script) {
 /// The whole walk, in order.
 fn script() -> Script {
     let mut s = Script(VecDeque::new());
+    if env("JIFFSHOT_UITEST_VIDEO_EDIT").is_some() {
+        video_edit_steps(&mut s);
+        return s;
+    }
     #[cfg(target_os = "macos")]
     if env("JIFFSHOT_UITEST_PERMISSIONS").is_some() {
         return permissions_script();
@@ -3409,6 +3413,129 @@ fn image_tools(s: &mut Script, fresh: String) {
     })
     .log(move |_| format!("simplify: {}; {}", k.status.get_untracked(), k.document_info.get_untracked()))
     .shot("ui-6-simplified.png");
+}
+
+fn video_edit_steps(s: &mut Script) {
+    let safe = env("JIFFSHOT_LIBRARY").zip(env("JIFFSHOT_UITEST"))
+        .is_some_and(|(library, output)| isolated_library(Path::new(&library), Path::new(&output)));
+    let video = env("JIFFSHOT_UITEST_VIDEO");
+    if !safe || video.is_none() {
+        s.log(|_| {
+            FAILED.store(true, Ordering::Release);
+            "FAILED: video editing needs JIFFSHOT_UITEST_VIDEO and a scratch library inside JIFFSHOT_UITEST".into()
+        });
+        return;
+    }
+    let k = sink();
+    s.step(move |_| {
+        run(format!("open:{}", video.expect("the video fixture was checked")));
+        800
+    })
+    .step(move |t| {
+        t.note = k.video_duration.get_untracked().to_string();
+        crate::app::post(|app| {
+            let duration = app.video.as_ref().map_or(0.0, crate::video::Session::duration);
+            crate::video::select(app, duration * 0.2, duration * 0.3);
+            app.video_action("cut");
+        });
+        300
+    })
+    .step(move |t| {
+        let original: f64 = t.note.parse().expect("the original duration was recorded");
+        if original <= 1.0 || (k.video_duration.get_untracked() - original * 0.9).abs() > 0.01
+            || k.video_joins.get_untracked().len() != 1 || !k.undo_enabled.get_untracked() {
+            FAILED.store(true, Ordering::Release);
+            t.line(format!("FAILED: first ripple cut: {}", k.status.get_untracked()));
+        }
+        call(|m| m.undo());
+        200
+    })
+    .step(move |t| {
+        let original: f64 = t.note.parse().expect("the original duration was recorded");
+        if (k.video_duration.get_untracked() - original).abs() > 0.01 || !k.redo_enabled.get_untracked() {
+            FAILED.store(true, Ordering::Release);
+            t.line("FAILED: undo must restore the source timeline");
+        }
+        call(|m| m.redo());
+        200
+    })
+    .step(|_| {
+        crate::app::post(|app| {
+            let duration = app.video.as_ref().map_or(0.0, crate::video::Session::duration);
+            crate::video::select(app, duration * 0.6, duration * 0.7);
+            app.video_action("cut");
+            crate::video::seek(app, 0.0);
+            app.video_action("play");
+        });
+        500
+    })
+    .shot("video-multiple-cuts.png")
+    .step(move |t| {
+        let original: f64 = t.note.parse().expect("the original duration was recorded");
+        if (k.video_duration.get_untracked() - original * 0.81).abs() > 0.01
+            || k.video_joins.get_untracked().len() != 2 {
+            FAILED.store(true, Ordering::Release);
+            t.line("FAILED: repeated cuts must use edited time and retain both joins");
+        }
+        (original * 1000.0).ceil() as u64 + 500
+    })
+    .step(move |t| {
+        if k.playing.get_untracked() || (k.video_position.get_untracked() - k.video_duration.get_untracked()).abs() > 0.05 {
+            FAILED.store(true, Ordering::Release);
+            t.line("FAILED: preview must play the complete edited timeline");
+        }
+        call(|m| m.save());
+        200
+    });
+    video_save_wait(s);
+    s.step(move |t| {
+        if k.video_saving.get_untracked() || !k.status.get_untracked().starts_with("Saved edited video") {
+            FAILED.store(true, Ordering::Release);
+            t.line(format!("FAILED: automatic edited-copy save: {}", k.status.get_untracked()));
+        }
+        crate::app::post(|app| {
+            let duration = app.video.as_ref().map_or(0.0, crate::video::Session::duration);
+            crate::video::select(app, 0.0, duration * 0.1);
+            app.video_action("cut");
+            app.save();
+        });
+        200
+    });
+    video_save_wait(s);
+    s.step(move |t| {
+        let original: f64 = t.note.parse().expect("the original duration was recorded");
+        let library = PathBuf::from(env("JIFFSHOT_LIBRARY").expect("the scratch library was checked"));
+        let videos = jiffshot_capture::library::Library::new(library).recent(2000)
+            .into_iter().filter(|path| path.extension().is_some_and(|ext| ext == "mp4"))
+            .collect::<Vec<_>>();
+        let duration = videos.first().and_then(|path| jiffshot_capture::media::Reader::open(path).ok())
+            .map(|reader| reader.duration as f64 / jiffshot_capture::media::HNS_PER_SECOND as f64);
+        if videos.len() != 1 || duration.is_none_or(|duration| (duration - original * 0.729).abs() > 0.15)
+            || k.video_saving.get_untracked() || !k.status.get_untracked().starts_with("Saved edited video") {
+            FAILED.store(true, Ordering::Release);
+            t.line(format!("FAILED: subsequent save must update one playable edited copy: {}", k.status.get_untracked()));
+        } else {
+            t.line("PASS: multiple cuts, undo/redo, continuous preview, automatic edited copy and repeated saves");
+        }
+        200
+    })
+    .shot("video-saved.png")
+    .step(|_| {
+        run("theme:Light");
+        300
+    })
+    .shot("video-light.png")
+    .step(|_| {
+        run("theme:Dark");
+        200
+    });
+}
+
+fn video_save_wait(s: &mut Script) {
+    let k = sink();
+    for _ in 0..300 {
+        s.step(move |_| if k.video_saving.get_untracked() { 100 } else { 1 });
+    }
 }
 
 fn video_steps(s: &mut Script, video: String) {

@@ -222,6 +222,8 @@ pub struct MainViewModelSink {
     pub video_info: Signal<String>,
     pub trim_start: Signal<f64>,
     pub trim_end: Signal<f64>,
+    pub video_joins: Signal<Vec<f64>>,
+    pub video_saving: Signal<bool>,
     pub playing: Signal<bool>,
     pub document_info: Signal<String>,
     pub rotation: Signal<f64>,
@@ -516,6 +518,8 @@ impl MainViewModelSink {
             video_info: Signal::new(String::new()),
             trim_start: Signal::new(0.0),
             trim_end: Signal::new(0.0),
+            video_joins: Signal::new(Vec::new()),
+            video_saving: Signal::new(false),
             playing: Signal::new(false),
             document_info: Signal::new(String::new()),
             rotation: Signal::new(0.0),
@@ -774,6 +778,12 @@ impl MainViewModelSink {
     pub fn set_trim_end(&self, value: f64) -> Result<()> {
         publish(self.trim_end, value)
     }
+    pub fn set_video_joins(&self, value: Vec<f64>) -> Result<()> {
+        publish(self.video_joins, value)
+    }
+    pub fn set_video_saving(&self, value: bool) -> Result<()> {
+        publish(self.video_saving, value)
+    }
     pub fn set_playing(&self, value: bool) -> Result<()> {
         publish(self.playing, value)
     }
@@ -935,6 +945,9 @@ impl MainViewModelSink {
     }
     pub fn set_cut_enabled(&self, enabled: bool) -> Result<()> {
         publish(self.cut_enabled, enabled)
+    }
+    pub fn set_cut_selection_enabled(&self, enabled: bool) -> Result<()> {
+        publish(self.cut_selection_enabled, enabled)
     }
     pub fn set_delete_enabled(&self, enabled: bool) -> Result<()> {
         publish(self.delete_enabled, enabled)
