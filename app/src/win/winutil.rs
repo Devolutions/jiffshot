@@ -288,8 +288,16 @@ mod tests {
                 b'n' as u16,
                 b'g' as u16,
                 0,
+                0,
             ]
         );
+    }
+
+    #[test]
+    fn recycle_paths_use_a_double_terminated_path_list() {
+        let paths = [PathBuf::from("first"), PathBuf::from("second")];
+        let expected: Vec<u16> = "first\0second\0\0".encode_utf16().collect();
+        assert_eq!(recycle_path_list(&paths), expected);
     }
 }
 

@@ -3723,8 +3723,8 @@ fn windows_steps(s: &mut Script, drop: String) {
     .step(move |_| {
         // The test image on the first zone, and twice more for the next ones.
         let paths = serde_json::to_string(&[
-            crate::win::app::App::encode_drop_path(Path::new(&drop)),
-            crate::win::app::App::encode_drop_path(Path::new(&drop)),
+            crate::app::App::encode_drop_path(Path::new(&drop)),
+            crate::app::App::encode_drop_path(Path::new(&drop)),
         ])
         .expect("test paths serialize");
         run(format!("drop:200,200|{paths}"));
