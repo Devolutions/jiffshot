@@ -238,7 +238,7 @@ fn wire_canvas(ctx: &Ctx, zoom: ZoomView) -> Result<()> {
         let paths: Vec<Vec<u8>> = items
             .iter()
             .filter_map(|item| item.local_path())
-            .map(|path| crate::app::App::encode_drop_path(&path))
+            .map(crate::app::App::encode_drop_path)
             .collect();
         if paths.is_empty() {
             return;
