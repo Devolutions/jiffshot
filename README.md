@@ -589,7 +589,7 @@ Do not convert the Ubuntu binary into a Fedora RPM: Ubuntu's `liblept.so.5` and 
 
 Each format contains a relocatable launcher, Jiffshot and its three private native runtime libraries, the SVG icon, desktop entry, `.jsd` MIME registration, and documentation. The launcher preserves file arguments and the caller's working directory, including paths containing spaces. Native packages install under `/usr` and resolve system libraries through the package manager; the portable archive still needs those libraries installed. No .NET SDK is required. Fedora may need additional RPM Fusion media codecs for recording/export; missing GStreamer elements are reported by the app. Removing a native package leaves user captures and settings untouched.
 
-The repository currently has no declared application license. The RPM records `LicenseRef-Unknown`; this metadata does not grant a new license or replace upstream runtime licensing terms.
+Jiffshot is dual-licensed under the MIT License or Apache License, Version 2.0, at your option. The RPM records this license expression; bundled native runtimes retain their upstream licensing terms.
 
 ### Logo Assets
 
@@ -692,3 +692,9 @@ On macOS, `JIFFSHOT_RECORD_SYNTHETIC_POINTER=all` makes `--record-selftest` inje
 On macOS, `JIFFSHOT_RECORD_WORKFLOW_TEST=1` makes `--record-selftest DIR 1` exercise the production recording toolbar's restart, cancel, stop and publication-failure recovery against its own synthetic window. Run as a non-root user with `JIFFSHOT_LIBRARY=DIR/workflow-library`, `JIFFSHOT_CONFIG_DIR=DIR/workflow-config` and `JIFFSHOT_LOCAL_DIR=DIR/workflow-local`, using an empty scratch `DIR`; the library directory must not already exist. The test deliberately preserves one recoverable recording in that scratch library.
 
 `JIFFSHOT_RECORD_SHUTDOWN_TEST=1` uses the same scratch paths to request capture-engine shutdown after a synthetic recording starts, then checks that the recording is published and decodable. This exercises the engine's quit message, not an external macOS logout or shutdown.
+
+## License
+
+Jiffshot is dual-licensed under the [MIT License](LICENSE-MIT) or
+[Apache License, Version 2.0](LICENSE-APACHE), at your option. Bundled native
+runtimes and other third-party components retain their respective licenses.

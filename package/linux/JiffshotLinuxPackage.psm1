@@ -513,7 +513,9 @@ function New-JiffshotPayload {
         @((Join-Path $script:Root 'assets/jiffshot.svg'), 'share/icons/hicolor/scalable/apps/com.devolutions.Jiffshot.svg', $script:Mode644),
         @((Join-Path $script:Assets 'com.devolutions.Jiffshot.xml'), 'share/mime/packages/com.devolutions.Jiffshot.xml', $script:Mode644),
         @((Join-Path $script:Assets 'README.txt'), 'share/doc/jiffshot/README-linux.txt', $script:Mode644),
-        @((Join-Path $script:Root 'README.md'), 'share/doc/jiffshot/README.md', $script:Mode644)
+        @((Join-Path $script:Root 'README.md'), 'share/doc/jiffshot/README.md', $script:Mode644),
+        @((Join-Path $script:Root 'LICENSE-MIT'), 'share/doc/jiffshot/LICENSE-MIT', $script:Mode644),
+        @((Join-Path $script:Root 'LICENSE-APACHE'), 'share/doc/jiffshot/LICENSE-APACHE', $script:Mode644)
     )
     foreach ($file in $files) {
         $destination = Join-Path $Payload $file[1]

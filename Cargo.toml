@@ -6,6 +6,7 @@ members = ["app", "crates/jiffshot-capture", "crates/jiffshot-cli", "crates/jiff
 version = "0.2.0"
 edition = "2021"
 publish = false
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Both crates and their downloaded host must come from the same release.

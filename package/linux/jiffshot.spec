@@ -2,7 +2,7 @@ Name:           jiffshot
 Version:        @VERSION@
 Release:        1
 Summary:        Screen capture, recording, and non-destructive image editor
-License:        LicenseRef-Unknown
+License:        MIT OR Apache-2.0
 URL:            https://github.com/Devolutions/jiffshot
 Source0:        payload.tar.gz
 BuildArch:      @ARCH@
@@ -39,7 +39,7 @@ Recommends:     gstreamer1-plugin-libav
 Linux image/document editing, OCR, portal capture, and video tools.
 Screen capture requires a running XDG desktop portal and PipeWire.
 Additional media codecs may require RPM Fusion on Fedora.
-The upstream repository does not currently declare an application license.
+The application is licensed under either the MIT or Apache License, Version 2.0.
 
 %prep
 %setup -q -n jiffshot-%{version}
@@ -56,4 +56,7 @@ cp -a bin lib share %{buildroot}/usr/
 /usr/share/applications/com.devolutions.Jiffshot.desktop
 /usr/share/icons/hicolor/scalable/apps/com.devolutions.Jiffshot.svg
 /usr/share/mime/packages/com.devolutions.Jiffshot.xml
-%doc /usr/share/doc/jiffshot
+%doc /usr/share/doc/jiffshot/README-linux.txt
+%doc /usr/share/doc/jiffshot/README.md
+%license /usr/share/doc/jiffshot/LICENSE-MIT
+%license /usr/share/doc/jiffshot/LICENSE-APACHE
