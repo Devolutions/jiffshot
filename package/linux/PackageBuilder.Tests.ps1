@@ -281,6 +281,8 @@ Describe 'Package contents' -Tag PackageContent {
             'rpm' {
                 (Invoke-JiffshotNativeCommand -Command @('rpm', '-qp', '--queryformat', '%{VERSION} %{RELEASE} %{ARCH}', $artifact)).Stdout |
                     Should -BeExactly "$($script:Version) 1 $($script:RpmArch)"
+                (Invoke-JiffshotNativeCommand -Command @('rpm', '-qp', '--queryformat', '%{LICENSE}', $artifact)).Stdout |
+                    Should -BeExactly 'MIT OR Apache-2.0'
                 $requires = (Invoke-JiffshotNativeCommand -Command @('rpm', '-qp', '--requires', $artifact)).Stdout
                 $requires | Should -MatchExactly '(?m)^libtesseract\.so\.5(?:\.\d+)*\(\)\(64bit\)$'
                 foreach ($dependency in 'libX11.so.6()(64bit)', 'gtk3', 'pipewire-gstreamer') {

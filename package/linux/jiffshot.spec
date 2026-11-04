@@ -56,6 +56,7 @@ cp -a bin lib share %{buildroot}/usr/
 /usr/share/applications/com.devolutions.Jiffshot.desktop
 /usr/share/icons/hicolor/scalable/apps/com.devolutions.Jiffshot.svg
 /usr/share/mime/packages/com.devolutions.Jiffshot.xml
+%dir /usr/share/doc/jiffshot
 %doc /usr/share/doc/jiffshot/README-linux.txt
 %doc /usr/share/doc/jiffshot/README.md
 %license /usr/share/doc/jiffshot/LICENSE-MIT
