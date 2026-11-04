@@ -542,6 +542,7 @@ fn capture_scroll(a: &Args) -> Reply {
     let notches = a.int("notches", 1, 20)?.unwrap_or(3) as i32;
     prepare()?;
     let target = capture::target(a, false)?;
+    let _hidden = jiffshot_capture::visibility::hide().map_err(internal)?;
     let layout = target.layout.display();
     let mapping = target.layout.mapping(target.rect).map_err(internal)?;
     let (width, height) = mapping.size();

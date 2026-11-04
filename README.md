@@ -80,6 +80,15 @@ current Rustolonia host.
 3. **Annotate & share:** By default, captures are saved to `Pictures\Jiffshot`, copied to the clipboard, and opened in the **Jiffshot Editor** where you can add arrows, callouts, numbered steps, blur, or effects, then copy (`Ctrl+Shift+C`), export (`Ctrl+E`), or share directly to other apps.
 4. **Stay ready in the tray:** Closing the editor window keeps Jiffshot running quietly in the notification area so your hotkeys stay active. To quit completely, right-click the tray icon and choose **Exit**.
 
+On Windows, macOS, and Linux, screenshots and recordings automatically hide
+Jiffshot's visible windows, including the editor and preferences. Windows that
+were visible are restored afterward, including after cancellation or failure;
+hidden and minimized windows stay that way. No preference needs to be enabled.
+The `JIFFSHOT_UITEST_CAPTURE_VISIBILITY=1` UI self-test checks hiding and
+restoration, including nested captures, failures, and capture-worker dispatch.
+On macOS, also set `JIFFSHOT_UITEST_CAPTURE_VISIBILITY_SCREEN=1` to verify actual
+screenshot pixels against a visible test window; this requires Screen Recording permission.
+
 ---
 
 ## Features

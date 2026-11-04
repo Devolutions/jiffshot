@@ -847,6 +847,14 @@ fn capture_interactive(mode: usize) {
         return;
     };
 
+    let _hidden = match jiffshot_capture::visibility::hide() {
+        Ok(hidden) => hidden,
+        Err(error) => {
+            with_app(|app| app.busy = false);
+            notify(hwnd, "Capture failed", &error.to_string(), true);
+            return;
+        }
+    };
     let started = Instant::now();
     #[cfg(target_os = "macos")]
     let display_layout = match screen::DisplayLayout::current() {

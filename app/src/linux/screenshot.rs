@@ -14,6 +14,7 @@ pub(super) async fn capture_full_screen() -> Result<Option<Document>, String> {
 }
 
 async fn capture(interactive: bool) -> Result<Option<Document>, String> {
+    let _hidden = jiffshot_capture::visibility::hide().map_err(|error| error.to_string())?;
     let response = Screenshot::request()
         .interactive(interactive)
         .modal(true)

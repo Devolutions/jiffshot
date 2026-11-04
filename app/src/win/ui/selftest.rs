@@ -449,6 +449,78 @@ fn script() -> Script {
     if env("JIFFSHOT_UITEST_WIDGET").is_some() {
         return capture_widget_script();
     }
+    if env("JIFFSHOT_UITEST_CAPTURE_VISIBILITY").is_some() {
+        s.wait(800);
+        s.step(|test| {
+            let scope = super::scope().expect("the application scope is unavailable");
+            let editor = scope.main_window().expect("the editor is unavailable");
+            editor.show().expect("show the editor");
+            let hidden = rustolonia::Window::new().expect("create a hidden test window");
+            scope.mount_hidden(hidden.clone()).expect("mount the hidden test window");
+            let shown = rustolonia::Window::new().expect("create a visible test window");
+            scope.mount(shown.clone()).expect("mount the visible test window");
+            let activated = editor.get_show_activated().unwrap();
+            let first = jiffshot_capture::visibility::hide().expect("hide application windows");
+            assert!(scope.windows().iter().all(|window| !window.get_is_visible().unwrap()),
+                "a Jiffshot window remained visible");
+            let second = jiffshot_capture::visibility::hide().expect("nest window hiding");
+            drop(first);
+            assert!(!editor.get_is_visible().unwrap(), "nested capture restored the editor too early");
+            drop(second);
+            assert!(editor.get_is_visible().unwrap(), "capture did not restore the editor");
+            assert!(shown.get_is_visible().unwrap(), "capture did not restore another visible window");
+            assert!(!hidden.get_is_visible().unwrap(), "capture opened a previously hidden window");
+            assert_eq!(editor.get_show_activated().unwrap(), activated,
+                "capture changed the editor's activation policy");
+            let failed = (|| -> std::io::Result<()> {
+                let _hidden = jiffshot_capture::visibility::hide()?;
+                Err(std::io::Error::other("synthetic capture failure"))
+            })();
+            assert!(failed.is_err());
+            assert!(editor.get_is_visible().unwrap(), "failed capture did not restore the editor");
+            assert!(shown.get_is_visible().unwrap(), "failed capture did not restore another window");
+            assert!(!hidden.get_is_visible().unwrap());
+            shown.close().expect("close the visible test window");
+            hidden.close().expect("close the hidden test window");
+            test.line("capture visibility: all windows hidden, nested guards balanced, originals restored on success and failure");
+            100
+        });
+        let (send, receive) = std::sync::mpsc::channel();
+        s.step(move |_| {
+            let scope = super::scope().expect("the application scope is unavailable");
+            std::thread::spawn(move || {
+                let result = (|| -> std::result::Result<(), String> {
+                    let hidden = jiffshot_capture::visibility::hide().map_err(|error| error.to_string())?;
+                    let target = scope.clone();
+                    let (send, receive) = std::sync::mpsc::channel();
+                    scope.post(move || {
+                        let hidden = target.windows().iter().all(|window| window.get_is_visible().is_ok_and(|visible| !visible));
+                        let _ = send.send(hidden);
+                    }).map_err(|error| error.to_string())?;
+                    if !receive.recv_timeout(Duration::from_secs(5)).map_err(|error| error.to_string())? {
+                        return Err("a worker capture left a Jiffshot window visible".into());
+                    }
+                    drop(hidden);
+                    Ok(())
+                })();
+                let _ = send.send(result);
+            });
+            1000
+        });
+        s.step(move |test| {
+            receive.try_recv().expect("the worker capture did not finish")
+                .expect("worker capture visibility failed");
+            assert!(super::main_window().unwrap().get_is_visible().unwrap(),
+                "the worker capture did not restore the editor");
+            test.line("capture visibility: worker-thread hiding acknowledged before capture and restored afterward");
+            0
+        });
+        #[cfg(target_os = "macos")]
+        if env("JIFFSHOT_UITEST_CAPTURE_VISIBILITY_SCREEN").is_some() {
+            capture_visibility_pixel_steps(&mut s);
+        }
+        return s;
+    }
     if env("JIFFSHOT_UITEST_VIDEO_EDIT").is_some() {
         video_edit_steps(&mut s);
         return s;
@@ -726,6 +798,54 @@ fn script() -> Script {
         windows_steps(&mut s, drop);
     }
     s
+}
+
+#[cfg(target_os = "macos")]
+fn capture_visibility_pixel_steps(script: &mut Script) {
+    use rustolonia::{Color, Window};
+    let marker = Rc::new(RefCell::new(None::<Window>));
+    let shown = marker.clone();
+    script.step(move |_| {
+        let scope = super::scope().unwrap();
+        let window = Window::el().title("Screenshot visibility marker")
+            .width(240.0).height(160.0).background(Color::rgb(255, 0, 255))
+            .build(&scope).expect("build the screenshot marker");
+        scope.mount(window.clone()).expect("show the screenshot marker");
+        *shown.borrow_mut() = Some(window);
+        500
+    });
+    let shown = marker.clone();
+    let (send, receive) = std::sync::mpsc::channel();
+    script.step(move |test| {
+        let scope = super::scope().unwrap();
+        let window = shown.borrow().clone().unwrap();
+        let handle = scope.platform_handle(&window).unwrap();
+        let number = crate::mac_window::number(handle).unwrap() as isize;
+        let (x, y) = window_rect(number).center();
+        let baseline = probe(x, y, number);
+        let color = u32::from_str_radix(&baseline[1..7], 16).expect("read the marker pixel");
+        assert!(((color >> 16) & 255) >= 180 && ((color >> 8) & 255) <= 40
+            && (color & 255) >= 180 && baseline.ends_with("hits: yes"),
+            "the screenshot marker is not visibly magenta: {baseline}");
+        test.line(format!("capture visibility baseline: {baseline}"));
+        std::thread::spawn(move || {
+            let result = jiffshot_capture::screen::grab(Rect::new(x, y, 4, 4))
+                .map(|frame| frame.rgb(0, 0));
+            let _ = send.send(result);
+        });
+        3000
+    });
+    script.step(move |test| {
+        let pixel = receive.try_recv().expect("the real screenshot did not finish")
+            .expect("the real screenshot failed").expect("the screenshot is empty");
+        assert!(!(pixel.0 >= 180 && pixel.1 <= 40 && pixel.2 >= 180),
+            "Jiffshot appeared in its own screenshot: {pixel:?}");
+        let window = marker.borrow_mut().take().unwrap();
+        assert!(window.get_is_visible().unwrap(), "the screenshot did not restore its marker");
+        window.close().expect("close the screenshot marker");
+        test.line(format!("capture visibility: real screenshot excluded the visible magenta window (pixel {pixel:?}) and restored it"));
+        0
+    });
 }
 
 #[cfg(target_os = "macos")]

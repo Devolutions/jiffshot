@@ -10,6 +10,48 @@ use jiffshot_doc::{Document, Pixmap};
 
 const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
 
+/// Discard the frame cached before hiding the UI, not just its decoded pixels.
+pub(super) fn screenshot_sample(
+    sink: &gst_app::AppSink,
+    previous: gst::Sample,
+) -> Result<gst::Sample, String> {
+    let reference = std::time::Instant::now();
+    let running_time = sink.current_running_time();
+    let hidden = jiffshot_capture::visibility::hide().map_err(|error| error.to_string())?;
+    let Some(hidden_since) = hidden.hidden_since() else {
+        return Ok(previous);
+    };
+    let running_time = running_time.ok_or("the screenshot stream has no running clock")?.nseconds();
+    let elapsed = if hidden_since >= reference {
+        hidden_since.duration_since(reference)
+    } else {
+        reference.duration_since(hidden_since)
+    };
+    let offset = u64::try_from(elapsed.as_nanos())
+        .map_err(|_| "the screenshot visibility timestamp is out of range")?;
+    let cutoff = if hidden_since >= reference {
+        running_time.checked_add(offset).ok_or("the screenshot timestamp overflowed")?
+    } else {
+        running_time.saturating_sub(offset)
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while std::time::Instant::now() < deadline {
+        let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(100)) else {
+            continue;
+        };
+        let pts = sample.buffer().and_then(|buffer| buffer.pts())
+            .ok_or("the screenshot stream returned a frame without a timestamp")?;
+        let segment = sample.segment().and_then(|segment| segment.downcast_ref::<gst::ClockTime>())
+            .ok_or("the screenshot stream returned a frame without a time segment")?;
+        let timestamp = segment.to_running_time(pts)
+            .ok_or("the screenshot frame is outside its time segment")?;
+        if timestamp.nseconds() >= cutoff {
+            return Ok(sample);
+        }
+    }
+    Err("timed out waiting for a screenshot frame with Jiffshot hidden".to_owned())
+}
+
 pub(super) fn with_source<T>(
     source: gst::Element,
     description: &str,

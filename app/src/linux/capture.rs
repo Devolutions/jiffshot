@@ -48,6 +48,7 @@ impl CaptureCursor {
 pub(super) async fn capture_monitor(
     cursor: CaptureCursor,
 ) -> Result<jiffshot_doc::Document, String> {
+    let _hidden = jiffshot_capture::visibility::hide().map_err(|error| error.to_string())?;
     let stream = open_portal_stream(cursor.portal_mode()).await?;
     let result = capture_stream_document(&stream);
     stream.finish(result).await
@@ -60,11 +61,17 @@ pub(super) async fn capture_monitor_after_delay(
     on_wait: impl FnOnce(),
     on_wait_finished: impl FnOnce(),
 ) -> Result<Option<jiffshot_doc::Document>, String> {
-    let stream = open_portal_stream(cursor.portal_mode()).await?;
+    let stream = {
+        let _hidden = jiffshot_capture::visibility::hide().map_err(|error| error.to_string())?;
+        open_portal_stream(cursor.portal_mode()).await?
+    };
     let outcome = wait_for_capture_delay(delay, cancel, on_wait);
     on_wait_finished();
     let result = match outcome {
-        Ok(CaptureDelayOutcome::Elapsed) => capture_stream_document(&stream).map(Some),
+        Ok(CaptureDelayOutcome::Elapsed) => match jiffshot_capture::visibility::hide() {
+            Ok(_hidden) => capture_stream_document(&stream).map(Some),
+            Err(error) => Err(error.to_string()),
+        },
         Ok(CaptureDelayOutcome::Cancelled) => Ok(None),
         Err(error) => Err(error),
     };
@@ -889,6 +896,7 @@ pub(super) async fn record_monitor_with_audio(
     frame_rate: RecordingFrameRate,
     state_changed: impl FnMut(RecordingState),
 ) -> Result<Option<PathBuf>, String> {
+    let _hidden = jiffshot_capture::visibility::hide().map_err(|error| error.to_string())?;
     gst::init().map_err(|error| format!("could not initialize GStreamer: {error}"))?;
     // Fail before the desktop asks what to share, not after.
     let missing: Vec<&str> = ["pipewiresrc", "videoconvert", "x264enc", "h264parse", "mp4mux"]

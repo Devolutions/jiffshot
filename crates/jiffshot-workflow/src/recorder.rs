@@ -1703,6 +1703,7 @@ pub(crate) fn record_in_layout(
     settings: &Settings,
     layout: CaptureLayout,
 ) -> Result<Option<PathBuf>, String> {
+    let _hidden = jiffshot_capture::visibility::hide().map_err(|error| error.to_string())?;
     layout.validate().map_err(|error| error.to_string())?;
     let library = Library::new(jiffshot_capture::config::library_root());
     let _border = Border::show(rect);
