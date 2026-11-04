@@ -4,6 +4,7 @@ description = "Screen, window and region capture for Jiffshot"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 png.workspace = true

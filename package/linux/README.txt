@@ -402,6 +402,6 @@ xwininfo, and English Tesseract data:
     -Binary target/release/jiffshot -RuntimeDir target/release
 This mock does not verify a real desktop's shortcut activation.
 
-The source repository does not currently specify an application license;
-the RPM records LicenseRef-Unknown rather than granting a new license.
+Jiffshot is dual-licensed under the MIT License or Apache License, Version 2.0,
+at your option. The source repository includes both license texts at its root.
 Bundled native runtimes retain their upstream licensing terms.

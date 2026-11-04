@@ -12,6 +12,8 @@ $script:ExpectedFiles = @(
     'share/mime/packages/com.devolutions.Jiffshot.xml'
     'share/doc/jiffshot/README-linux.txt'
     'share/doc/jiffshot/README.md'
+    'share/doc/jiffshot/LICENSE-MIT'
+    'share/doc/jiffshot/LICENSE-APACHE'
 ) | Sort-Object -CaseSensitive
 
 function New-ElfHeader([int]$Machine = 62, [int]$ElfType = 3) {

@@ -4,6 +4,7 @@ description = "Jiffshot's capture side: tray, hotkeys, selection overlay, record
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 serde.workspace = true

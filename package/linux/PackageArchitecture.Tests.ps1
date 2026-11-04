@@ -312,6 +312,10 @@ Describe 'Architecture packaging' {
             $spec = [System.IO.File]::ReadAllText($Command[-1])
             $spec | Should -BeLikeExactly "*BuildArch:      $Rpm`n*"
             $spec | Should -BeLikeExactly "*Version:        1.2.3`n*"
+            $spec | Should -BeLikeExactly '*License:        MIT OR Apache-2.0*'
+            $spec | Should -BeLikeExactly '*%dir /usr/share/doc/jiffshot*'
+            $spec | Should -BeLikeExactly '*%license /usr/share/doc/jiffshot/LICENSE-MIT*'
+            $spec | Should -BeLikeExactly '*%license /usr/share/doc/jiffshot/LICENSE-APACHE*'
             $spec | Should -Not -BeLikeExactly '*@ARCH@*'
             $destination = Join-Path $work "rpm/RPMS/$Rpm/jiffshot-1.2.3-1.$Rpm.rpm"
             [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($destination))

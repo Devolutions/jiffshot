@@ -4,6 +4,7 @@ description = "jiffshot-cli: drives the running Jiffshot from scripts and AI age
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "jiffshot-cli"
