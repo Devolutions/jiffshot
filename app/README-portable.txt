@@ -1,4 +1,4 @@
-Jiffshot 0.2.0 (portable)
+Jiffshot 0.3.0 (portable)
 =========================
 
 Screen capture and image editor for Windows 10 and 11.
