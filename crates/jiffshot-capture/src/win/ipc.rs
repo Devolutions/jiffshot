@@ -168,7 +168,11 @@ pub fn send_to_editor(path: &Path) -> bool {
     let Ok(identity) = current_identity() else {
         return false;
     };
-    let name = wide(&pipe_name(&identity));
+    send_on(&pipe_name(&identity), &identity, path)
+}
+
+fn send_on(name: &str, identity: &Identity, path: &Path) -> bool {
+    let name = wide(name);
     // SAFETY: the handle is checked and closed; the buffer outlives WriteFile.
     unsafe {
         let pipe = CreateFileW(
@@ -186,7 +190,7 @@ pub fn send_to_editor(path: &Path) -> bool {
         let mut server = 0;
         let trusted_server = GetNamedPipeServerProcessId(pipe, &mut server) != 0
             && process_identity(server)
-                .is_ok_and(|server_identity| identities_match(&identity, &server_identity));
+                .is_ok_and(|server_identity| identities_match(identity, &server_identity));
         if !trusted_server {
             CloseHandle(pipe);
             return false;
@@ -216,7 +220,16 @@ pub fn send_to_editor(path: &Path) -> bool {
 /// Fails if another editor already owns the pipe.
 pub fn serve(handler: impl Fn(PathBuf) + Send + 'static) -> io::Result<()> {
     let identity = current_identity()?;
-    let name = wide(&pipe_name(&identity));
+    let name = pipe_name(&identity);
+    serve_on(&name, identity, handler)
+}
+
+fn serve_on(
+    name: &str,
+    identity: Identity,
+    handler: impl Fn(PathBuf) + Send + 'static,
+) -> io::Result<()> {
+    let name = wide(name);
     let security = OwnerOnly::new(&identity.sid)?;
     let attributes = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -244,6 +257,9 @@ pub fn serve(handler: impl Fn(PathBuf) + Send + 'static) -> io::Result<()> {
     std::thread::Builder::new()
         .name("editor-ipc".into())
         .spawn(move || {
+            // Own the whole guard: capturing only `pipe.0` would drop it, and
+            // close the handle, as soon as `serve` returns.
+            let pipe = pipe;
             loop {
                 let pipe_handle = pipe.0 as HANDLE;
                 // SAFETY: `pipe` owns a live server handle for this thread.
@@ -329,6 +345,39 @@ mod tests {
                 session: 8,
             }
         ));
+    }
+
+    #[test]
+    fn editor_pipe_outlives_serve_and_delivers_paths() {
+        let identity = current_identity().expect("read current process identity");
+        let name = format!(
+            r"\\.\pipe\Jiffshot.Editor.Test.{}.{}",
+            std::process::id(),
+            identity.session
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        serve_on(&name, current_identity().unwrap(), move |path| {
+            let _ = sender.send(path);
+        })
+        .expect("start editor pipe server");
+
+        let path = Path::new(r"C:\captures\shot.png");
+        let delivered = (0..50).any(|_| {
+            send_on(&name, &identity, path) || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                false
+            }
+        });
+        assert!(
+            delivered,
+            "the pipe must accept clients after serve returns"
+        );
+        assert_eq!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("handler receives the path"),
+            path
+        );
     }
 
     #[test]
