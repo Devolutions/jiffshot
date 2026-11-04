@@ -712,6 +712,7 @@ impl DisplayLayout {
     /// is shown, allowing a selection to be composed without recapturing it.
     pub fn freeze(&self) -> io::Result<FrozenDesktop> {
         check_layout(&self.layout)?;
+        let _hidden = crate::visibility::hide()?;
         let (capture, snapshot, content) = content_for_capture()?;
         capture.applied(snapshot.revision);
         let sc_displays = unsafe { content.displays() };
@@ -1350,6 +1351,7 @@ fn grab_mapped(mapping: CaptureMapping, layout: &Layout) -> io::Result<Frame> {
 
 fn grab_logical(mapping: LogicalCaptureMapping, layout: &Layout) -> io::Result<Frame> {
     check_layout(layout)?;
+    let _hidden = crate::visibility::hide()?;
     let (capture, snapshot, content) = content_for_capture()?;
     capture.applied(snapshot.revision);
     let (width, height) = mapping.size;
@@ -1388,6 +1390,7 @@ pub fn grab_window(number: u32) -> io::Result<Frame> {
     use objc2::AllocAnyThread;
     use objc2_screen_capture_kit::SCContentFilter;
 
+    let _hidden = crate::visibility::hide()?;
     observe_display_changes()?;
     let layout = Layout::current();
     let content = sck::shareable_content()?;

@@ -44,6 +44,7 @@ pub fn scrolling(rect: Rect) -> io::Result<Frame> {
 
 pub(crate) fn scrolling_in_layout(rect: Rect, layout: &CaptureLayout) -> io::Result<Frame> {
     layout.validate()?;
+    let _hidden = jiffshot_capture::visibility::hide()?;
     #[cfg(target_os = "macos")]
     jiffshot_capture::os::require_event_posting()?;
     let _border = Border::show(rect);
@@ -107,6 +108,7 @@ pub(crate) fn scrolling_horizontal_in_layout(
     layout: &CaptureLayout,
 ) -> io::Result<Frame> {
     layout.validate()?;
+    let _hidden = jiffshot_capture::visibility::hide()?;
     #[cfg(target_os = "macos")]
     jiffshot_capture::os::require_event_posting()?;
     let _border = Border::show(rect);
@@ -154,6 +156,7 @@ pub fn scrolling_both(rect: Rect) -> io::Result<Frame> {
 
 pub(crate) fn scrolling_both_in_layout(rect: Rect, layout: &CaptureLayout) -> io::Result<Frame> {
     layout.validate()?;
+    let _hidden = jiffshot_capture::visibility::hide()?;
     #[cfg(target_os = "macos")]
     jiffshot_capture::os::require_event_posting()?;
     let _cursor = RestoreCursor {
@@ -193,6 +196,7 @@ pub(crate) fn scrolling_both_in_layout(rect: Rect, layout: &CaptureLayout) -> io
 /// frames wherever they moved to. `None` when cancelled.
 pub(crate) fn panoramic_in_layout(rect: Rect, layout: &CaptureLayout) -> io::Result<Option<Frame>> {
     layout.validate()?;
+    let _hidden = jiffshot_capture::visibility::hide()?;
     let _border = Border::show(rect);
     let first = layout.grab(rect)?;
     let size = (first.width as i32, first.height as i32);

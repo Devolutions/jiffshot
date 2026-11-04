@@ -132,6 +132,7 @@ pub fn grab(r: Rect) -> io::Result<Frame> {
             "empty capture rectangle",
         ));
     }
+    let _hidden = crate::visibility::hide()?;
     let dib = Dib::new(r.width, r.height)?;
     // SAFETY: the screen DC is released before returning; `dib` owns its DC.
     unsafe {

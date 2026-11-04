@@ -388,6 +388,7 @@ fn capture_frames(
             Ok(Action::Cancel) | Err(async_channel::TryRecvError::Closed) => return Ok(None),
             Ok(Action::Finish) => {
                 let limit_reached = if let Some(sample) = pending.take() {
+                    let sample = crate::linux::frame_stream::screenshot_sample(sink, sample)?;
                     process_sample(sample, mode, &mut frames, &mut last_lost_notice, progress)?
                 } else {
                     false
@@ -437,6 +438,7 @@ fn capture_frames(
         }
         next_sample = Instant::now() + SAMPLE_INTERVAL;
         if let Some(sample) = pending.take() {
+            let sample = crate::linux::frame_stream::screenshot_sample(sink, sample)?;
             if process_sample(sample, mode, &mut frames, &mut last_lost_notice, progress)? {
                 return finish_capture(frames, mode, true);
             }

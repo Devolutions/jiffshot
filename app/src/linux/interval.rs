@@ -120,7 +120,8 @@ fn capture_frames(
         if Instant::now() < next_capture {
             continue;
         }
-        let document = document_from_frame(frame_from_sample(sample)?)?;
+        let sample = crate::linux::frame_stream::screenshot_sample(sink, sample.clone())?;
+        let document = document_from_frame(frame_from_sample(&sample)?)?;
         if options.skip_identical
             && previous.as_ref().is_some_and(|last| {
                 document.size() == last.size()

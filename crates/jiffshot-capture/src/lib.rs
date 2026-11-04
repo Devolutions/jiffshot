@@ -56,6 +56,7 @@ pub mod screen;
 #[cfg_attr(target_os = "linux", path = "linux_share.rs")]
 pub mod share;
 pub mod stitch;
+pub mod visibility;
 #[cfg(any(windows, target_os = "macos"))]
 #[cfg_attr(windows, path = "win/targets.rs")]
 #[cfg_attr(target_os = "macos", path = "mac/targets.rs")]

@@ -336,6 +336,7 @@ pub(crate) fn run() -> Result<()> {
         return crate::shared_main::run();
     }
     App::load_from_env()?.run(move |scope| {
+        crate::ui::capture_visibility::install(scope)?;
         let document = Document::blank(1280, 720, Rgba::WHITE);
         let mut initial_status = "Open an image or .jsd document to start editing.".to_owned();
         match settings::theme() {

@@ -8,6 +8,8 @@
 
 #[path = "../../ui/canvas_view.rs"]
 pub mod canvas_view;
+#[path = "../../ui/capture_visibility.rs"]
+pub(crate) mod capture_visibility;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod capture_view;
 mod dark_blue;
@@ -187,6 +189,7 @@ pub fn mount_main_window(scope: &AppScope, model: impl MainViewModel, show: bool
     }
     #[cfg(target_os = "linux")]
     prefs_window::install(scope)?;
+    capture_visibility::install(scope)?;
     // JIFFSHOT_UITEST=DIR: the editor drives itself (see `selftest`).
     #[cfg(any(windows, target_os = "macos"))]
     if let Some(dir) = std::env::var_os("JIFFSHOT_UITEST").filter(|d| !d.is_empty()) {
