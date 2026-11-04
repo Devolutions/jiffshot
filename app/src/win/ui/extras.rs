@@ -7,8 +7,9 @@
 use super::capture_view::parts::{self, post, rgb, Subscriptions, GLYPHS, SIZE_TO_CONTENT};
 use super::dark_blue;
 use rustolonia::{
-    AnyEl, AppScope, Border, Button, Color, Dock, DockPanel, Effect, HorizontalAlignment, NodeRef, Orientation, Result, Signal, StackPanel, TextBlock,
-    TextBox, TextWrapping, Window, WindowDecorations, WindowStartupLocation,
+    AnyEl, AppScope, Border, Brush, Button, Color, Command, Dock, DockPanel, Effect, HorizontalAlignment, MenuFlyout, MenuItem, NodeRef, Orientation,
+    Path, PlacementMode, Result, Separator, Signal, StackPanel, TextBlock, TextBox, TextWrapping, VerticalAlignment, Window,
+    WindowDecorations, WindowStartupLocation,
 };
 use std::cell::RefCell;
 use std::time::Duration;
@@ -39,6 +40,10 @@ struct Widget {
     /// Bumped each time the pointer comes or goes, so that a collapse timer
     /// started before is ignored.
     hover: u64,
+    inside: bool,
+    menu_open: bool,
+    menu: MenuFlyout,
+    more_button: NodeRef<Button>,
     #[cfg(windows)]
     prepared: bool,
     #[cfg(target_os = "macos")]
@@ -106,6 +111,7 @@ pub(super) fn delayed_widget_for_selftest() -> impl FnOnce() -> Result<()> + Sen
 fn set_widget(on: bool) -> Result<()> {
     let Some(scope) = with(|e| e.scope.clone()) else { return Ok(()) };
     if !on {
+        close_widget_menu()?;
         if let Some(window) = with(|e| e.widget.as_mut().map(|widget| {
             #[cfg(target_os = "macos")]
             { widget.pending = false; }
@@ -141,7 +147,9 @@ fn set_widget(on: bool) -> Result<()> {
         if let Some(hwnd) = parts::hwnd(&scope, &window) {
             parts::make_popup(hwnd);
         }
-        window.set_position((-32000, -32000))?;
+        // Showing off-screen initializes at 100% DPI and can clip the last
+        // buttons when the popup is then moved to a scaled primary display.
+        window.set_position((parts::primary_screen_width() / 2, 0))?;
         window.show()?;
         let prepare = with(|e| e.widget.as_mut().is_some_and(|widget| !std::mem::replace(&mut widget.prepared, true))).unwrap_or(false);
         if prepare {
@@ -247,6 +255,7 @@ fn hovered(inside: bool) {
     let Some((scope, hover, expanded)) = with(|e| {
         e.widget.as_mut().map(|widget| {
             widget.hover += 1;
+            widget.inside = inside;
             (e.scope.clone(), widget.hover, widget.expanded)
         })
     })
@@ -257,14 +266,13 @@ fn hovered(inside: bool) {
         expanded.set_if_changed(true);
     } else {
         parts::after(&scope, COLLAPSE_AFTER, move || {
-            if with(|e| e.widget.as_ref().is_some_and(|w| w.hover == hover)) == Some(true) {
+            if with(|e| e.widget.as_ref().is_some_and(|w| w.hover == hover && !w.menu_open)) == Some(true) {
                 collapse();
             }
         });
     }
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn widget_visible_for_selftest() -> std::result::Result<bool, String> {
     let window = with(|extras| extras.widget.as_ref().map(|widget| widget.window.clone())).flatten();
     match window {
@@ -273,7 +281,6 @@ pub(super) fn widget_visible_for_selftest() -> std::result::Result<bool, String>
     }
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn expand_widget_for_selftest() -> std::result::Result<(), String> {
     let expanded = with(|extras| extras.widget.as_ref().map(|widget| widget.expanded))
         .flatten().ok_or("the test Capture Widget is unavailable")?;
@@ -319,6 +326,33 @@ fn build_widget(scope: &AppScope) -> Result<Widget> {
     let expanded = scope.signal(false);
     let dark = scope.signal(parts::dark_theme(scope));
     let subs = Subscriptions::default();
+    let more_button = NodeRef::<Button>::new();
+    let menu = MenuFlyout::new()?.placement(PlacementMode::BottomEdgeAlignedRight)?;
+    let items = menu.items()?;
+    for (label, command) in [
+        ("Hide Capture Widget", "hide"),
+        ("Open Capture Window", "capture-window"),
+        ("Open Editor", "editor"),
+        ("Preferences...", "preferences"),
+    ] {
+        let item = MenuItem::el().header(label).command(Command::new(move |_| {
+            widget_command(command);
+            Ok(())
+        })).build(scope)?;
+        items.add(item)?;
+        if command == "hide" {
+            items.add(Separator::new()?)?;
+        }
+    }
+    subs.keep(menu.subscribe_closed(|_| {
+        let inside = with(|extras| extras.widget.as_mut().map(|widget| {
+            widget.menu_open = false;
+            widget.inside
+        })).flatten();
+        if let Some(inside) = inside {
+            hovered(inside);
+        }
+    })?);
     #[cfg(target_os = "macos")]
     let test_button = NodeRef::<Button>::new();
     let buttons = StackPanel::el()
@@ -327,18 +361,53 @@ fn build_widget(scope: &AppScope) -> Result<Widget> {
         .margin((6.0, 4.0))
         .visible(expanded)
         .children_iter(MODES.iter().map(|&(mode, glyph, tip)| {
+            let icon = if mode == "text" {
+                // Draw OCR's selection corners and T without relying on an icon-font glyph.
+                AnyEl::from(
+                    Path::el()
+                        .width(16.0)
+                        .height(16.0)
+                        .data("M 4,0 L 0,0 L 0,4 M 12,0 L 16,0 L 16,4 M 0,12 L 0,16 L 4,16 M 12,16 L 16,16 L 16,12 M 4,5 L 12,5 M 8,5 L 8,12 M 6,12 L 10,12")
+                        .stroke(move || Some(Brush::solid(if dark.get() { rgb(dark_blue::TEXT) } else { rgb(0x202020) })))
+                        .stroke_thickness(1.5)
+                        .vertical_alignment(VerticalAlignment::Center),
+                )
+            } else {
+                AnyEl::from(TextBlock::el().text(super::icons::glyph(glyph)).font_family(GLYPHS).font_size(16.0))
+            };
             let button = Button::el()
                 .background(parts::TRANSPARENT)
                 .padding((10.0, 6.0))
                 .tool_tip_tip(tip)
-                .content(TextBlock::el().text(super::icons::glyph(glyph)).font_family(GLYPHS).font_size(16.0));
+                .content(icon);
             #[cfg(target_os = "macos")]
             let button = if mode == "image" { button.node_ref(test_button) } else { button };
             parts::on_click(button, &subs, move |_| {
                 collapse();
                 super::main().model.run(|m| m.run(format!("widget:{mode}")));
             })
-        }));
+        }))
+        .child(Border::el().width(1.0).margin((4.0, 4.0)).background(move || if dark.get() {
+            rgb(dark_blue::windows_or(dark_blue::STRONG_BORDER, 0x555555))
+        } else { rgb(0xDDDDDD) }))
+        .child(parts::on_click(
+            Button::el()
+                .node_ref(more_button)
+                .background(parts::TRANSPARENT)
+                .padding((10.0, 6.0))
+                .tool_tip_tip("More options, including Hide Capture Widget")
+                .content(StackPanel::el().orientation(Orientation::Horizontal).spacing(6.0)
+                    .child(TextBlock::el().text("More"))
+                    .child(Path::el().width(8.0).height(4.0).data("M 0,0 L 4,4 L 8,0")
+                        .stroke(move || Some(Brush::solid(if dark.get() { rgb(dark_blue::TEXT) } else { rgb(0x202020) })))
+                        .stroke_thickness(1.0).vertical_alignment(VerticalAlignment::Center))),
+            &subs,
+            |button| {
+                if let Err(error) = toggle_widget_menu(button) {
+                    eprintln!("Capture Widget menu: {error:?}");
+                }
+            },
+        ));
     let strip = Border::el()
         .width(90.0)
         .height(6.0)
@@ -380,8 +449,12 @@ fn build_widget(scope: &AppScope) -> Result<Widget> {
         .content(StackPanel::el().child(buttons).child(strip))
         .build(scope)?;
     scope.set_topmost(&window, true)?;
+    let theme_scope = scope.clone();
+    window.clone().on_actual_theme_variant_changed(scope, move |_| {
+        dark.set_if_changed(parts::dark_theme(&theme_scope));
+    })?;
     Ok(Widget {
-        window, expanded, dark, hover: 0,
+        window, expanded, dark, hover: 0, inside: false, menu_open: false, menu, more_button,
         #[cfg(windows)]
         prepared: false,
         #[cfg(target_os = "macos")]
@@ -390,6 +463,79 @@ fn build_widget(scope: &AppScope) -> Result<Widget> {
         test_button,
         _subs: subs,
     })
+}
+
+pub(super) fn hide_widget_for_selftest() -> Result<()> {
+    let menu = with(|extras| extras.widget.as_ref().map(|widget| widget.menu.clone()))
+        .flatten().expect("the test widget is mounted");
+    let item = menu.items()?.get(0)?.cast::<MenuItem>().expect("the first widget option is a menu item");
+    let command = item.get_command()?.expect("Hide Capture Widget has a bound command");
+    Ok(command.execute(Default::default())?)
+}
+
+fn widget_command(command: &str) {
+    if let Err(error) = close_widget_menu() {
+        eprintln!("Capture Widget menu: {error:?}");
+    }
+    collapse();
+    let binding = super::TRAY.with(|tray| tray.borrow().clone()).expect("the tray is mounted before the Capture Widget is shown");
+    binding.model.run(|model| match command {
+        "hide" => model.set_show_widget(false),
+        "capture-window" => model.show_capture_window(),
+        "editor" => model.show_editor(),
+        "preferences" => model.preferences(),
+        _ => unreachable!("unknown Capture Widget command: {command}"),
+    });
+}
+
+fn close_widget_menu() -> Result<()> {
+    let menu = with(|extras| extras.widget.as_mut().map(|widget| {
+        widget.menu_open = false;
+        widget.menu.clone()
+    })).flatten();
+    if let Some(menu) = menu {
+        menu.hide()?;
+    }
+    Ok(())
+}
+
+fn toggle_widget_menu(button: &Button) -> Result<()> {
+    let Some((menu, open)) = with(|extras| extras.widget.as_mut().map(|widget| {
+        let open = widget.menu_open;
+        widget.menu_open = !open;
+        (widget.menu.clone(), open)
+    })).flatten() else {
+        return Ok(());
+    };
+    if open {
+        close_widget_menu()
+    } else if let Err(error) = menu.show_at_with_control(button) {
+        with(|extras| {
+            if let Some(widget) = extras.widget.as_mut() {
+                widget.menu_open = false;
+            }
+        });
+        Err(error)
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn widget_menu_for_selftest(open: bool) -> Result<()> {
+    if !open {
+        return close_widget_menu();
+    }
+    let button = with(|extras| extras.widget.as_ref().and_then(|widget| widget.more_button.get()))
+        .flatten().expect("the test widget More button is mounted");
+    toggle_widget_menu(&button)?;
+    hovered(false);
+    Ok(())
+}
+
+pub(super) fn widget_menu_open_for_selftest() -> Result<bool> {
+    let (menu, expanded) = with(|extras| extras.widget.as_ref().map(|widget| (widget.menu.clone(), widget.expanded)))
+        .flatten().expect("the test widget is mounted");
+    Ok(menu.get_is_open()? && expanded.get_untracked())
 }
 
 // ---- Grab Text ----------------------------------------------------------------

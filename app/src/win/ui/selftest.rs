@@ -7,6 +7,7 @@
 //! video to step through; `JIFFSHOT_UITEST_KEEP` leaves the test window open.
 //! `JIFFSHOT_UITEST_CAPTURE_ONLY` checks the Capture window and chooser
 //! without running the editor and overlay walk.
+//! `JIFFSHOT_UITEST_WIDGET` checks the floating bar with an isolated tray model.
 //! On macOS, `JIFFSHOT_UITEST_OVERLAY` runs only the synthetic overlay test.
 //! `JIFFSHOT_UITEST_STARTUP` checks login-item status without changing it.
 //! `JIFFSHOT_UITEST_RECENT` checks recent-file actions with a scratch library.
@@ -445,6 +446,9 @@ fn editor_walk(s: &mut Script) {
 /// The whole walk, in order.
 fn script() -> Script {
     let mut s = Script(VecDeque::new());
+    if env("JIFFSHOT_UITEST_WIDGET").is_some() {
+        return capture_widget_script();
+    }
     if env("JIFFSHOT_UITEST_VIDEO_EDIT").is_some() {
         video_edit_steps(&mut s);
         return s;
@@ -2793,6 +2797,157 @@ fn saved_areas_script() -> Script {
     if env("JIFFSHOT_UITEST_SAVED_AREAS_ENGINE").is_some() {
         add_saved_area_engine_steps(&mut script);
     }
+    script
+}
+
+fn capture_widget_script() -> Script {
+    struct WidgetTray {
+        sink: Option<crate::vm::TrayViewModelSink>,
+    }
+    macro_rules! unexpected {
+        ($($name:ident $(($ty:ty))?),* $(,)?) => {
+            $(fn $name(&mut self $(, _: $ty)?) -> rustolonia::Result<()> {
+                panic!("unexpected widget test tray action: {}", stringify!($name));
+            })*
+        };
+    }
+    impl crate::vm::TrayViewModel for WidgetTray {
+        fn attach(&mut self, sink: crate::vm::TrayViewModelSink) -> rustolonia::Result<()> {
+            self.sink = Some(sink);
+            Ok(())
+        }
+        fn detach(&mut self) -> rustolonia::Result<()> { Ok(()) }
+        fn set_show_widget(&mut self, value: bool) -> rustolonia::Result<()> {
+            let mut settings = jiffshot_workflow::settings::Settings::load();
+            settings.show_widget = value;
+            settings.save();
+            self.sink.expect("the test tray is attached").set_show_widget(value)?;
+            super::main().sink.set_widget(value)
+        }
+        fn show_capture_window(&mut self) -> rustolonia::Result<()> {
+            crate::vm::TrayViewModel::show_capture_window(&mut crate::tray::TrayModel)
+        }
+        fn show_editor(&mut self) -> rustolonia::Result<()> {
+            crate::vm::TrayViewModel::show_editor(&mut crate::tray::TrayModel)
+        }
+        fn preferences(&mut self) -> rustolonia::Result<()> {
+            crate::vm::TrayViewModel::preferences(&mut crate::tray::TrayModel)
+        }
+        unexpected!(
+            set_copy_to_clipboard(bool), set_open_in_editor(bool), set_include_cursor(bool), set_run_at_startup(bool),
+            set_time_lapse(bool), set_schedule(bool), capture, capture_delayed, capture_screen, repeat_last,
+            capture_window, scrolling, scrolling_horizontal, scrolling_both,
+            panoramic, freehand, multiple_areas, fixed_size, menu_capture, grab_text, step_capture, from_clipboard,
+            from_file, record_video, open_library_folder, exit, open_recent_capture(String),
+        );
+    }
+    fn saved_widget() -> bool {
+        let path = jiffshot_capture::paths::config_dir().expect("the scratch config directory").join(jiffshot_capture::config::FILE);
+        let bytes = std::fs::read(path).expect("read the saved widget preference");
+        let root: serde_json::Value = serde_json::from_slice(&bytes).expect("parse the saved widget preference");
+        root["capture"]["show_widget"].as_bool().expect("the saved widget preference is a boolean")
+    }
+    #[cfg(windows)]
+    fn assert_widget_pixels(path: &Path, window: isize) -> bool {
+        let image = image::open(path).expect("read the floating bar screenshot").to_rgb8();
+        let dark = image.get_pixel(1, image.height() / 2)[0] < 128;
+        let ink = |pixel: &image::Rgb<u8>| {
+            if dark { pixel.0.iter().all(|channel| *channel > 180) } else { pixel.0.iter().all(|channel| *channel < 90) }
+        };
+        let count = |left: u32, right: u32| {
+            (0..image.height() * 3 / 4).flat_map(|y| (left..right).map(move |x| (x, y)))
+                .filter(|&(x, y)| ink(image.get_pixel(x, y))).count()
+        };
+        let scale = super::capture_view::parts::scale(window);
+        assert!(count((126.0 * scale) as u32, (154.0 * scale) as u32) > 40, "the Grab Text icon is missing");
+        assert!(count(image.width() * 3 / 4, image.width()) > 40, "the More label is missing or clipped at the display's DPI");
+        dark
+    }
+    let mut script = Script(VecDeque::new());
+    script.step(|test| {
+        let dir = test.dir.canonicalize().expect("resolve the test directory");
+        let config = jiffshot_capture::paths::config_dir().expect("the scratch config directory")
+            .canonicalize().expect("resolve the scratch config directory");
+        assert!(config.starts_with(&dir) && config != dir, "the config must be inside the test directory");
+        assert!(super::TRAY.with(|tray| tray.borrow().is_none()), "the widget fixture must not use the real capture engine");
+        super::mount_tray(&super::scope().expect("the editor scope"), WidgetTray { sink: None }).expect("mount the isolated widget tray");
+        test.remember_windows();
+        super::TRAY.with(|tray| tray.borrow().as_ref().expect("the test tray").model.run(|model| model.set_show_widget(true)));
+        500
+    }).step(|_| {
+        assert!(super::extras::widget_visible_for_selftest().expect("inspect the widget"), "the widget did not appear");
+        assert!(saved_widget(), "showing the widget did not save its preference");
+        super::extras::expand_widget_for_selftest().expect("expand the widget");
+        300
+    }).step(|test| {
+        let windows = test.new_windows();
+        assert_eq!(windows.len(), 1, "expected just the floating bar");
+        test.shot_of(windows[0], "capture-widget.png");
+        #[cfg(windows)]
+        {
+            assert_widget_pixels(&test.path("capture-widget.png"), windows[0]);
+            test.line("capture_widget_script: Grab Text and More both have visible pixels at the display's DPI");
+        }
+        test.line("capture_widget_script: expanded Grab Text icon and visible More action");
+        test.note = sink().theme.get_untracked();
+        run(if test.note == "Light" { "theme:Dark" } else { "theme:Light" });
+        350
+    }).step(|test| {
+        let windows = test.new_windows();
+        assert_eq!(windows.len(), 1, "expected just the floating bar after a theme change");
+        test.shot_of(windows[0], "capture-widget-theme.png");
+        #[cfg(windows)]
+        assert_eq!(assert_widget_pixels(&test.path("capture-widget-theme.png"), windows[0]), test.note == "Light",
+            "the floating bar did not follow the changed theme");
+        test.line("capture_widget_script: Grab Text stays visible after changing the theme");
+        run(format!("theme:{}", test.note));
+        350
+    }).step(|test| {
+        test.remember_windows();
+        super::extras::widget_menu_for_selftest(true).expect("open the widget options");
+        700
+    }).step(|test| {
+        assert!(super::extras::widget_menu_open_for_selftest().expect("inspect the widget menu"),
+            "the floating bar collapsed while its options menu was open");
+        let menus = test.new_windows();
+        assert_eq!(menus.len(), 1, "expected the vertical widget options menu");
+        test.shot_of(menus[0], "capture-widget-menu.png");
+        test.line("capture_widget_script: vertical menu stays open after the pointer leaves the bar");
+        if env("JIFFSHOT_UITEST_KEEP").is_none() {
+            super::extras::hide_widget_for_selftest().expect("invoke Hide Capture Widget");
+        }
+        500
+    }).step(|test| {
+        if env("JIFFSHOT_UITEST_KEEP").is_none() {
+            assert!(!super::extras::widget_visible_for_selftest().expect("inspect the hidden widget"), "Hide left the floating bar visible");
+            assert!(test.new_windows().is_empty(), "Hide left the options popup visible");
+            assert!(!saved_widget(), "Hide did not persist the disabled preference");
+            super::extras::hide_widget_for_selftest().expect("invoke Hide Capture Widget again");
+            test.line("capture_widget_script: Hide disabled the saved preference and removed the floating bar");
+        }
+        500
+    }).step(|test| {
+        if env("JIFFSHOT_UITEST_KEEP").is_none() {
+            assert!(!saved_widget(), "repeated Hide re-enabled the widget");
+            test.line("capture_widget_script: repeated Hide stays disabled");
+            super::TRAY.with(|tray| tray.borrow().as_ref().expect("the test tray").model.run(|model| model.set_show_widget(true)));
+        }
+        500
+    }).step(|test| {
+        if env("JIFFSHOT_UITEST_KEEP").is_none() {
+            assert!(super::extras::widget_visible_for_selftest().expect("inspect the restored widget"), "the tray could not restore the widget");
+            assert!(saved_widget(), "restoring the widget did not persist its preference");
+            super::extras::hide_widget_for_selftest().expect("hide the restored widget");
+            test.line("capture_widget_script: the tray restores the widget after Hide");
+        }
+        500
+    }).step(|_| {
+        if env("JIFFSHOT_UITEST_KEEP").is_none() {
+            assert!(!super::extras::widget_visible_for_selftest().expect("inspect the hidden widget"), "the restored widget could not be hidden again");
+            assert!(!saved_widget(), "hiding the restored widget did not persist");
+        }
+        0
+    });
     script
 }
 
