@@ -16,7 +16,7 @@ pub fn data_object(files: &[PathBuf]) -> io::Result<IDataObject> {
     let mut pidls: Vec<*const ITEMIDLIST> = Vec::with_capacity(files.len());
     let result = (|| {
         for file in files {
-            let path = crate::wide(&file.to_string_lossy());
+            let path = crate::wide_path(file);
             // SAFETY: a NUL-terminated path that outlives the call.
             let pidl = unsafe { ILCreateFromPathW(PCWSTR(path.as_ptr())) };
             if pidl.is_null() {
@@ -88,7 +88,7 @@ mod tests {
                 .map(|i| {
                     let mut buf = vec![0u16; DragQueryFileW(drop, i, None) as usize + 1];
                     DragQueryFileW(drop, i, Some(&mut buf));
-                    PathBuf::from(crate::from_wide(&buf))
+                    crate::path_from_wide(&buf)
                 })
                 .collect();
             ReleaseStgMedium(&mut medium);

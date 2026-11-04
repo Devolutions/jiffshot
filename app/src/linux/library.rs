@@ -166,11 +166,18 @@ fn search_captures_in_at(
 }
 
 fn site_from_url(url: &str) -> Option<&str> {
-    let authority = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let authority = authority.split(['/', '?', '#']).next()?;
-    let host = authority
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host_port = authority
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host);
+    let host = if host_port.starts_with('[') {
+        host_port.find(']').map(|end| &host_port[..=end])?
+    } else {
+        host_port
+            .split_once(':')
+            .map_or(host_port, |(host, _)| host)
+    };
     (!host.is_empty()).then_some(host)
 }
 
@@ -318,26 +325,16 @@ fn write_metadata_document(
         .map_err(|error| format!("could not serialize capture metadata: {error}"))?;
     let mut staging = tempfile::NamedTempFile::new_in(parent)
         .map_err(|error| format!("could not stage metadata in {}: {error}", parent.display()))?;
-    match std::fs::metadata(&path) {
-        Ok(existing) => {
-            staging
-                .as_file()
-                .set_permissions(existing.permissions())
-                .map_err(|error| {
-                    format!(
-                        "could not preserve permissions for {}: {error}",
-                        path.display()
-                    )
-                })?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+    let existing_permissions = match std::fs::metadata(&path) {
+        Ok(existing) => Some(existing.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
             return Err(format!(
                 "could not read permissions for {}: {error}",
                 path.display()
             ));
         }
-    }
+    };
     staging
         .write_all(&bytes)
         .and_then(|_| staging.as_file().sync_all())
@@ -347,6 +344,17 @@ fn write_metadata_document(
                 path.display()
             )
         })?;
+    if let Some(permissions) = existing_permissions {
+        staging
+            .as_file()
+            .set_permissions(permissions)
+            .map_err(|error| {
+                format!(
+                    "could not preserve permissions for {}: {error}",
+                    path.display()
+                )
+            })?;
+    }
     reject_metadata_symlink(capture)?;
     if read_metadata_bytes(capture)?.as_deref() != original {
         return Err(format!(
@@ -472,6 +480,22 @@ mod tests {
             )
             .expect("capture modification time should be set");
         path
+    }
+
+    #[test]
+    fn site_search_uses_only_the_url_host() {
+        assert_eq!(
+            site_from_url("https://account:password@example.test:8443/path"),
+            Some("example.test")
+        );
+        assert_eq!(
+            site_from_url("https://[2001:db8::1]:8443/path"),
+            Some("[2001:db8::1]")
+        );
+        assert_eq!(
+            site_from_url("https://example.test:8443/path"),
+            Some("example.test")
+        );
     }
 
     #[test]
@@ -893,6 +917,34 @@ mod tests {
                 & 0o777,
             0o640,
             "replacing the sidecar should preserve its permissions"
+        );
+    }
+
+    #[test]
+    fn editing_read_only_metadata_succeeds_and_preserves_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temporary directory should be available");
+        let capture = write_capture(directory.path(), "capture.mp4", 1);
+        let sidecar = capture.with_extension("json");
+        std::fs::write(&sidecar, r#"{"tags":["old"]}"#)
+            .expect("metadata fixture should be written");
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o444))
+            .expect("fixture should be read-only");
+
+        set_tags(&capture, "new").expect("tags should save to read-only metadata");
+
+        let metadata = std::fs::metadata(&sidecar).expect("metadata should exist");
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            0o444,
+            "replacing the sidecar should preserve its read-only permissions"
+        );
+        assert_eq!(
+            read_metadata(&capture)
+                .expect("updated metadata should be readable")
+                .tags,
+            ["new"]
         );
     }
 

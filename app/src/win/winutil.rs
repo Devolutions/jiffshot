@@ -95,7 +95,7 @@ pub fn minimize() {
 #[cfg(windows)]
 fn shell(verb: &str, file: &Path, args: Option<&str>) -> bool {
     let verb = wide(verb);
-    let file = wide(&file.to_string_lossy());
+    let file = jiffshot_capture::wide_path(file);
     let args = args.map(wide);
     // SAFETY: NUL-terminated strings that outlive the call.
     let r = unsafe {
@@ -222,20 +222,29 @@ pub fn print_file(path: &Path) -> bool {
     shell("print", path, None)
 }
 
+#[cfg(windows)]
+fn recycle_path_list(files: &[PathBuf]) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut list = Vec::new();
+    for file in files {
+        list.extend(file.as_os_str().encode_wide());
+        list.push(0);
+    }
+    list.push(0);
+    list
+}
+
 /// Moves files to the Recycle Bin (so a mistaken delete can be undone).
 #[cfg(windows)]
 pub fn recycle(files: &[PathBuf]) -> bool {
     use windows_sys::Win32::UI::Shell::{SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT, FO_DELETE, SHFILEOPSTRUCTW};
+
     if files.is_empty() {
         return true;
     }
     // A double-NUL-terminated list of paths.
-    let mut list: Vec<u16> = Vec::new();
-    for f in files {
-        list.extend(f.to_string_lossy().encode_utf16());
-        list.push(0);
-    }
-    list.push(0);
+    let list = recycle_path_list(files);
     let mut op = SHFILEOPSTRUCTW {
         hwnd: main_hwnd() as HWND,
         wFunc: FO_DELETE,
@@ -248,6 +257,48 @@ pub fn recycle(files: &[PathBuf]) -> bool {
     };
     // SAFETY: the list and struct outlive the call.
     unsafe { SHFileOperationW(&mut op) == 0 && op.fAnyOperationsAborted == 0 }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::os::windows::ffi::OsStringExt;
+
+    #[test]
+    fn recycle_paths_preserve_unpaired_utf16() {
+        let path = PathBuf::from(std::ffi::OsString::from_wide(&[
+            b'C' as u16,
+            b':' as u16,
+            b'\\' as u16,
+            0xD800,
+            b'.' as u16,
+            b'p' as u16,
+            b'n' as u16,
+            b'g' as u16,
+        ]));
+        assert_eq!(
+            recycle_path_list(&[path]),
+            [
+                b'C' as u16,
+                b':' as u16,
+                b'\\' as u16,
+                0xD800,
+                b'.' as u16,
+                b'p' as u16,
+                b'n' as u16,
+                b'g' as u16,
+                0,
+                0,
+            ]
+        );
+    }
+
+    #[test]
+    fn recycle_paths_use_a_double_terminated_path_list() {
+        let paths = [PathBuf::from("first"), PathBuf::from("second")];
+        let expected: Vec<u16> = "first\0second\0\0".encode_utf16().collect();
+        assert_eq!(recycle_path_list(&paths), expected);
+    }
 }
 
 /// Moves files to the Trash (so a mistaken delete can be undone).

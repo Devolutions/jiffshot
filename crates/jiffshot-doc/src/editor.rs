@@ -414,6 +414,14 @@ pub struct Editor {
 const HISTORY_LIMIT: usize = 100;
 const MIN_DRAG: f32 = 4.0;
 
+fn valid_canvas_size(width: u32, height: u32) -> bool {
+    width > 0
+        && height > 0
+        && width <= i32::MAX as u32
+        && height <= i32::MAX as u32
+        && u64::from(width) * u64::from(height) <= crate::io::MAX_DOCUMENT_PIXELS
+}
+
 impl Editor {
     pub fn new(doc: Document) -> Editor {
         let display = Pixmap::new(doc.width(), doc.height()).expect("non-zero document");
@@ -819,6 +827,7 @@ impl Editor {
 
     /// Selects just `id` (or nothing).
     pub fn select(&mut self, id: Option<u64>) {
+        let id = id.filter(|id| self.doc.get(*id).is_some());
         if !self.others.is_empty() {
             self.others.clear();
             self.events |= EVENT_SELECTION;
@@ -1046,6 +1055,39 @@ impl Editor {
         true
     }
 
+    fn relabel_duplicated_group_steps(&mut self, id: u64) {
+        fn step_ids(object: &Object, ids: &mut Vec<u64>) {
+            match &object.kind {
+                Kind::Step { .. } => ids.push(object.id),
+                Kind::Group { objects } => {
+                    for child in objects {
+                        step_ids(child, ids);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let Some(root) = self.doc.get(id) else { return };
+        let mut ids = Vec::new();
+        step_ids(root, &mut ids);
+        if ids.is_empty() {
+            return;
+        }
+
+        let labels = self.doc.next_step_labels(ids.len());
+        let by_id: HashMap<u64, String> = ids.into_iter().zip(labels).collect();
+        if let Some(root) = self.doc.get_mut(id) {
+            root.walk_mut(&mut |object| {
+                if let Some(label) = by_id.get(&object.id) {
+                    if let Kind::Step { label: current, .. } = &mut object.kind {
+                        *current = label.clone();
+                    }
+                }
+            });
+        }
+    }
+
     pub fn duplicate_selected(&mut self) -> Option<u64> {
         if !self.others.is_empty() {
             let copies: Vec<Object> = self
@@ -1061,6 +1103,9 @@ impl Editor {
                     *label = self.doc.next_step_label();
                 }
                 let id = self.doc.insert(c);
+                if matches!(self.doc.get(id).map(|object| &object.kind), Some(Kind::Group { .. })) {
+                    self.relabel_duplicated_group_steps(id);
+                }
                 let b = self.doc.get(id).unwrap().bounds();
                 self.invalidate_box(b);
                 ids.push(id);
@@ -1075,6 +1120,9 @@ impl Editor {
         }
         self.checkpoint("Duplicate", None);
         let id = self.doc.insert(copy);
+        if matches!(self.doc.get(id).map(|object| &object.kind), Some(Kind::Group { .. })) {
+            self.relabel_duplicated_group_steps(id);
+        }
         let b = self.doc.get(id).unwrap().bounds();
         self.invalidate_box(b);
         self.select(Some(id));
@@ -1475,14 +1523,29 @@ impl Editor {
             return false;
         };
         let canvas = self.doc.bounds().to_box();
-        let b = all.inflate(-2.0).union(&canvas);
+        let trim = |start: f32, end: f32| {
+            if end - start > 4.0 {
+                (start + 2.0, end - 2.0)
+            } else {
+                (start, end)
+            }
+        };
+        let (x0, x1) = trim(all.x0, all.x1);
+        let (y0, y1) = trim(all.y0, all.y1);
+        let b = Box2::new(x0, y0, x1, y1).union(&canvas);
         if b == canvas {
             return false;
         }
         let r = b.to_irect();
+        let (Some(dx), Some(dy)) = (r.x.checked_neg(), r.y.checked_neg()) else {
+            return false;
+        };
+        if !valid_canvas_size(r.w as u32, r.h as u32) {
+            return false;
+        }
         let color = self.canvas_color;
         self.edit_document("Expand canvas", |d| {
-            d.resize_canvas(r.w as u32, r.h as u32, -r.x, -r.y, color);
+            d.resize_canvas(r.w as u32, r.h as u32, dx, dy, color);
             true
         })
     }
@@ -1936,10 +1999,11 @@ impl Editor {
                 if let Some(m) = self.marquee {
                     self.set_marquee(None);
                     let (nw, nh) = (m.x1.round() as u32, m.y1.round() as u32);
+                    let (nw, nh) = (nw.max(8), nh.max(8));
                     let color = self.canvas_color;
-                    if (nw, nh) != self.doc.size() {
+                    if (nw, nh) != self.doc.size() && valid_canvas_size(nw, nh) {
                         self.edit_document("Resize canvas", |d| {
-                            d.resize_canvas(nw.max(8), nh.max(8), 0, 0, color);
+                            d.resize_canvas(nw, nh, 0, 0, color);
                             true
                         });
                     }
@@ -2638,6 +2702,58 @@ mod tests {
     }
 
     #[test]
+    fn selecting_a_missing_object_clears_the_selection() {
+        let mut e = editor();
+        e.select(Some(u64::MAX));
+        assert_eq!(e.selection(), None);
+        assert!(e.selected_ids().is_empty());
+        assert!(!e.delete_selected());
+    }
+
+    #[test]
+    fn canvas_resize_rejects_dimensions_that_documents_cannot_save() {
+        let mut e = editor();
+        e.set_tool(Tool::Select);
+        e.pointer_down(Pt::new(400.0, 300.0), NONE, 4.0);
+        e.pointer_up(Pt::new(8_000.0, 5_000.0), NONE);
+        assert_eq!(e.document().size(), (400, 300));
+    }
+
+    #[test]
+    fn expand_to_fit_rejects_dimensions_that_documents_cannot_save() {
+        let mut doc = Document::blank(10, 10, Rgba::WHITE);
+        doc.add(
+            Kind::Shape {
+                rect: Box2::from_xywh(0.0, 0.0, 8_000.0, 5_000.0),
+                shape: ShapeKind::Rectangle,
+            },
+            Style::default(),
+        );
+        let mut e = Editor::new(doc);
+        assert!(!e.expand_to_fit());
+        assert_eq!(e.document().size(), (10, 10));
+    }
+
+    #[test]
+    fn expand_to_fit_does_not_trim_thin_objects_out_of_the_canvas() {
+        let mut doc = Document::blank(200, 100, Rgba::WHITE);
+        doc.add(
+            Kind::Line {
+                a: Pt::new(250.0, 40.0),
+                b: Pt::new(250.0, 60.0),
+                control: None,
+            },
+            Style {
+                width: 0.0,
+                ..Style::default()
+            },
+        );
+        let mut editor = Editor::new(doc);
+        assert!(editor.expand_to_fit());
+        assert!(editor.document().width() >= 252);
+    }
+
+    #[test]
     fn text_steps_styles_and_crop() {
         let mut e = editor();
         e.set_tool(Tool::Text);
@@ -2746,6 +2862,75 @@ mod tests {
             if let Kind::Step { label, .. } = &object.kind { Some(label.as_str()) } else { None }
         }).collect();
         assert_eq!(labels, ["1", "2", "3", "4"]);
+    }
+
+    #[test]
+    fn duplicating_a_group_assigns_new_labels_to_nested_steps() {
+        let mut doc = Document::blank(100, 100, Rgba::WHITE);
+        let id = doc.add(
+            Kind::Group {
+                objects: vec![Object::new(
+                    2,
+                    Kind::Step {
+                        center: Pt::new(20.0, 20.0),
+                        radius: 10.0,
+                        label: "1".into(),
+                        shape: ShapeKind::Ellipse,
+                    },
+                    Style::default(),
+                )],
+            },
+            Style::default(),
+        );
+        let mut editor = Editor::new(doc);
+        editor.select(Some(id));
+        editor.duplicate_selected();
+
+        let mut labels = Vec::<String>::new();
+        for object in &editor.document().objects {
+            object.walk(&mut |nested| {
+                if let Kind::Step { label, .. } = &nested.kind {
+                    labels.push(label.clone());
+                }
+            });
+        }
+        assert_eq!(labels, ["1", "2"]);
+    }
+
+    #[test]
+    fn duplicating_a_group_advances_each_lettered_step() {
+        let mut doc = Document::blank(100, 100, Rgba::WHITE);
+        let step = |id, label: &str| {
+            Object::new(
+                id,
+                Kind::Step {
+                    center: Pt::new(20.0, 20.0),
+                    radius: 10.0,
+                    label: label.into(),
+                    shape: ShapeKind::Ellipse,
+                },
+                Style::default(),
+            )
+        };
+        let id = doc.add(
+            Kind::Group {
+                objects: vec![step(2, "A"), step(3, "B")],
+            },
+            Style::default(),
+        );
+        let mut editor = Editor::new(doc);
+        editor.select(Some(id));
+        editor.duplicate_selected();
+
+        let mut labels = Vec::<String>::new();
+        for object in &editor.document().objects {
+            object.walk(&mut |nested| {
+                if let Kind::Step { label, .. } = &nested.kind {
+                    labels.push(label.clone());
+                }
+            });
+        }
+        assert_eq!(labels, ["A", "B", "C", "D"]);
     }
 
     #[test]

@@ -3,7 +3,9 @@
 
 use crate::wide;
 use std::path::{Path, PathBuf};
-use windows_sys::Win32::Foundation::HWND;
+use std::ffi::{OsStr, OsString};
+use std::os::windows::ffi::OsStrExt;
+use windows_sys::Win32::Foundation::{FreeLibrary, HWND};
 
 fn app_path_value(value: &str) -> Option<PathBuf> {
     let value = value.trim_end_matches('\0').trim().trim_matches('"');
@@ -78,18 +80,18 @@ fn executable_path(program: &str) -> Result<PathBuf, String> {
     Err(format!("{program} is not installed or could not start"))
 }
 
-fn shell(owner: isize, verb: &str, file: &str, args: Option<&str>) -> bool {
+fn shell(owner: isize, verb: &str, file: &OsStr, args: Option<&[u16]>) -> bool {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    let (verb, file) = (wide(verb), wide(file));
-    let args = args.map(wide);
+    let verb = wide(verb);
+    let file = file.encode_wide().chain(Some(0)).collect::<Vec<_>>();
     // SAFETY: NUL-terminated strings that outlive the call.
     let r = unsafe {
         ShellExecuteW(
             owner as HWND,
             verb.as_ptr(),
             file.as_ptr(),
-            args.as_ref().map_or(std::ptr::null(), |a| a.as_ptr()),
+            args.map_or(std::ptr::null(), |a| a.as_ptr()),
             std::ptr::null(),
             SW_SHOWNORMAL,
         )
@@ -97,8 +99,11 @@ fn shell(owner: isize, verb: &str, file: &str, args: Option<&str>) -> bool {
     r as isize > 32
 }
 
-fn quoted(p: &Path) -> String {
-    format!("\"{}\"", p.display())
+fn quoted(p: &Path) -> Vec<u16> {
+    std::iter::once(b'"' as u16)
+        .chain(p.as_os_str().encode_wide())
+        .chain([b'"' as u16, 0])
+        .collect()
 }
 
 /// Opens `file` in an absolute executable path or an executable registered in App Paths.
@@ -107,7 +112,7 @@ pub fn open_in(owner: isize, program: &str, file: &Path) -> Result<(), String> {
     if shell(
         owner,
         "open",
-        &executable.to_string_lossy(),
+        executable.as_os_str(),
         Some(&quoted(file)),
     ) {
         Ok(())
@@ -118,7 +123,7 @@ pub fn open_in(owner: isize, program: &str, file: &Path) -> Result<(), String> {
 
 /// Lets Windows ask which program to open the file with.
 pub fn open_with(owner: isize, file: &Path) -> Result<bool, String> {
-    if shell(owner, "openas", &file.to_string_lossy(), None) {
+    if shell(owner, "openas", file.as_os_str(), None) {
         Ok(true)
     } else {
         Err("Windows could not show the Open with dialog".into())
@@ -126,7 +131,7 @@ pub fn open_with(owner: isize, file: &Path) -> Result<bool, String> {
 }
 
 pub fn print(owner: isize, file: &Path) -> Result<bool, String> {
-    if shell(owner, "print", &file.to_string_lossy(), None) {
+    if shell(owner, "print", file.as_os_str(), None) {
         Ok(true)
     } else {
         Err("Windows has no print handler for this file type".into())
@@ -136,22 +141,44 @@ pub fn print(owner: isize, file: &Path) -> Result<bool, String> {
 /// Copies the file into `folder` (a OneDrive, Dropbox or network folder),
 /// never overwriting.
 pub fn to_folder(file: &Path, folder: &Path) -> Result<PathBuf, String> {
-    let name = file
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Capture".into());
-    let ext = file
-        .extension()
-        .map(|e| e.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "png".into());
-    let mut target = folder.join(format!("{name}.{ext}"));
-    let mut n = 2;
-    while target.exists() {
-        target = folder.join(format!("{name} ({n}).{ext}"));
-        n += 1;
+    let name = file.file_stem().unwrap_or_else(|| OsStr::new("Capture"));
+    let ext = file.extension().unwrap_or_else(|| OsStr::new("png"));
+    for n in 1_u64.. {
+        let mut target_name = OsString::from(name);
+        if n != 1 {
+            target_name.push(format!(" ({n})"));
+        }
+        target_name.push(".");
+        target_name.push(ext);
+        let target = folder.join(target_name);
+        let mut destination = match std::fs::File::options()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+        {
+            Ok(destination) => destination,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        let result = (|| {
+            let mut source = std::fs::File::open(file)?;
+            let permissions = source.metadata()?.permissions();
+            std::io::copy(&mut source, &mut destination)?;
+            destination.set_permissions(permissions)?;
+            Ok::<_, std::io::Error>(())
+        })();
+        if let Err(error) = result {
+            drop(destination);
+            if let Err(cleanup) = std::fs::remove_file(&target) {
+                if cleanup.kind() != std::io::ErrorKind::NotFound {
+                    return Err(format!("{error}; could not remove {}: {cleanup}", target.display()));
+                }
+            }
+            return Err(error.to_string());
+        }
+        return Ok(target);
     }
-    std::fs::copy(file, &target).map_err(|e| e.to_string())?;
-    Ok(target)
+    Err("No available destination filename.".into())
 }
 
 #[repr(C)]
@@ -194,13 +221,11 @@ pub fn email(owner: isize, file: &Path, subject: &str) -> Result<bool, String> {
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
     const MAPI_LOGON_UI: u32 = 1;
     const MAPI_DIALOG: u32 = 8;
-    let path = wide(&file.to_string_lossy());
-    let name = wide(
-        &file
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-    );
+    let path = crate::wide_path(file);
+    let name = file
+        .file_name()
+        .map(|name| name.encode_wide().chain(Some(0)).collect())
+        .unwrap_or_else(|| vec![0]);
     let subject = wide(subject);
     // SAFETY: mapi32.dll's MAPISendMailW has this signature; every pointer
     // handed to it outlives the call.
@@ -210,6 +235,7 @@ pub fn email(owner: isize, file: &Path, subject: &str) -> Result<bool, String> {
             return Err("no mail program is set up (Simple MAPI is missing)".into());
         }
         let Some(proc_) = GetProcAddress(module, c"MAPISendMailW".as_ptr() as *const u8) else {
+            FreeLibrary(module);
             return Err("the mail program does not support attachments from other apps".into());
         };
         let send: MapiSendMailW = std::mem::transmute(proc_);
@@ -235,7 +261,9 @@ pub fn email(owner: isize, file: &Path, subject: &str) -> Result<bool, String> {
             file_count: 1,
             files: &mut attachment,
         };
-        match send(0, owner as usize, &message, MAPI_DIALOG | MAPI_LOGON_UI, 0) {
+        let result = send(0, owner as usize, &message, MAPI_DIALOG | MAPI_LOGON_UI, 0);
+        FreeLibrary(module);
+        match result {
             0 => Ok(true),
             1 => Ok(false),
             code => Err(format!(
@@ -248,6 +276,7 @@ pub fn email(owner: isize, file: &Path, subject: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn app_paths_reject_bare_names_and_relative_paths() {
@@ -257,5 +286,42 @@ mod tests {
             app_path_value("\"C:\\Windows\\System32\\mspaint.exe\"\0"),
             Some(PathBuf::from(r"C:\Windows\System32\mspaint.exe"))
         );
+    }
+
+    #[test]
+    fn concurrent_folder_copies_never_overwrite_each_other() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("jiffshot-share-{nonce}"));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("source.bin");
+        let folder = root.join("destination");
+        std::fs::create_dir(&folder).unwrap();
+        let contents = vec![0xA5; 1 << 20];
+        std::fs::write(&source, &contents).unwrap();
+        std::fs::write(folder.join("source.bin"), b"existing").unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let source = source.clone();
+                let folder = folder.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    to_folder(&source, &folder).unwrap()
+                })
+            })
+            .collect();
+        let paths: Vec<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
+
+        assert_eq!(paths.iter().collect::<HashSet<_>>().len(), paths.len());
+        assert_eq!(std::fs::read(folder.join("source.bin")).unwrap(), b"existing");
+        for path in paths {
+            assert_eq!(std::fs::read(path).unwrap(), contents);
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

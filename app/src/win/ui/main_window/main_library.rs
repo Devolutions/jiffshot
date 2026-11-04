@@ -292,8 +292,8 @@ pub(super) fn tile(s: MainViewModelSink, theme: Theme, key: u64) -> AnyEl {
         .child(content);
     #[cfg(windows)]
     let card = card
-        .on_pointer_entered(move |_| fields.with(|f| crate::drag_out::hover(&f.path)))
-        .on_pointer_exited(move |_| fields.with(|f| crate::drag_out::leave(&f.path)))
+        .on_pointer_entered(move |_| fields.with(|f| crate::drag_out::hover(&f.path_identity)))
+        .on_pointer_exited(move |_| fields.with(|f| crate::drag_out::leave(&f.path_identity)))
         .on_tapped(move |args| {
             if args.key_modifiers & crate::ui::COMMAND_MODIFIER != 0 {
                 on_item(s, key, |m| m.toggle_select());

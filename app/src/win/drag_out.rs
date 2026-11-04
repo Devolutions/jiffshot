@@ -5,7 +5,7 @@
 //! main window starts a shell drag when the left button is dragged from it.
 
 use crate::{app, winutil};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
@@ -18,13 +18,13 @@ static HOVERED: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// Where the left button went down on a tile, and its capture.
 static PRESSED: Mutex<Option<(i32, i32, PathBuf)>> = Mutex::new(None);
 
-pub fn hover(path: &str) {
-    *HOVERED.lock().unwrap() = (!path.is_empty()).then(|| PathBuf::from(path));
+pub fn hover(path: &Path) {
+    *HOVERED.lock().unwrap() = (!path.as_os_str().is_empty()).then(|| path.to_path_buf());
 }
 
-pub fn leave(path: &str) {
+pub fn leave(path: &Path) {
     let mut hovered = HOVERED.lock().unwrap();
-    if hovered.as_deref().is_some_and(|p| p.as_os_str() == path) {
+    if hovered.as_deref() == Some(path) {
         *hovered = None;
     }
 }
@@ -109,10 +109,10 @@ mod tests {
 
     #[test]
     fn leaving_another_tile_keeps_the_hover() {
-        hover("a.png");
-        leave("b.png");
+        hover(Path::new("a.png"));
+        leave(Path::new("b.png"));
         assert_eq!(HOVERED.lock().unwrap().as_deref(), Some(std::path::Path::new("a.png")));
-        leave("a.png");
+        leave(Path::new("a.png"));
         assert!(HOVERED.lock().unwrap().is_none());
     }
 }

@@ -77,22 +77,51 @@ pub fn decode_dib(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     let height = u32_at(8) as i32;
     let bits = u16::from_le_bytes([bytes[14], bytes[15]]);
     let compression = u32_at(16);
-    if width <= 0 || height == 0 || !(bits == 24 || bits == 32) {
+    if header_size < 40
+        || header_size > bytes.len()
+        || width <= 0
+        || height == 0
+        || !(bits == 24 || bits == 32)
+        || !matches!(compression, 0 | 3 | 6)
+    {
         return None;
     }
-    // BI_BITFIELDS with a plain BITMAPINFOHEADER appends three masks.
-    let masks = if compression == 3 && header_size == 40 {
-        12
+    // BITMAPINFOHEADER bitfields append their masks; larger headers include them.
+    let masks = if header_size == 40 {
+        match compression {
+            3 => 12,
+            6 => 16,
+            _ => 0,
+        }
     } else {
         0
     };
-    let offset = header_size + masks;
+    let Some(offset) = header_size.checked_add(masks) else {
+        return None;
+    };
     let (w, h) = (width as usize, height.unsigned_abs() as usize);
-    let row = (w * bits as usize / 8 + 3) & !3;
-    if bytes.len() < offset + row * h {
+    let Some(row) = w
+        .checked_mul(bits as usize / 8)
+        .and_then(|row| row.checked_add(3))
+        .map(|row| row & !3)
+    else {
+        return None;
+    };
+    let Some(data_len) = row.checked_mul(h) else {
+        return None;
+    };
+    let Some(data_end) = offset.checked_add(data_len) else {
+        return None;
+    };
+    if bytes.len() < data_end {
         return None;
     }
-    let mut rgba = vec![0u8; w * h * 4];
+    let Some(output_len) = w.checked_mul(h).and_then(|pixels| pixels.checked_mul(4)) else {
+        return None;
+    };
+    let mut rgba = Vec::new();
+    rgba.try_reserve_exact(output_len).ok()?;
+    rgba.resize(output_len, 0);
     let mut any_alpha = false;
     for y in 0..h {
         let src_y = if height > 0 { h - 1 - y } else { y };
@@ -240,7 +269,7 @@ fn hdrop_bytes(files: &[PathBuf]) -> Vec<u8> {
     // SAFETY: DROPFILES is plain old data and `bytes` is large enough.
     unsafe { std::ptr::write_unaligned(bytes.as_mut_ptr() as *mut DROPFILES, drop) };
     for f in files {
-        bytes.extend(f.as_os_str().to_string_lossy().encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes));
+        bytes.extend(crate::wide_path(f).into_iter().flat_map(u16::to_le_bytes));
     }
     bytes.extend([0, 0]);
     bytes
@@ -288,7 +317,7 @@ pub fn read(owner: isize) -> io::Result<Option<Pasted>> {
                     let len = DragQueryFileW(drop, i, std::ptr::null_mut(), 0) as usize;
                     let mut buf = vec![0u16; len + 1];
                     DragQueryFileW(drop, i, buf.as_mut_ptr(), buf.len() as u32);
-                    PathBuf::from(crate::from_wide(&buf))
+                    crate::path_from_wide(&buf)
                 })
                 .collect();
             Some(Pasted::Files(files))
@@ -327,6 +356,23 @@ mod tests {
         assert_eq!((w, h), (3, 2));
         assert_eq!(&rgba[..4], &[3, 2, 1, 255], "top-left back as RGBA");
         assert_eq!(&rgba[12..16], &[6, 5, 4, 255]);
+    }
+
+    #[test]
+    fn dib_rejects_invalid_headers_compressions_and_dimensions() {
+        let make_dib = |header_size: u32, width: i32, height: i32, bits: u16, compression: u32| {
+            let mut bytes = vec![0; 40];
+            bytes[0..4].copy_from_slice(&header_size.to_le_bytes());
+            bytes[4..8].copy_from_slice(&width.to_le_bytes());
+            bytes[8..12].copy_from_slice(&height.to_le_bytes());
+            bytes[14..16].copy_from_slice(&bits.to_le_bytes());
+            bytes[16..20].copy_from_slice(&compression.to_le_bytes());
+            bytes
+        };
+        assert!(decode_dib(&make_dib(0, 1, 1, 32, 0)).is_none());
+        assert!(decode_dib(&make_dib(41, 1, 1, 32, 0)).is_none());
+        assert!(decode_dib(&make_dib(40, 1, 1, 32, 4)).is_none());
+        assert!(decode_dib(&make_dib(40, i32::MAX, i32::MAX, 32, 0)).is_none());
     }
 
     #[test]

@@ -250,6 +250,14 @@ fn channel(v: f32) -> u8 {
     v.round().clamp(0.0, 255.0) as u8
 }
 
+fn valid_effect_size(width: u32, height: u32) -> bool {
+    width > 0
+        && height > 0
+        && width <= i32::MAX as u32
+        && height <= i32::MAX as u32
+        && u64::from(width) * u64::from(height) <= crate::io::MAX_DOCUMENT_PIXELS
+}
+
 /// Applies `effect` to the document. Returns false when it changed nothing.
 pub fn apply(doc: &mut Document, effect: Effect) -> bool {
     let (width, height) = doc.size();
@@ -287,7 +295,7 @@ pub fn apply(doc: &mut Document, effect: Effect) -> bool {
             else {
                 return false;
             };
-            if new_width > i32::MAX as u32 || new_height > i32::MAX as u32 {
+            if !valid_effect_size(new_width, new_height) {
                 return false;
             }
             doc.resize_canvas(new_width, new_height, width as i32, width as i32, color);
@@ -306,7 +314,7 @@ pub fn apply(doc: &mut Document, effect: Effect) -> bool {
             ) else {
                 return false;
             };
-            if nw > i32::MAX as u32 || nh > i32::MAX as u32 {
+            if !valid_effect_size(nw, nh) {
                 return false;
             }
             let Some(mut out) = Pixmap::new(nw, nh) else {
@@ -488,7 +496,13 @@ pub fn apply(doc: &mut Document, effect: Effect) -> bool {
             };
             let layout = crate::text::layout(&text, &ts, Some(w as f32 - 24.0));
             let band = (layout.height() + 20.0).ceil() as u32;
-            doc.resize_canvas(w, h + band, 0, 0, Rgba::rgb(0x22, 0x26, 0x2E));
+            let Some(new_height) = h.checked_add(band) else {
+                return false;
+            };
+            if !valid_effect_size(w, new_height) {
+                return false;
+            }
+            doc.resize_canvas(w, new_height, 0, 0, Rgba::rgb(0x22, 0x26, 0x2E));
             let pm = doc.background_mut();
             crate::text::draw(
                 pm,
@@ -505,7 +519,13 @@ pub fn apply(doc: &mut Document, effect: Effect) -> bool {
             let (w, h) = doc.size();
             let r = (h as f32 * 0.35) as u32;
             let src = doc.background().clone();
-            let Some(mut out) = Pixmap::new(w, h + r) else {
+            let Some(new_height) = h.checked_add(r) else {
+                return false;
+            };
+            if !valid_effect_size(w, new_height) {
+                return false;
+            }
+            let Some(mut out) = Pixmap::new(w, new_height) else {
                 return false;
             };
             raster::copy_area(&src, IRect::of_size(w, h), &mut out, 0, 0);
@@ -610,14 +630,14 @@ pub fn apply(doc: &mut Document, effect: Effect) -> bool {
                 for x in 0..w {
                     let cx = if (x as f32) < r {
                         r
-                    } else if (x as f32) > w as f32 - r {
+                    } else if (x as f32) >= w as f32 - r {
                         w as f32 - r
                     } else {
                         continue;
                     };
                     let cy = if (y as f32) < r {
                         r
-                    } else if (y as f32) > h as f32 - r {
+                    } else if (y as f32) >= h as f32 - r {
                         h as f32 - r
                     } else {
                         continue;
@@ -856,6 +876,37 @@ fn clipped_band(origin: i32, extent: i32, total: i32) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canvas_expanding_effects_respect_document_size_limits() {
+        assert!(valid_effect_size(100, 100));
+        assert!(!valid_effect_size(0, 100));
+        assert!(!valid_effect_size(100, 0));
+        assert!(!valid_effect_size(
+            (crate::io::MAX_DOCUMENT_PIXELS as u32).saturating_add(1),
+            1,
+        ));
+        assert!(!valid_effect_size(i32::MAX as u32 + 1, 1));
+        assert!(!valid_effect_size(1, i32::MAX as u32 + 1));
+    }
+
+    #[test]
+    fn rounded_corners_are_symmetric_at_the_right_and_bottom_edges() {
+        let mut d = Document::blank(20, 20, Rgba::WHITE);
+        apply(&mut d, Effect::RoundedCorners { radius: 5 });
+        for y in 0..20 {
+            assert_eq!(
+                raster::pixel(d.background(), 4, y).a,
+                raster::pixel(d.background(), 15, y).a
+            );
+        }
+        for x in 0..20 {
+            assert_eq!(
+                raster::pixel(d.background(), x, 4).a,
+                raster::pixel(d.background(), x, 15).a
+            );
+        }
+    }
 
     #[test]
     fn border_shadow_and_cut_out_resize_the_canvas() {

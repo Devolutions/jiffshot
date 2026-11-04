@@ -177,6 +177,28 @@ struct Pending {
     completed: bool,
 }
 
+fn clear_pending(
+    pending: &mut HashMap<i64, Pending>,
+    token: i64,
+    tile: u64,
+    suppress_tap: &AtomicI64,
+) {
+    if pending.get(&token).is_some_and(|pending| pending.tile == tile) {
+        pending.remove(&token);
+    }
+    let _ = suppress_tap.compare_exchange(token, 0, Ordering::AcqRel, Ordering::Acquire);
+}
+
+struct CompletionCleanup {
+    token: i64,
+    tile: u64,
+    suppress_tap: Arc<AtomicI64>,
+    effect: i32,
+    prepared: Option<Prepared>,
+    message: Option<String>,
+    substitutions: Vec<jiffshot_doc::text::FontSubstitution>,
+}
+
 struct Coordinator {
     application: sys::ComPtr<Application>,
     scope: AppScope,
@@ -328,6 +350,36 @@ pub(crate) fn install(scope: &AppScope) -> io::Result<()> {
     Ok(())
 }
 
+fn take_completion_cleanup(
+    cleanup: &Mutex<Option<CompletionCleanup>>,
+) -> Option<CompletionCleanup> {
+    cleanup
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
+fn finish_completion(coordinator: Arc<Coordinator>, mut cleanup: CompletionCleanup) {
+    if cleanup.effect == 0 {
+        if let Some(prepared) = &mut cleanup.prepared {
+            prepared.discard_after_completion();
+        }
+    }
+    drop(cleanup.prepared);
+    clear_pending(
+        &mut lock_pending(&coordinator),
+        cleanup.token,
+        cleanup.tile,
+        &cleanup.suppress_tap,
+    );
+    finish_tile(cleanup.tile);
+    if let Some(message) = cleanup.message {
+        crate::app::report_library_drag_error(message);
+    } else if !cleanup.substitutions.is_empty() {
+        crate::app::report_library_drag_fonts(cleanup.substitutions);
+    }
+}
+
 impl Coordinator {
     fn set_handler(&self, control: &sys::ComPtr<sys::IAvnControl>, handler: Option<&sys::ComPtr<Handler>>) -> io::Result<()> {
         // SAFETY: both owned interfaces are live, and this method is called on the UI thread.
@@ -363,7 +415,15 @@ impl Coordinator {
         }
         suppress_tap.store(token, Ordering::Release);
         record_test_event(TestEvent::Preparing { token, path: path.clone() });
-        crate::shutdown_ui_macos::post("a library drag preparation", move || crate::app::prepare_library_drag(token, path))
+        if let Err(error) = crate::shutdown_ui_macos::post(
+            "a library drag preparation",
+            move || crate::app::prepare_library_drag(token, path),
+        ) {
+            let mut pending = lock_pending(self);
+            clear_pending(&mut pending, token, tile, &suppress_tap);
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn completed(self: &Arc<Self>, token: i64, tile: u64, suppress_tap: Arc<AtomicI64>, effect: i32, status: i32) -> Result<(), String> {
@@ -400,22 +460,27 @@ impl Coordinator {
             Vec::new()
         };
         let coordinator = self.clone();
-        crate::shutdown_ui_macos::post("a library drag completion", move || {
-            if effect == 0 {
-                if let Some(prepared) = &mut prepared {
-                    prepared.discard_after_completion();
-                }
+        let cleanup = Arc::new(Mutex::new(Some(CompletionCleanup {
+            token,
+            tile,
+            suppress_tap,
+            effect,
+            prepared,
+            message,
+            substitutions,
+        })));
+        let queued_cleanup = cleanup.clone();
+        if let Err(error) = crate::shutdown_ui_macos::post("a library drag completion", move || {
+            if let Some(cleanup) = take_completion_cleanup(&queued_cleanup) {
+                finish_completion(coordinator, cleanup);
             }
-            drop(prepared);
-            lock_pending(&coordinator).remove(&token);
-            let _ = suppress_tap.compare_exchange(token, 0, Ordering::AcqRel, Ordering::Acquire);
-            finish_tile(tile);
-            if let Some(message) = message {
-                crate::app::report_library_drag_error(message);
-            } else if !substitutions.is_empty() {
-                crate::app::report_library_drag_fonts(substitutions);
+        }) {
+            if let Some(cleanup) = take_completion_cleanup(&cleanup) {
+                finish_completion(self.clone(), cleanup);
             }
-        })
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -695,6 +760,26 @@ pub(crate) fn uninstall() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_a_failed_drag_releases_its_pending_token_and_tap_suppression() {
+        let token = 17;
+        let tile = 23;
+        let suppress_tap = AtomicI64::new(token);
+        let mut pending = HashMap::from([(
+            token,
+            Pending {
+                tile,
+                prepared: None,
+                completed: false,
+            },
+        )]);
+
+        clear_pending(&mut pending, token, tile, &suppress_tap);
+
+        assert!(!pending.contains_key(&token));
+        assert_eq!(suppress_tap.load(Ordering::Acquire), 0);
+    }
 
     #[test]
     fn callback_supports_both_interfaces_and_balances_references() {

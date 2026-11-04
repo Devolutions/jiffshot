@@ -222,6 +222,11 @@ fn font_dirs() -> Vec<PathBuf> {
 }
 
 #[cfg(not(target_os = "macos"))]
+fn is_default_family(family: &str) -> bool {
+    family.eq_ignore_ascii_case(DEFAULT_FAMILY)
+}
+
+#[cfg(not(target_os = "macos"))]
 fn load_file(name: &str) -> Option<FontArc> {
     font_dirs().into_iter().find_map(|dir| {
         let bytes = std::fs::read(dir.join(name)).ok()?;
@@ -262,7 +267,7 @@ pub fn font(family: &str, bold: bool, italic: bool) -> Option<FontArc> {
         files(family)
             .and_then(|f| load_file(f[index]).or_else(|| load_file(f[0])))
             .or_else(|| {
-                (family != DEFAULT_FAMILY)
+                (!is_default_family(family))
                     .then(|| font(DEFAULT_FAMILY, bold, italic))
                     .flatten()
             })
@@ -542,9 +547,18 @@ pub fn layout(text: &str, style: &TextStyle, max_width: Option<f32>) -> Layout {
     fonts.extend(fallbacks().iter().cloned());
     // Font sizes are em sizes; ab_glyph scales by ascent-to-descent height.
     let scales: Vec<PxScale> = fonts.iter().map(|f| em_scale(f, style.size)).collect();
-    let s0 = fonts[0].as_scaled(scales[0]);
-    let ascent = s0.ascent();
-    let line_height = (s0.ascent() - s0.descent() + s0.line_gap()).max(style.size);
+    let metrics: Vec<_> = fonts
+        .iter()
+        .zip(&scales)
+        .map(|(font, scale)| {
+            let scaled = font.as_scaled(*scale);
+            (scaled.ascent(), scaled.descent(), scaled.line_gap())
+        })
+        .collect();
+    let ascent = metrics.iter().map(|m| m.0).fold(f32::NEG_INFINITY, f32::max);
+    let descent = metrics.iter().map(|m| m.1).fold(0.0, f32::min);
+    let line_gap = metrics.iter().map(|m| m.2).fold(0.0, f32::max);
+    let line_height = (ascent - descent + line_gap).max(style.size);
 
     let pick = |c: char| -> (usize, GlyphId) {
         for (i, f) in fonts.iter().enumerate() {
@@ -709,6 +723,14 @@ pub fn draw(
 mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn default_family_detection_is_case_insensitive() {
+        assert!(is_default_family(DEFAULT_FAMILY));
+        assert!(is_default_family("segoe ui"));
+        assert!(!is_default_family("Arial"));
+    }
+
     fn style(size: f32) -> TextStyle<'static> {
         TextStyle {
             family: DEFAULT_FAMILY,
@@ -781,6 +803,16 @@ mod tests {
             p.data().chunks(4).any(|px| px[3] > 200),
             "glyphs were drawn"
         );
+    }
+
+    #[test]
+    fn line_metrics_contain_every_fallback_font() {
+        let layout = layout("A", &style(20.0), None);
+        for (font, scale) in layout.fonts.iter().zip(&layout.scales) {
+            let scaled = font.as_scaled(*scale);
+            assert!(layout.ascent >= scaled.ascent());
+            assert!(layout.line_height >= layout.ascent - scaled.descent());
+        }
     }
 
     #[test]

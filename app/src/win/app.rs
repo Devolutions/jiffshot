@@ -1635,7 +1635,7 @@ impl App {
     /// Trim: removes this many pixels from each side.
     pub fn trim(&mut self, left: u32, top: u32, right: u32, bottom: u32) {
         let (w, h) = with_editor(|e| e.document().size()).unwrap_or_default();
-        if left + right >= w || top + bottom >= h {
+        if left >= w || right >= w - left || top >= h || bottom >= h - top {
             return self.set_status("That would trim away the whole image");
         }
         let r = jiffshot_doc::IRect::new(
@@ -2053,15 +2053,28 @@ impl App {
     }
 
     /// Images (or a capture to open) dropped at a canvas point:
-    /// "x,y|path|path…". Several images fill the next empty drop zones.
+    /// "x,y|[native path bytes, …]". Several images fill the next empty drop zones.
     fn drop_files(&mut self, arg: &str) {
         self.canvas_drop = Some(std::time::Instant::now());
-        let mut parts = arg.split('|');
-        let at = parts
-            .next()
-            .and_then(|xy| xy.split_once(','))
+        let Some((coordinates, files)) = arg.split_once('|') else {
+            return self.set_status("Could not read the dropped file list.");
+        };
+        let at = coordinates
+            .split_once(',')
             .and_then(|(x, y)| Some(jiffshot_doc::Pt::new(x.parse().ok()?, y.parse().ok()?)));
-        let paths: Vec<PathBuf> = parts.filter(|p| !p.is_empty()).map(PathBuf::from).collect();
+        let paths: Vec<PathBuf> = match serde_json::from_str::<Vec<Vec<u8>>>(files) {
+            Ok(paths) => match paths
+                .iter()
+                .map(|bytes| Self::decode_drop_path(bytes))
+                .collect()
+            {
+                Some(paths) => paths,
+                None => return self.set_status("The dropped file list contained an invalid path."),
+            },
+            Err(error) => {
+                return self.set_status(format!("Could not read the dropped file list: {error}"));
+            }
+        };
         let Some(at) = at else { return };
         let images: Vec<_> = paths
             .iter()
@@ -2092,6 +2105,51 @@ impl App {
         self.set_status(format!("Placed {n} image{}", if n == 1 { "" } else { "s" }));
     }
 
+    pub(crate) fn encode_drop_path(path: &Path) -> Vec<u8> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            path.as_os_str()
+                .encode_wide()
+                .flat_map(u16::to_le_bytes)
+                .collect()
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            path.as_os_str().as_bytes().to_vec()
+        }
+    }
+
+    fn decode_drop_path(bytes: &[u8]) -> Option<PathBuf> {
+        if bytes.is_empty() {
+            return None;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            if bytes.len() % 2 != 0 {
+                return None;
+            }
+            let wide: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            if wide.contains(&0) {
+                return None;
+            }
+            Some(PathBuf::from(std::ffi::OsString::from_wide(&wide)))
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            if bytes.contains(&0) {
+                return None;
+            }
+            Some(PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec())))
+        }
+    }
+
     /// Chooses a picture for the selected drop zone.
     fn pick_zone_image(&mut self) {
         let zone =
@@ -2102,9 +2160,17 @@ impl App {
             false,
             true,
             move |app, paths| {
-                if let Some(img) = paths.first().and_then(|p| io::load_image(p).ok()) {
-                    with_editor(|e| e.fill_zone(id, img));
-                    app.bump_frame();
+                if let Some(path) = paths.first() {
+                    match io::load_image(path) {
+                        Ok(image) => {
+                            with_editor(|e| e.fill_zone(id, image));
+                            app.bump_frame();
+                        }
+                        Err(error) => app.set_status(format!(
+                            "Could not open {}: {error}",
+                            path.display()
+                        )),
+                    }
                 }
             },
         );
@@ -2131,25 +2197,42 @@ impl App {
         let name = name.to_owned();
         // Captures picked in the library go in; otherwise templates start
         // with empty drop zones and combining asks for images.
-        let picked: Vec<_> = self
+        let selected: Vec<_> = self
             .library_items
             .iter()
             .filter(|i| self.library_selected.contains(&i.path))
-            .filter_map(|i| io::load_image(&i.path).ok())
             .collect();
-        if !name.starts_with("Combine") && (!picked.is_empty() || self.library_selected.is_empty())
+        let mut picked = Vec::with_capacity(selected.len());
+        for item in &selected {
+            if item.entry.is_video() {
+                return self.set_status("Select images, not videos, for this template.");
+            }
+            match io::load_image(&item.path) {
+                Ok(image) => picked.push(image),
+                Err(error) => {
+                    return self.set_status(format!(
+                        "Could not open {}: {error}",
+                        item.path.display()
+                    ));
+                }
+            }
+        }
+        if !name.starts_with("Combine") && (!picked.is_empty() || selected.is_empty())
         {
-            if let Some(doc) = combine::template_with(&name, &picked, &self.template_options()) {
-                self.load(doc, None, None);
-                with_editor(|e| e.checkpoint("Template", None));
-                let browser = if cfg!(target_os = "macos") {
-                    "Finder"
-                } else {
-                    "Explorer"
-                };
-                self.set_status(format!(
-                    "{name}: drop images from the tray or {browser} onto the drop zones"
-                ));
+            match combine::template_with(&name, &picked, &self.template_options()) {
+                Some(doc) => {
+                    self.load(doc, None, None);
+                    with_editor(|e| e.checkpoint("Template", None));
+                    let browser = if cfg!(target_os = "macos") {
+                        "Finder"
+                    } else {
+                        "Explorer"
+                    };
+                    self.set_status(format!(
+                        "{name}: drop images from the tray or {browser} onto the drop zones"
+                    ));
+                }
+                None => self.set_status(format!("Could not create the {name} template.")),
             }
             return;
         }
@@ -2167,10 +2250,19 @@ impl App {
         }
         let options = self.template_options();
         self.pick_open("Choose images", true, true, move |app, paths| {
-            let images: Vec<_> = paths
-                .iter()
-                .filter_map(|p| io::load_image(p).ok())
-                .collect();
+            let mut images = Vec::with_capacity(paths.len());
+            for path in &paths {
+                match io::load_image(path) {
+                    Ok(image) => images.push(image),
+                    Err(error) => {
+                        app.set_status(format!(
+                            "Could not open {}: {error}",
+                            path.display()
+                        ));
+                        return;
+                    }
+                }
+            }
             if images.is_empty() {
                 return;
             }
@@ -2186,10 +2278,13 @@ impl App {
                 }
                 other => combine::template_with(other, &images, &options),
             };
-            if let Some(doc) = doc {
-                app.load(doc, None, None);
-                with_editor(|e| e.checkpoint("Template", None));
-                app.set_status(format!("{name}: {} image(s)", images.len()));
+            match doc {
+                Some(doc) => {
+                    app.load(doc, None, None);
+                    with_editor(|e| e.checkpoint("Template", None));
+                    app.set_status(format!("{name}: {} image(s)", images.len()));
+                }
+                None => app.set_status(format!("Could not create {name} from the selected images.")),
             }
         });
     }
@@ -4109,12 +4204,6 @@ impl App {
             "delete" => {
                 let mut files = Vec::new();
                 for t in &targets {
-                    if Some(t) == self.source.as_ref() {
-                        with_editor(|e| e.mark_saved());
-                        self.source = None;
-                        self.path = None;
-                        self.close_file();
-                    }
                     files.push(t.clone());
                     files.extend(
                         jiffshot_capture::library::companions(t)
@@ -4123,6 +4212,15 @@ impl App {
                     );
                 }
                 if winutil::recycle(&files) {
+                    if targets
+                        .iter()
+                        .any(|target| Some(target) == self.source.as_ref())
+                    {
+                        with_editor(|e| e.mark_saved());
+                        self.source = None;
+                        self.path = None;
+                        self.close_file();
+                    }
                     let trash = if cfg!(target_os = "macos") {
                         "Trash"
                     } else {
@@ -4278,18 +4376,31 @@ impl App {
             .iter()
             .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp4")))
             .count();
-        if videos == picked.len() {
-            return crate::video::combine_files(self, picked);
+        if videos > 0 {
+            if videos == picked.len() {
+                return crate::video::combine_files(self, picked);
+            }
+            return self.set_status("Select either images or videos to combine, not both.");
         }
-        let images: Vec<_> = picked
-            .iter()
-            .filter_map(|p| io::load_image(p).ok())
-            .collect();
+        let mut images = Vec::with_capacity(picked.len());
+        for path in &picked {
+            match io::load_image(path) {
+                Ok(image) => images.push(image),
+                Err(error) => {
+                    return self.set_status(format!(
+                        "Could not load {} for combining: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
         if let Some(doc) = combine::combine(&images, combine::Arrangement::Grid, 24.0, Rgba::WHITE)
         {
             self.load(doc, None, None);
             with_editor(|e| e.checkpoint("Combine", None));
             self.set_status(format!("Combined {} images", images.len()));
+        } else {
+            self.set_status("Could not combine the selected images.");
         }
     }
 
@@ -4671,6 +4782,39 @@ fn path_of_uri(uri: &str) -> std::result::Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn dropped_paths_round_trip_non_utf8_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/capture-\xff.png".to_vec()));
+        assert_eq!(
+            App::decode_drop_path(&App::encode_drop_path(&path)),
+            Some(path)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dropped_paths_round_trip_unpaired_utf16() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let path = PathBuf::from(std::ffi::OsString::from_wide(&[
+            b'C' as u16,
+            b':' as u16,
+            b'\\' as u16,
+            0xD800,
+            b'.' as u16,
+            b'p' as u16,
+            b'n' as u16,
+            b'g' as u16,
+        ]));
+        assert_eq!(
+            App::decode_drop_path(&App::encode_drop_path(&path)),
+            Some(path)
+        );
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

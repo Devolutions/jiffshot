@@ -489,10 +489,12 @@ fn capture_scroll(a: &Args) -> Reply {
     let mut frames = vec![transform(capture.frame)];
     struct RestoreCursor((i32, i32));
     impl Drop for RestoreCursor {
-        fn drop(&mut self) { input::move_to(self.0, Duration::ZERO); }
+        fn drop(&mut self) { let _ = input::move_to(self.0, Duration::ZERO); }
     }
     let _restore = RestoreCursor(input::cursor());
-    input::move_to(t.rect.center(), Duration::ZERO);
+    if !input::move_to(t.rect.center(), Duration::ZERO) {
+        return Err(internal("could not position the cursor inside the scroll target"));
+    }
     if input::cursor() != t.rect.center() { return Err(internal("could not position the cursor inside the scroll target")); }
     std::thread::sleep(settle.min(timeout));
     frames[0] = transform(screen::grab(t.rect).map_err(internal)?);
@@ -976,7 +978,9 @@ fn click(a: &Args) -> Reply {
     let glide = glide(a)?;
     // The step shows the screen as it is about to be clicked, pointer included.
     let step = if step {
-        input::move_to(at, glide);
+        if !input::move_to(at, glide) {
+            return Err(internal("Windows could not position the cursor"));
+        }
         Some(add_step(at, button == Button::Right, a.string("description")?)?)
     } else {
         None
@@ -992,7 +996,9 @@ fn move_pointer(a: &Args) -> Reply {
     a.only(&with(&[TARGET, POINTER, &["glide_ms"]]))?;
     let _input = INPUT.lock().unwrap();
     let (at, matched) = locate(a)?;
-    input::move_to(at, glide(a)?);
+    if !input::move_to(at, glide(a)?) {
+        return Err(internal("Windows could not position the cursor"));
+    }
     Ok(json!({ "at": point_json(at), "matched": matched }))
 }
 
@@ -1015,13 +1021,17 @@ fn scroll(a: &Args) -> Reply {
     let horizontal = a.bool("horizontal")?;
     let at = if a.has("at") || a.has("text") || a.has("element") {
         let (at, _) = locate(a)?;
-        input::move_to(at, glide(a)?);
+        if !input::move_to(at, glide(a)?) {
+            return Err(internal("Windows could not position the cursor"));
+        }
         at
     } else {
         if has_target(a) {
             let t = target(a, CaptureKind::Monitor)?;
             let center = (t.rect.x + t.rect.width / 2, t.rect.y + t.rect.height / 2);
-            input::move_to(center, glide(a)?);
+            if !input::move_to(center, glide(a)?) {
+                return Err(internal("Windows could not position the cursor"));
+            }
         }
         input::cursor()
     };
@@ -1045,6 +1055,9 @@ fn type_text(a: &Args) -> Reply {
     a.only(&with(&[TARGET, &["text", "delay_ms", "settle_ms"]]))?;
     let _input = INPUT.lock().unwrap();
     let text = a.string("text")?.ok_or_else(|| invalid("text is required"))?;
+    if text.chars().any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t')) {
+        return Err(invalid("text contains a control character other than newline or tab"));
+    }
     let window = focus_target(a)?;
     let delay = a.millis("delay_ms", if recording() { 35 } else { 0 })?;
     if !input::type_text(&text, delay) {

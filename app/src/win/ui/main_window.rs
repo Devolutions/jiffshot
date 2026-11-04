@@ -235,12 +235,17 @@ fn wire_canvas(ctx: &Ctx, zoom: ZoomView) -> Result<()> {
     let dropped_on = ctx.canvas_handle();
     ctx.scope.on_file_drop(canvas.control(), DragDropEffects::COPY, move |event| {
         let FileDropEvent::Drop { items, .. } = event else { return };
-        let paths: Vec<String> = items.iter().filter_map(|item| item.local_path()).map(|p| p.to_string_lossy().into_owned()).collect();
+        let paths: Vec<Vec<u8>> = items
+            .iter()
+            .filter_map(|item| item.local_path())
+            .map(crate::app::App::encode_drop_path)
+            .collect();
         if paths.is_empty() {
             return;
         }
         let (w, h) = dropped_on.get().document_size();
-        run(format!("drop:{},{}|{}", f64::from(w) / 2.0, f64::from(h) / 2.0, paths.join("|")));
+        let paths = serde_json::to_string(&paths).expect("serializing file paths cannot fail");
+        run(format!("drop:{},{}|{paths}", f64::from(w) / 2.0, f64::from(h) / 2.0));
     })?;
     // The properties' text box takes focus when the model asks.
     let (scope, editor, first) = (ctx.scope.clone(), ctx.text_editor, Cell::new(true));

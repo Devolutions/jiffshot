@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::ffi::{OsStr, OsString};
 
 /// Creates a private per-operation folder for a temporary share export.
 pub fn temporary_export_path(stem: &str, ext: &str) -> Result<PathBuf, String> {
@@ -98,22 +99,19 @@ pub fn to_folder(file: &Path, folder: &Path) -> Result<PathBuf, String> {
             file.display()
         ));
     }
-    let name = file
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Capture".into());
-    let ext = file
-        .extension()
-        .map(|e| e.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "png".into());
+    let name = file.file_stem().unwrap_or_else(|| OsStr::new("Capture"));
+    let ext = file.extension().unwrap_or_else(|| OsStr::new("png"));
+    let permissions = metadata.permissions();
     let mut source = std::fs::File::open(file)
         .map_err(|error| format!("could not open {}: {error}", file.display()))?;
     for n in 1u64.. {
-        let target = if n == 1 {
-            folder.join(format!("{name}.{ext}"))
-        } else {
-            folder.join(format!("{name} ({n}).{ext}"))
-        };
+        let mut target_name = OsString::from(name);
+        if n != 1 {
+            target_name.push(format!(" ({n})"));
+        }
+        target_name.push(".");
+        target_name.push(ext);
+        let target = folder.join(target_name);
         let mut output = match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -123,8 +121,20 @@ pub fn to_folder(file: &Path, folder: &Path) -> Result<PathBuf, String> {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(format!("could not create {}: {error}", target.display())),
         };
-        io::copy(&mut source, &mut output)
-            .map_err(|error| format!("could not copy to {}: {error}", target.display()))?;
+        if let Err(error) = io::copy(&mut source, &mut output)
+            .and_then(|_| output.set_permissions(permissions))
+        {
+            drop(output);
+            if let Err(cleanup) = std::fs::remove_file(&target) {
+                if cleanup.kind() != io::ErrorKind::NotFound {
+                    return Err(format!(
+                        "could not copy to {}: {error}; could not remove partial file: {cleanup}",
+                        target.display()
+                    ));
+                }
+            }
+            return Err(format!("could not copy to {}: {error}", target.display()));
+        }
         return Ok(target);
     }
     unreachable!()
