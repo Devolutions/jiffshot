@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version matching Cargo.toml, without the v prefix (for example, 0.3.0)
+        description: Version matching Cargo.toml, without the v prefix (for example, 0.4.0)
         required: true
         type: string
       dry_run:
@@ -194,10 +194,12 @@ jobs:
           New-Item -ItemType Directory -Path release | Out-Null
           foreach ($arch in @('x64', 'arm64')) {
             $portable = "artifacts\jiffshot-win-$arch"
-            $msiName = "Devolutions.Jiffshot-$arch-$env:RELEASE_VERSION.msi"
-            $msi = "artifacts\jiffshot-win-$arch-msi\$msiName"
-            $msixName = "Devolutions.Jiffshot-$arch-$env:RELEASE_VERSION.msix"
-            $msix = "artifacts\jiffshot-win-$arch-msix\$msixName"
+            $msiSourceName = "Devolutions.Jiffshot-$arch-$env:RELEASE_VERSION.msi"
+            $msiName = "Devolutions.Jiffshot-windows-$arch-$env:RELEASE_VERSION.msi"
+            $msi = "artifacts\jiffshot-win-$arch-msi\$msiSourceName"
+            $msixSourceName = "Devolutions.Jiffshot-$arch-$env:RELEASE_VERSION.msix"
+            $msixName = "Devolutions.Jiffshot-windows-$arch-$env:RELEASE_VERSION.msix"
+            $msix = "artifacts\jiffshot-win-$arch-msix\$msixSourceName"
             foreach ($required in @("$portable\jiffshot.exe", "$portable\jiffshot-cli.exe", "$portable\rustolonia_host.dll", "$portable\README-portable.txt", $msi, $msix)) {
               if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Missing release file: $required" }
             }
@@ -221,7 +223,7 @@ jobs:
             Copy-Item -LiteralPath $msi -Destination "release\$msiName"
             Copy-Item -LiteralPath $msix -Destination "release\$msixName"
             Compress-Archive -Path "$portable\*" `
-              -DestinationPath "release\Devolutions.Jiffshot-$arch-$env:RELEASE_VERSION.zip"
+              -DestinationPath "release\Devolutions.Jiffshot-windows-$arch-$env:RELEASE_VERSION.zip"
           }
           pwsh -NoProfile -File package/linux/assemble-release.ps1 -ArtifactDir artifacts `
             -OutputDir release -Version "$env:RELEASE_VERSION"
