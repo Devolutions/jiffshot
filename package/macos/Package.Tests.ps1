@@ -15,6 +15,8 @@ Describe 'macOS ticket stapling' {
                 @{ Action = $action; SuccessAttempt = 1; ExpectedDelays = @() }
                 @{ Action = $action; SuccessAttempt = 2; ExpectedDelays = @(10) }
                 @{ Action = $action; SuccessAttempt = 4; ExpectedDelays = @(10, 20, 40) }
+                @{ Action = $action; SuccessAttempt = 5; ExpectedDelays = @(10, 20, 40, 60) }
+                @{ Action = $action; SuccessAttempt = 10; ExpectedDelays = @(10, 20, 40, 60, 60, 60, 60, 60, 60) }
             }
         ) {
             param($Action, $SuccessAttempt, $ExpectedDelays)
@@ -36,7 +38,7 @@ Describe 'macOS ticket stapling' {
             $script:StapleDelays.ToArray() | Should -Be $ExpectedDelays
         }
 
-        It 'gives up stapler <Action> after three retries and preserves the final diagnostic' -TestCases @(
+        It 'gives up stapler <Action> after nine retries and preserves the final diagnostic' -TestCases @(
             @{ Action = 'staple'; Operation = 'Stapling' }
             @{ Action = 'validate'; Operation = 'Validating the stapled ticket for' }
         ) {
@@ -46,10 +48,10 @@ Describe 'macOS ticket stapling' {
             }
 
             { Invoke-MacStapler -Action $Action -Path '/fixture/Jiffshot.app' } |
-                Should -Throw "$Operation '/fixture/Jiffshot.app' failed after 4 attempt(s)*exit status 68*The network connection was lost.*"
+                Should -Throw "$Operation '/fixture/Jiffshot.app' failed after 10 attempt(s)*exit status 68*The network connection was lost.*"
 
-            Should -Invoke Invoke-MacCommand -Times 4 -Exactly
-            $script:StapleDelays.ToArray() | Should -Be @(10, 20, 40)
+            Should -Invoke Invoke-MacCommand -Times 10 -Exactly
+            $script:StapleDelays.ToArray() | Should -Be @(10, 20, 40, 60, 60, 60, 60, 60, 60)
         }
 
         It 'fails stapler <Action> immediately for non-service errors' -TestCases @(
