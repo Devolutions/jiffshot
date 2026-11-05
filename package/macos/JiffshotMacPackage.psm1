@@ -242,18 +242,19 @@ function Invoke-MacStapler {
     )
 
     $operation = if ($Action -ceq 'staple') { 'Stapling' } else { 'Validating the stapled ticket for' }
-    for ($attempt = 1; $attempt -le 4; $attempt++) {
+    $maxAttempts = 10
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
         $result = Invoke-MacCommand -File '/usr/bin/xcrun' -Arguments @('stapler', $Action, $Path) -AllowFailure
         if ($result.Stdout) { [Console]::Out.Write($result.Stdout) }
         if ($result.Stderr) { [Console]::Error.Write($result.Stderr) }
         if ($result.ExitCode -eq 0) { return }
         # stapler uses EX_NOHOST (68) when Apple's ticket service cannot be reached.
-        if ($result.ExitCode -ne 68 -or $attempt -eq 4) {
+        if ($result.ExitCode -ne 68 -or $attempt -eq $maxAttempts) {
             $detail = if ($result.Stderr.Trim()) { $result.Stderr.Trim() } else { $result.Stdout.Trim() }
             throw "$operation '$Path' failed after $attempt attempt(s) with exit status $($result.ExitCode): $detail"
         }
-        $delay = 10 * [int][Math]::Pow(2, $attempt - 1)
-        Write-Warning "Apple ticket service unavailable for '$Path' (exit 68, attempt $attempt/4); retrying in $delay seconds."
+        $delay = [Math]::Min(60, 10 * [int][Math]::Pow(2, $attempt - 1))
+        Write-Warning "Apple ticket service unavailable for '$Path' (exit 68, attempt $attempt/$maxAttempts); retrying in $delay seconds."
         Start-Sleep -Seconds $delay
     }
 }
