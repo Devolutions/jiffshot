@@ -933,7 +933,7 @@ function Read-JiffshotChecksumManifest {
 function Publish-JiffshotLinuxRelease {
     <#
     .SYNOPSIS
-    Require and verify all six Linux packages before adding them to a release.
+    Verify all six Linux packages and add platform-named assets to a release.
     #>
     [CmdletBinding()]
     param(
@@ -944,7 +944,7 @@ function Publish-JiffshotLinuxRelease {
     $Version = Get-JiffshotPackageVersion -Expected $Version
     $ArtifactDir = Resolve-FullPath $ArtifactDir
     $OutputDir = Resolve-FullPath $OutputDir
-    $verified = [System.Collections.Generic.List[string]]::new()
+    $verified = [System.Collections.Generic.List[object]]::new()
     $merged = [ordered]@{}
     foreach ($architecture in $script:Architectures.Values) {
         $arch = $architecture.Name
@@ -961,16 +961,21 @@ function Publish-JiffshotLinuxRelease {
                 if ($actual -cne $checksums[$name]) {
                     throw (New-PackagingError "checksum mismatch for $source")
                 }
-                $verified.Add($source)
-                $records[$name] = $actual
+                $releaseName = switch -Regex ($name) {
+                    '\.deb$' { "Devolutions.Jiffshot-linux-$arch-$Version.deb"; break }
+                    '\.rpm$' { "Devolutions.Jiffshot-linux-$arch-$Version.rpm"; break }
+                    default { $name }
+                }
+                $verified.Add([pscustomobject]@{ Source = $source; Name = $releaseName })
+                $records[$releaseName] = $actual
             }
         }
         $merged[$arch] = $records
     }
     # No output is touched until all architectures, formats, and hashes pass.
     New-Directory $OutputDir
-    foreach ($source in $verified) {
-        [System.IO.File]::Copy($source, (Join-Path $OutputDir ([System.IO.Path]::GetFileName($source))), $true)
+    foreach ($asset in $verified) {
+        [System.IO.File]::Copy($asset.Source, (Join-Path $OutputDir $asset.Name), $true)
     }
     foreach ($arch in $merged.Keys) {
         $names = [string[]]@($merged[$arch].Keys)
@@ -978,7 +983,7 @@ function Publish-JiffshotLinuxRelease {
         $content = -join ($names | ForEach-Object { "$($merged[$arch][$_])  $_`n" })
         [System.IO.File]::WriteAllText((Join-Path $OutputDir "SHA256SUMS-linux-$arch.txt"), $content, [System.Text.Encoding]::ASCII)
     }
-    $verified | ForEach-Object { [System.IO.Path]::GetFileName($_) }
+    $verified | ForEach-Object Name
 }
 
 Export-ModuleMember -Function @(

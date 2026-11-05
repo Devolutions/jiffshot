@@ -359,6 +359,7 @@ Describe 'Release assembly' {
         $script:Artifacts = Join-Path $script:Work 'artifacts'
         $script:Output = Join-Path $script:Work 'release'
         $script:Packages = [ordered]@{}
+        $script:ReleaseNames = [ordered]@{}
         $script:Manifests = [System.Collections.Generic.List[string]]::new()
         foreach ($row in @(@('x64', 'amd64', 'x86_64'), @('arm64', 'arm64', 'aarch64'))) {
             $arch, $deb, $rpm = $row
@@ -371,6 +372,16 @@ Describe 'Release assembly' {
                     $content = Get-AsciiBytes "independent fixture $name"
                     [System.IO.File]::WriteAllBytes((Join-Path $directory $name), $content)
                     $script:Packages[$name] = @((Join-Path $directory $name), $content)
+                    $releaseName = if ($name.EndsWith('.deb')) {
+                        "Devolutions.Jiffshot-linux-$arch-$($script:Version).deb"
+                    }
+                    elseif ($name.EndsWith('.rpm')) {
+                        "Devolutions.Jiffshot-linux-$arch-$($script:Version).rpm"
+                    }
+                    else {
+                        $name
+                    }
+                    $script:ReleaseNames[$name] = $releaseName
                     "$(Get-BytesSha256 $content)  $name`n"
                 }
                 $manifest = Join-Path $directory "SHA256SUMS-linux-$arch.txt"
@@ -389,21 +400,17 @@ Describe 'Release assembly' {
         [System.IO.File]::WriteAllBytes((Join-Path $script:Output 'windows.msi'), (Get-AsciiBytes 'leave Windows assets alone'))
         $actual = @(Publish-JiffshotLinuxRelease -ArtifactDir $script:Artifacts -OutputDir $script:Output -Version $script:Version)
         $actual.Count | Should -Be 6
-        @($actual | Sort-Object -CaseSensitive) | Should -BeExactly @($script:Packages.Keys | Sort-Object -CaseSensitive)
+        @($actual | Sort-Object -CaseSensitive) | Should -BeExactly @($script:ReleaseNames.Values | Sort-Object -CaseSensitive)
         foreach ($name in $script:Packages.Keys) {
-            [System.IO.File]::ReadAllBytes((Join-Path $script:Output $name)) | Should -Be $script:Packages[$name][1]
+            [System.IO.File]::ReadAllBytes((Join-Path $script:Output $script:ReleaseNames[$name])) | Should -Be $script:Packages[$name][1]
         }
         foreach ($arch in 'x64', 'arm64') {
             $manifest = Join-Path $script:Output "SHA256SUMS-linux-$arch.txt"
-            $debSuffix = if ($arch -eq 'x64') { '_amd64.deb' } else { '_arm64.deb' }
-            $rpmSuffix = if ($arch -eq 'x64') { '.x86_64.rpm' } else { '.aarch64.rpm' }
-            $names = @($script:Packages.Keys | Where-Object {
-                    $_.Contains("linux-$arch-") -or $_.EndsWith($debSuffix) -or $_.EndsWith($rpmSuffix)
-                })
+            $names = @($script:ReleaseNames.Values | Where-Object { $_.Contains("linux-$arch-") })
             $records = Read-JiffshotChecksumManifest -Path $manifest -ExpectedName $names
             $records.Count | Should -Be 3
             foreach ($name in $names) {
-                $records[$name] | Should -BeExactly (Get-BytesSha256 $script:Packages[$name][1])
+                $records[$name] | Should -BeExactly (Get-JiffshotSha256 (Join-Path $script:Output $name))
             }
         }
         [System.IO.File]::ReadAllBytes((Join-Path $script:Output 'windows.msi')) | Should -Be (Get-AsciiBytes 'leave Windows assets alone')
@@ -475,8 +482,9 @@ Describe 'Release assembly' {
         $result = Invoke-TestScript (Join-Path $script:Assets 'assemble-release.ps1') @(
             '-ArtifactDir', $script:Artifacts, '-OutputDir', $script:Output, '-Version', $script:Version)
         $result.ExitCode | Should -Be 0 -Because $result.Stderr
-        @($result.Stdout.Split("`n", [System.StringSplitOptions]::RemoveEmptyEntries) | Sort-Object -CaseSensitive) |
-            Should -BeExactly @($script:Packages.Keys | Sort-Object -CaseSensitive)
+        @($result.Stdout.Split("`n", [System.StringSplitOptions]::RemoveEmptyEntries) |
+                ForEach-Object { $_.Trim() } | Sort-Object -CaseSensitive) |
+            Should -BeExactly @($script:ReleaseNames.Values | Sort-Object -CaseSensitive)
     }
 }
 
@@ -617,6 +625,9 @@ Describe 'Architecture workflows' {
     It 'release uses the verified collector and propagates failure' {
         $release = Get-WorkflowText 'release.yml'
         foreach ($expected in @(
+                '$msiName = "Devolutions.Jiffshot-windows-$arch-$env:RELEASE_VERSION.msi"'
+                '$msixName = "Devolutions.Jiffshot-windows-$arch-$env:RELEASE_VERSION.msix"'
+                '-DestinationPath "release\Devolutions.Jiffshot-windows-$arch-$env:RELEASE_VERSION.zip"'
                 'pwsh -NoProfile -File package/linux/assemble-release.ps1 -ArtifactDir artifacts'
                 '-OutputDir release -Version "$env:RELEASE_VERSION"'
                 "if (`$LASTEXITCODE -ne 0) { throw 'Linux release assembly"

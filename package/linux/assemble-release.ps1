@@ -7,7 +7,8 @@ Require and verify all six Linux packages before adding them to a release.
 .DESCRIPTION
 Reads jiffshot-linux-<arch> (tar.gz and DEB) and jiffshot-linux-<arch>-rpm artifact
 directories for x64 and arm64, verifies every package against its builder manifest,
-then copies the packages and merged SHA256SUMS-linux-<arch>.txt files to OutputDir.
+then copies the packages with platform and architecture in each release filename,
+along with merged SHA256SUMS-linux-<arch>.txt files, to OutputDir.
 #>
 [CmdletBinding()]
 param(
