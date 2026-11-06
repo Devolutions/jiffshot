@@ -3,15 +3,17 @@
 //! Effects in Image, a Share menu, View ▸ Pixel grid, Edit ▸ Preferences and
 //! Help) and the toolbar's Create ▾ and Share ▾ menus.
 //!
-//! Menu items run commands, so their shortcuts work while the menus are
-//! closed (`hot_key`) and they are disabled with the model's
-//! `<command>_enabled` values.
+//! The same definitions drive the native macOS menu bar and in-window menus
+//! elsewhere, including shortcuts and the model's `<command>_enabled` values.
 
 use crate::ui::dialogs;
 use super::main_common::{act, action, command, file_name, reactive_items, run, Call, Ctx};
 use super::main_tools::grouped_effects;
+use super::menu_entry::MenuEntry;
 use crate::vm::MainViewModelSink;
-use rustolonia::{AnyEl, AppScope, Command, El, Menu, MenuFlyout, MenuItem, MenuItemToggleType, Result, Separator, Signal, TextBox, Variant, Window};
+use rustolonia::{AnyEl, AppScope, Command, El, MenuFlyout, MenuItem, MenuItemToggleType, Result, Separator, Signal, TextBox, Variant, Window};
+#[cfg(not(target_os = "macos"))]
+use rustolonia::Menu;
 
 /// Shown in Open recent while the list is empty.
 const NO_RECENT_FILES: &str = "(no recent files)";
@@ -42,47 +44,56 @@ fn header(text: &str) -> String {
 }
 
 /// A menu item that runs `command`, with an optional shortcut.
-fn item(text: &str, command: Command, gesture: Option<&str>) -> El<MenuItem> {
-    let el = MenuItem::el().header(header(text)).command(command);
-    match gesture {
-        Some(gesture) => {
-            let gesture = crate::ui::shortcut(gesture);
-            el.input_gesture(gesture.clone()).hot_key(gesture)
-        }
-        None => el,
-    }
+fn item(text: &str, command: Command, gesture: Option<&str>) -> MenuEntry {
+    MenuEntry::action(&header(text), command, gesture)
 }
 
 /// A menu item for a view-model command.
-fn cmd(text: &str, enabled: Signal<bool>, f: Call, gesture: Option<&str>) -> AnyEl {
-    item(text, command(enabled, f), gesture).into()
+fn cmd(text: &str, enabled: Signal<bool>, f: Call, gesture: Option<&str>) -> MenuEntry {
+    item(text, command(enabled, f), gesture).enabled(enabled)
 }
 
 /// A check item that flips `value` (a writable property).
-fn toggle(text: &str, value: Signal<bool>) -> AnyEl {
-    MenuItem::el()
-        .header(header(text))
-        .toggle_type(MenuItemToggleType::CheckBox)
-        .checked(value)
-        .command(act(move || value.set(!value.get_untracked())))
-        .into()
+fn toggle(text: &str, value: Signal<bool>) -> MenuEntry {
+    item(text, act(move || value.set(!value.get_untracked())), None).checked(value)
 }
 
 /// A submenu.
-fn submenu(text: &str, items: Vec<AnyEl>) -> El<MenuItem> {
-    MenuItem::el().header(header(text)).items_iter(items)
+fn submenu(text: &str, items: Vec<MenuEntry>) -> MenuEntry {
+    MenuEntry::Submenu(header(text), items)
 }
 
-fn sep() -> AnyEl {
-    Separator::el().into()
+fn sep() -> MenuEntry {
+    MenuEntry::Separator
 }
 
 /// The menu bar.
+#[cfg(not(target_os = "macos"))]
 pub fn menu_bar(ctx: &Ctx) -> El<Menu> {
-    Menu::el().item(file_menu(ctx)).item(edit_menu(ctx)).item(image_menu(ctx)).item(share_menu(ctx)).item(tools_menu(ctx)).item(view_menu(ctx)).item(video_menu(ctx)).item(help_menu(ctx))
+    Menu::el().items_iter(editor_menus(ctx).into_iter().map(AnyEl::from))
 }
 
-fn file_menu(ctx: &Ctx) -> El<MenuItem> {
+fn editor_menus(ctx: &Ctx) -> Vec<MenuEntry> {
+    vec![file_menu(ctx), edit_menu(ctx), image_menu(ctx), share_menu(ctx), tools_menu(ctx), view_menu(ctx), video_menu(ctx), help_menu(ctx)]
+}
+
+#[cfg(target_os = "macos")]
+pub fn install_native(ctx: &Ctx, window: &Window) -> Result<()> {
+    let menu = super::menu_entry::native_menu(&ctx.scope, editor_menus(ctx))?;
+    ctx.scope.set_window_menu(window, Some(&menu))?;
+    let about = ctx.scope.clone();
+    let application = super::menu_entry::native_menu(
+        &ctx.scope,
+        vec![
+            item("About Jiffshot", act(move || with_owner(&about, dialogs::about)), None),
+            sep(),
+            item("Settings…", action("prefs:editor"), Some("Ctrl+OemComma")),
+        ],
+    )?;
+    ctx.scope.set_application_menu(Some(&application))
+}
+
+fn file_menu(ctx: &Ctx) -> MenuEntry {
     let s = ctx.sink;
     submenu(
         "_File",
@@ -92,7 +103,7 @@ fn file_menu(ctx: &Ctx) -> El<MenuItem> {
             cmd("_Record video", s.record_video_enabled, |m| m.record_video(), None),
             cmd("_New image", s.new_image_enabled, |m| m.new_image(), Some("Ctrl+N")),
             cmd("_Open…", s.open_enabled, |m| m.open(), Some("Ctrl+O")),
-            open_recent(s).into(),
+            open_recent(s),
             cmd("Co_mbine images…", s.combine_images_enabled, |m| m.combine_images(), None),
             sep(),
             cmd("_Save", s.save_enabled, |m| m.save(), Some("Ctrl+S")),
@@ -106,18 +117,18 @@ fn file_menu(ctx: &Ctx) -> El<MenuItem> {
             cmd("Delete _file", s.delete_file_enabled, |m| m.delete_file(), Some("Ctrl+Delete")),
             sep(),
             cmd("Open _library folder", s.open_library_folder_enabled, |m| m.open_library_folder(), None),
+            #[cfg(not(target_os = "macos"))]
             cmd("E_xit", s.exit_enabled, |m| m.exit(), Some("Ctrl+Q")),
         ],
     )
 }
 
 /// File ▸ Open recent: the recent files by name, newest first.
-fn open_recent(sink: MainViewModelSink) -> El<MenuItem> {
+fn open_recent(sink: MainViewModelSink) -> MenuEntry {
     let enabled = sink.open_recent_file_enabled;
-    let el = MenuItem::el().header(header("Open _recent"));
-    reactive_items(el, MenuItem::items, move || sink.recent_files.get(), move |files: &Vec<String>| {
+    MenuEntry::dynamic("Open _recent", move || sink.recent_files.get(), move |files| {
         if files.is_empty() {
-            return vec![MenuItem::el().header(NO_RECENT_FILES).enabled(false).into()];
+            return vec![MenuEntry::Disabled(NO_RECENT_FILES.to_owned())];
         }
         files
             .iter()
@@ -131,13 +142,13 @@ fn open_recent(sink: MainViewModelSink) -> El<MenuItem> {
                     Ok(())
                 };
                 let command = Command::with_can_execute(enabled, open.clone()).unwrap_or_else(|_| Command::new(open));
-                MenuItem::el().header(name).command(command).into()
+                MenuEntry::action(&name, command, None).enabled(enabled)
             })
             .collect()
     })
 }
 
-fn edit_menu(ctx: &Ctx) -> El<MenuItem> {
+fn edit_menu(ctx: &Ctx) -> MenuEntry {
     let s = ctx.sink;
     submenu(
         "_Edit",
@@ -163,26 +174,28 @@ fn edit_menu(ctx: &Ctx) -> El<MenuItem> {
             cmd("Send to bac_k", s.send_to_back_enabled, |m| m.send_to_back(), Some("Ctrl+Shift+OemOpenBrackets")),
             sep(),
             cmd("Save as _quick style", s.save_quick_style_enabled, |m| m.save_quick_style(), None),
+            #[cfg(not(target_os = "macos"))]
             sep(),
-            item("_Preferences…", action("prefs:editor"), Some("Ctrl+OemComma")).into(),
+            #[cfg(not(target_os = "macos"))]
+            item("_Preferences…", action("prefs:editor"), Some("Ctrl+OemComma")),
         ],
     )
 }
 
-fn image_menu(ctx: &Ctx) -> El<MenuItem> {
+fn image_menu(ctx: &Ctx) -> MenuEntry {
     let s = ctx.sink;
     let scope = ctx.scope.clone();
     let trim_scope = scope.clone();
-    let colors: Vec<AnyEl> = CANVAS_COLORS
+    let colors = CANVAS_COLORS
         .iter()
-        .map(|&(name, hex)| item(name, act(move || s.canvas_color.set(hex.to_owned())), None).into())
+        .map(|&(name, hex)| item(name, act(move || s.canvas_color.set(hex.to_owned())), None))
         .collect();
-    let effects = reactive_items(MenuItem::el().header(header("_Effects")), MenuItem::items, move || s.effects.get(), |names: &Vec<String>| {
+    let effects = MenuEntry::dynamic("_Effects", move || s.effects.get(), |names| {
         grouped_effects(names)
             .into_iter()
             .map(|(group, effects)| match effects.as_slice() {
-                [one] => item(one, action(format!("effect:{one}")), None).into(),
-                _ => submenu(&group, effects.iter().map(|name| item(name, action(format!("effect:{name}")), None).into()).collect()).into(),
+                [one] => item(one, action(format!("effect:{one}")), None),
+                _ => submenu(&group, effects.iter().map(|name| item(name, action(format!("effect:{name}")), None)).collect()),
             })
             .collect()
     });
@@ -191,8 +204,8 @@ fn image_menu(ctx: &Ctx) -> El<MenuItem> {
         vec![
             cmd("_Crop", s.tool_crop_menu_enabled, |m| m.tool_crop_menu(), None),
             cmd("_Auto trim", s.auto_trim_enabled, |m| m.auto_trim(), None),
-            item("_Trim…", act(move || ask_trim(&trim_scope, s)), None).into(),
-            item("Resize _image…", act(move || ask_resize(&scope, s)), Some("Ctrl+Shift+R")).into(),
+            item("_Trim…", act(move || ask_trim(&trim_scope, s)), None),
+            item("Resize _image…", act(move || ask_resize(&scope, s)), Some("Ctrl+Shift+R")),
             sep(),
             cmd("Rotate _left", s.rotate_left_enabled, |m| m.rotate_left(), None),
             cmd("Rotate _right", s.rotate_right_enabled, |m| m.rotate_right(), None),
@@ -209,16 +222,16 @@ fn image_menu(ctx: &Ctx) -> El<MenuItem> {
             cmd("_Grab text", s.grab_text_enabled, |m| m.grab_text(), None),
             cmd("_Simplify", s.simplify_enabled, |m| m.simplify(), None),
             sep(),
-            submenu("Canvas c_olor", colors).into(),
-            effects.into(),
+            submenu("Canvas c_olor", colors),
+            effects,
         ],
     )
 }
 
 /// The Share menu: the share destinations, then Copy all, Export and Print.
-fn share_menu(ctx: &Ctx) -> El<MenuItem> {
+fn share_menu(ctx: &Ctx) -> MenuEntry {
     let s = ctx.sink;
-    reactive_items(MenuItem::el().header(header("_Share")), MenuItem::items, move || s.shares.get(), move |shares: &Vec<String>| {
+    MenuEntry::dynamic("_Share", move || s.shares.get(), move |shares| {
         let mut items = share_items(shares);
         items.push(sep());
         items.push(cmd("Copy all", s.copy_image_enabled, |m| m.copy_image(), None));
@@ -228,12 +241,12 @@ fn share_menu(ctx: &Ctx) -> El<MenuItem> {
     })
 }
 
-fn share_items(shares: &[String]) -> Vec<AnyEl> {
-    shares.iter().map(|name| item(name, action(format!("share:{name}")), None).into()).collect()
+fn share_items(shares: &[String]) -> Vec<MenuEntry> {
+    shares.iter().map(|name| item(name, action(format!("share:{name}")), None)).collect()
 }
 
 /// Tools: every tool, the first nine on Ctrl+1 … Ctrl+9.
-fn tools_menu(ctx: &Ctx) -> El<MenuItem> {
+fn tools_menu(ctx: &Ctx) -> MenuEntry {
     let s = ctx.sink;
     let tools: [(&str, Signal<bool>, Call); 22] = [
         ("_Select / move", s.tool_select_enabled, |m| m.tool_select()),
@@ -264,21 +277,19 @@ fn tools_menu(ctx: &Ctx) -> El<MenuItem> {
     submenu("_Tools", items)
 }
 
-fn view_menu(ctx: &Ctx) -> El<MenuItem> {
+fn view_menu(ctx: &Ctx) -> MenuEntry {
     let s = ctx.sink;
     let grid = Signal::new(ctx.canvas.show_pixel_grid());
     let canvas = ctx.canvas_handle();
-    let pixel_grid = MenuItem::el()
-        .header(header("Pixel _grid"))
-        .toggle_type(MenuItemToggleType::CheckBox)
-        .checked(grid)
-        .input_gesture(crate::ui::shortcut("Ctrl+G"))
-        .hot_key(crate::ui::shortcut("Ctrl+G"))
-        .command(act(move || {
+    let pixel_grid = item(
+        "Pixel _grid",
+        act(move || {
             let canvas = canvas.get();
             canvas.set_show_pixel_grid(!canvas.show_pixel_grid());
             grid.set(canvas.show_pixel_grid());
-        }));
+        }),
+        Some("Ctrl+G"),
+    ).checked(grid);
     submenu(
         "_View",
         vec![
@@ -286,7 +297,7 @@ fn view_menu(ctx: &Ctx) -> El<MenuItem> {
             cmd("Zoom _out", s.zoom_out_enabled, |m| m.zoom_out(), Some("Ctrl+OemMinus")),
             cmd("_Fit", s.zoom_fit_enabled, |m| m.zoom_fit(), Some("Ctrl+Alt+D0")),
             cmd("_Actual size", s.zoom_actual_enabled, |m| m.zoom_actual(), Some("Ctrl+D0")),
-            pixel_grid.into(),
+            pixel_grid,
             sep(),
             cmd("_Library view", s.toggle_library_view_enabled, |m| m.toggle_library_view(), Some("Ctrl+L")),
             cmd("Show captures _closed from the tray", s.show_closed_enabled, |m| m.show_closed(), None),
@@ -301,7 +312,7 @@ fn view_menu(ctx: &Ctx) -> El<MenuItem> {
     )
 }
 
-fn video_menu(ctx: &Ctx) -> El<MenuItem> {
+fn video_menu(ctx: &Ctx) -> MenuEntry {
     let s = ctx.sink;
     submenu(
         "Vi_deo",
@@ -327,14 +338,18 @@ fn video_menu(ctx: &Ctx) -> El<MenuItem> {
     )
 }
 
-fn help_menu(ctx: &Ctx) -> El<MenuItem> {
-    let (shortcuts, about) = (ctx.scope.clone(), ctx.scope.clone());
+fn help_menu(ctx: &Ctx) -> MenuEntry {
+    let shortcuts = ctx.scope.clone();
+    #[cfg(not(target_os = "macos"))]
+    let about = ctx.scope.clone();
     submenu(
         "_Help",
         vec![
-            item("_Keyboard shortcuts", act(move || with_owner(&shortcuts, dialogs::keyboard_shortcuts)), Some("F1")).into(),
+            item("_Keyboard shortcuts", act(move || with_owner(&shortcuts, dialogs::keyboard_shortcuts)), Some("F1")),
+            #[cfg(not(target_os = "macos"))]
             sep(),
-            item("_About Jiffshot", act(move || with_owner(&about, dialogs::about)), None).into(),
+            #[cfg(not(target_os = "macos"))]
+            item("_About Jiffshot", act(move || with_owner(&about, dialogs::about)), None),
         ],
     )
 }
@@ -342,7 +357,14 @@ fn help_menu(ctx: &Ctx) -> El<MenuItem> {
 /// Shows a dialog over the editor window.
 fn with_owner(scope: &AppScope, show: fn(&AppScope, &Window) -> Result<()>) {
     if let Some(owner) = scope.main_window() {
-        if let Err(error) = show(scope, &owner) {
+        let result = (|| {
+            #[cfg(target_os = "macos")]
+            if !owner.get_is_visible()? {
+                owner.show()?;
+            }
+            show(scope, &owner)
+        })();
+        if let Err(error) = result {
             eprintln!("could not show the dialog: {error}");
         }
     }
@@ -410,16 +432,16 @@ pub fn create_flyout(ctx: &Ctx) -> El<MenuFlyout> {
     MenuFlyout::el()
         .item(templates)
         .item(themes)
-        .item(toggle("Captions under images", s.template_captions))
-        .item(toggle("Number images", s.template_numbers))
-        .item(submenu("Footer", vec![MenuItem::el().header(footer).stays_open_on_click(true).into()]))
-        .item(sep())
-        .item(cmd("Combine images…", s.combine_images_enabled, |m| m.combine_images(), None))
-        .item(cmd("Combine the picked captures", s.combine_selected_enabled, |m| m.combine_selected(), None))
-        .item(sep())
-        .item(cmd("Video from images…", s.video_from_images_enabled, |m| m.video_from_images(), None))
-        .item(cmd("Narrated video from images…", s.narrate_images_enabled, |m| m.narrate_images(), None))
-        .item(cmd("Combine videos…", s.combine_videos_enabled, |m| m.combine_videos(), None))
+        .item(AnyEl::from(toggle("Captions under images", s.template_captions)))
+        .item(AnyEl::from(toggle("Number images", s.template_numbers)))
+        .item(MenuItem::el().header("Footer").item(MenuItem::el().header(footer).stays_open_on_click(true)))
+        .item(Separator::el())
+        .item(AnyEl::from(cmd("Combine images…", s.combine_images_enabled, |m| m.combine_images(), None)))
+        .item(AnyEl::from(cmd("Combine the picked captures", s.combine_selected_enabled, |m| m.combine_selected(), None)))
+        .item(Separator::el())
+        .item(AnyEl::from(cmd("Video from images…", s.video_from_images_enabled, |m| m.video_from_images(), None)))
+        .item(AnyEl::from(cmd("Narrated video from images…", s.narrate_images_enabled, |m| m.narrate_images(), None)))
+        .item(AnyEl::from(cmd("Combine videos…", s.combine_videos_enabled, |m| m.combine_videos(), None)))
 }
 
 /// Share ▾: the share destinations, Export and Print.
@@ -430,7 +452,7 @@ pub fn share_flyout(ctx: &Ctx) -> El<MenuFlyout> {
         items.push(sep());
         items.push(cmd("Export…", s.export_enabled, |m| m.export(), None));
         items.push(cmd("Print…", s.print_enabled, |m| m.print(), None));
-        items
+        items.into_iter().map(AnyEl::from).collect()
     })
 }
 

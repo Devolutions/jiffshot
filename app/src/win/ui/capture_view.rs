@@ -29,10 +29,12 @@ pub enum CaptureTiming {
     Schedule,
 }
 use rustolonia::{
-    AppScope, AsControl, Border, Button, Color, Control, Dock, DockPanel, Effect, El, Flyout, FontWeight, Grid, HorizontalAlignment, Image, Key, MenuFlyout,
+    AppScope, AsControl, Border, Button, Color, Control, Dock, DockPanel, Effect, El, Flyout, FontWeight, Grid, HorizontalAlignment, Key, MenuFlyout,
     MenuItem, MenuItemToggleType, NodeRef, Orientation, PlacementMode, Result, ScrollViewer, Separator, Signal, StackPanel, TextAlignment, TextBlock, TextWrapping, Upcast,
     VerticalAlignment, Window, WindowStartupLocation,
 };
+#[cfg(not(target_os = "macos"))]
+use rustolonia::Image;
 #[cfg(windows)]
 use rustolonia::{Brush, Path, TemplatedControl, WindowDecorations, WindowState};
 #[cfg(target_os = "macos")]
@@ -117,6 +119,10 @@ struct View {
     capture: Action,
     #[serde(default)]
     toggles: Vec<Toggle>,
+    /// The title menus, for the macOS menu bar.
+    #[cfg(target_os = "macos")]
+    #[serde(default)]
+    menus: Vec<MenuEntry>,
 }
 
 /// An icon toggle (`panel::Toggle`).
@@ -225,6 +231,7 @@ struct Ui {
     popup: Subscriptions,
     /// The control the next menu, panel or note opens under.
     anchor: Option<Control>,
+    /// The in-window menu bar, or a zero-height popup anchor on macOS.
     menu_bar: NodeRef<StackPanel>,
     menu_buttons: Vec<MenuButton>,
     open_menu: Option<MenuFlyout>,
@@ -232,6 +239,8 @@ struct Ui {
     /// Invalidates posted payloads after a newer request or dismissal.
     menu_revision: u64,
     topmost: bool,
+    #[cfg(target_os = "macos")]
+    native_menu: native_menu::NativeMenus,
 }
 
 thread_local! {
@@ -294,8 +303,9 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
     let subs = Subscriptions::default();
     let menu_bar = NodeRef::new();
     let active_menu = scope.signal(None::<&'static str>);
-    let menu_buttons = Rc::new(RefCell::new(Vec::new()));
+    let menu_buttons = Rc::new(RefCell::new(Vec::<MenuButton>::new()));
 
+    #[cfg(not(target_os = "macos"))]
     let menu_button = |label: &str, which: &'static str| {
         let buttons = menu_buttons.clone();
         let hover_subs = subs.clone();
@@ -357,7 +367,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         )
         .child(caption_button(scope, dark, custom_caption, &subs, 2, "Minimize", false))
         .child(caption_button(scope, dark, custom_caption, &subs, 3, "Close", true));
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     let title_bar = Grid::el()
         .column_definitions("Auto,Auto,*")
         .child(Image::el().source(super::icon_file()).width(20.0).height(20.0).margin((14.0, 0.0, 10.0, 0.0)).vertical_alignment(VerticalAlignment::Center))
@@ -373,6 +383,8 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                 .child(menu_button("View", "view"))
                 .child(menu_button("Help", "help")),
         );
+    #[cfg(target_os = "macos")]
+    let title_bar = StackPanel::el().height(0.0).node_ref(menu_bar);
 
     let capture_button = {
         let hover = scope.signal(false);
@@ -572,46 +584,38 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
 
     let theme_scope = scope.clone();
     let closing_scope = scope.clone();
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(windows)]
     let loaded_scope = scope.clone();
-    let window = Window::el()
-        // The drawn title bar holds the icon and the menus, so the title is
-        // only the native window's (the taskbar's and Alt+Tab's).
-        .title("")
-        .on_loaded(move |_| {
-            #[cfg(windows)]
-            {
-                if !custom_caption.get() {
-                    return;
-                }
-                let Some(window) = window_ref.get() else {
-                    eprintln!("Capture window title bar: window unavailable");
-                    return;
-                };
-                let result = if let Some(hwnd) = parts::hwnd(&loaded_scope, &window) {
-                    parts::set_native_title(hwnd, TITLE);
-                    caption::install(hwnd as windows_sys::Win32::Foundation::HWND)
-                } else {
-                    Err(std::io::Error::other("native window handle unavailable"))
-                };
-                if let Err(error) = result {
-                    eprintln!("Capture window title bar: {error}");
-                    custom_caption.set(false);
-                    let fallback = window
-                        .set_extend_client_area_to_decorations_hint(false)
-                        .and_then(|_| window.set_window_decorations(WindowDecorations::Full))
-                        .and_then(|_| window.set_title(TITLE))
-                        .and_then(|_| window.set_height(350.0));
-                    if let Err(error) = fallback {
-                        eprintln!("Capture window native title bar: {error:?}");
-                    }
-                }
+    let window = Window::el().title(if cfg!(target_os = "macos") { TITLE } else { "" });
+    #[cfg(windows)]
+    let window = window.on_loaded(move |_| {
+        if !custom_caption.get() {
+            return;
+        }
+        let Some(window) = window_ref.get() else {
+            eprintln!("Capture window title bar: window unavailable");
+            return;
+        };
+        let result = if let Some(hwnd) = parts::hwnd(&loaded_scope, &window) {
+            parts::set_native_title(hwnd, TITLE);
+            caption::install(hwnd as windows_sys::Win32::Foundation::HWND)
+        } else {
+            Err(std::io::Error::other("native window handle unavailable"))
+        };
+        if let Err(error) = result {
+            eprintln!("Capture window title bar: {error}");
+            custom_caption.set(false);
+            let fallback = window
+                .set_extend_client_area_to_decorations_hint(false)
+                .and_then(|_| window.set_window_decorations(WindowDecorations::Full))
+                .and_then(|_| window.set_title(TITLE))
+                .and_then(|_| window.set_height(350.0));
+            if let Err(error) = fallback {
+                eprintln!("Capture window native title bar: {error:?}");
             }
-            #[cfg(target_os = "macos")]
-            if let Some(hwnd) = window_ref.get().and_then(|window| parts::hwnd(&loaded_scope, &window)) {
-                parts::set_native_title(hwnd, TITLE);
-            }
-        })
+        }
+    });
+    let window = window
         .icon(super::icon_file())
         .width(if cfg!(target_os = "linux") { 660.0 } else { 560.0 })
         .height(if cfg!(target_os = "linux") { 400.0 } else { 320.0 })
@@ -619,10 +623,10 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         .can_maximize(false);
     #[cfg(windows)]
     let window = window.window_decorations(WindowDecorations::BorderOnly);
+    #[cfg(not(target_os = "macos"))]
+    let window = window.extend_client_area_to_decorations_hint(true).extend_client_area_title_bar_height_hint(40.0);
     let window = window
         .window_startup_location(WindowStartupLocation::CenterScreen)
-        .extend_client_area_to_decorations_hint(true)
-        .extend_client_area_title_bar_height_hint(40.0)
         .background(move || palette(dark).back)
         .foreground(move || palette(dark).text)
         .on_actual_theme_variant_changed(move |_| {
@@ -643,13 +647,15 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         })
         .content(
             Grid::el()
-                .row_definitions("40,*,44")
+                .row_definitions(if cfg!(target_os = "macos") { "Auto,*,44" } else { "40,*,44" })
                 .child(title_bar)
                 .child(Grid::el().grid_row(1).margin((8.0, 0.0, 8.0, 0.0)).child(card))
                 .child(bottom_bar),
         )
         .node_ref(window_ref)
         .build(scope)?;
+    #[cfg(target_os = "macos")]
+    let native_menu = native_menu::NativeMenus::install(scope, &window)?;
 
     UI.with(|ui| {
         *ui.borrow_mut() = Some(Ui {
@@ -673,6 +679,8 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
             active_menu,
             menu_revision: 0,
             topmost: false,
+            #[cfg(target_os = "macos")]
+            native_menu,
         })
     });
     follow(scope, binding)?;
@@ -829,6 +837,8 @@ fn glyph(text: &str, size: f64) -> El<TextBlock> {
 
 fn apply_view(json: &str) -> Result<()> {
     let Ok(view) = serde_json::from_str::<View>(json) else { return Ok(()) };
+    #[cfg(target_os = "macos")]
+    with_ui(|ui| ui.native_menu.update(&view.menus)).transpose()?;
     let Some((scope, dark, fields, rows, (tab, recording, timing, interval_running, active_schedule, action))) =
         with_ui(|ui| Some((ui.scope.clone(), ui.dark, ui.fields.get()?, ui.rows.clone(), (ui.tab, ui.recording, ui.timing, ui.interval_running, ui.active_schedule, ui.action))))
             .flatten()
@@ -1084,6 +1094,7 @@ pub(super) fn menu_for_selftest() -> Option<(&'static str, MenuFlyout)> {
     with_ui(|ui| Some((ui.active_menu.get_untracked()?, ui.open_menu.clone()?))).flatten()
 }
 
+#[cfg(not(target_os = "macos"))]
 fn request_top_menu(which: &'static str, button: &Button, hover: bool) {
     let Some(scope) = with_ui(|ui| ui.scope.clone()) else { return };
     let button = button.clone();
@@ -1197,13 +1208,104 @@ fn menu_entry(entry: &MenuEntry, subs: &Subscriptions, _dark: Signal<bool>) -> R
             let checked = this.get_is_checked().unwrap_or(false);
             let _ = this.set_checked(!checked);
         }
-        if let Some(command) = id.strip_prefix("window:") {
-            window_command(command);
-        } else if !id.is_empty() {
-            run(format!("pick:{id}"));
-        }
+        pick(&id);
     })?);
     Ok(item.upcast())
+}
+
+/// Runs a menu entry's `id`, as a click on it does.
+fn pick(id: &str) {
+    if let Some(command) = id.strip_prefix("window:") {
+        window_command(command);
+    } else if !id.is_empty() {
+        run(format!("pick:{id}"));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn pick_native(id: &str) -> Result<()> {
+    dismiss_menu()?;
+    with_ui(|ui| ui.anchor = ui.menu_bar.get().map(|bar| bar.upcast()))
+        .ok_or_else(|| rustolonia::Error::Load("the Capture window is unavailable".into()))?;
+    pick(id);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn native_menu_anchor_for_selftest() -> Result<bool> {
+    with_ui(|ui| match (ui.anchor.as_ref(), ui.menu_bar.get()) {
+        (Some(anchor), Some(bar)) => anchor.same_object(&bar),
+        _ => Ok(false),
+    }).unwrap_or(Ok(false))
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn native_menu_layout_for_selftest() -> Result<(usize, f64)> {
+    with_ui(|ui| {
+        let anchor = ui.menu_bar.get().ok_or_else(|| rustolonia::Error::Load("the Capture menu anchor is unavailable".into()))?;
+        Ok((anchor.children()?.len()?, anchor.get_height()?))
+    }).ok_or_else(|| rustolonia::Error::Load("the Capture window is unavailable".into()))?
+}
+
+/// The title menus in the macOS menu bar while the window is key.
+#[cfg(target_os = "macos")]
+mod native_menu {
+    use super::{pick_native, MenuEntry};
+    use crate::ui::main_window::menu_entry::update_native_states;
+    use rustolonia::{AppScope, NativeMenu, NativeMenuItem, Result, Window};
+    use std::sync::{Arc, Mutex};
+
+    pub(super) struct NativeMenus {
+        menu: NativeMenu,
+        ids: Arc<Mutex<Vec<String>>>,
+        shown: Vec<NativeMenuItem>,
+    }
+
+    impl NativeMenus {
+        pub fn install(scope: &AppScope, window: &Window) -> Result<Self> {
+            let ids = Arc::<Mutex<Vec<String>>>::default();
+            let dispatch = ids.clone();
+            let menu = scope.create_native_menu(move |id| {
+                let picked = id.checked_sub(1).and_then(|index| dispatch.lock().expect("Capture menu ids poisoned").get(index as usize).cloned());
+                let picked = picked.ok_or_else(|| rustolonia::Error::Load(format!("unknown Capture native menu command: {id}")))?;
+                pick_native(&picked)
+            })?;
+            scope.set_window_menu(window, Some(&menu))?;
+            Ok(Self { menu, ids, shown: Vec::new() })
+        }
+
+        pub fn update(&mut self, entries: &[MenuEntry]) -> Result<()> {
+            let mut ids = Vec::new();
+            let items = entries.iter().map(|entry| item(entry, &mut ids)).collect::<Vec<_>>();
+            if items != self.shown {
+                if !update_native_states(&self.menu, &self.shown, &items)? {
+                    self.menu.set_items(&items)?;
+                }
+                self.shown = items;
+            }
+            *self.ids.lock().expect("Capture menu ids poisoned") = ids;
+            Ok(())
+        }
+    }
+
+    fn item(entry: &MenuEntry, ids: &mut Vec<String>) -> NativeMenuItem {
+        if entry.separator {
+            return NativeMenuItem::separator();
+        }
+        // NativeMenu interprets access-key markers; the labels are literal.
+        let label = entry.label.replace('_', "__");
+        if !entry.items.is_empty() {
+            return NativeMenuItem::submenu(label, entry.items.iter().map(|child| item(child, ids)).collect());
+        }
+        ids.push(entry.id.clone());
+        let id = ids.len() as u32;
+        let item = if entry.id == "widget" || entry.checked || entry.keep_open {
+            NativeMenuItem::check(id, label, entry.checked)
+        } else {
+            NativeMenuItem::command(id, label)
+        };
+        item.enabled(entry.enabled && !entry.id.is_empty())
+    }
 }
 
 /// Menu commands about this window itself.
