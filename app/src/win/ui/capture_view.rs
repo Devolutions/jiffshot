@@ -34,7 +34,7 @@ use rustolonia::{
     VerticalAlignment, Window, WindowStartupLocation,
 };
 #[cfg(windows)]
-use rustolonia::{Brush, Path, WindowDecorations, WindowState};
+use rustolonia::{Brush, Path, TemplatedControl, WindowDecorations, WindowState};
 #[cfg(target_os = "macos")]
 use rustolonia::ScrollBarVisibility;
 use serde::Deserialize;
@@ -198,6 +198,13 @@ struct PanelAction {
 
 // ---- state ------------------------------------------------------------------
 
+struct MenuButton {
+    name: &'static str,
+    button: Button,
+    #[cfg(windows)]
+    width: Signal<f64>,
+}
+
 /// The window and what its callbacks need. UI thread only.
 struct Ui {
     scope: AppScope,
@@ -218,6 +225,12 @@ struct Ui {
     popup: Subscriptions,
     /// The control the next menu, panel or note opens under.
     anchor: Option<Control>,
+    menu_bar: NodeRef<StackPanel>,
+    menu_buttons: Vec<MenuButton>,
+    open_menu: Option<MenuFlyout>,
+    active_menu: Signal<Option<&'static str>>,
+    /// Invalidates posted payloads after a newer request or dismissal.
+    menu_revision: u64,
     topmost: bool,
 }
 
@@ -237,7 +250,19 @@ fn run(action: String) {
 /// Asks the model for a menu or panel (`verb` is "menu" or "panel"), to open
 /// under `anchor`.
 fn request(verb: &str, which: &str, anchor: Control) {
-    with_ui(|ui| ui.anchor = Some(anchor));
+    with_ui(|ui| {
+        ui.menu_revision = ui.menu_revision.wrapping_add(1);
+        let top_menu = ui.menu_buttons.iter().find_map(|menu| match menu.button.same_object(&anchor) {
+            Ok(true) => Some(menu.name),
+            Ok(false) => None,
+            Err(error) => {
+                eprintln!("Capture window menu anchor: {error:?}");
+                None
+            }
+        });
+        ui.active_menu.set(top_menu);
+        ui.anchor = Some(anchor);
+    });
     run(format!("{verb}:{which}"));
 }
 
@@ -267,9 +292,47 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
     let (window_ref, fields) = (NodeRef::new(), NodeRef::new());
     // The static controls' subscriptions last as long as the window.
     let subs = Subscriptions::default();
+    let menu_bar = NodeRef::new();
+    let active_menu = scope.signal(None::<&'static str>);
+    let menu_buttons = Rc::new(RefCell::new(Vec::new()));
 
     let menu_button = |label: &str, which: &'static str| {
-        on_click(flat(dark).content(label.to_owned()), &subs, move |button: &Button| request("menu", which, button.upcast()))
+        let buttons = menu_buttons.clone();
+        let hover_subs = subs.clone();
+        let hover = scope.signal(false);
+        #[cfg(windows)]
+        let width = scope.signal(0.0);
+        let button = flat(dark);
+        #[cfg(windows)]
+        let button = button.on_size_changed(move |args| width.set(args.new_size.width));
+        on_click(
+            button
+                .name(format!("capture-menu-{which}"))
+                .padding(0.0)
+                .border_thickness(0.0)
+                .content(
+                    Border::el()
+                        .padding((9.0, 4.0))
+                        .corner_radius(5.0)
+                        .background(move || if hover.get() || active_menu.get() == Some(which) { palette(dark).track } else { parts::TRANSPARENT })
+                        .child(TextBlock::el().text(label.to_owned()).foreground(move || palette(dark).text)),
+                )
+                .on_pointer_entered(move |_| hover.set(true))
+                .on_pointer_exited(move |_| hover.set(false)),
+            &subs,
+            move |button: &Button| request_top_menu(which, button, false),
+        )
+        .with_op(move |_, button| {
+            buttons.borrow_mut().push(MenuButton {
+                name: which,
+                button: button.clone(),
+                #[cfg(windows)]
+                width,
+            });
+            let this = button.clone();
+            hover_subs.keep(button.subscribe_pointer_entered(move |_| request_top_menu(which, &this, true))?);
+            Ok(())
+        })
     };
     #[cfg(windows)]
     let title_bar = Grid::el()
@@ -283,6 +346,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                     StackPanel::el()
                         .grid_column(1)
                         .orientation(Orientation::Horizontal)
+                        .node_ref(menu_bar)
                         .spacing(2.0)
                         .vertical_alignment(VerticalAlignment::Center)
                         .child(menu_button("File", "file"))
@@ -301,6 +365,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
             StackPanel::el()
                 .grid_column(1)
                 .orientation(Orientation::Horizontal)
+                .node_ref(menu_bar)
                 .spacing(2.0)
                 .vertical_alignment(VerticalAlignment::Center)
                 .child(menu_button("File", "file"))
@@ -560,7 +625,10 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         .extend_client_area_title_bar_height_hint(40.0)
         .background(move || palette(dark).back)
         .foreground(move || palette(dark).text)
-        .on_actual_theme_variant_changed(move |_| dark.set_if_changed(parts::dark_theme(&theme_scope)))
+        .on_actual_theme_variant_changed(move |_| {
+            dark.set_if_changed(parts::dark_theme(&theme_scope));
+            post(&theme_scope, "Capture window menu theme", dismiss_menu);
+        })
         .on_key_down(on_key)
         .on_closing(move |e| {
             // Closing keeps it for next time; only Jiffshot's Exit ends it.
@@ -599,6 +667,11 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
             rows: Subscriptions::default(),
             popup: Subscriptions::default(),
             anchor: None,
+            menu_bar,
+            menu_buttons: menu_buttons.borrow_mut().drain(..).collect(),
+            open_menu: None,
+            active_menu,
+            menu_revision: 0,
             topmost: false,
         })
     });
@@ -626,8 +699,17 @@ fn follow(scope: &AppScope, binding: &CaptureBinding) -> Result<()> {
     })?;
     let s = scope.clone();
     Effect::new(move || {
-        if let Some(json) = payload(&sink.menu.get()).map(str::to_owned) {
-            post(&s, "Capture window menu", move || show_menu(&json));
+        let request = sink.menu.get();
+        if payload(&request).is_some() {
+            let revision = with_ui(|ui| ui.menu_revision);
+            post(&s, "Capture window menu", move || {
+                if with_ui(|ui| ui.menu_revision) == revision && sink.menu.get_untracked() == request {
+                    if let Some(json) = payload(&request) {
+                        show_menu(json)?;
+                    }
+                }
+                Ok(())
+            });
         }
         Ok(())
     })?;
@@ -944,6 +1026,9 @@ fn on_key(e: &mut rustolonia::ControlKeyDownEventArgs) {
 
 /// Hides the window (it stays mounted for next time) and tells the model.
 fn close_to_tray() {
+    if let Err(error) = dismiss_menu() {
+        eprintln!("Capture window menu: {error:?}");
+    }
     if let Some(window) = with_ui(|ui| ui.window.get()).flatten() {
         let _ = window.hide();
     }
@@ -952,27 +1037,135 @@ fn close_to_tray() {
 
 // ---- menus -------------------------------------------------------------------
 
+fn dismiss_menu() -> Result<()> {
+    let open = with_ui(|ui| {
+        ui.menu_revision = ui.menu_revision.wrapping_add(1);
+        ui.active_menu.set(None);
+        ui.open_menu.take()
+    }).flatten();
+    if let Some(open) = open {
+        open.hide()?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(super) fn request_menu_for_selftest(which: &'static str, hover: bool) {
+    let (scope, window, x) = with_ui(|ui| {
+        let mut x = 44.0; // The title icon's width and margins.
+        for menu in &ui.menu_buttons {
+            let width = menu.width.get_untracked();
+            assert!(width > 0.0, "the {} menu has not been laid out", menu.name);
+            if menu.name == which {
+                return Some((ui.scope.clone(), ui.window.get()?, x + width / 2.0));
+            }
+            x += width + 2.0;
+        }
+        None
+    }).flatten().expect("the Capture menu button is mounted");
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE};
+    let hwnd = scope.platform_handle(&window).expect("the Capture fixture has a native handle") as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: hwnd belongs to this fixture; the messages have no borrowed data
+    // and deliver pointer input without changing the desktop pointer.
+    unsafe {
+        let scale = f64::from(GetDpiForWindow(hwnd)) / 96.0;
+        let point = (x * scale).round() as u16 as isize | (((20.0 * scale).round() as u16 as isize) << 16);
+        assert_ne!(PostMessageW(hwnd, WM_MOUSEMOVE, 0, point), 0, "could not post the fixture mouse move");
+        if !hover {
+            assert_ne!(PostMessageW(hwnd, WM_LBUTTONDOWN, 1, point), 0, "could not post the fixture mouse press");
+            assert_ne!(PostMessageW(hwnd, WM_LBUTTONUP, 0, point), 0, "could not post the fixture mouse release");
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(super) fn menu_for_selftest() -> Option<(&'static str, MenuFlyout)> {
+    with_ui(|ui| Some((ui.active_menu.get_untracked()?, ui.open_menu.clone()?))).flatten()
+}
+
+fn request_top_menu(which: &'static str, button: &Button, hover: bool) {
+    let Some(scope) = with_ui(|ui| ui.scope.clone()) else { return };
+    let button = button.clone();
+    post(&scope, "Capture window menu switch", move || {
+        let Some((active, open)) = with_ui(|ui| (ui.active_menu.get_untracked(), ui.open_menu.clone())) else { return Ok(()) };
+        if hover && (active.is_none() || active == Some(which)) {
+            return Ok(());
+        }
+        let toggle_off = !hover && active == Some(which);
+        if toggle_off {
+            return dismiss_menu();
+        }
+        if let Some(open) = open {
+            open.hide()?;
+        }
+        request("menu", which, button.upcast());
+        Ok(())
+    });
+}
+
 fn show_menu(json: &str) -> Result<()> {
     let Ok(entries) = serde_json::from_str::<Vec<MenuEntry>>(json) else { return Ok(()) };
     let Some((_, _, anchor, popup)) = popup_target() else { return Ok(()) };
+    let Some((previous, menu_bar, active, dark)) = with_ui(|ui| (ui.open_menu.take(), ui.menu_bar.get(), ui.active_menu, ui.dark)) else { return Ok(()) };
+    if let Some(previous) = previous {
+        previous.hide()?;
+    }
     popup.clear();
     let flyout = MenuFlyout::new()?.placement(PlacementMode::BottomEdgeAlignedLeft)?;
+    if active.get_untracked().is_some() {
+        flyout.set_overlay_input_pass_through_element(menu_bar.as_ref().map(|bar| bar as &dyn AsControl))?;
+    }
+    let id = flyout.object_id()?;
+    popup.keep(flyout.subscribe_closed(move |_| {
+        with_ui(|ui| {
+            match ui.open_menu.as_ref().map(MenuFlyout::object_id).transpose() {
+                Ok(Some(current)) if current == id => {
+                    ui.menu_revision = ui.menu_revision.wrapping_add(1);
+                    ui.open_menu = None;
+                    ui.active_menu.set(None);
+                }
+                Err(error) => eprintln!("Capture window menu dismissal: {error:?}"),
+                _ => {}
+            }
+        });
+    })?);
     let items = flyout.items()?;
     for entry in &entries {
-        items.add(menu_entry(entry, &popup)?)?;
+        items.add(menu_entry(entry, &popup, dark)?)?;
     }
-    flyout.show_at_with_control(&anchor)
+    flyout.show_at_with_control(&anchor)?;
+    with_ui(|ui| ui.open_menu = Some(flyout.clone()));
+    #[cfg(windows)]
+    if dark.get_untracked() {
+        let presenter = flyout.popup()?.get_child()?.and_then(|child| child.cast::<TemplatedControl>())
+            .ok_or_else(|| rustolonia::Error::Async { hresult: 0x80004005_u32 as i32, message: "Capture menu presenter is not a templated control".into() })?;
+        presenter.set_background(Brush::solid(parts::rgb(dark_blue::WINDOW)))?;
+        presenter.set_border_brush(Brush::solid(parts::rgb(dark_blue::INPUT_BORDER)))?;
+        presenter.set_foreground(Brush::solid(WHITE))?;
+    }
+    Ok(())
 }
 
-fn menu_entry(entry: &MenuEntry, subs: &Subscriptions) -> Result<Control> {
+fn menu_entry(entry: &MenuEntry, subs: &Subscriptions, dark: Signal<bool>) -> Result<Control> {
     if entry.separator {
-        return Ok(Separator::new()?.upcast());
+        let separator = Separator::new()?;
+        #[cfg(windows)]
+        if dark.get_untracked() {
+            separator.set_background(Brush::solid(parts::rgb(dark_blue::INPUT_BORDER)))?;
+        }
+        return Ok(separator.upcast());
     }
     let (label, keys) = match entry.label.split_once('\t') {
         Some((label, keys)) => (label, Some(keys)),
         None => (entry.label.as_str(), None),
     };
     let item = MenuItem::new()?.enabled(entry.enabled)?.stays_open_on_click(entry.keep_open)?;
+    #[cfg(windows)]
+    if dark.get_untracked() {
+        item.set_background(Brush::solid(parts::rgb(dark_blue::WINDOW)))?;
+        item.set_foreground(Brush::solid(WHITE))?;
+    }
     match keys {
         // A shortcut or preset hotkey, as text: not every one parses as a gesture.
         Some(keys) => {
@@ -987,7 +1180,7 @@ fn menu_entry(entry: &MenuEntry, subs: &Subscriptions) -> Result<Control> {
     if !entry.items.is_empty() {
         let children = item.items()?;
         for child in &entry.items {
-            children.add(menu_entry(child, subs)?)?;
+            children.add(menu_entry(child, subs, dark)?)?;
         }
         if entry.checked {
             item.set_header_text(format!("{label}  \u{2713}"))?;
@@ -1072,6 +1265,7 @@ fn activate_panel_action(id: &str, flyout: &Flyout, values: &[Input]) {
 }
 
 fn show_panel_with_height(json: &str, max_height: Option<f64>) -> Result<Option<ShownPanel>> {
+    dismiss_menu()?;
     let Ok(panel) = serde_json::from_str::<Panel>(json) else { return Ok(None) };
     let Some((scope, window, anchor, popup)) = popup_target() else { return Ok(None) };
     let Some(owner) = with_ui(|ui| ui.window) else { return Ok(None) };
@@ -1143,6 +1337,7 @@ pub(super) fn show_delay_for_selftest(json: &str, height: f64) -> Result<Option<
 }
 
 fn show_problem(text: &str) -> Result<()> {
+    dismiss_menu()?;
     let Some((_, _, anchor, _)) = popup_target() else { return Ok(()) };
     let note = TextBlock::new()?.text(text)?.text_wrapping(TextWrapping::Wrap)?.max_width(320.0)?.margin(4.0)?;
     Flyout::new()?.placement(PlacementMode::BottomEdgeAlignedLeft)?.content(Some(&note as &dyn AsControl))?.show_at_with_control(&anchor)

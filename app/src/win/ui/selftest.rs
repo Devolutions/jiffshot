@@ -7,6 +7,7 @@
 //! video to step through; `JIFFSHOT_UITEST_KEEP` leaves the test window open.
 //! `JIFFSHOT_UITEST_CAPTURE_ONLY` checks the Capture window and chooser
 //! without running the editor and overlay walk.
+//! `JIFFSHOT_UITEST_CAPTURE_MENUS` checks menu switching and DarkBlue popups.
 //! `JIFFSHOT_UITEST_WIDGET` checks the floating bar with an isolated tray model.
 //! On macOS, `JIFFSHOT_UITEST_OVERLAY` runs only the synthetic overlay test.
 //! `JIFFSHOT_UITEST_STARTUP` checks login-item status without changing it.
@@ -651,6 +652,10 @@ fn script() -> Script {
     #[cfg(target_os = "macos")]
     if let Some(case) = env("JIFFSHOT_UITEST_POPUP_SHUTDOWN") {
         return popup_shutdown_script(&case);
+    }
+    #[cfg(windows)]
+    if env("JIFFSHOT_UITEST_CAPTURE_MENUS").is_some() {
+        return capture_menus_script();
     }
     if env("JIFFSHOT_UITEST_CAPTURE_ONLY").is_some() {
         capture_ux_steps(&mut s);
@@ -4151,6 +4156,119 @@ fn show_capture_fixture(t: &mut Test, timing: &str, running: bool) {
 
 fn show_capture_scheduled_fixture(t: &mut Test, timing: &str, running: bool) {
     show_capture_tab_fixture(t, 0, timing, running, Some("12:45"));
+}
+
+#[cfg(windows)]
+fn capture_menus_script() -> Script {
+    use super::capture_view::{menu_for_selftest, request_menu_for_selftest};
+    use rustolonia::TemplatedControl;
+
+    let mut script = Script(VecDeque::new());
+    let previous = Rc::new(RefCell::new(None::<rustolonia::MenuFlyout>));
+    script.step(|_| {
+        run("theme:Dark");
+        let window = crate::capture_window::window().expect("the Capture window is mounted");
+        window.set_show_activated(false).expect("avoid activating the fixture");
+        window.show().expect("show the Capture fixture");
+        500
+    });
+    script.step(|test| {
+        test.remember_windows();
+        request_menu_for_selftest("edit", true);
+        200
+    });
+    script.step(|_| {
+        assert!(menu_for_selftest().is_none(), "hover alone opened a menu");
+        request_menu_for_selftest("file", false);
+        request_menu_for_selftest("file", false);
+        200
+    });
+    script.step(|test| {
+        assert!(menu_for_selftest().is_none(), "a cancelled pending click reopened the menu");
+        test.line("capture_menu_pending_click_cancellation: no stale popup");
+        request_menu_for_selftest("file", false);
+        400
+    });
+    for (which, next) in [("file", "edit"), ("edit", "view"), ("view", "help"), ("help", "file")] {
+        let previous = previous.clone();
+        script.step(move |test| {
+            if let Some(previous) = previous.borrow().as_ref() {
+                assert!(!previous.get_is_open().expect("read the previous menu state"), "hover left two menus open");
+            }
+            let (active, menu) = menu_for_selftest().expect("a Capture menu is open");
+            assert_eq!(active, which, "hover did not switch the active heading");
+            assert!(menu.get_is_open().expect("read the menu state"));
+            let presenter = menu.popup().expect("the menu popup").get_child().expect("the menu presenter")
+                .expect("the menu presenter exists").cast::<TemplatedControl>().expect("a templated presenter");
+            assert_eq!(presenter.get_background().expect("read menu background").expect("menu background").color,
+                rustolonia::Color::from(0xFF161B26), "the menu is not RDM DarkBlue");
+            assert_eq!(presenter.get_border_brush().expect("read menu border").expect("menu border").color,
+                rustolonia::Color::from(0xFF2F3441), "the menu border is not RDM DarkBlue");
+            assert!(menu.get_overlay_input_pass_through_element().expect("read overlay pass-through").is_some(),
+                "the popup overlay blocks the adjacent headings");
+            for (index, hwnd) in test.new_windows().iter().enumerate() {
+                test.shot_of(*hwnd, &format!("capture-menu-{which}-{index}.png"));
+            }
+            if let (Some(scope), Some(window)) = (super::scope(), crate::capture_window::window()) {
+                test.shot_of(scope.platform_handle(&window).expect("the Capture window handle"), &format!("capture-menu-bar-{which}.png"));
+            }
+            test.line(format!("capture_menu_hover_switching_and_dark_blue: {which}"));
+            *previous.borrow_mut() = Some(menu);
+            request_menu_for_selftest(next, true);
+            300
+        });
+    }
+    script.step(|_| {
+        assert_eq!(menu_for_selftest().expect("the File menu is open").0, "file");
+        request_menu_for_selftest("file", false);
+        200
+    });
+    script.step(|test| {
+        assert!(menu_for_selftest().is_none(), "clicking the active heading did not dismiss its menu");
+        request_menu_for_selftest("help", true);
+        test.line("capture_menu_toggle_and_idle_hover: dismissed");
+        200
+    });
+    script.step(|_| {
+        assert!(menu_for_selftest().is_none(), "hover reopened a dismissed menu");
+        request_menu_for_selftest("edit", false);
+        200
+    });
+    script.step(|test| {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+        use windows_sys::Win32::UI::WindowsAndMessaging::WM_KEYDOWN;
+        let popup = *test.new_windows().first().expect("the Edit popup is visible");
+        // SAFETY: popup belongs to this fixture; the key message has no borrowed data.
+        assert_ne!(unsafe { PostMessageW(popup as HWND, WM_KEYDOWN, VK_ESCAPE as usize, 0) }, 0, "could not post Escape");
+        200
+    });
+    script.step(|_| {
+        assert!(menu_for_selftest().is_none(), "dismissal left a stale active heading");
+        assert!(crate::capture_window::window().expect("the Capture fixture").get_is_visible().expect("read Capture visibility"),
+            "Escape closed the owner instead of its menu");
+        request_menu_for_selftest("file", false);
+        200
+    });
+    script.step(|_| {
+        run("theme:Light");
+        300
+    });
+    script.step(|_| {
+        assert!(menu_for_selftest().is_none(), "a theme change retained the old popup palette");
+        request_menu_for_selftest("file", false);
+        300
+    });
+    script.step(|test| {
+        let (_, menu) = menu_for_selftest().expect("the light File menu is open");
+        let presenter = menu.popup().expect("the menu popup").get_child().expect("the menu presenter")
+            .expect("the menu presenter exists").cast::<TemplatedControl>().expect("a templated presenter");
+        assert_ne!(presenter.get_background().expect("read light menu background").expect("light menu background").color,
+            rustolonia::Color::from(0xFF161B26), "DarkBlue leaked into the light theme");
+        menu.hide().expect("dismiss the light menu");
+        test.line("capture_menu_dismissal_and_theme_switch: light palette preserved");
+        0
+    });
+    script
 }
 
 /// Checks the Capture window's normal and automatic states and its chooser.
