@@ -966,15 +966,8 @@ fn share_from(
     match to {
         "" | "none" => Ok(None),
         "file" => match save_copy_dialog(owner, suggested_path)? {
-            Some(target) => {
-                if path != suggested_path {
-                    return copy_flattened_share(path, suggested_path, &target)
-                        .map(|()| Some(format!("copied to {}", target.display())));
-                }
-                std::fs::copy(path, &target)
-                    .map(|_| Some(format!("copied to {}", target.display())))
-                    .map_err(|e| e.to_string())
-            }
+            Some(target) => copy_flattened_share(path, suggested_path, &target)
+                .map(|()| Some(format!("copied to {}", target.display()))),
             None => Ok(None),
         },
         "email" => {
@@ -1023,6 +1016,11 @@ fn share_from(
 }
 
 fn copy_flattened_share(source: &Path, original: &Path, target: &Path) -> Result<(), String> {
+    let same_file_message = if source == original {
+        "Choose a different file than the saved capture."
+    } else {
+        "Choose a different file: the capture and its editable pointer must remain separate."
+    };
     let mut source_file = std::fs::File::open(source)
         .map_err(|error| format!("could not open {}: {error}", source.display()))?;
     let source_meta = source_file
@@ -1034,10 +1032,7 @@ fn copy_flattened_share(source: &Path, original: &Path, target: &Path) -> Result
         if same_protected_path(path, target).map_err(|error| {
             format!("could not inspect {}: {error}", target.display())
         })? {
-            return Err(
-                "Choose a different file: the capture and its editable pointer must remain separate."
-                    .to_owned(),
-            );
+            return Err(same_file_message.to_owned());
         }
     }
     let mut protected = Vec::new();
@@ -1061,10 +1056,7 @@ fn copy_flattened_share(source: &Path, original: &Path, target: &Path) -> Result
     let target_identity = file_identity(&target_file)
         .map_err(|error| format!("could not inspect {}: {error}", target.display()))?;
     if protected.contains(&target_identity) || target_identity == source_identity {
-        return Err(
-            "Choose a different file: the capture and its editable pointer must remain separate."
-                .to_owned(),
-        );
+        return Err(same_file_message.to_owned());
     }
     target_file
         .set_len(0)
@@ -1996,6 +1988,10 @@ mod tests {
             std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        for same in [&original, &hardlink, &link, &pointer, &pointer_link] {
+            assert!(copy_flattened_share(&original, &original, same).is_err());
+            assert_eq!(std::fs::read(&original).unwrap(), b"background");
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

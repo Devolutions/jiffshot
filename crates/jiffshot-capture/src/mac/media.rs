@@ -195,6 +195,7 @@ struct AudioInput {
 
 /// Writes an MP4 file. Frames are top-down BGRA (the fourth byte unused).
 pub struct Writer {
+    path: std::path::PathBuf,
     writer: Retained<AVAssetWriter>,
     video: Retained<AVAssetWriterInput>,
     adaptor: Retained<AVAssetWriterInputPixelBufferAdaptor>,
@@ -222,116 +223,119 @@ unsafe impl Send for Writer {}
 
 impl Writer {
     pub fn create(path: &Path, spec: VideoSpec, audio: Option<AudioSpec>) -> Result<Writer> {
-        let url = crate::macos::picker::file_url(path, false).map_err(|error| error.to_string())?;
-        // AVAssetWriter refuses to replace a file; Media Foundation does.
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("could not replace {}: {error}", path.display())),
-        }
-        // SAFETY: AVFoundation calls with valid arguments; the dictionaries
-        // hold the documented key and value types.
-        unsafe {
-            let file_type = key(AVFileTypeMPEG4, ns_string!("public.mpeg-4"));
-            let writer = AVAssetWriter::assetWriterWithURL_fileType_error(&url, file_type).map_err(|e| ns_err(&e))?;
-
-            let fps = spec.fps.max(1) as i64;
-            let compression = dict(&[
-                (key(AVVideoAverageBitRateKey, ns_string!("AverageBitRate")), &num(spec.bitrate as i64)),
-                // A keyframe every two seconds, so the editor can seek quickly.
-                (key(AVVideoMaxKeyFrameIntervalKey, ns_string!("MaxKeyFrameInterval")), &num(fps * 2)),
-                (key(AVVideoExpectedSourceFrameRateKey, ns_string!("ExpectedFrameRate")), &num(fps)),
-                // Presentation order equals decode order: simpler seeking.
-                (key(AVVideoAllowFrameReorderingKey, ns_string!("AllowFrameReordering")), &NSNumber::new_bool(false)),
-            ]);
-            // Explicit metadata prevents SD frames from being decoded with a different YCbCr matrix.
-            let colors = dict(&[
-                (key(AVVideoColorPrimariesKey, ns_string!("AVVideoColorPrimariesKey")), key(AVVideoColorPrimaries_ITU_R_709_2, ns_string!("ITU_R_709_2"))),
-                (key(AVVideoTransferFunctionKey, ns_string!("AVVideoTransferFunctionKey")), key(AVVideoTransferFunction_ITU_R_709_2, ns_string!("ITU_R_709_2"))),
-                (key(AVVideoYCbCrMatrixKey, ns_string!("AVVideoYCbCrMatrixKey")), key(AVVideoYCbCrMatrix_ITU_R_709_2, ns_string!("ITU_R_709_2"))),
-            ]);
-            let settings = dict(&[
-                (key(AVVideoCodecKey, ns_string!("AVVideoCodecKey")), key(AVVideoCodecTypeH264, ns_string!("avc1"))),
-                (key(AVVideoWidthKey, ns_string!("AVVideoWidthKey")), &num(spec.width as i64)),
-                (key(AVVideoHeightKey, ns_string!("AVVideoHeightKey")), &num(spec.height as i64)),
-                (key(AVVideoCompressionPropertiesKey, ns_string!("AVVideoCompressionPropertiesKey")), &compression),
-                (key(AVVideoColorPropertiesKey, ns_string!("AVVideoColorPropertiesKey")), &colors),
-            ]);
-            let video = AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(video_type(), Some(&settings));
-            video.setExpectsMediaDataInRealTime(false);
-            let attributes = dict(&[
-                (cf_key(kCVPixelBufferPixelFormatTypeKey), &num(kCVPixelFormatType_32BGRA as i64)),
-                (cf_key(objc2_core_video::kCVPixelBufferWidthKey), &num(spec.width as i64)),
-                (cf_key(objc2_core_video::kCVPixelBufferHeightKey), &num(spec.height as i64)),
-            ]);
-            let adaptor = AVAssetWriterInputPixelBufferAdaptor::assetWriterInputPixelBufferAdaptorWithAssetWriterInput_sourcePixelBufferAttributes(
-                &video,
-                Some(&attributes),
-            );
-            if !writer.canAddInput(&video) {
-                return Err("cannot add an H.264 track".into());
+        objc2::rc::autoreleasepool(|_| {
+            let url = crate::macos::picker::file_url(path, false).map_err(|error| error.to_string())?;
+            // AVAssetWriter refuses to replace a file; Media Foundation does.
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("could not replace {}: {error}", path.display())),
             }
-            writer.addInput(&video);
+            // SAFETY: AVFoundation calls with valid arguments; the dictionaries
+            // hold the documented key and value types.
+            unsafe {
+                let file_type = key(AVFileTypeMPEG4, ns_string!("public.mpeg-4"));
+                let writer = AVAssetWriter::assetWriterWithURL_fileType_error(&url, file_type).map_err(|e| ns_err(&e))?;
 
-            let audio = match audio {
-                Some(a) => {
-                    let settings = dict(&[
-                        (ns_string!("AVFormatIDKey"), &num(FORMAT_AAC as i64)),
-                        (ns_string!("AVSampleRateKey"), &num(a.sample_rate as i64)),
-                        (ns_string!("AVNumberOfChannelsKey"), &num(a.channels as i64)),
-                        (ns_string!("AVEncoderBitRateKey"), &num(96_000 * a.channels.min(2) as i64)),
-                    ]);
-                    let input = AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(audio_type(), Some(&settings));
-                    input.setExpectsMediaDataInRealTime(false);
-                    if !writer.canAddInput(&input) {
-                        return Err("cannot add an AAC track".into());
-                    }
-                    writer.addInput(&input);
-                    let asbd = Asbd {
-                        sample_rate: a.sample_rate as f64,
-                        format_id: FORMAT_LPCM,
-                        format_flags: FLAG_SIGNED | FLAG_PACKED,
-                        bytes_per_packet: a.channels * 2,
-                        frames_per_packet: 1,
-                        bytes_per_frame: a.channels * 2,
-                        channels_per_frame: a.channels,
-                        bits_per_channel: 16,
-                        reserved: 0,
-                    };
-                    let mut format = ptr::null();
-                    let status = CMAudioFormatDescriptionCreate(
-                        ptr::null(),
-                        &asbd,
-                        0,
-                        ptr::null(),
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        &mut format,
-                    );
-                    let format = NonNull::new(format as *mut CMFormatDescription)
-                        .filter(|_| status == 0)
-                        .ok_or_else(|| format!("unsupported audio format (error {status})"))?;
-                    Some(AudioInput { input, format: CFRetained::from_raw(format), spec: a })
+                let fps = spec.fps.max(1) as i64;
+                let compression = dict(&[
+                    (key(AVVideoAverageBitRateKey, ns_string!("AverageBitRate")), &num(spec.bitrate as i64)),
+                    // A keyframe every two seconds, so the editor can seek quickly.
+                    (key(AVVideoMaxKeyFrameIntervalKey, ns_string!("MaxKeyFrameInterval")), &num(fps * 2)),
+                    (key(AVVideoExpectedSourceFrameRateKey, ns_string!("ExpectedFrameRate")), &num(fps)),
+                    // Presentation order equals decode order: simpler seeking.
+                    (key(AVVideoAllowFrameReorderingKey, ns_string!("AllowFrameReordering")), &NSNumber::new_bool(false)),
+                ]);
+                // Explicit metadata prevents SD frames from being decoded with a different YCbCr matrix.
+                let colors = dict(&[
+                    (key(AVVideoColorPrimariesKey, ns_string!("AVVideoColorPrimariesKey")), key(AVVideoColorPrimaries_ITU_R_709_2, ns_string!("ITU_R_709_2"))),
+                    (key(AVVideoTransferFunctionKey, ns_string!("AVVideoTransferFunctionKey")), key(AVVideoTransferFunction_ITU_R_709_2, ns_string!("ITU_R_709_2"))),
+                    (key(AVVideoYCbCrMatrixKey, ns_string!("AVVideoYCbCrMatrixKey")), key(AVVideoYCbCrMatrix_ITU_R_709_2, ns_string!("ITU_R_709_2"))),
+                ]);
+                let settings = dict(&[
+                    (key(AVVideoCodecKey, ns_string!("AVVideoCodecKey")), key(AVVideoCodecTypeH264, ns_string!("avc1"))),
+                    (key(AVVideoWidthKey, ns_string!("AVVideoWidthKey")), &num(spec.width as i64)),
+                    (key(AVVideoHeightKey, ns_string!("AVVideoHeightKey")), &num(spec.height as i64)),
+                    (key(AVVideoCompressionPropertiesKey, ns_string!("AVVideoCompressionPropertiesKey")), &compression),
+                    (key(AVVideoColorPropertiesKey, ns_string!("AVVideoColorPropertiesKey")), &colors),
+                ]);
+                let video = AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(video_type(), Some(&settings));
+                video.setExpectsMediaDataInRealTime(false);
+                let attributes = dict(&[
+                    (cf_key(kCVPixelBufferPixelFormatTypeKey), &num(kCVPixelFormatType_32BGRA as i64)),
+                    (cf_key(objc2_core_video::kCVPixelBufferWidthKey), &num(spec.width as i64)),
+                    (cf_key(objc2_core_video::kCVPixelBufferHeightKey), &num(spec.height as i64)),
+                ]);
+                let adaptor = AVAssetWriterInputPixelBufferAdaptor::assetWriterInputPixelBufferAdaptorWithAssetWriterInput_sourcePixelBufferAttributes(
+                    &video,
+                    Some(&attributes),
+                );
+                if !writer.canAddInput(&video) {
+                    return Err("cannot add an H.264 track".into());
                 }
-                None => None,
-            };
-            if !writer.startWriting() {
-                return Err(writer_error(&writer));
+                writer.addInput(&video);
+
+                let audio = match audio {
+                    Some(a) => {
+                        let settings = dict(&[
+                            (ns_string!("AVFormatIDKey"), &num(FORMAT_AAC as i64)),
+                            (ns_string!("AVSampleRateKey"), &num(a.sample_rate as i64)),
+                            (ns_string!("AVNumberOfChannelsKey"), &num(a.channels as i64)),
+                            (ns_string!("AVEncoderBitRateKey"), &num(96_000 * a.channels.min(2) as i64)),
+                        ]);
+                        let input = AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(audio_type(), Some(&settings));
+                        input.setExpectsMediaDataInRealTime(false);
+                        if !writer.canAddInput(&input) {
+                            return Err("cannot add an AAC track".into());
+                        }
+                        writer.addInput(&input);
+                        let asbd = Asbd {
+                            sample_rate: a.sample_rate as f64,
+                            format_id: FORMAT_LPCM,
+                            format_flags: FLAG_SIGNED | FLAG_PACKED,
+                            bytes_per_packet: a.channels * 2,
+                            frames_per_packet: 1,
+                            bytes_per_frame: a.channels * 2,
+                            channels_per_frame: a.channels,
+                            bits_per_channel: 16,
+                            reserved: 0,
+                        };
+                        let mut format = ptr::null();
+                        let status = CMAudioFormatDescriptionCreate(
+                            ptr::null(),
+                            &asbd,
+                            0,
+                            ptr::null(),
+                            0,
+                            ptr::null(),
+                            ptr::null(),
+                            &mut format,
+                        );
+                        let format = NonNull::new(format as *mut CMFormatDescription)
+                            .filter(|_| status == 0)
+                            .ok_or_else(|| format!("unsupported audio format (error {status})"))?;
+                        Some(AudioInput { input, format: CFRetained::from_raw(format), spec: a })
+                    }
+                    None => None,
+                };
+                if !writer.startWriting() {
+                    return Err(writer_error(&writer));
+                }
+                let () = msg_send![&*writer, startSessionAtSourceTime: cm_time(0)];
+                Ok(Writer {
+                    path: path.to_path_buf(),
+                    writer,
+                    video,
+                    adaptor,
+                    audio,
+                    spec,
+                    pending_video: VecDeque::new(),
+                    pending_audio: VecDeque::new(),
+                    end: 0,
+                    finished: false,
+                })
             }
-            let () = msg_send![&*writer, startSessionAtSourceTime: cm_time(0)];
-            Ok(Writer {
-                writer,
-                video,
-                adaptor,
-                audio,
-                spec,
-                pending_video: VecDeque::new(),
-                pending_audio: VecDeque::new(),
-                end: 0,
-                finished: false,
-            })
-        }
+        })
     }
 
     pub fn spec(&self) -> VideoSpec {
@@ -357,131 +361,157 @@ impl Writer {
 
     /// Writes a frame of exactly `width * height * 4` bytes.
     pub fn write_frame(&mut self, bgra: &[u8], time: i64, duration: i64) -> Result<()> {
-        let (w, h) = (self.spec.width as usize, self.spec.height as usize);
-        if bgra.len() < w * h * 4 {
-            return Err("frame too small".into());
-        }
-        let buffer = self.pixel_buffer()?;
-        // SAFETY: the buffer is locked while its rows are written, each row
-        // within its bytes-per-row (which may include padding) and size.
-        unsafe {
-            if CVPixelBufferLockBaseAddress(&buffer, CVPixelBufferLockFlags::empty()) != 0 {
-                return Err("could not lock a pixel buffer".into());
+        objc2::rc::autoreleasepool(|_| {
+            let (w, h) = (self.spec.width as usize, self.spec.height as usize);
+            if bgra.len() < w * h * 4 {
+                return Err("frame too small".into());
             }
-            let base = CVPixelBufferGetBaseAddress(&buffer) as *mut u8;
-            let stride = CVPixelBufferGetBytesPerRow(&buffer);
-            let rows = CVPixelBufferGetHeight(&buffer).min(h);
-            let row = (CVPixelBufferGetWidth(&buffer).min(w) * 4).min(stride);
-            if !base.is_null() {
-                for y in 0..rows {
-                    ptr::copy_nonoverlapping(bgra.as_ptr().add(y * w * 4), base.add(y * stride), row);
+            let buffer = self.pixel_buffer()?;
+            // SAFETY: the buffer is locked while its rows are written, each row
+            // within its bytes-per-row (which may include padding) and size.
+            unsafe {
+                if CVPixelBufferLockBaseAddress(&buffer, CVPixelBufferLockFlags::empty()) != 0 {
+                    return Err("could not lock a pixel buffer".into());
                 }
+                let base = CVPixelBufferGetBaseAddress(&buffer) as *mut u8;
+                let stride = CVPixelBufferGetBytesPerRow(&buffer);
+                let rows = CVPixelBufferGetHeight(&buffer).min(h);
+                let row = (CVPixelBufferGetWidth(&buffer).min(w) * 4).min(stride);
+                if !base.is_null() {
+                    for y in 0..rows {
+                        ptr::copy_nonoverlapping(bgra.as_ptr().add(y * w * 4), base.add(y * stride), row);
+                    }
+                }
+                CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags::empty());
             }
-            CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags::empty());
-        }
-        self.pending_video.push_back((buffer, time));
-        self.end = self.end.max(time + duration);
-        self.drain(false)
+            self.pending_video.push_back((buffer, time));
+            self.end = self.end.max(time + duration);
+            self.drain(false)
+        })
     }
 
     /// Writes interleaved 16-bit samples.
     pub fn write_audio(&mut self, pcm: &[i16], time: i64, duration: i64) -> Result<()> {
-        let Some(audio) = &self.audio else { return Ok(()) };
-        let channels = audio.spec.channels.max(1) as usize;
-        let frames = pcm.len() / channels;
-        if frames == 0 {
-            return Ok(());
-        }
-        let bytes = frames * channels * 2;
-        let rate = audio.spec.sample_rate as i64;
-        // SAFETY: the block buffer owns `bytes` bytes, filled from `pcm`
-        // before the sample buffer is created over it.
-        let sample = unsafe {
-            let mut block: *mut CMBlockBuffer = ptr::null_mut();
-            let status = CMBlockBuffer::create_with_memory_block(
-                None,
-                ptr::null_mut(),
-                bytes,
-                None,
-                ptr::null(),
-                0,
-                bytes,
-                kCMBlockBufferAssureMemoryNowFlag,
-                NonNull::from(&mut block),
-            );
-            let block = match NonNull::new(block) {
-                Some(b) if status == 0 => CFRetained::from_raw(b),
-                _ => return Err(format!("could not allocate audio (error {status})")),
-            };
-            let status = CMBlockBuffer::replace_data_bytes(NonNull::new_unchecked(pcm.as_ptr() as *mut c_void), &block, 0, bytes);
-            if status != 0 {
-                return Err(format!("could not copy audio (error {status})"));
+        objc2::rc::autoreleasepool(|_| {
+            let Some(audio) = &self.audio else { return Ok(()) };
+            let channels = audio.spec.channels.max(1) as usize;
+            let frames = pcm.len() / channels;
+            if frames == 0 {
+                return Ok(());
             }
-            let mut sample: *mut CMSampleBuffer = ptr::null_mut();
-            let pts = CMTime {
-                value: audio_frame_position(time, audio.spec.sample_rate)?,
-                timescale: rate as i32,
-                flags: CMTimeFlags::Valid,
-                epoch: 0,
+            let bytes = frames * channels * 2;
+            let rate = audio.spec.sample_rate as i64;
+            let start_frame = audio_frame_position(time, audio.spec.sample_rate)?;
+            let end_frames = i128::from(start_frame) + frames as i128;
+            let sample_end = i64::try_from(
+                (end_frames * i128::from(HNS_PER_SECOND) + i128::from(rate) - 1) / i128::from(rate),
+            )
+            .map_err(|_| "audio presentation time is out of range".to_owned())?;
+            // SAFETY: the block buffer owns `bytes` bytes, filled from `pcm`
+            // before the sample buffer is created over it.
+            let sample = unsafe {
+                let mut block: *mut CMBlockBuffer = ptr::null_mut();
+                let status = CMBlockBuffer::create_with_memory_block(
+                    None,
+                    ptr::null_mut(),
+                    bytes,
+                    None,
+                    ptr::null(),
+                    0,
+                    bytes,
+                    kCMBlockBufferAssureMemoryNowFlag,
+                    NonNull::from(&mut block),
+                );
+                let block = match NonNull::new(block) {
+                    Some(b) if status == 0 => CFRetained::from_raw(b),
+                    _ => return Err(format!("could not allocate audio (error {status})")),
+                };
+                let status = CMBlockBuffer::replace_data_bytes(NonNull::new_unchecked(pcm.as_ptr() as *mut c_void), &block, 0, bytes);
+                if status != 0 {
+                    return Err(format!("could not copy audio (error {status})"));
+                }
+                let mut sample: *mut CMSampleBuffer = ptr::null_mut();
+                let pts = CMTime {
+                    value: start_frame,
+                    timescale: rate as i32,
+                    flags: CMTimeFlags::Valid,
+                    epoch: 0,
+                };
+                let status = CMAudioSampleBufferCreateReadyWithPacketDescriptions(
+                    None,
+                    &block,
+                    &audio.format,
+                    frames as isize,
+                    pts,
+                    ptr::null(),
+                    NonNull::from(&mut sample),
+                );
+                match NonNull::new(sample) {
+                    Some(s) if status == 0 => CFRetained::from_raw(s),
+                    _ => return Err(format!("could not create an audio sample (error {status})")),
+                }
             };
-            let status = CMAudioSampleBufferCreateReadyWithPacketDescriptions(
-                None,
-                &block,
-                &audio.format,
-                frames as isize,
-                pts,
-                ptr::null(),
-                NonNull::from(&mut sample),
-            );
-            match NonNull::new(sample) {
-                Some(s) if status == 0 => CFRetained::from_raw(s),
-                _ => return Err(format!("could not create an audio sample (error {status})")),
-            }
-        };
-        self.pending_audio.push_back(sample);
-        self.end = self.end.max(time + duration);
-        self.drain(false)
+            self.pending_audio.push_back(sample);
+            self.end = self.end.max(time + duration).max(sample_end);
+            self.drain(false)
+        })
     }
 
     /// Appends queued samples while their inputs take them. Waits until the
     /// queues are short again, or, if `all` (finishing), until they are
-    /// empty, marking each input finished once its queue is, since the
-    /// writer may hold one track back until the other one ends.
+    /// empty, marking an emptied input finished only if the other track
+    /// stalls waiting for interleaving.
     fn drain(&mut self, all: bool) -> Result<()> {
         let mut progress = Instant::now();
         let (mut video_done, mut audio_done) = (false, self.audio.is_none());
         loop {
             let mut appended = false;
-            // SAFETY: appending filled buffers of each input's format while
-            // it is ready for them.
-            unsafe {
-                while let Some((buffer, time)) = self.pending_video.front() {
-                    if !self.video.isReadyForMoreMediaData() {
-                        break;
-                    }
-                    let ok: bool = msg_send![&*self.adaptor, appendPixelBuffer: &**buffer, withPresentationTime: cm_time(*time)];
-                    if !ok {
-                        return Err(writer_error(&self.writer));
-                    }
-                    self.pending_video.pop_front();
-                    appended = true;
-                }
-                if let Some(audio) = &self.audio {
-                    while let Some(sample) = self.pending_audio.front() {
-                        if !audio.input.isReadyForMoreMediaData() {
+            objc2::rc::autoreleasepool(|_| -> Result<()> {
+                // SAFETY: appending filled buffers of each input's format while
+                // it is ready for them.
+                unsafe {
+                    while let Some((buffer, time)) = self.pending_video.front() {
+                        if !self.video.isReadyForMoreMediaData() {
                             break;
                         }
-                        let ok: bool = msg_send![&*audio.input, appendSampleBuffer: &**sample];
+                        let ok: bool = msg_send![&*self.adaptor, appendPixelBuffer: &**buffer, withPresentationTime: cm_time(*time)];
                         if !ok {
                             return Err(writer_error(&self.writer));
                         }
-                        self.pending_audio.pop_front();
+                        self.pending_video.pop_front();
                         appended = true;
                     }
+                    if let Some(audio) = &self.audio {
+                        while let Some(sample) = self.pending_audio.front() {
+                            if !audio.input.isReadyForMoreMediaData() {
+                                break;
+                            }
+                            let ok: bool = msg_send![&*audio.input, appendSampleBuffer: &**sample];
+                            if !ok {
+                                return Err(writer_error(&self.writer));
+                            }
+                            self.pending_audio.pop_front();
+                            appended = true;
+                        }
+                    }
                 }
+                Ok(())
+            })?;
+            // SAFETY: plain property read.
+            if unsafe { self.writer.status() } != AVAssetWriterStatus::Writing {
+                return Err(writer_error(&self.writer));
             }
             let done = if all {
-                // SAFETY: no more samples follow for an emptied queue.
+                self.pending_video.is_empty() && self.pending_audio.is_empty()
+            } else {
+                self.pending_video.len() <= MAX_PENDING_VIDEO && self.pending_audio.len() <= MAX_PENDING_AUDIO
+            };
+            if done {
+                return Ok(());
+            }
+            if all && !appended && progress.elapsed() >= Duration::from_millis(100) {
+                // SAFETY: one queue is empty while the other input is waiting
+                // for interleaving; marking the empty input finished unblocks it.
                 unsafe {
                     if !video_done && self.pending_video.is_empty() {
                         self.video.markAsFinished();
@@ -492,16 +522,6 @@ impl Writer {
                         (audio_done, appended) = (true, true);
                     }
                 }
-                video_done && audio_done
-            } else {
-                self.pending_video.len() <= MAX_PENDING_VIDEO && self.pending_audio.len() <= MAX_PENDING_AUDIO
-            };
-            if done {
-                return Ok(());
-            }
-            // SAFETY: plain property read.
-            if unsafe { self.writer.status() } != AVAssetWriterStatus::Writing {
-                return Err(writer_error(&self.writer));
             }
             if appended {
                 progress = Instant::now();
@@ -517,26 +537,41 @@ impl Writer {
     }
 
     pub fn finish(mut self) -> Result<()> {
-        self.drain(true)?;
-        self.finished = true;
-        let (tx, rx) = mpsc::channel();
-        let done = RcBlock::new(move || {
-            let _ = tx.send(());
-        });
-        // SAFETY: finishing a writing writer; the completion block is copied
-        // by AVFoundation.
-        unsafe {
-            if self.end > 0 {
-                let () = msg_send![&*self.writer, endSessionAtSourceTime: cm_time(self.end)];
+        let path = objc2::rc::autoreleasepool(|_| -> Result<std::path::PathBuf> {
+            self.drain(true)?;
+            self.finished = true;
+            let (tx, rx) = mpsc::channel();
+            let done = RcBlock::new(move || {
+                let _ = tx.send(());
+            });
+            // SAFETY: finishing a writing writer; `endSessionAtSourceTime:`
+            // runs before inputs are marked finished, and the completion block
+            // is copied by AVFoundation.
+            unsafe {
+                if self.end > 0 {
+                    let () = msg_send![&*self.writer, endSessionAtSourceTime: cm_time(self.end)];
+                }
+                self.video.markAsFinished();
+                if let Some(audio) = &self.audio {
+                    audio.input.markAsFinished();
+                }
+                self.writer.finishWritingWithCompletionHandler(&done);
             }
-            self.writer.finishWritingWithCompletionHandler(&done);
+            rx.recv_timeout(Duration::from_secs(120)).map_err(|_| "finishing the video timed out".to_owned())?;
+            // SAFETY: plain property read.
+            if unsafe { self.writer.status() } != AVAssetWriterStatus::Completed {
+                return Err(writer_error(&self.writer));
+            }
+            let path = self.path.clone();
+            drop(self);
+            Ok(path)
+        })?;
+        let metadata = std::fs::metadata(&path)
+            .map_err(|error| format!("could not verify written video {}: {error}", path.display()))?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            return Err("the video encoder produced an empty file".into());
         }
-        rx.recv_timeout(Duration::from_secs(120)).map_err(|_| "finishing the video timed out".to_owned())?;
-        // SAFETY: plain property read.
-        match unsafe { self.writer.status() } {
-            AVAssetWriterStatus::Completed => Ok(()),
-            _ => Err(writer_error(&self.writer)),
-        }
+        Ok(())
     }
 }
 

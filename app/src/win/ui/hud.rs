@@ -431,6 +431,9 @@ impl HudBorder {
             &window,
             true,
             move || {
+                let (_, current_scale) = native::screen_of(outer);
+                positioned.set_width(outer.width as f64 / current_scale).map_err(std::io::Error::other)?;
+                positioned.set_height(outer.height as f64 / current_scale).map_err(std::io::Error::other)?;
                 native::place_checked(native::handle(&position_scope, &positioned), outer, false)
             },
             |_| {},

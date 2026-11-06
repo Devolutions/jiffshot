@@ -1305,6 +1305,9 @@ fn open_draw(scope: &AppScope, id: u64, mapping: CaptureMapping) -> std::result:
                 if jiffshot_capture::screen::scale_factor() != scale {
                     return Err("the display scale changed before Screen Draw was shown".to_owned());
                 }
+                let [left, top, right, bottom] = viewport.frame;
+                position_window.set_width((right - left) / scale).map_err(|error| format!("could not size the Screen Draw window: {error:?}"))?;
+                position_window.set_height((bottom - top) / scale).map_err(|error| format!("could not size the Screen Draw window: {error:?}"))?;
                 native::place_mapped_checked(hwnd, mapping, scale, viewport.frame, false).map_err(|error| error.to_string())
             },
             move || {

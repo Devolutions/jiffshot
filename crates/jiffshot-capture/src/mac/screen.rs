@@ -1795,56 +1795,58 @@ impl CursorSnapshot {
 
     #[allow(deprecated)]
     fn take_on_scale(scale: f64) -> Option<CursorSnapshot> {
-        let cursor = objc2_app_kit::NSCursor::currentSystemCursor()?;
-        let image = cursor.image();
-        let size = image.size();
-        let hot = cursor.hotSpot();
-        let (width, height) = (size.width * scale, size.height * scale);
-        let dimension = |value: f64| {
-            let rounded = value.round().max(1.0);
-            (value.is_finite() && value > 0.0 && rounded <= i32::MAX as f64).then_some(rounded as usize)
-        };
-        let Some((w, h)) = dimension(width).zip(dimension(height)) else {
-            eprintln!("could not construct the cursor snapshot: invalid cursor dimensions");
-            return None;
-        };
-        if w.checked_mul(h).and_then(|pixels| pixels.checked_mul(4)).is_none_or(|bytes| bytes > isize::MAX as usize) {
-            eprintln!("could not construct the cursor snapshot: cursor image is too large");
-            return None;
-        }
-        // SAFETY: a null proposed rectangle asks for the best representation.
-        let cg = unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }?;
-        let mut pixels = match sck::image_bgra(objc2::rc::Retained::as_ptr(&cg) as CGImageRef, w, h) {
-            Ok(pixels) => pixels,
-            Err(error) => {
-                eprintln!("could not read the cursor image: {error}");
+        objc2::rc::autoreleasepool(|_| {
+            let cursor = objc2_app_kit::NSCursor::currentSystemCursor()?;
+            let image = cursor.image();
+            let size = image.size();
+            let hot = cursor.hotSpot();
+            let (width, height) = (size.width * scale, size.height * scale);
+            let dimension = |value: f64| {
+                let rounded = value.round().max(1.0);
+                (value.is_finite() && value > 0.0 && rounded <= i32::MAX as f64).then_some(rounded as usize)
+            };
+            let Some((w, h)) = dimension(width).zip(dimension(height)) else {
+                eprintln!("could not construct the cursor snapshot: invalid cursor dimensions");
                 return None;
-            }
-        };
-        // Premultiplied to straight alpha.
-        for p in pixels.chunks_exact_mut(4) {
-            let a = p[3] as u32;
-            if a > 0 && a < 255 {
-                for c in &mut p[..3] {
-                    *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+            };
+            if w.checked_mul(h).and_then(|pixels| pixels.checked_mul(4)).is_none_or(|bytes| bytes > isize::MAX as usize) {
+                eprintln!("could not construct the cursor snapshot: cursor image is too large");
+                return None;
+            };
+            // SAFETY: a null proposed rectangle asks for the best representation.
+            let cg = unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }?;
+            let mut pixels = match sck::image_bgra(objc2::rc::Retained::as_ptr(&cg) as CGImageRef, w, h) {
+                Ok(pixels) => pixels,
+                Err(error) => {
+                    eprintln!("could not read the cursor image: {error}");
+                    return None;
+                }
+            };
+            // Premultiplied to straight alpha.
+            for p in pixels.chunks_exact_mut(4) {
+                let a = p[3] as u32;
+                if a > 0 && a < 255 {
+                    for c in &mut p[..3] {
+                        *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+                    }
                 }
             }
-        }
-        let (mx, my) = match try_cursor_pos_points() {
-            Ok(position) => position,
-            Err(error) => {
-                eprintln!("could not locate the cursor: {error}");
-                return None;
+            let (mx, my) = match try_cursor_pos_points() {
+                Ok(position) => position,
+                Err(error) => {
+                    eprintln!("could not locate the cursor: {error}");
+                    return None;
+                }
+            };
+            let image = Frame { width: w as u32, height: h as u32, pixels, alpha: true };
+            match CursorSnapshot::from_system_image(image, (mx, my), (hot.x, hot.y), (size.width, size.height), scale) {
+                Ok(snapshot) => Some(snapshot),
+                Err(error) => {
+                    eprintln!("could not construct the cursor snapshot: {error}");
+                    None
+                }
             }
-        };
-        let image = Frame { width: w as u32, height: h as u32, pixels, alpha: true };
-        match CursorSnapshot::from_system_image(image, (mx, my), (hot.x, hot.y), (size.width, size.height), scale) {
-            Ok(snapshot) => Some(snapshot),
-            Err(error) => {
-                eprintln!("could not construct the cursor snapshot: {error}");
-                None
-            }
-        }
+        })
     }
 
     /// The cursor alone, with transparency.
