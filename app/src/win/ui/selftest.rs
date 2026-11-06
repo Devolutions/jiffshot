@@ -9,6 +9,7 @@
 //! without running the editor and overlay walk.
 //! `JIFFSHOT_UITEST_CAPTURE_MENUS` checks menu switching and DarkBlue popups.
 //! `JIFFSHOT_UITEST_WIDGET` checks the floating bar with an isolated tray model.
+//! On macOS, `JIFFSHOT_UITEST_APP_NAME` checks the native application menu name.
 //! On macOS, `JIFFSHOT_UITEST_OVERLAY` runs only the synthetic overlay test.
 //! `JIFFSHOT_UITEST_TRANSPARENCY` checks capture overlays and notifications.
 //! `JIFFSHOT_UITEST_STARTUP` checks login-item status without changing it.
@@ -456,6 +457,10 @@ fn script() -> Script {
     if env("JIFFSHOT_UITEST_LIBRARY_LATENCY").is_some() {
         return library_latency_script();
     }
+    #[cfg(target_os = "macos")]
+    if env("JIFFSHOT_UITEST_APP_NAME").is_some() {
+        return application_name_script();
+    }
     if env("JIFFSHOT_UITEST_WIDGET").is_some() {
         return capture_widget_script();
     }
@@ -820,6 +825,28 @@ fn script() -> Script {
         windows_steps(&mut s, drop);
     }
     s
+}
+
+#[cfg(target_os = "macos")]
+fn application_name_script() -> Script {
+    let mut script = Script(VecDeque::new());
+    script.wait(500).step(|test| {
+        platform::check_application_name().expect("check the initial application name");
+        test.line("application name: Jiffshot in the menu bar and running application");
+        crate::capture_window::show(&super::scope().expect("the editor scope is unavailable"));
+        500
+    }).step(|test| {
+        platform::check_application_name().expect("check the application name in the Capture window");
+        test.line("application name: retained in the Capture window");
+        let handle = super::main_window_handle().expect("the editor window is unavailable");
+        crate::mac_window::activate(handle).expect("reactivate the editor");
+        500
+    }).step(|test| {
+        platform::check_application_name().expect("check the application name after returning to the editor");
+        test.line("application name: retained after returning to the editor");
+        0
+    });
+    script
 }
 
 #[cfg(target_os = "macos")]

@@ -705,6 +705,10 @@ pub(crate) fn run() -> rustolonia::Result<()> {
     *canvas::EDITOR.lock() = Some(editor);
     let result = App::load_from_env()?.run(move |scope| {
         #[cfg(target_os = "macos")]
+        if let Err(error) = mac_window::name_application() {
+            eprintln!("macOS application name: {error}");
+        }
+        #[cfg(target_os = "macos")]
         if let Err(error) = jiffshot_capture::screen::watch_displays() {
             eprintln!("display configuration: {error}");
         }

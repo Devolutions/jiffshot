@@ -6,17 +6,66 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
     NSApplication, NSColor, NSStatusWindowLevel, NSWindow, NSWindowCollectionBehavior,
-    NSWindowWillCloseNotification,
+    NSWindowDidBecomeKeyNotification, NSWindowWillCloseNotification,
 };
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol};
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol, NSProcessInfo, NSString};
 use rustolonia::AppScope;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ptr::NonNull;
 
 thread_local! {
+    static NAME_OBSERVER: RefCell<Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>> = RefCell::new(None);
     static CLOSE_OBSERVER: RefCell<Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>> = RefCell::new(None);
     static PROTECTED_WINDOWS: RefCell<HashMap<isize, jiffshot_capture::screen::ExclusionTicket>> = RefCell::new(HashMap::new());
+}
+
+fn name_application_menu() -> Result<(), String> {
+    let marker = MainThreadMarker::new().ok_or("application menu naming must run on the main thread")?;
+    let menu = NSApplication::sharedApplication(marker)
+        .mainMenu()
+        .ok_or("the application menu bar is unavailable")?;
+    if menu.numberOfItems() == 0 {
+        return Err("the application menu bar is empty".into());
+    }
+    let item = menu.itemAtIndex(0).ok_or("the application menu item is unavailable")?;
+    let submenu = item.submenu().ok_or("the application submenu is unavailable")?;
+    let name = NSString::from_str(jiffshot_capture::paths::NAME);
+    item.setTitle(&name);
+    submenu.setTitle(&name);
+    if let Some(hide) = submenu.itemWithTitle(&NSString::from_str("Hide Avalonia Application")) {
+        hide.setTitle(&NSString::from_str(&format!("Hide {}", jiffshot_capture::paths::NAME)));
+    }
+    Ok(())
+}
+
+/// Corrects the name set by the prebuilt Avalonia host and its native menu.
+pub fn name_application() -> Result<(), String> {
+    if MainThreadMarker::new().is_none() {
+        return Err("application naming must run on the main thread".into());
+    }
+    NSProcessInfo::processInfo().setProcessName(&NSString::from_str(jiffshot_capture::paths::NAME));
+    NAME_OBSERVER.with(|slot| {
+        if slot.borrow().is_some() {
+            return Ok(());
+        }
+        let callback = RcBlock::new(|_: NonNull<NSNotification>| {
+            if let Err(error) = name_application_menu() {
+                eprintln!("macOS application menu: {error}");
+            }
+        });
+        // SAFETY: AppKit delivers key-window notifications on the main thread.
+        let observer = unsafe {
+            NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+                Some(NSWindowDidBecomeKeyNotification),
+                None,
+                None,
+                &callback,
+            )
+        };
+        *slot.borrow_mut() = Some(observer);
+        Ok(())
+    })
 }
 
 /// Resolves an opaque handle freshly obtained from a live Rustolonia window
