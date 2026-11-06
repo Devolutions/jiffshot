@@ -585,7 +585,7 @@ fn snipping_owns_print_screen() -> bool {
 }
 
 fn hotkey_owner(key: &str) -> &'static str {
-    if key == "PrtScn" && snipping_owns_print_screen() {
+    if keys::parse(key) == Some((0, sys::VK_SNAPSHOT)) && snipping_owns_print_screen() {
         "Windows gives it to the Snipping Tool (Settings › Accessibility › Keyboard › Print screen key)"
     } else {
         "another app or the system holds it"
@@ -621,15 +621,16 @@ fn register_hotkeys(hwnd: HWND, settings: &Settings) -> (String, Vec<String>) {
         "capture",
         &mut problems,
     );
-    let screen = configured_key(
-        settings.screen_key(),
-        keys::SCREEN,
-        "full-screen",
-        &mut problems,
-    );
-    let repeat = configured_key(settings.repeat_key(), keys::REPEAT, "repeat", &mut problems);
-    let reserved: std::collections::HashSet<_> = [(screen.0, screen.1), (repeat.0, repeat.1)]
+    let screen = settings
+        .screen_key()
+        .map(|key| configured_key(key, keys::SCREEN, "full-screen", &mut problems));
+    let repeat = settings
+        .repeat_key()
+        .map(|key| configured_key(key, keys::REPEAT, "repeat", &mut problems));
+    let reserved: std::collections::HashSet<_> = [&screen, &repeat]
         .into_iter()
+        .flatten()
+        .map(|key| (key.0, key.1))
         .chain(
             settings
                 .presets
@@ -658,13 +659,13 @@ fn register_hotkeys(hwnd: HWND, settings: &Settings) -> (String, Vec<String>) {
         ));
         "the tray icon".to_owned()
     };
-    if !register_hotkey(hwnd, HOTKEY_SCREEN, screen.0, screen.1) {
+    if let Some(screen) = screen.filter(|screen| !register_hotkey(hwnd, HOTKEY_SCREEN, screen.0, screen.1)) {
         problems.push(format!(
             "{} (full screen) is taken",
             keys::display(&screen.2)
         ));
     }
-    if !register_hotkey(hwnd, HOTKEY_REPEAT, repeat.0, repeat.1) {
+    if let Some(repeat) = repeat.filter(|repeat| !register_hotkey(hwnd, HOTKEY_REPEAT, repeat.0, repeat.1)) {
         problems.push(format!(
             "{} (repeat last region) is taken",
             keys::display(&repeat.2)
@@ -2576,21 +2577,74 @@ struct HotkeyUpdate {
     save_error: Option<std::io::Error>,
 }
 
-fn update_hotkeys(settings: Settings) -> Result<HotkeyUpdate, String> {
-    let (hwnd, old_count) = with_app(|app| (app.hwnd, app.settings.presets.len()))
-        .ok_or_else(|| "The capture service is unavailable.".to_owned())?;
+/// Global hotkeys are off while a Preferences hotkey box records keys, so
+/// pressing a key Jiffshot holds types it instead of starting a capture.
+static HOTKEYS_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn unregister_all_hotkeys(hwnd: HWND, preset_count: usize) {
+    // SAFETY: our own window's timer and hotkey ids.
     unsafe {
         KillTimer(hwnd, TIMER_HOTKEY_RETRY);
         for id in [HOTKEY_CAPTURE, HOTKEY_SCREEN, HOTKEY_REPEAT] {
             UnregisterHotKey(hwnd, id);
         }
-        for i in 0..old_count {
+        for i in 0..preset_count {
             UnregisterHotKey(hwnd, HOTKEY_PRESET + i as i32);
         }
     }
-    let desired_capture = settings.capture_key().to_owned();
-    let (capture_key, mut problems) = register_hotkeys(hwnd, &settings);
+}
+
+/// Registers every global and preset hotkey; returns the capture key in use
+/// and what went wrong. Retries the configured capture key when a fallback
+/// had to stand in.
+fn register_all_hotkeys(hwnd: HWND, settings: &Settings) -> (String, Vec<String>) {
+    let (capture_key, mut problems) = register_hotkeys(hwnd, settings);
     problems.extend(register_preset_hotkeys(hwnd, &settings.presets));
+    if capture_key != settings.capture_key() {
+        // SAFETY: a timer on our own window.
+        unsafe { SetTimer(hwnd, TIMER_HOTKEY_RETRY, 30_000, None) };
+    }
+    (capture_key, problems)
+}
+
+/// Turns the global hotkeys off (while the user records a new one) or back
+/// on. Repeated calls change nothing.
+pub fn pause_hotkeys(paused: bool) {
+    use std::sync::atomic::Ordering;
+    if HOTKEYS_PAUSED.swap(paused, Ordering::SeqCst) == paused {
+        return;
+    }
+    let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else {
+        return;
+    };
+    if paused {
+        unregister_all_hotkeys(hwnd, settings.presets.len());
+        return;
+    }
+    let (capture_key, problems) = register_all_hotkeys(hwnd, &settings);
+    with_app(|app| app.capture_key = capture_key);
+    if !problems.is_empty() {
+        for problem in &problems {
+            log(problem);
+        }
+        notify(hwnd, "Jiffshot hotkeys", &problems.join(". "), true);
+    }
+    publish_state();
+}
+
+fn hotkeys_paused() -> bool {
+    HOTKEYS_PAUSED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn update_hotkeys(settings: Settings) -> Result<HotkeyUpdate, String> {
+    let (hwnd, old_count) = with_app(|app| (app.hwnd, app.settings.presets.len()))
+        .ok_or_else(|| "The capture service is unavailable.".to_owned())?;
+    unregister_all_hotkeys(hwnd, old_count);
+    let (capture_key, problems) = if hotkeys_paused() {
+        (settings.capture_key().to_owned(), Vec::new())
+    } else {
+        register_all_hotkeys(hwnd, &settings)
+    };
     let save_error = with_app(|app| {
         app.settings.capture_hotkey = settings.capture_hotkey;
         app.settings.screen_hotkey = settings.screen_hotkey;
@@ -2608,9 +2662,6 @@ fn update_hotkeys(settings: Settings) -> Result<HotkeyUpdate, String> {
         }
     })
     .ok_or_else(|| "The capture service stopped while changing hotkeys.".to_owned())?;
-    if capture_key != desired_capture {
-        unsafe { SetTimer(hwnd, TIMER_HOTKEY_RETRY, 30_000, None) };
-    }
     Ok(HotkeyUpdate {
         hwnd,
         problems,
