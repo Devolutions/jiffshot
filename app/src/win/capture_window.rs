@@ -44,6 +44,14 @@ struct State {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(serde::Serialize)]
+struct NativeCaptureView {
+    #[serde(flatten)]
+    view: panel::View,
+    menus: Vec<panel::MenuItem>,
+}
+
+#[cfg(target_os = "macos")]
 struct PendingEdit {
     id: u64,
     ticket: WindowEditTicket,
@@ -178,10 +186,19 @@ pub fn refresh(state: &TrayState, settings: jiffshot_workflow::settings::Setting
 fn publish_view() {
     let (sink, json) = with(|s| {
         let view = panel::unified_view(&s.settings, &s.capture_key, s.timelapse, capture::is_recording());
-        (s.sink.clone(), serde_json::to_string(&view).unwrap_or_default())
+        #[cfg(target_os = "macos")]
+        let view = NativeCaptureView { view, menus: native_menus(&s.settings) };
+        (s.sink.clone(), serde_json::to_string(&view))
     });
-    if let Some(sink) = sink {
-        let _ = sink.set_view(json);
+    match json {
+        Ok(json) => {
+            if let Some(sink) = sink {
+                if let Err(error) = sink.set_view(json) {
+                    eprintln!("Could not update the Capture window view: {error}");
+                }
+            }
+        }
+        Err(error) => eprintln!("Could not serialize the Capture window view: {error}"),
     }
 }
 
@@ -650,6 +667,34 @@ fn capture_menu(settings: &Settings, id: &str) -> Vec<panel::MenuItem> {
     items
 }
 
+/// The title menus for the macOS menu bar, without what the application
+/// menu already offers (About, Preferences and Quit).
+#[cfg(target_os = "macos")]
+fn native_menus(settings: &Settings) -> Vec<panel::MenuItem> {
+    [("File", "file"), ("Edit", "edit"), ("View", "view"), ("Help", "help")]
+        .into_iter()
+        .filter_map(|(label, name)| {
+            let mut items = capture_menu(settings, name);
+            items.retain(|item| !matches!(item.id.as_str(), "exit" | "panel:prefs" | "window:about"));
+            for item in &mut items {
+                if let Some((text, _)) = item.label.split_once('\t') {
+                    item.label = text.to_owned();
+                }
+            }
+            let mut tidy: Vec<panel::MenuItem> = Vec::with_capacity(items.len());
+            for item in items {
+                if !item.separator || tidy.last().is_some_and(|last| !last.separator) {
+                    tidy.push(item);
+                }
+            }
+            if tidy.last().is_some_and(|last| last.separator) {
+                tidy.pop();
+            }
+            (!tidy.is_empty()).then(|| panel::MenuItem { label: label.to_owned(), enabled: true, items: tidy, ..Default::default() })
+        })
+        .collect()
+}
+
 fn act(action: &str) {
     if action == "capture" && capture::is_recording() {
         capture::stop_recording();
@@ -780,6 +825,35 @@ impl CaptureViewModel for CaptureModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_capture_menus_follow_settings_without_application_menu_duplicates() {
+        let mut settings = Settings::default();
+        settings.show_widget = false;
+        let menus = native_menus(&settings);
+        assert_eq!(menus.iter().map(|menu| menu.label.as_str()).collect::<Vec<_>>(), ["File", "Edit", "View", "Help"]);
+        for menu in &menus {
+            assert!(!menu.items.first().is_some_and(|item| item.separator), "{} starts with a separator", menu.label);
+            assert!(!menu.items.last().is_some_and(|item| item.separator), "{} ends with a separator", menu.label);
+            assert!(menu.items.windows(2).all(|pair| !(pair[0].separator && pair[1].separator)));
+            assert!(menu.items.iter().all(|item| !matches!(item.id.as_str(), "exit" | "panel:prefs" | "window:about")));
+        }
+        let view = menus.iter().find(|menu| menu.label == "View").expect("View menu");
+        assert!(!view.items.iter().find(|item| item.id == "widget").expect("widget item").checked);
+        settings.show_widget = true;
+        let menus = native_menus(&settings);
+        let view = menus.iter().find(|menu| menu.label == "View").expect("View menu");
+        assert!(view.items.iter().find(|item| item.id == "widget").expect("widget item").checked);
+
+        let view = NativeCaptureView {
+            view: panel::unified_view(&settings, "", false, false),
+            menus,
+        };
+        let json = serde_json::to_value(view).expect("serialize native Capture view");
+        assert_eq!(json["widget"], true);
+        assert_eq!(json["menus"][2]["items"][0]["id"], "widget");
+    }
 
     #[test]
     fn split_actions_use_independent_modes_and_keep_video_manual() {

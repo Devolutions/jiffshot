@@ -565,13 +565,6 @@ pub fn set_native_title(hwnd: isize, title: &str) {
     unsafe { SetWindowTextW(hwnd as HWND, title.as_ptr()) };
 }
 
-#[cfg(target_os = "macos")]
-pub fn set_native_title(handle: isize, title: &str) {
-    if let Some(window) = crate::mac_window::window(handle) {
-        window.setTitle(&objc2_foundation::NSString::from_str(title));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

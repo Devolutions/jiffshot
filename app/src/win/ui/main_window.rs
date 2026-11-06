@@ -13,13 +13,14 @@ mod main_library;
 mod main_menu;
 mod main_panel;
 mod main_tools;
+pub(super) mod menu_entry;
 mod video_timeline;
 
 use super::canvas_view::{CanvasView, FLAG_CHANGED};
 use self::main_bars::{narration_bar, status_bar, video_bar, ZoomView};
 use self::main_common::{call, rule, run, solid, Ctx, Theme, Tone, RED, TRANSPARENT, WHITE};
 use self::main_library::library_panel;
-use self::main_menu::{create_flyout, menu_bar, share_flyout};
+use self::main_menu::{create_flyout, share_flyout};
 use self::main_panel::side_bar;
 use self::main_tools::{effects_panel, tool_bar};
 use super::{shortcut, UiOnly};
@@ -51,6 +52,9 @@ pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
     let zoom = ZoomView::new();
     let theme = ctx.theme;
     let window_height = ctx.window_height;
+    let content = DockPanel::el();
+    #[cfg(not(target_os = "macos"))]
+    let content = content.child(main_menu::menu_bar(&ctx).dock_panel_dock(Dock::Top));
     let window = Window::el()
         .title(sink.title)
         .width(1500.0)
@@ -61,8 +65,7 @@ pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
         .background(theme.brush(Tone::Window))
         .on_size_changed(move |args| window_height.set_if_changed(args.new_size.height))
         .content(
-            DockPanel::el()
-                .child(menu_bar(&ctx).dock_panel_dock(Dock::Top))
+            content
                 .child(top_bar(&ctx))
                 .child(library_panel(&ctx))
                 .child(status_bar(&ctx, zoom))
@@ -73,6 +76,8 @@ pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
                 .child(AnyEl::from_control(canvas.control().clone())),
         )
         .build(scope)?;
+    #[cfg(target_os = "macos")]
+    main_menu::install_native(&ctx, &window)?;
     follow_theme(scope, &window, sink, theme)?;
     wire_canvas(&ctx, zoom)?;
     wire_window(&ctx, &window)?;

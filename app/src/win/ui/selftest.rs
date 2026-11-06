@@ -10,6 +10,7 @@
 //! `JIFFSHOT_UITEST_CAPTURE_MENUS` checks menu switching and DarkBlue popups.
 //! `JIFFSHOT_UITEST_WIDGET` checks the floating bar with an isolated tray model.
 //! On macOS, `JIFFSHOT_UITEST_APP_NAME` checks the native application menu name.
+//! On macOS, `JIFFSHOT_UITEST_NATIVE_MENU` checks native menus and shortcuts.
 //! On macOS, `JIFFSHOT_UITEST_OVERLAY` runs only the synthetic overlay test.
 //! `JIFFSHOT_UITEST_TRANSPARENCY` checks capture overlays and notifications.
 //! `JIFFSHOT_UITEST_STARTUP` checks login-item status without changing it.
@@ -460,6 +461,10 @@ fn script() -> Script {
         return library_latency_script();
     }
     #[cfg(target_os = "macos")]
+    if env("JIFFSHOT_UITEST_NATIVE_MENU").is_some() {
+        return native_menu_script();
+    }
+    #[cfg(target_os = "macos")]
     if env("JIFFSHOT_UITEST_APP_NAME").is_some() {
         return application_name_script();
     }
@@ -827,6 +832,181 @@ fn script() -> Script {
         windows_steps(&mut s, drop);
     }
     s
+}
+
+#[cfg(target_os = "macos")]
+fn native_menu_script() -> Script {
+    use objc2_app_kit::NSEventModifierFlags;
+    let widget_item = Rc::new(RefCell::new(None::<objc2::rc::Retained<objc2_app_kit::NSMenuItem>>));
+    let save_widget_item = widget_item.clone();
+    let check_widget_item = widget_item.clone();
+    let mut script = Script(VecDeque::new());
+    script.wait(500).step(|_| {
+        let handle = super::main_window_handle().expect("the editor is unavailable");
+        crate::mac_window::activate(handle).expect("activate native menu fixture");
+        500
+    }).step(|test| {
+        let scope = super::scope().expect("the editor scope is unavailable");
+        assert!(scope.is_native_menu_exported(&scope.main_window().expect("the editor is unavailable")).expect("query native menu export"));
+        for title in ["File", "Edit", "Image", "Share", "Tools", "View", "Video", "Help"] {
+            platform::native_menu_item(&[title]).expect("the editor menu was not exported");
+        }
+        for path in [
+            &["Jiffshot", "About Jiffshot"][..],
+            &["Jiffshot", "Settings…"],
+            &["Jiffshot", "Quit"],
+            &["Image", "Canvas color", "Transparent"],
+            &["Image", "Effects"],
+        ] {
+            platform::native_menu_item(path).expect("native submenu is missing");
+        }
+        assert!(platform::native_menu_item(&["Jiffshot", "About Avalonia"]).is_err());
+        assert!(platform::native_menu_item(&["File", "Exit"]).is_err());
+        assert!(platform::native_menu_item(&["Edit", "Preferences…"]).is_err());
+        for (path, key, modifiers) in [
+            (&["File", "Open…"][..], "o", NSEventModifierFlags::Command),
+            (&["Edit", "Redo"][..], "z", NSEventModifierFlags::Command | NSEventModifierFlags::Shift),
+            (&["Jiffshot", "Settings…"][..], ",", NSEventModifierFlags::Command),
+        ] {
+            let (_, item) = platform::native_menu_item(path).expect("shortcut menu item is missing");
+            assert_eq!(item.keyEquivalent().to_string(), key);
+            assert_eq!(item.keyEquivalentModifierMask(), modifiers);
+        }
+        test.note = sink().show_side_bar.get_untracked().to_string();
+        platform::click_native_menu(&["View", "Side bar"]).expect("click native check item");
+        test.line("native menu: exported editor menus, application items, and Command shortcuts");
+        200
+    }).step(|test| {
+        let original: bool = test.note.parse().expect("saved side bar state");
+        assert_eq!(sink().show_side_bar.get_untracked(), !original, "native click must run once");
+        let (_, item) = platform::native_menu_item(&["View", "Side bar"]).expect("native side bar item");
+        assert_eq!(item.state() != 0, !original, "native checkmark must follow its signal");
+        sink().show_side_bar.set(original);
+        sink().undo_enabled.set(false);
+        200
+    }).step(|_| {
+        assert!(!platform::native_menu_item(&["Edit", "Undo"]).expect("native Undo item").1.isEnabled());
+        sink().undo_enabled.set(true);
+        sink().shares.set(vec!["Native menu fixture".into()]);
+        sink().recent_files.set(vec!["file:///tmp/native_menu_fixture.png".into()]);
+        200
+    }).step(|test| {
+        assert!(platform::native_menu_item(&["Edit", "Undo"]).expect("native Undo item").1.isEnabled());
+        platform::native_menu_item(&["Share", "Native menu fixture"]).expect("dynamic share destination");
+        platform::native_menu_item(&["File", "Open recent", "native_menu_fixture.png"]).expect("dynamic recent file");
+        let grid = super::canvas().expect("the canvas is unavailable").show_pixel_grid();
+        test.note = grid.to_string();
+        platform::press_native_menu_key("g", 5).expect("send Command+G to the fixture");
+        200
+    }).step(|test| {
+        let original: bool = test.note.parse().expect("saved pixel grid state");
+        assert_eq!(super::canvas().expect("the canvas is unavailable").show_pixel_grid(), !original, "native shortcut must run once");
+        let (_, item) = platform::native_menu_item(&["View", "Pixel grid"]).expect("native pixel grid item");
+        assert_eq!(item.state() != 0, !original);
+        platform::click_native_menu(&["View", "Pixel grid"]).expect("restore pixel grid");
+        sink().shares.set(Vec::new());
+        sink().recent_files.set(Vec::new());
+        200
+    }).step(|test| {
+        assert!(platform::native_menu_item(&["Share", "Native menu fixture"]).is_err());
+        let (_, empty) = platform::native_menu_item(&["File", "Open recent", "(no recent files)"]).expect("empty recent files placeholder");
+        assert!(!empty.isEnabled());
+        test.line("native menu: click and shortcut each execute once; enabled states, checkmarks, recent files, and share destinations refresh");
+        super::main_window().expect("the editor is unavailable").hide().expect("hide the editor");
+        platform::click_native_menu(&["Jiffshot", "Settings…"]).expect("open Settings with the editor hidden");
+        200
+    }).step(|_| {
+        assert!(super::prefs_window::showing_for_selftest(), "application Settings did not open");
+        platform::close_named_dialog("Jiffshot Preferences").expect("close Settings");
+        platform::click_native_menu(&["Jiffshot", "About Jiffshot"]).expect("open About with the editor hidden");
+        200
+    }).step(|test| {
+        platform::close_named_dialog("About Jiffshot").expect("application About did not open");
+        test.line("native menu: Settings and About work while the editor is hidden");
+        crate::capture_window::show(&super::scope().expect("the editor scope is unavailable"));
+        500
+    }).step(|test| {
+        let scope = super::scope().expect("the editor scope is unavailable");
+        let window = crate::capture_window::window().expect("the Capture window is unavailable");
+        crate::mac_window::activate(scope.platform_handle(&window).expect("the Capture window has no native handle")).expect("activate the Capture window");
+        assert!(scope.is_native_menu_exported(&window).expect("query Capture native menu export"));
+        assert_eq!(window.get_title().expect("Capture window title").as_deref(), Some("Jiffshot Capture"));
+        assert!(!window.get_extend_client_area_to_decorations_hint().expect("Capture title bar mode"),
+            "the Capture window must use the native macOS title bar");
+        assert_eq!(super::capture_view::native_menu_layout_for_selftest().expect("Capture menu layout"), (0, 0.0),
+            "the Capture window must not contain an in-window menu bar or reserve space for one");
+        test.line("native menu: Capture uses the native macOS title bar without an in-window menu bar");
+        for path in [&["File", "Open Jiffshot Editor"][..], &["File", "Close Window"], &["Edit", "Reset image and video options"], &["View", "Keep on Top"], &["Help", "Keyboard Shortcuts"]] {
+            platform::native_menu_item(path).expect("the Capture menu was not exported");
+        }
+        for path in [&["File", "Exit Jiffshot"][..], &["File", "Preferences…"], &["Help", "About Jiffshot"], &["Image"]] {
+            assert!(platform::native_menu_item(path).is_err(), "unexpected Capture menu item {path:?}");
+        }
+        platform::native_menu_item(&["View", "Show Capture Widget"]).expect("the Capture widget item");
+        assert!(!capture_topmost(), "the Capture window started on top");
+        platform::click_native_menu(&["View", "Keep on Top"]).expect("click Keep on Top");
+        assert!(super::capture_view::native_menu_anchor_for_selftest().expect("check Capture menu anchor"),
+            "native menu panels must use the top of the Capture content as their anchor");
+        200
+    }).step(|test| {
+        assert!(capture_topmost(), "the Capture menu click did not run");
+        platform::click_native_menu(&["View", "Keep on Top"]).expect("restore Keep on Top");
+        assert!(!capture_topmost(), "Keep on Top did not toggle back");
+        test.line("native menu: the Capture window exports its own menus and runs their picks");
+        200
+    }).step(move |test| {
+        let (_, item) = platform::native_menu_item(&["View", "Show Capture Widget"]).expect("the Capture widget item");
+        test.note = super::capture().sink.view.get_untracked();
+        let mut view: serde_json::Value = serde_json::from_str(&test.note).expect("the Capture view JSON");
+        let entry = capture_widget_menu_entry(&mut view);
+        let checked = entry["checked"].as_bool().expect("widget checked state");
+        assert_eq!(item.state() != 0, checked);
+        entry["checked"] = serde_json::Value::Bool(!checked);
+        entry["enabled"] = serde_json::Value::Bool(false);
+        *save_widget_item.borrow_mut() = Some(item);
+        super::capture().sink.view.set(view.to_string());
+        200
+    }).step(move |test| {
+        let mut original: serde_json::Value = serde_json::from_str(&test.note).expect("saved Capture view");
+        let checked = capture_widget_menu_entry(&mut original)["checked"].as_bool().expect("saved widget state");
+        let (_, item) = platform::native_menu_item(&["View", "Show Capture Widget"]).expect("updated Capture widget item");
+        let saved = check_widget_item.borrow();
+        assert!(std::ptr::eq(&**saved.as_ref().expect("saved native item"), &*item), "Capture state update rebuilt the menu");
+        assert_eq!(item.state() != 0, !checked, "Capture menu checkmark did not update");
+        assert!(!item.isEnabled(), "Capture menu enabled state did not update");
+        drop(saved);
+        super::capture().sink.view.set(test.note.clone());
+        200
+    }).step(move |test| {
+        let mut original: serde_json::Value = serde_json::from_str(&test.note).expect("saved Capture view");
+        let entry = capture_widget_menu_entry(&mut original);
+        let checked = entry["checked"].as_bool().expect("saved widget state");
+        let enabled = entry["enabled"].as_bool().expect("saved widget enabled state");
+        let (_, item) = platform::native_menu_item(&["View", "Show Capture Widget"]).expect("restored Capture widget item");
+        let saved = widget_item.borrow();
+        assert!(std::ptr::eq(&**saved.as_ref().expect("saved native item"), &*item), "restoring Capture state rebuilt the menu");
+        assert_eq!(item.state() != 0, checked);
+        assert_eq!(item.isEnabled(), enabled);
+        test.line("native menu: Capture checkmarks and enabled states update without rebuilding the menu");
+        0
+    });
+    script
+}
+
+#[cfg(target_os = "macos")]
+fn capture_widget_menu_entry(view: &mut serde_json::Value) -> &mut serde_json::Value {
+    view["menus"].as_array_mut().expect("Capture menus").iter_mut()
+        .find(|menu| menu["label"] == "View").expect("Capture View menu")["items"]
+        .as_array_mut().expect("Capture View items").iter_mut()
+        .find(|item| item["id"] == "widget").expect("Capture widget menu item")
+}
+
+#[cfg(target_os = "macos")]
+fn capture_topmost() -> bool {
+    let scope = super::scope().expect("the editor scope is unavailable");
+    let window = crate::capture_window::window().expect("the Capture window is unavailable");
+    let handle = scope.platform_handle(&window).expect("the Capture window has no native handle");
+    crate::mac_window::window(handle).expect("the Capture NSWindow").level() > 0
 }
 
 #[cfg(target_os = "macos")]

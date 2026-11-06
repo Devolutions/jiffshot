@@ -3,7 +3,7 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, ProtocolObject, Sel};
 use objc2::{ClassType, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSApplication, NSApplicationWillTerminateNotification, NSBackingStoreType, NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSFont, NSPasteboard, NSRunningApplication, NSStatusWindowLevel, NSTextField, NSWindow, NSWindowStyleMask, NSWindowWillCloseNotification};
+use objc2_app_kit::{NSApplication, NSApplicationWillTerminateNotification, NSBackingStoreType, NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSFont, NSMenu, NSMenuItem, NSPasteboard, NSRunningApplication, NSStatusWindowLevel, NSTextField, NSWindow, NSWindowStyleMask, NSWindowWillCloseNotification};
 use objc2_core_foundation::CGRect;
 use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventSendOptions, NSDate, NSError, NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString};
 use std::cell::RefCell;
@@ -744,6 +744,54 @@ pub(super) fn check_application_name() -> Result<(), String> {
     {
         return Err("the application menu shortcuts or actions changed".into());
     }
+    Ok(())
+}
+
+pub(super) fn native_menu_item(path: &[&str]) -> Result<(Retained<NSMenu>, Retained<NSMenuItem>), String> {
+    let (_, app) = app().ok_or("native menus must be checked on the main thread")?;
+    let mut menu = app.mainMenu().ok_or("the native menu bar is unavailable")?;
+    for (index, title) in path.iter().enumerate() {
+        menu.update();
+        let item = menu.itemWithTitle(&NSString::from_str(title))
+            .ok_or_else(|| format!("native menu item {path:?} is unavailable at {title:?}"))?;
+        if index + 1 == path.len() {
+            return Ok((menu, item));
+        }
+        menu = item.submenu().ok_or_else(|| format!("{title:?} has no native submenu"))?;
+    }
+    Err("a native menu path must not be empty".into())
+}
+
+pub(super) fn click_native_menu(path: &[&str]) -> Result<(), String> {
+    let (menu, item) = native_menu_item(path)?;
+    if !item.isEnabled() {
+        return Err(format!("native menu item {path:?} is disabled"));
+    }
+    menu.performActionForItemAtIndex(menu.indexOfItem(&item));
+    Ok(())
+}
+
+pub(super) fn close_named_dialog(title: &str) -> Result<(), String> {
+    let (_, app) = app().ok_or("dialogs must be closed on the main thread")?;
+    let window = app.windows().iter().find(|window| window.isVisible() && window.title().to_string() == title)
+        .ok_or_else(|| format!("the {title:?} dialog is not visible"))?;
+    window.close();
+    Ok(())
+}
+
+pub(super) fn press_native_menu_key(character: &str, key_code: u16) -> Result<(), String> {
+    use objc2_core_graphics::{CGEvent, CGEventFlags};
+    let (_, app) = app().ok_or("native menu shortcuts must run on the main thread")?;
+    app.keyWindow().ok_or("the menu fixture has no key window")?;
+    // Keep CoreGraphics' keyboard-layout metadata, which AppKit uses to
+    // distinguish shifted and unshifted key equivalents.
+    let raw = CGEvent::new_keyboard_event(None, key_code, true).ok_or("could not create the native menu shortcut event")?;
+    CGEvent::set_flags(Some(&raw), CGEventFlags::MaskCommand);
+    let text: Vec<u16> = character.encode_utf16().collect();
+    // SAFETY: the UTF-16 buffer is live and contains exactly text.len() units.
+    unsafe { CGEvent::keyboard_set_unicode_string(Some(&raw), text.len() as u64, text.as_ptr()); }
+    let event = NSEvent::eventWithCGEvent(&raw).ok_or("could not convert the native menu shortcut event")?;
+    app.sendEvent(&event);
     Ok(())
 }
 

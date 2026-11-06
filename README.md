@@ -494,6 +494,12 @@ While hidden, capture and recording results, scheduled-capture problems, and sho
 
 ### macOS builds
 
+The editor and Capture window use only the native macOS menu bar, with About
+Jiffshot and Settings in the Jiffshot application menu and the standard macOS
+Hide and Quit actions. The Capture window uses the standard macOS title bar
+without a duplicate in-window menu bar.
+Editor shortcuts use Command; Windows and Linux retain their in-window menus.
+
 On macOS 13 or later, install Rust, PowerShell 7.4 or newer, and Xcode command-line tools. The Rustolonia release includes the required macOS host and companion dylibs:
 
 ```bash
@@ -696,6 +702,7 @@ The editor drives its own UI when `JIFFSHOT_UITEST=DIR` is set (with `JIFFSHOT_U
 On Windows, `JIFFSHOT_UITEST_CAPTURE_MENUS=1` checks Capture menu hover switching, click-to-dismiss, dismissal cleanup, and DarkBlue popup backgrounds and borders without changing the system pointer. It also checks that changing to Light closes the old popup and preserves the light palette. Use the same isolated settings and library paths.
 Set `JIFFSHOT_UITEST_VIDEO_EDIT=1` with a short `JIFFSHOT_UITEST_VIDEO` fixture and an empty scratch library inside `DIR` for the focused multi-cut, undo/redo, playback, automatic-save and subsequent-save checks.
 On macOS, set `JIFFSHOT_UITEST_APP_NAME=1` to check the native application name and menu across editor and Capture windows. Set `JIFFSHOT_UITEST_OVERLAY=1` to run a focused synthetic selection-window lifecycle test without screen captures. Use scratch `JIFFSHOT_CONFIG_DIR` and `JIFFSHOT_LOCAL_DIR` for both.
+`JIFFSHOT_UITEST_NATIVE_MENU=1` checks the exported macOS editor, Capture window and application menus, Command shortcuts, single-dispatch clicks and shortcuts, reactive enabled states and checkmarks, and changing recent-file and share submenus. Use the same isolated settings, cache and library paths; it sends keyboard input only to the fixture application and does not capture the screen or move the pointer.
 `JIFFSHOT_UITEST_PERMISSIONS=1` exercises permission guidance for synthetic screen, Accessibility, camera, microphone, and Automation denials, including duplicate failures, dismissal, retry, and a hidden editor. It does not request permissions, open System Settings, or capture the screen; use the same isolated test paths.
 `JIFFSHOT_UITEST_RECENT=1` uses an empty `JIFFSHOT_LIBRARY` inside `JIFFSHOT_UITEST` to check editor and tray recent-file actions with a synthetic image whose name contains Unicode and URI-reserved characters, including malformed-URI reporting.
 `JIFFSHOT_UITEST_LIBRARY=1` uses the same isolated-library requirement to check filtering, pinning, tags, multi-selection, combining, renaming with companions, collision handling, saved edits, closed items, and metadata errors using synthetic captures.
