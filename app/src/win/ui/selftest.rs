@@ -12,6 +12,7 @@
 //! `JIFFSHOT_UITEST_STARTUP` checks login-item status without changing it.
 //! `JIFFSHOT_UITEST_RECENT` checks recent-file actions with a scratch library.
 //! `JIFFSHOT_UITEST_LIBRARY` checks library actions with synthetic captures.
+//! `JIFFSHOT_UITEST_LIBRARY_LATENCY` checks large-library refresh and capture delivery.
 //! `JIFFSHOT_UITEST_LIBRARY_COPY` checks library copy using a private pasteboard.
 //! `JIFFSHOT_UITEST_LIBRARY_DRAG` checks outgoing library drag gestures.
 //! `JIFFSHOT_UITEST_CONTROL` leaves an isolated control server for an external fixture.
@@ -446,6 +447,9 @@ fn editor_walk(s: &mut Script) {
 /// The whole walk, in order.
 fn script() -> Script {
     let mut s = Script(VecDeque::new());
+    if env("JIFFSHOT_UITEST_LIBRARY_LATENCY").is_some() {
+        return library_latency_script();
+    }
     if env("JIFFSHOT_UITEST_WIDGET").is_some() {
         return capture_widget_script();
     }
@@ -852,7 +856,6 @@ fn capture_visibility_pixel_steps(script: &mut Script) {
     });
 }
 
-#[cfg(target_os = "macos")]
 fn empty_scratch_library(test: &Test) -> PathBuf {
     let ui_dir = test.dir.canonicalize().expect("resolve the test directory");
     let library = PathBuf::from(std::env::var_os("JIFFSHOT_LIBRARY").expect("scratch JIFFSHOT_LIBRARY"));
@@ -860,6 +863,96 @@ fn empty_scratch_library(test: &Test) -> PathBuf {
     assert!(resolved.starts_with(&ui_dir) && resolved != ui_dir, "the library must be inside the test directory");
     assert!(std::fs::read_dir(&resolved).expect("read the scratch library").next().is_none(), "the test library must be empty");
     library
+}
+
+fn library_latency_script() -> Script {
+    let mut script = Script(VecDeque::new());
+    script.wait(800).step(|test| {
+        let library = empty_scratch_library(test);
+        let folder = library.join("2026-01");
+        std::fs::create_dir(&folder).expect("create synthetic capture folder");
+        let image = jiffshot_doc::Document::blank(54, 34, jiffshot_doc::Rgba::WHITE);
+        for index in 0..600 {
+            let capture = folder.join(format!("capture-{index:04}.png"));
+            image
+                .background()
+                .save_png(&capture)
+                .expect("save synthetic capture");
+            crate::library::write_thumbnail(&image, &capture);
+        }
+        crate::app::act(|app| {
+            assert_eq!(
+                app.library.root, library,
+                "the app must use the scratch library"
+            );
+            app.refresh_library();
+        })
+        .expect("refresh synthetic library");
+        800
+    });
+    for expanded in [false, true] {
+        script.step(move |_| {
+            crate::app::act(|app| app.library_view(|view| view.expanded = expanded))
+                .expect("set library view");
+            800
+        });
+        script.step(move |test| {
+            let items = sink().library.get_untracked();
+            let expected = if expanded { 600 } else { 120 };
+            assert_eq!(items.len(), expected);
+            let started = Instant::now();
+            for _ in 0..10 {
+                crate::app::act(|app| app.refresh_library()).expect("refresh unchanged library");
+                let refreshed = sink().library.get_untracked();
+                assert!(items.iter().zip(&refreshed).all(|(old, new)| Rc::ptr_eq(old, new)),
+                    "unchanged {expected}-item refresh rebuilt tiles");
+            }
+            test.line(format!("library latency: {expected} visible tiles, 10 unchanged refreshes in {:.1} ms, no rebuilt tiles",
+                started.elapsed().as_secs_f64() * 1000.0));
+            300
+        });
+    }
+    script.step(|test| {
+        let items = sink().library.get_untracked();
+        let capture = PathBuf::from(std::env::var_os("JIFFSHOT_LIBRARY").unwrap())
+            .join("2026-01")
+            .join("000-incoming.png");
+        let image = jiffshot_doc::Document::blank(63, 39, jiffshot_doc::Rgba::WHITE);
+        image
+            .background()
+            .save_png(&capture)
+            .expect("save incoming capture");
+        crate::library::write_thumbnail(&image, &capture);
+        crate::app::act(|app| app.library_view(|view| view.sort = "Name".into()))
+            .expect("sort synthetic library");
+        let started = Instant::now();
+        crate::app::act(|app| app.incoming(capture.clone())).expect("deliver incoming capture");
+        let refreshed = sink().library.get_untracked();
+        assert_eq!(super::canvas().unwrap().document_size(), (63, 39));
+        assert_eq!(refreshed.len(), 600);
+        assert!(
+            refreshed.iter().any(|item| {
+                let fields = item.fields.get_untracked();
+                fields.path_identity == capture && fields.is_current
+            }),
+            "the incoming capture must be current"
+        );
+        let old_keys: std::collections::HashSet<_> = items.iter().map(|item| item.key).collect();
+        assert_eq!(
+            refreshed
+                .iter()
+                .filter(|item| !old_keys.contains(&item.key))
+                .count(),
+            1,
+            "an incoming capture must create only one tile"
+        );
+        test.line(format!(
+            "library latency: incoming capture opened at 63x39 in {:.1} ms, one new tile",
+            started.elapsed().as_secs_f64() * 1000.0
+        ));
+        300
+    });
+    script
 }
 
 #[cfg(target_os = "macos")]
@@ -1829,8 +1922,12 @@ fn library_drag_script() -> Script {
             TestEvent::Completed { token, .. } if *token == state.token)), "the active drag completed prematurely");
         crate::app::act(|app| app.exit()).expect("request quit during the native drag");
         let toast = sink().toast.get_untracked();
-        assert!(toast.contains("Could not quit Jiffshot") && toast.contains("library drag"), "{toast}");
-        crate::app::act(|app| app.refresh_library()).expect("rebuild the library during a native drag");
+        assert!(
+            toast.contains("Could not quit Jiffshot") && toast.contains("library drag"),
+            "{toast}"
+        );
+        crate::app::act(|app| app.library_view(|view| view.thumb += 1.0))
+            .expect("rebuild the library during a native drag");
         assert!(crate::file_drag_macos::has_pending().expect("inspect the retained native drag"));
         if let Some(receiver) = std::env::var_os("JIFFSHOT_UITEST_DRAG_RECEIVER") {
             let mut command = std::process::Command::new(receiver);
@@ -1965,8 +2062,12 @@ fn library_drag_script() -> Script {
     });
     let state = fixture.clone();
     script.step(move |test| {
-        assert!(crate::file_drag_macos::preparation_waiting_for_selftest(), "the rebuild-race worker did not reach the gate");
-        crate::app::act(|app| app.refresh_library()).expect("rebuild the library");
+        assert!(
+            crate::file_drag_macos::preparation_waiting_for_selftest(),
+            "the rebuild-race worker did not reach the gate"
+        );
+        crate::app::act(|app| app.library_view(|view| view.thumb += 1.0))
+            .expect("rebuild the library");
         let mut state = state.borrow_mut();
         assert_drag_completed(state.token);
         state.release_preparation();
