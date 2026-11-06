@@ -51,6 +51,12 @@ Prebuilt, Authenticode-signed packages for **Windows 10 and Windows 11** (`x64` 
 
 The macOS builds target macOS 13 or later and are experimental; feature parity and behavior across supported Macs are still being verified. Open the matching DMG and drag **Jiffshot** to **Applications**. Jiffshot requests permissions only when a feature needs them, not at startup. If access is denied, a guidance window explains why it is needed and offers **Open System Settings** for the relevant privacy pane. The DMGs are published after Developer ID signing and notarization; older releases may not include them. See [macOS builds](#macos-builds) for details and current limitations.
 
+Alternatively, install Jiffshot on macOS with Homebrew:
+
+```sh
+brew install --cask devolutions/tap/jiffshot
+```
+
 Linux x64 and ARM64 release builds are configured to produce a portable `.tar.gz`
 and Ubuntu 24.04 `.deb`, plus a separately built native Fedora 43 `.rpm` for each
 architecture. See
