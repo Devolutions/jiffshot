@@ -9,7 +9,7 @@
 //! without running the editor and overlay walk.
 //! `JIFFSHOT_UITEST_WIDGET` checks the floating bar with an isolated tray model.
 //! On macOS, `JIFFSHOT_UITEST_OVERLAY` runs only the synthetic overlay test.
-//! `JIFFSHOT_UITEST_TRANSPARENCY` checks recording overlays and notifications.
+//! `JIFFSHOT_UITEST_TRANSPARENCY` checks capture overlays and notifications.
 //! `JIFFSHOT_UITEST_STARTUP` checks login-item status without changing it.
 //! `JIFFSHOT_UITEST_RECENT` checks recent-file actions with a scratch library.
 //! `JIFFSHOT_UITEST_LIBRARY` checks library actions with synthetic captures.
@@ -5244,29 +5244,29 @@ fn assert_transparency_pixels(test: &mut Test, label: &str, blank: (usize, usize
 }
 
 #[cfg(target_os = "macos")]
-fn assert_notice_transparency(test: &mut Test, attempt: usize) {
-    let reply = platform::exclusion_reply().expect("the notification probe did not finish");
+fn assert_card_transparency(test: &mut Test, label: &str) {
+    let reply = platform::exclusion_reply().expect("the card transparency probe did not finish");
     let platform::ProbeReply::PixelFrames { raw, filtered } = reply
-        else { panic!("unexpected notification probe reply: {reply:?}") };
+        else { panic!("unexpected card transparency probe reply: {reply:?}") };
     assert_eq!(raw.len(), 210 * 130 * 4, "the desktop probe has an invalid size");
     assert_eq!(filtered.len(), raw.len(), "the recording probe has an invalid size");
     let area = test.probe_area.expect("the probe area is unavailable");
-    let window = test.note.parse::<isize>().expect("the notification window number");
+    let window = test.note.parse::<isize>().expect("the card window number");
     let rect = window_rect(window);
-    assert!(rect.x >= area.x && rect.y >= area.y, "the notification is outside the probe: {rect:?}");
+    assert!(rect.x >= area.x && rect.y >= area.y, "{label} is outside the probe: {rect:?}");
     let x = ((rect.x - area.x) * 210 / area.width) as usize;
     let y = ((rect.y - area.y) * 130 / area.height) as usize;
-    assert!(x + 12 < 210 && y + 12 < 130, "the notification does not overlap the probe");
-    assert!(green_pixel(&raw, ((y + 1) * 210 + x + 1) * 4), "notification {attempt} has an opaque corner");
-    assert!(!green_pixel(&raw, ((y + 12) * 210 + x + 12) * 4), "notification {attempt} did not render");
+    assert!(x + 12 < 210 && y + 12 < 130, "{label} does not overlap the probe");
+    assert!(green_pixel(&raw, ((y + 1) * 210 + x + 1) * 4), "{label} has an opaque corner");
+    assert!(!green_pixel(&raw, ((y + 12) * 210 + x + 12) * 4), "{label} did not render");
     let samples = popup_visible_samples(area, rect, &raw);
     let visible = samples.iter().filter(|&&at| !green_pixel(&filtered, at)).count();
     if super::hud::native::capturable() {
-        assert!(visible >= samples.len() / 4, "notification {attempt} was not captured in debug mode");
+        assert!(visible >= samples.len() / 4, "{label} was not captured in debug mode");
     } else {
-        assert_eq!(visible, 0, "notification {attempt} leaked into the recording");
+        assert_eq!(visible, 0, "{label} leaked into the recording");
     }
-    test.line(format!("notification {attempt}: transparent corner and capture behavior verified"));
+    test.line(format!("{label}: transparent corner and capture behavior verified"));
 }
 
 #[cfg(target_os = "macos")]
@@ -5376,8 +5376,60 @@ fn transparency_script() -> Script {
         set(k.screen_draw, String::new());
         500
     })
-    .step(|t| {
+    .step(move |t| {
         assert!(t.new_windows().is_empty(), "the Screen Draw window did not close");
+        let area = t.probe_area.expect("the probe area is unavailable");
+        t.remember_windows();
+        set(k.hud, serde_json::json!({
+            "panels": [],
+            "borders": [],
+            "countdowns": [{
+                "id": 9005, "area": [area.x, area.y, area.width, area.height],
+                "title": "Get ready to capture", "seconds": 3, "progress": 0.72
+            }]
+        }).to_string());
+        500
+    })
+    .step(|t| {
+        let windows = t.new_windows();
+        assert_eq!(windows.len(), 1, "the capture countdown was not created");
+        let window = windows[0];
+        assert_eq!(platform::exclusion_window_ignores_input(window), Some(true));
+        if super::hud::native::capturable() {
+            assert_eq!(affinity(window), 0);
+        } else {
+            assert_eq!(platform::exclusion_window_alpha(window), Some(0.0), "the countdown appeared before exclusion");
+            assert_eq!(affinity(window), 0x11);
+        }
+        t.note = window.to_string();
+        platform::exclusion_command(platform::ProbeCommand::Refresh).expect("refresh the countdown exclusion");
+        t.probe_deadline = Some(Instant::now() + Duration::from_secs(15));
+        0
+    })
+    .step(|t| {
+        assert!(matches!(platform::exclusion_reply(), Ok(platform::ProbeReply::Refreshed)));
+        let window = t.note.parse::<isize>().expect("the countdown window number");
+        t.window_reveal = Some((window, Instant::now() + Duration::from_secs(15)));
+        0
+    })
+    .step(|t| {
+        let window = t.note.parse::<isize>().expect("the countdown window number");
+        let area = t.probe_area.expect("the probe area is unavailable");
+        platform::place_for_exclusion_probe(window, area.x + 20, area.y + 20).expect("position the test countdown");
+        500
+    })
+    .step(|t| {
+        platform::exclusion_command(platform::ProbeCommand::PixelFrames).expect("capture the countdown pixels");
+        t.probe_deadline = Some(Instant::now() + Duration::from_secs(15));
+        0
+    })
+    .step(move |t| {
+        assert_card_transparency(t, "capture countdown");
+        set(k.hud, r#"{"panels":[],"borders":[],"countdowns":[]}"#.to_owned());
+        500
+    })
+    .step(|t| {
+        assert!(t.new_windows().is_empty(), "the capture countdown did not close");
         t.remember_windows();
         0
     });
@@ -5426,7 +5478,7 @@ fn transparency_script() -> Script {
             0
         })
         .step(move |t| {
-            assert_notice_transparency(t, attempt);
+            assert_card_transparency(t, &format!("notification {attempt}"));
             5500
         })
         .step(|t| {
