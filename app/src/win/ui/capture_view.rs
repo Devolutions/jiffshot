@@ -1147,11 +1147,11 @@ fn show_menu(json: &str) -> Result<()> {
     Ok(())
 }
 
-fn menu_entry(entry: &MenuEntry, subs: &Subscriptions, dark: Signal<bool>) -> Result<Control> {
+fn menu_entry(entry: &MenuEntry, subs: &Subscriptions, _dark: Signal<bool>) -> Result<Control> {
     if entry.separator {
         let separator = Separator::new()?;
         #[cfg(windows)]
-        if dark.get_untracked() {
+        if _dark.get_untracked() {
             separator.set_background(Brush::solid(parts::rgb(dark_blue::INPUT_BORDER)))?;
         }
         return Ok(separator.upcast());
@@ -1162,7 +1162,7 @@ fn menu_entry(entry: &MenuEntry, subs: &Subscriptions, dark: Signal<bool>) -> Re
     };
     let item = MenuItem::new()?.enabled(entry.enabled)?.stays_open_on_click(entry.keep_open)?;
     #[cfg(windows)]
-    if dark.get_untracked() {
+    if _dark.get_untracked() {
         item.set_background(Brush::solid(parts::rgb(dark_blue::WINDOW)))?;
         item.set_foreground(Brush::solid(WHITE))?;
     }
@@ -1180,7 +1180,7 @@ fn menu_entry(entry: &MenuEntry, subs: &Subscriptions, dark: Signal<bool>) -> Re
     if !entry.items.is_empty() {
         let children = item.items()?;
         for child in &entry.items {
-            children.add(menu_entry(child, subs, dark)?)?;
+            children.add(menu_entry(child, subs, _dark)?)?;
         }
         if entry.checked {
             item.set_header_text(format!("{label}  \u{2713}"))?;
