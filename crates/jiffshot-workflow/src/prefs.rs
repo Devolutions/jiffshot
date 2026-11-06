@@ -2,7 +2,7 @@
 //! their rows (as in the Capture window's panels, see `panel.rs`) and how
 //! the values the dialog sends back change the settings.
 
-use crate::panel::{check_row, choice, int, note, number, on, string, text, Row, FPS};
+use crate::panel::{check_row, choice, hotkey, int, note, number, on, string, Row, FPS};
 use crate::settings::Settings;
 use serde_json::Value;
 
@@ -74,13 +74,17 @@ pub fn apply_capture(s: &mut Settings, values: &[Value], runs_at_startup: bool) 
 /// The Hotkeys tab: configurable global shortcuts and a hotkey per preset.
 pub fn hotkeys(s: &Settings, capture_key: &str) -> Vec<Row> {
     let key = crate::panel::key_name(capture_key);
+    let default = |key: Option<&str>, default: &str| match key {
+        Some(key) => format!("Default: {}", crate::keys::display(key)),
+        None => format!("None: another hotkey uses {}", crate::keys::display(default)),
+    };
     let mut rows = vec![
         note(format!("{key}: current capture key; another key may be used while the configured key is unavailable.")),
-        text("Capture", s.capture_hotkey.clone().unwrap_or_default()),
-        text("Full screen", s.screen_hotkey.clone().unwrap_or_default()),
-        text("Repeat last region", s.repeat_hotkey.clone().unwrap_or_default()),
+        hotkey("Capture", s.capture_hotkey.clone().unwrap_or_default(), default(Some(s.capture_key()), crate::keys::CAPTURE.2)),
+        hotkey("Full screen", s.screen_hotkey.clone().unwrap_or_default(), default(s.screen_key(), crate::keys::SCREEN.2)),
+        hotkey("Repeat last region", s.repeat_hotkey.clone().unwrap_or_default(), default(s.repeat_key(), crate::keys::REPEAT.2)),
         note(format!(
-            "Leave these blank for the defaults: {}, {}, {}.",
+            "Click a box and press the keys. Leave these blank for the defaults: {}, {}, {}; a default goes unused when another hotkey takes its keys.",
             crate::keys::display(crate::keys::CAPTURE.2),
             crate::keys::display(crate::keys::SCREEN.2),
             crate::keys::display(crate::keys::REPEAT.2),
@@ -91,7 +95,7 @@ pub fn hotkeys(s: &Settings, capture_key: &str) -> Vec<Row> {
     rows.extend(
         s.presets
             .iter()
-            .map(|p| text(&p.name, p.hotkey.clone().unwrap_or_default())),
+            .map(|p| hotkey(&p.name, p.hotkey.clone().unwrap_or_default(), "None")),
     );
     if s.presets.is_empty() {
         rows.push(note(
@@ -121,8 +125,8 @@ pub fn validate_hotkeys(settings: &Settings) -> Result<(), String> {
     let mut seen = std::collections::HashMap::new();
     for (label, key) in [
         ("capture", Some(settings.capture_key())),
-        ("full screen", Some(settings.screen_key())),
-        ("repeat last region", Some(settings.repeat_key())),
+        ("full screen", settings.screen_key()),
+        ("repeat last region", settings.repeat_key()),
     ]
     .into_iter()
     .chain(
@@ -145,6 +149,7 @@ pub fn apply_hotkeys(settings: &mut Settings, values: &[Value]) -> Result<(), St
     let mut updated = settings.clone();
     let optional = |index| {
         let value = string(values, index);
+        let value = crate::keys::normalize(&value);
         (!value.is_empty()).then_some(value)
     };
     updated.capture_hotkey = optional(1);
@@ -217,6 +222,30 @@ mod tests {
     }
 
     #[test]
+    fn a_chosen_hotkey_takes_a_default_from_another_action() {
+        let mut settings = Settings::default();
+        let mut values = vec![Value::Null; 7 + settings.presets.len()];
+        let typed = if cfg!(windows) { crate::keys::display(crate::keys::SCREEN.2) } else { crate::keys::SCREEN.2.to_owned() };
+        values[1] = json!(format!("{typed}  "));
+        apply_hotkeys(&mut settings, &values).unwrap();
+        assert_eq!(settings.capture_hotkey.as_deref(), Some(crate::keys::SCREEN.2));
+        assert_eq!(settings.capture_key(), crate::keys::SCREEN.2);
+        assert_eq!(settings.screen_key(), None, "the full-screen default gave up its key");
+        assert_eq!(settings.repeat_key(), Some(crate::keys::REPEAT.2));
+
+        let mut settings = Settings::default();
+        values[1] = Value::Null;
+        values[3] = json!(crate::keys::CAPTURE.2);
+        apply_hotkeys(&mut settings, &values).unwrap();
+        assert_eq!(settings.capture_key(), crate::keys::CAPTURE_FALLBACKS[0].2, "capture moves to a free fallback");
+
+        values[3] = Value::Null;
+        values[2] = json!(crate::keys::REPEAT.2);
+        values[1] = json!(crate::keys::REPEAT.2);
+        assert!(apply_hotkeys(&mut settings, &values).is_err(), "two chosen keys still collide");
+    }
+
+    #[test]
     fn global_hotkeys_are_editable_and_checked_against_presets() {
         let mut settings = Settings::default();
         let mut values = vec![Value::Null; 7 + settings.presets.len()];
@@ -226,8 +255,8 @@ mod tests {
         values[7] = json!("Shift+F9");
         apply_hotkeys(&mut settings, &values).unwrap();
         assert_eq!(settings.capture_key(), "Ctrl+Alt+9");
-        assert_eq!(settings.screen_key(), "Ctrl+Alt+8");
-        assert_eq!(settings.repeat_key(), "Ctrl+Alt+7");
+        assert_eq!(settings.screen_key(), Some("Ctrl+Alt+8"));
+        assert_eq!(settings.repeat_key(), Some("Ctrl+Alt+7"));
         values[7] = json!("Alt+Control+9");
         assert!(apply_hotkeys(&mut settings, &values).is_err());
         #[cfg(target_os = "macos")]

@@ -1156,6 +1156,13 @@ pub enum Row {
         label: String,
         value: String,
     },
+    /// A hotkey ("Ctrl+Shift+1"), recorded by pressing it; empty for none.
+    Hotkey {
+        label: String,
+        value: String,
+        /// Shown while it is empty: what the empty value does.
+        placeholder: String,
+    },
 }
 
 pub fn number(label: &str, value: i64, min: i64, max: i64) -> Row {
@@ -1205,6 +1212,14 @@ pub fn text(label: &str, value: impl Into<String>) -> Row {
 
 pub fn note(text: impl Into<String>) -> Row {
     Row::Note { text: text.into() }
+}
+
+pub fn hotkey(label: &str, value: impl Into<String>, placeholder: impl Into<String>) -> Row {
+    Row::Hotkey {
+        label: label.into(),
+        value: value.into(),
+        placeholder: placeholder.into(),
+    }
 }
 
 /// A small panel of options behind a gear, a › button or a menu item.
@@ -1458,7 +1473,7 @@ pub fn panel(s: &Settings, id: &str, runs_at_startup: bool, capture_key: &str) -
             ..panel_of(
                 id,
                 "New preset from these settings",
-                vec![text("Name", ""), text("Hotkey", "")],
+                vec![text("Name", ""), hotkey("Hotkey", "", "None")],
             )?
         }),
         "shortcuts" => {
@@ -1469,21 +1484,22 @@ pub fn panel(s: &Settings, id: &str, runs_at_startup: bool, capture_key: &str) -
                 ok: None,
                 action: None,
                 rows: [
-                    format!("{key}: capture (region, window or screen)"),
-                    format!("{}: full screen", key_name(s.screen_key())),
-                    format!("{}: repeat the last region", key_name(s.repeat_key())),
-                    if cfg!(target_os = "macos") {
+                    Some(format!("{key}: capture (region, window or screen)")),
+                    s.screen_key().map(|k| format!("{}: full screen", key_name(k))),
+                    s.repeat_key().map(|k| format!("{}: repeat the last region", key_name(k))),
+                    Some(if cfg!(target_os = "macos") {
                         "While selecting: arrow keys nudge; Shift, Cmd, Cmd+Shift lock square, 16:9, 4:3; M hides the magnifier; F1 shows all keys; Enter captures; Esc cancels"
                     } else {
                         "While selecting: arrow keys nudge; Shift, Ctrl, Ctrl+Shift lock square, 16:9, 4:3; M hides the magnifier; F1 shows all keys; Enter captures; Esc cancels"
-                    }.into(),
-                    format!("While recording: {}", crate::recorder::keys_text("; ")),
-                    format!(
+                    }.into()),
+                    Some(format!("While recording: {}", crate::recorder::keys_text("; "))),
+                    Some(format!(
                         "In the Capture window: Enter runs the selected mode; {}, 2, 3 switch modes; Esc closes",
                         key_name(&format!("{}+1", crate::keys::COMMAND))
-                    ),
+                    )),
                 ]
                 .into_iter()
+                .flatten()
                 .map(note)
                 .collect(),
             })
@@ -1498,7 +1514,7 @@ pub fn panel(s: &Settings, id: &str, runs_at_startup: bool, capture_key: &str) -
                     "Edit preset",
                     vec![
                         text("Name", p.name.clone()),
-                        text("Hotkey", p.hotkey.clone().unwrap_or_default()),
+                        hotkey("Hotkey", p.hotkey.clone().unwrap_or_default(), "None"),
                     ],
                 )?
             })
@@ -1898,7 +1914,7 @@ fn apply_inner(
                     crate::keys::CAPTURE.2
                 ));
             }
-            let hotkey = Some(hotkey).filter(|k| !k.is_empty());
+            let hotkey = Some(crate::keys::normalize(&hotkey)).filter(|k| !k.is_empty());
             let mut presets = s.presets.clone();
             match id
                 .strip_prefix("edit-preset:")
@@ -1977,7 +1993,7 @@ mod tests {
                 Row::Number { value, .. } => Some((*value).into()),
                 Row::Check { value, .. } => Some((*value).into()),
                 Row::Choice { value, .. } => Some((*value).into()),
-                Row::Text { value, .. } | Row::Folder { value, .. } => Some(value.clone().into()),
+                Row::Text { value, .. } | Row::Folder { value, .. } | Row::Hotkey { value, .. } => Some(value.clone().into()),
                 Row::Note { .. } => None,
             })
             .collect()

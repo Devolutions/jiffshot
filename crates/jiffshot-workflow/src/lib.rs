@@ -420,6 +420,12 @@ pub mod capture {
         on_capture_thread(move || tray::set_hotkeys(settings));
     }
 
+    /// Turns Jiffshot's global hotkeys off while a hotkey box records keys,
+    /// and back on.
+    pub fn pause_hotkeys(paused: bool) {
+        on_capture_thread(move || tray::pause_hotkeys(paused));
+    }
+
     pub fn step_capture() {
         on_capture_thread(|| tray::start_mode_after_delay("steps"));
     }
