@@ -23,6 +23,8 @@
 //! jiffshot --quit                       stop the running instance
 //! jiffshot --write-icon OUT.ico         write the program icon (assets/jiffshot.ico)
 //! jiffshot --write-logo SIZE OUT.png    render the logo as a square PNG
+//! jiffshot --write-tray-icon OUT.ico    write the notification-area icon
+//! jiffshot --write-tray-logo SIZE OUT.png  render the notification-area icon as a PNG
 //! ```
 //!
 //! The running instance also serves `jiffshot-cli` (scripts and AI agents)
@@ -1336,7 +1338,8 @@ pub fn run_command(args: &[String]) -> Option<i32> {
         .as_slice()
     {
         ["--write-icon", out] => icon::ico().and_then(|bytes| std::fs::write(out, bytes)),
-        ["--write-logo", size, out] => size
+        ["--write-tray-icon", out] => icon::tray_ico().and_then(|bytes| std::fs::write(out, bytes)),
+        [command @ ("--write-logo" | "--write-tray-logo"), size, out] => size
             .parse::<u32>()
             .map_err(|_| {
                 std::io::Error::new(
@@ -1344,11 +1347,14 @@ pub fn run_command(args: &[String]) -> Option<i32> {
                     "logo size must be a positive whole number",
                 )
             })
-            .and_then(icon::png)
+            .and_then(|size| match *command {
+                "--write-tray-logo" => icon::tray_png(size),
+                _ => icon::png(size),
+            })
             .and_then(|bytes| std::fs::write(out, bytes)),
-        ["--write-logo", ..] => Err(std::io::Error::new(
+        [command @ ("--write-logo" | "--write-tray-logo"), ..] => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "usage: --write-logo SIZE OUT.png",
+            format!("usage: {command} SIZE OUT.png"),
         )),
         ["--monitors"] => {
             print_monitors(&screen::monitors());
