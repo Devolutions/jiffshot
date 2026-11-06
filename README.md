@@ -624,6 +624,15 @@ To export a square PNG from the SVG, choose a size from 1 through 4096 pixels:
 cargo run --release -p jiffshot -- --write-logo 512 jiffshot-512.png
 ```
 
+The notification-area artwork uses an enlarged version of the same logo. On
+Windows, regenerate the Windows/macOS tray icon and the 32-pixel Linux tray
+image with:
+
+```powershell
+cargo run --release -p jiffshot -- --write-tray-icon assets\jiffshot-tray.ico
+cargo run --release -p jiffshot -- --write-tray-logo 32 assets\jiffshot-tray.png
+```
+
 ### Building the MSI Installer
 
 `package/` builds a per-machine MSI with [WixSharp](https://github.com/oleg-shilo/wixsharp) on its WiX 4+ stream. It installs `jiffshot.exe` and the host DLLs into `C:\Program Files\Devolutions\Jiffshot`, adds a Start menu shortcut and associates `.jsd` documents; installing a newer MSI upgrades the old one. It needs the .NET SDK (the packager is a small .NET Framework program) and WiX CLI 5.0.2 (`winget install --id WiXToolset.WiXCLI --version 5.0.2.0 --exact`) with `wix.exe` on `PATH`:

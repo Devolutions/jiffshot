@@ -132,24 +132,41 @@ pub fn capture() -> CaptureBinding {
         .expect("the Capture window is mounted")
 }
 
-/// The program icon as a file, for window and tray icons (written once next
-/// to the settings; the executable embeds the same image).
+fn icon_directory() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Jiffshot")
+}
+
+fn write_icon_file(name: &str, bytes: &[u8]) -> std::io::Result<String> {
+    let dir = icon_directory();
+    let path = dir.join(name);
+    if std::fs::read(&path).ok().as_deref() != Some(bytes) {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path, bytes)?;
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// The program icon as a file, for window icons (the executable embeds it too).
 pub fn icon_file() -> String {
     static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     PATH.get_or_init(|| {
-        let dir = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join("Jiffshot");
-        let path = dir.join("jiffshot.ico");
-        let bytes = include_bytes!("../../../../assets/jiffshot.ico");
-        if std::fs::read(&path).ok().as_deref() != Some(&bytes[..]) {
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(&path, bytes);
-        }
-        path.to_string_lossy().into_owned()
+        write_icon_file("jiffshot.ico", include_bytes!("../../../../assets/jiffshot.ico"))
+            .unwrap_or_else(|error| {
+                let path = icon_directory().join("jiffshot.ico");
+                eprintln!("could not write {}: {error}", path.display());
+                path.to_string_lossy().into_owned()
+            })
     })
     .clone()
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn tray_icon_file() -> Result<String> {
+    write_icon_file("jiffshot-tray.ico", include_bytes!("../../../../assets/jiffshot-tray.ico"))
+        .map_err(|error| rustolonia::Error::Load(format!("could not write the tray image: {error}")))
 }
 
 /// The display name for a recent file URI or plain path.

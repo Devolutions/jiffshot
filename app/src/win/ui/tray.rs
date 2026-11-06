@@ -218,7 +218,7 @@ pub fn mount(scope: &AppScope, model: impl TrayViewModel) -> Result<TrayBinding>
         clicked(handler_binding.get(), event);
         Ok(())
     }).inspect_err(|error| eprintln!("could not create the tray icon: {error}"))?;
-    tray.set_icon(&crate::ui::icon_file()).inspect_err(|error| eprintln!("could not set the tray image: {error}"))?;
+    tray.set_icon(&super::tray_icon_file()?).inspect_err(|error| eprintln!("could not set the tray image: {error}"))?;
     tray.set_tool_tip("Jiffshot").inspect_err(|error| eprintln!("could not set the tray tooltip: {error}"))?;
     let sink = binding.sink;
     // Every value the menu shows: a change rebuilds it.
