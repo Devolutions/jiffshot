@@ -6,7 +6,7 @@
 //! Actions: `tab:N`, `switch:ID`, `menu:NAME`, `pick:ID`, `panel:ID`,
 //! `apply:ID:[values]`, `select-image-region:[values]`,
 //! `select-video-region:[values]`, `capture`, `stop-interval`,
-//! `cancel-schedule`, `editor`, `closed`.
+//! `cancel-schedule`, `show-recording-controls`, `editor`, `closed`.
 
 use crate::app;
 use crate::vm::{CaptureViewModel, CaptureViewModelSink};
@@ -155,6 +155,11 @@ pub fn refresh(state: &TrayState) {
     publish_view();
 }
 
+/// Updates the main Capture button when a recording starts or finishes.
+pub fn recording_changed() {
+    publish_view();
+}
+
 /// Shows a consistent pair of settings and tray metadata from the capture side.
 #[cfg(target_os = "macos")]
 pub fn refresh(state: &TrayState, settings: jiffshot_workflow::settings::Settings) {
@@ -172,7 +177,7 @@ pub fn refresh(state: &TrayState, settings: jiffshot_workflow::settings::Setting
 
 fn publish_view() {
     let (sink, json) = with(|s| {
-        let view = panel::unified_view(&s.settings, &s.capture_key, s.timelapse);
+        let view = panel::unified_view(&s.settings, &s.capture_key, s.timelapse, capture::is_recording());
         (s.sink.clone(), serde_json::to_string(&view).unwrap_or_default())
     });
     if let Some(sink) = sink {
@@ -646,6 +651,19 @@ fn capture_menu(settings: &Settings, id: &str) -> Vec<panel::MenuItem> {
 }
 
 fn act(action: &str) {
+    if action == "capture" && capture::is_recording() {
+        capture::stop_recording();
+        return;
+    }
+    if action == "show-recording-controls" {
+        if !capture::is_recording() {
+            problem("No recording is running. Start a new recording to show its controls.");
+        } else if let Err(error) = crate::ui::restore_recording_controls() {
+            problem(&error);
+        }
+        publish_view();
+        return;
+    }
     #[cfg(target_os = "macos")]
     if with(|s| {
         if s.pending.is_some() {
@@ -800,7 +818,7 @@ mod tests {
         ];
         for (tab, (verb, fields, toggles, detail)) in expected.into_iter().enumerate() {
             settings.capture_window.tab = tab;
-            let view = panel::unified_view(&settings, "", false);
+            let view = panel::unified_view(&settings, "", false, false);
             assert_eq!(view.tab, tab);
             assert_eq!(view.fields.iter().map(|row| row.id).collect::<Vec<_>>(), fields);
             assert_eq!(view.fields[0].text, "Window");
@@ -811,7 +829,10 @@ mod tests {
         }
         settings.capture_window.tab = 2;
         settings.capture_window.selection = "scrolling".into();
-        assert_eq!(panel::unified_view(&settings, "", false).capture.detail, "Records Window");
+        assert_eq!(
+            panel::unified_view(&settings, "", false, false).capture.detail,
+            "Records Window"
+        );
     }
 
     #[cfg(windows)]
@@ -831,7 +852,7 @@ mod tests {
                 act(&format!("tab:{target}"));
 
                 with(|s| {
-                    let view = panel::unified_view(&s.settings, "", false);
+                    let view = panel::unified_view(&s.settings, "", false, false);
                     assert_eq!(s.settings.capture_window.tab, target, "{previous} -> {target}");
                     assert_eq!(view.tab, target, "{previous} -> {target}");
                     assert_eq!(view.capture.verb, *verb, "{previous} -> {target}");

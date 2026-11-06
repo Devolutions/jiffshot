@@ -1760,6 +1760,7 @@ fn record_shutdown_fixture(dir: &Path, rect: Rect) -> Result<(), String> {
             }
         }),
         state: Box::new(move |_| { let _ = ready_tx.try_send(()); }),
+        recording: Box::new(|_| {}),
         startup_status: Box::new(|_| {}),
         show_capture_window: Box::new(|| {}),
         show_text: Box::new(|_| {}),
@@ -1882,6 +1883,7 @@ fn record_workflow_fixture(dir: &Path, rect: Rect) -> Result<(), String> {
             }
         }),
         state: Box::new(move |_| { let _ = ready_tx.try_send(()); }),
+        recording: Box::new(|_| {}),
         startup_status: Box::new(|_| {}),
         show_capture_window: Box::new(|| {}),
         show_text: Box::new(|_| {}),

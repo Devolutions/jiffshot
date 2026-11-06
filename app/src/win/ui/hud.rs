@@ -63,8 +63,7 @@ pub(super) fn toolbar_menu_for_selftest(id: u64, open: bool) -> std::result::Res
 #[cfg(target_os = "macos")]
 pub(super) fn close_toolbar_for_selftest(id: u64) -> std::result::Result<(), String> {
     let toolbar = HUD.with(|hud| hud.borrow_mut().toolbars.remove(&id)).ok_or("the test toolbar is unavailable")?;
-    toolbar.close();
-    Ok(())
+    toolbar.close().map_err(|error| error.to_string())
 }
 
 /// Sends a command to the main view model (`hud:…`), on the UI thread.
@@ -72,7 +71,7 @@ fn run(command: String) {
     crate::ui::main().model.run(|m| m.run(command));
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos"))]
 fn report_failure(message: String) {
     eprintln!("hud: {message}");
     crate::app::post(move |app| app.toast("Capture controls failed", &message, true));
@@ -117,6 +116,38 @@ struct Hud {
     toolbars: HashMap<u64, RecordingToolbar>,
 }
 
+pub(super) fn has_recording_toolbar(state: &Value) -> bool {
+    state
+        .get("panels")
+        .and_then(Value::as_array)
+        .is_some_and(|panels| {
+            panels
+                .iter()
+                .any(|panel| panel.get("toolbar").is_some_and(Value::is_object))
+        })
+}
+
+pub(super) fn restore_recording_controls() -> std::result::Result<(), String> {
+    let scope = super::scope().ok_or("The application windows are unavailable.")?;
+    let json = super::main().sink.hud.get_untracked();
+    let state: Value = serde_json::from_str(&json)
+        .map_err(|error| format!("Could not read the recording controls: {error}"))?;
+    if !has_recording_toolbar(&state) {
+        return Err("No recording toolbar is available. The recording may have ended.".into());
+    }
+    let toolbars = HUD.with(|hud| std::mem::take(&mut hud.borrow_mut().toolbars));
+    for toolbar in toolbars.into_values() {
+        toolbar
+            .close()
+            .map_err(|error| format!("Could not replace the recording toolbar: {error}"))?;
+    }
+    apply(&scope, &json);
+    if HUD.with(|hud| hud.borrow().toolbars.is_empty()) {
+        return Err("Could not restore the recording toolbar.".into());
+    }
+    Ok(())
+}
+
 /// A rectangle `[x, y, w, h]` (desktop pixels) of the JSON.
 fn area_of(e: &Value) -> Rect {
     let a = e.get("area").and_then(Value::as_array);
@@ -155,7 +186,12 @@ fn apply(scope: &AppScope, json: &str) {
                         #[cfg(target_os = "macos")]
                         {
                             report_failure(format!("Could not show the recording toolbar: {error}"));
-                            run(format!("hud:{id}:act:cancel"));
+                            run(format!("hud:{id}:act:stop"));
+                        }
+                        #[cfg(windows)]
+                        {
+                            report_failure(format!("Could not show the recording toolbar: {error}"));
+                            jiffshot_workflow::panel_action(id, "stop");
                         }
                     }
                 }
@@ -190,7 +226,11 @@ fn apply(scope: &AppScope, json: &str) {
         let gone: Vec<u64> = hud.toolbars.keys().filter(|id| !live.contains(id)).copied().collect();
         for id in gone {
             if let Some(toolbar) = hud.toolbars.remove(&id) {
-                closing.push(Box::new(move || toolbar.close()));
+                closing.push(Box::new(move || {
+                    if let Err(error) = toolbar.close() {
+                        eprintln!("hud: could not close the recording toolbar: {error}");
+                    }
+                }));
             }
         }
         let gone: Vec<u64> = hud.panels.keys().filter(|id| !live.contains(id)).copied().collect();

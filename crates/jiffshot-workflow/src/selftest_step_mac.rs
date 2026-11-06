@@ -362,6 +362,7 @@ pub fn run(dir: &Path) -> io::Result<()> {
         quit: Box::new(|| {}),
         notify: Box::new(|_, _, _| {}),
         state: Box::new(|_| {}),
+        recording: Box::new(|_| {}),
         startup_status: Box::new(|_| {}),
         show_capture_window: Box::new(|| {}),
         show_text: Box::new(|_| {}),

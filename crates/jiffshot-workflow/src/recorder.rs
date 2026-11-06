@@ -28,7 +28,7 @@ use jiffshot_doc::{Document, Pixmap, Rgba};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 /// A recording key: modifiers, virtual key and how it is written.
@@ -127,11 +127,13 @@ pub fn keys_text(sep: &str) -> String {
 /// runs.
 #[derive(Default)]
 pub struct Control {
-    pub stop: AtomicBool,
+    pub stop: Arc<AtomicBool>,
     pub paused: AtomicBool,
     pub frames: AtomicU64,
     /// Recorded time so far (pauses excluded), in milliseconds.
     pub millis: AtomicU64,
+    /// Windows is on another desktop; protected intervals are black video.
+    pub capture_unavailable: AtomicBool,
     pub error: Mutex<Option<String>>,
     /// A note about the sound or the webcam ("no microphone: …").
     pub audio: Mutex<Option<String>>,
@@ -242,32 +244,81 @@ pub(crate) fn clear_annotations(control: &Control) -> Result<(), String> {
 }
 
 static RECORDING_ACTIVE: AtomicBool = AtomicBool::new(false);
+static ACTIVE_STOP_CONTROL: Mutex<Option<Weak<AtomicBool>>> = Mutex::new(None);
+
+fn register_stop_control(active_stop: &Mutex<Option<Weak<AtomicBool>>>, stop: &Arc<AtomicBool>) {
+    *active_stop.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(stop));
+}
+
+fn request_stop_from(active_stop: &Mutex<Option<Weak<AtomicBool>>>) -> bool {
+    let active_stop = active_stop.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(stop) = active_stop.as_ref().and_then(Weak::upgrade) else {
+        return false;
+    };
+    stop.store(true, Ordering::Release);
+    true
+}
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn is_recording() -> bool {
     RECORDING_ACTIVE.load(Ordering::Acquire)
 }
 
+pub(crate) fn request_stop() -> bool {
+    request_stop_from(&ACTIVE_STOP_CONTROL)
+}
+
 pub(crate) struct RecordingLease {
     active: &'static AtomicBool,
+    stop_control: Option<Weak<AtomicBool>>,
 }
 
 impl RecordingLease {
-    pub(crate) fn acquire() -> Result<Self, String> {
-        Self::acquire_from(&RECORDING_ACTIVE)
+    pub(crate) fn acquire(stop: &Arc<AtomicBool>) -> Result<Self, String> {
+        let mut lease = Self::acquire_from(&RECORDING_ACTIVE)?;
+        let stop_control = Arc::downgrade(stop);
+        register_stop_control(&ACTIVE_STOP_CONTROL, stop);
+        lease.stop_control = Some(stop_control);
+        if let Some(hooks) = crate::hooks() {
+            (hooks.recording)(true);
+        }
+        Ok(lease)
     }
 
     fn acquire_from(active: &'static AtomicBool) -> Result<Self, String> {
         active
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| Self { active })
+            .map(|_| Self {
+                active,
+                stop_control: None,
+            })
             .map_err(|_| "another recording is already running (tray or CLI)".into())
     }
 }
 
 impl Drop for RecordingLease {
     fn drop(&mut self) {
-        self.active.store(false, Ordering::Release);
+        let was_active_recording = if let Some(stop_control) = self.stop_control.take() {
+            let mut active_stop = ACTIVE_STOP_CONTROL
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if active_stop
+                .as_ref()
+                .is_some_and(|active| active.ptr_eq(&stop_control))
+            {
+                *active_stop = None;
+            }
+            self.active.store(false, Ordering::Release);
+            true
+        } else {
+            self.active.store(false, Ordering::Release);
+            false
+        };
+        if was_active_recording {
+            if let Some(hooks) = crate::hooks() {
+                (hooks.recording)(false);
+            }
+        }
     }
 }
 
@@ -1070,6 +1121,46 @@ struct PartialRecording<'a> {
     started: bool,
 }
 
+#[cfg(windows)]
+fn update_capture_frame(
+    frame: &mut Frame,
+    pixels: std::io::Result<&[u8]>,
+    control: &Control,
+) -> Result<bool, String> {
+    match pixels {
+        Ok(pixels) => {
+            frame.pixels.copy_from_slice(pixels);
+            if control.capture_unavailable.swap(false, Ordering::AcqRel) {
+                log("recording resumed after the Windows desktop became available");
+            }
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            frame.pixels.fill(0);
+            if !control.capture_unavailable.swap(true, Ordering::AcqRel) {
+                log("recording protected desktop interruption: black video until Windows returns; audio continues");
+            }
+            Ok(false)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(windows)]
+fn write_recording_frames(
+    writer: &mut Writer,
+    frame: &Frame,
+    written: &mut i64,
+    due: i64,
+    frame_time: i64,
+) -> Result<(), String> {
+    while *written <= due {
+        writer.write_frame(&frame.pixels, *written * frame_time, frame_time)?;
+        *written += 1;
+    }
+    Ok(())
+}
+
 impl Drop for PartialRecording<'_> {
     fn drop(&mut self) {
         if self.started {
@@ -1140,7 +1231,7 @@ pub(crate) fn record_to_in_layout(
     control: &Control,
     layout: &CaptureLayout,
 ) -> Result<VideoSpec, String> {
-    let lease = RecordingLease::acquire()?;
+    let lease = RecordingLease::acquire(&control.stop)?;
     record_with_lease(path, rect, options, control, layout, lease)
 }
 
@@ -1159,7 +1250,7 @@ pub(crate) fn record_with_selftest_pointer(
     layout: &CaptureLayout,
     pointer: SelftestPointer,
 ) -> Result<VideoSpec, String> {
-    let lease = RecordingLease::acquire()?;
+    let lease = RecordingLease::acquire(&control.stop)?;
     record_inner(path, rect, options, control, layout, lease, Some(pointer))
 }
 
@@ -1453,8 +1544,16 @@ fn record_inner(
             ));
             continue;
         }
-        let pixels = grabber.grab().map_err(|e| e.to_string())?;
-        frame.pixels.copy_from_slice(pixels);
+        #[cfg(windows)]
+        if !update_capture_frame(&mut frame, grabber.grab(), control)? {
+            write_recording_frames(&mut writer, &frame, &mut written, due, frame_time)?;
+            continue;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let pixels = grabber.grab().map_err(|e| e.to_string())?;
+            frame.pixels.copy_from_slice(pixels);
+        }
         // Screen Draw's window is left out of captures; its marks go in here.
         screendraw::blend_into(&mut frame)?;
         control
@@ -1529,10 +1628,7 @@ fn record_inner(
             }
         }
         #[cfg(windows)]
-        while written <= due {
-            writer.write_frame(&frame.pixels, written * frame_time, frame_time)?;
-            written += 1;
-        }
+        write_recording_frames(&mut writer, &frame, &mut written, due, frame_time)?;
         #[cfg(target_os = "macos")]
         {
             write_video_through_due(
@@ -1646,6 +1742,12 @@ fn toolbar_state(control: &Control, settings: &Settings) -> serde_json::Value {
             "No sound detected from the microphone. Check the selected input device.".to_owned(),
         );
     }
+    if on(&control.capture_unavailable) {
+        notes.push(
+            "Windows is showing another desktop (UAC or lock screen). Video resumes automatically; audio continues."
+                .to_owned(),
+        );
+    }
     json!({
         "millis": control.millis.load(Ordering::Relaxed),
         "frames": control.frames.load(Ordering::Relaxed),
@@ -1737,6 +1839,7 @@ pub(crate) fn record_in_layout(
         let worker = std::thread::spawn(move || {
             let result = record_to_in_layout(&p, rect, &o, &c, &capture_layout);
             if let Err(error) = &result {
+                log(&format!("recording failed: {error}"));
                 *c.error.lock().unwrap() = Some(error.clone());
                 c.stop.store(true, Ordering::Release);
             }
@@ -1848,6 +1951,69 @@ mod tests {
         assert!(RecordingLease::acquire_from(&TEST_ACTIVE).is_err());
         drop(lease);
         assert!(RecordingLease::acquire_from(&TEST_ACTIVE).is_ok());
+    }
+
+    #[test]
+    fn a_stop_request_reaches_the_active_recording_control() {
+        let active_stop = Mutex::new(None);
+        let stop = Arc::new(AtomicBool::new(false));
+        register_stop_control(&active_stop, &stop);
+
+        assert!(request_stop_from(&active_stop));
+        assert!(stop.load(Ordering::Acquire));
+
+        drop(stop);
+        assert!(!request_stop_from(&active_stop));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn secure_desktop_blanks_video_and_resumes_without_stopping() {
+        let control = Control::default();
+        let settings = Settings::default();
+        let mut frame = Frame::new(2, 2);
+        frame.pixels.fill(77);
+        assert!(!update_capture_frame(
+            &mut frame,
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "secure desktop"
+            )),
+            &control,
+        )
+        .expect("temporary desktop interruption"));
+        assert_eq!(
+            frame.pixels,
+            vec![0; 16],
+            "protected intervals must be black"
+        );
+        assert!(!control.stop.load(Ordering::Acquire));
+        assert!(toolbar_state(&control, &settings)["note"]
+            .as_str()
+            .expect("capture warning")
+            .contains("Windows"));
+
+        assert!(update_capture_frame(&mut frame, Ok(&[42; 16]), &control).expect("resumed frame"));
+        assert_eq!(frame.pixels, vec![42; 16]);
+        assert!(!control.stop.load(Ordering::Acquire));
+        assert_eq!(
+            toolbar_state(&control, &settings)["note"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn permanent_capture_errors_are_not_hidden_as_desktop_interruptions() {
+        let control = Control::default();
+        let mut frame = Frame::new(2, 2);
+        let error = update_capture_frame(
+            &mut frame,
+            Err(std::io::Error::other("capture device failed")),
+            &control,
+        )
+        .expect_err("permanent capture failure");
+        assert_eq!(error, "capture device failed");
     }
 
     #[test]

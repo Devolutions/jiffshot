@@ -13,6 +13,10 @@ use windows_sys::Win32::Graphics::Gdi::{
     MonitorFromPoint, ReleaseDC, BITMAP, CAPTUREBLT, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
     MONITOR_DEFAULTTONEAREST, SRCCOPY,
 };
+use windows_sys::Win32::System::StationsAndDesktops::{
+    GetThreadDesktop, GetUserObjectInformationW, UOI_IO,
+};
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForMonitor, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     MDT_EFFECTIVE_DPI,
@@ -161,6 +165,7 @@ pub fn grab(r: Rect) -> io::Result<Frame> {
 pub struct Grabber {
     rect: Rect,
     dib: Dib,
+    desktop_unavailable: bool,
 }
 
 impl Grabber {
@@ -168,32 +173,106 @@ impl Grabber {
         Ok(Grabber {
             rect,
             dib: Dib::new(rect.width, rect.height)?,
+            desktop_unavailable: false,
         })
     }
 
     /// Grabs the rectangle; returns its pixels (top-down BGRX).
+    ///
+    /// Returns [`io::ErrorKind::WouldBlock`] while another desktop, such as
+    /// the UAC secure desktop, receives input. Retry when that desktop closes.
     pub fn grab(&mut self) -> io::Result<&[u8]> {
-        let r = self.rect;
-        // SAFETY: as in `grab`.
-        unsafe {
-            let screen = GetDC(std::ptr::null_mut());
-            let copied = BitBlt(
-                self.dib.dc(),
-                0,
-                0,
-                r.width,
-                r.height,
-                screen,
-                r.x,
-                r.y,
-                SRCCOPY | CAPTUREBLT,
-            );
-            ReleaseDC(std::ptr::null_mut(), screen);
-            if copied == 0 {
-                return Err(io::Error::last_os_error());
+        self.grab_with(input_desktop_available, copy_recording_frame)
+    }
+
+    fn grab_with(
+        &mut self,
+        mut available: impl FnMut() -> io::Result<bool>,
+        mut copy: impl FnMut(&mut Dib, Rect) -> io::Result<()>,
+    ) -> io::Result<&[u8]> {
+        if !available()? {
+            return Err(self.unavailable());
+        }
+        if self.desktop_unavailable {
+            self.dib = Dib::new(self.rect.width, self.rect.height)?;
+            self.desktop_unavailable = false;
+        }
+        let mut retried = false;
+        loop {
+            let error = match copy(&mut self.dib, self.rect) {
+                Ok(()) => break,
+                Err(error) => error,
+            };
+            if !available()? {
+                return Err(self.unavailable());
             }
+            if retried {
+                return Err(error);
+            }
+            // A desktop switch can invalidate the display-backed memory DC.
+            self.dib = Dib::new(self.rect.width, self.rect.height)?;
+            retried = true;
         }
         Ok(self.dib.pixels())
+    }
+
+    fn unavailable(&mut self) -> io::Error {
+        self.desktop_unavailable = true;
+        io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "screen capture is unavailable while Windows is on another desktop",
+        )
+    }
+}
+
+fn input_desktop_available() -> io::Result<bool> {
+    // SAFETY: GetThreadDesktop returns a borrowed handle; UOI_IO writes one
+    // BOOL and never opens or switches to the protected desktop.
+    unsafe {
+        let desktop = GetThreadDesktop(GetCurrentThreadId());
+        if desktop.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let mut active: BOOL = 0;
+        if GetUserObjectInformationW(
+            desktop,
+            UOI_IO,
+            (&mut active as *mut BOOL).cast(),
+            std::mem::size_of::<BOOL>() as u32,
+            std::ptr::null_mut(),
+        ) == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(active != 0)
+    }
+}
+
+fn copy_recording_frame(dib: &mut Dib, rect: Rect) -> io::Result<()> {
+    // SAFETY: the screen DC is checked and released; the bitmap owns its DC.
+    unsafe {
+        let screen = GetDC(std::ptr::null_mut());
+        if screen.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let copied = BitBlt(
+            dib.dc(),
+            0,
+            0,
+            rect.width,
+            rect.height,
+            screen,
+            rect.x,
+            rect.y,
+            SRCCOPY | CAPTUREBLT,
+        );
+        let result = if copied == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        };
+        ReleaseDC(std::ptr::null_mut(), screen);
+        result
     }
 }
 
@@ -453,6 +532,159 @@ mod cursor_scale {
             .max()
             .unwrap();
         assert!(opaque_right > 32, "arrow drawn at nominal size");
+    }
+}
+
+#[cfg(test)]
+mod recording_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn recording_grabber_waits_for_the_input_desktop_and_resumes() {
+        let mut grabber = Grabber::new(Rect::new(0, 0, 2, 2)).expect("recording bitmap");
+        let copies = Cell::new(0);
+        let mut copy = |dib: &mut Dib, _: Rect| {
+            copies.set(copies.get() + 1);
+            dib.pixels_mut().fill(copies.get());
+            Ok(())
+        };
+        assert_eq!(
+            grabber
+                .grab_with(|| Ok(true), &mut copy)
+                .expect("first frame"),
+            &[1; 16]
+        );
+        let error = grabber
+            .grab_with(|| Ok(false), &mut copy)
+            .expect_err("other desktop");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(copies.get(), 1, "must not read the protected desktop");
+        assert_eq!(
+            grabber
+                .grab_with(|| Ok(true), &mut copy)
+                .expect("resumed frame"),
+            &[2; 16]
+        );
+    }
+
+    #[test]
+    fn recording_grabber_recovers_a_desktop_switch_during_bitblt() {
+        let mut grabber = Grabber::new(Rect::new(0, 0, 2, 2)).expect("recording bitmap");
+        let mut checks = [true, false].into_iter();
+        let error = grabber
+            .grab_with(
+                || Ok(checks.next().expect("desktop check")),
+                |_, _| Err(io::Error::from_raw_os_error(5)),
+            )
+            .expect_err("desktop changed after the initial check");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(grabber.grab_with(|| Ok(true), |_, _| Ok(())).is_ok());
+    }
+
+    #[test]
+    fn recording_grabber_rebuilds_stale_gdi_resources_once() {
+        let mut grabber = Grabber::new(Rect::new(0, 0, 2, 2)).expect("recording bitmap");
+        let mut attempts = 0;
+        let pixels = grabber
+            .grab_with(
+                || Ok(true),
+                |dib, _| {
+                    attempts += 1;
+                    if attempts == 1 {
+                        Err(io::Error::from_raw_os_error(6))
+                    } else {
+                        dib.pixels_mut().fill(42);
+                        Ok(())
+                    }
+                },
+            )
+            .expect("rebuilt capture surface");
+        assert_eq!(pixels, &[42; 16]);
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn recording_grabber_reports_permanent_capture_and_probe_errors() {
+        let mut grabber = Grabber::new(Rect::new(0, 0, 2, 2)).expect("recording bitmap");
+        let mut attempts = 0;
+        let error = grabber
+            .grab_with(
+                || Ok(true),
+                |_, _| {
+                    attempts += 1;
+                    Err(io::Error::from_raw_os_error(6))
+                },
+            )
+            .expect_err("permanent capture failure");
+        assert_eq!(error.raw_os_error(), Some(6));
+        assert_eq!(attempts, 2, "a real failure must not retry forever");
+        let error = grabber
+            .grab_with(
+                || Err(io::Error::other("desktop probe failed")),
+                |_, _| panic!("must not capture without a desktop check"),
+            )
+            .expect_err("desktop probe failure");
+        assert_eq!(error.to_string(), "desktop probe failed");
+    }
+
+    #[test]
+    fn recording_grabber_does_not_capture_a_non_input_desktop() {
+        std::thread::spawn(|| -> io::Result<()> {
+            use windows_sys::Win32::System::StationsAndDesktops::{
+                CloseDesktop, CreateDesktopW, SetThreadDesktop, DESKTOP_CREATEWINDOW,
+                DESKTOP_READOBJECTS, DESKTOP_WRITEOBJECTS,
+            };
+            let name = crate::wide(&format!("Jiffshot.RecordingTest.{}", std::process::id()));
+            // SAFETY: this worker owns the new desktop handle. Only this
+            // worker's desktop changes; the user's input desktop never switches.
+            unsafe {
+                let original = GetThreadDesktop(GetCurrentThreadId());
+                if original.is_null() {
+                    return Err(io::Error::last_os_error());
+                }
+                let desktop = CreateDesktopW(
+                    name.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    DESKTOP_CREATEWINDOW | DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS,
+                    std::ptr::null(),
+                );
+                if desktop.is_null() {
+                    return Err(io::Error::last_os_error());
+                }
+                if SetThreadDesktop(desktop) == 0 {
+                    let error = io::Error::last_os_error();
+                    CloseDesktop(desktop);
+                    return Err(error);
+                }
+                let result = (|| {
+                    let mut grabber = Grabber::new(Rect::new(0, 0, 2, 2))?;
+                    match grabber.grab() {
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(()),
+                        Err(error) => Err(error),
+                        Ok(_) => Err(io::Error::other("captured a non-input desktop")),
+                    }
+                })();
+                let restored = if SetThreadDesktop(original) == 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                };
+                let closed = if CloseDesktop(desktop) == 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                };
+                restored?;
+                closed?;
+                result
+            }
+        })
+        .join()
+        .expect("desktop probe worker panicked")
+        .expect("non-input desktops must be recoverable interruptions");
     }
 }
 

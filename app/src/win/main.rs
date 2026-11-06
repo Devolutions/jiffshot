@@ -781,6 +781,7 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         let window = ui::mount_capture_window(scope, capture_window::CaptureModel)?;
         capture_window::set_window(window, scope);
         if run_capture {
+            let recording_scope = scope.clone();
             let hooks = jiffshot_workflow::Hooks {
                 open_in_editor: Box::new(|path| {
                     let path = path.to_path_buf();
@@ -830,6 +831,11 @@ pub(crate) fn run() -> rustolonia::Result<()> {
                         capture_window::refresh(&state);
                         tray::publish(state);
                     })
+                }),
+                recording: Box::new(move |_| {
+                    if let Err(error) = recording_scope.post(capture_window::recording_changed) {
+                        jiffshot_workflow::log(&format!("could not update recording controls: {error}"));
+                    }
                 }),
                 #[cfg(target_os = "macos")]
                 state: Box::new(|_| app::request_capture_state_refresh()),

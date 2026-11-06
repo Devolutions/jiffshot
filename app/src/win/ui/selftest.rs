@@ -656,6 +656,10 @@ fn script() -> Script {
         capture_ux_steps(&mut s);
         return s;
     }
+    if env("JIFFSHOT_UITEST_HUD_ONLY").is_some() {
+        hud_steps(&mut s);
+        return s;
+    }
     #[cfg(target_os = "macos")]
     native_lifetime_steps(&mut s);
     #[cfg(target_os = "macos")]
@@ -3211,7 +3215,13 @@ fn capture_settings_handoff_script() -> Script {
         assert!(super::extras::widget_visible_for_selftest().expect("could not inspect the Capture Widget"));
         assert_eq!(settings.capture_window.tab, 2);
         assert_eq!(super::capture_view::view_tab_for_selftest(), Some(2));
-        let view = serde_json::to_string(&jiffshot_workflow::panel::unified_view(&settings, &state.capture_key, state.time_lapse)).unwrap();
+        let view = serde_json::to_string(&jiffshot_workflow::panel::unified_view(
+            &settings,
+            &state.capture_key,
+            state.time_lapse,
+            false,
+        ))
+        .unwrap();
         assert_eq!(super::capture().sink.view.get_untracked(), view, "the Capture window did not show the latest settings");
         late_view.borrow_mut().take().expect("the delayed Capture callback is missing")()
             .expect("could not apply the delayed Capture callback");
@@ -4128,7 +4138,7 @@ fn show_capture_tab_fixture(t: &mut Test, tab: usize, timing: &str, running: boo
     settings.delay_seconds = 0;
     settings.schedule_area = Some((10, 20, 640, 360));
     settings.schedule = schedule.map(str::to_owned);
-    let view = jiffshot_workflow::panel::unified_view(&settings, "PrtScn", running);
+    let view = jiffshot_workflow::panel::unified_view(&settings, "PrtScn", running, false);
     match serde_json::to_string(&view) {
         Ok(json) => set(super::capture().sink.view, json),
         Err(error) => t.line(format!("capture fixture: {error}")),
@@ -4383,16 +4393,58 @@ fn hud_steps(s: &mut Script) {
         400
     })
     .step(|t| {
-        for hwnd in t.new_windows() {
+        let windows = t.new_windows();
+        assert_eq!(windows.len(), 1, "the recording toolbar disappeared after its audio warning resized it");
+        for hwnd in windows {
             t.shot_of(hwnd, "ui-19c-recording-toolbar-paused.png");
         }
         0
+    })
+    .step(|t| {
+        let windows = t.new_windows();
+        assert_eq!(windows.len(), 1, "the recording toolbar must be present before hiding it");
+        super::hud::native::hide(windows[0]);
+        200
+    })
+    .step(|t| {
+        assert!(t.new_windows().is_empty(), "the recording toolbar was not hidden");
+        super::restore_recording_controls().expect("restore recording controls");
+        400
+    })
+    .step(|t| {
+        let windows = t.new_windows();
+        assert_eq!(windows.len(), 1, "the hidden recording toolbar was not restored");
+        t.shot_of(windows[0], "ui-19d-recording-toolbar-restored.png");
+        0
+    })
+    .step(|_| {
+        let mut settings = jiffshot_workflow::settings::Settings::default();
+        settings.capture_window.tab = 2;
+        let view = jiffshot_workflow::panel::unified_view(&settings, "PrtScn", false, true);
+        set(super::capture().sink.view, serde_json::to_string(&view).expect("recording Capture view"));
+        let window = crate::capture_window::window().expect("Capture window");
+        window.set_show_activated(false).expect("non-activating Capture fixture");
+        window.show().expect("show recording Capture fixture");
+        500
+    })
+    .step(|t| {
+        let window = crate::capture_window::window().expect("Capture window");
+        let scope = super::scope().expect("UI scope");
+        let hwnd = scope.platform_handle(&window).expect("Capture window handle");
+        t.shot_of(hwnd, "capture-recording-controls.png");
+        window.hide().expect("hide recording Capture fixture");
+        200
     })
     .step(move |_| {
         set(k.hud, r#"{"panels":[],"borders":[]}"#.into());
         200
     })
-    .log(|t| format!("hud after clear: {} new windows still shown", t.new_windows().len()));
+    .log(|t| format!("hud after clear: {} new windows still shown", t.new_windows().len()))
+    .step(|t| {
+        assert!(t.new_windows().is_empty(), "recording controls remained after the recording ended");
+        assert!(super::restore_recording_controls().is_err(), "restoring controls must not start a new recording");
+        0
+    });
 }
 
 /// Input for the overlay showing, through its windows (so they redraw).

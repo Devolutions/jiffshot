@@ -177,13 +177,14 @@ fn start(a: &Args) -> Reply {
     if crate::shutdown_macos::requested() {
         return Err(conflict("Jiffshot is shutting down"));
     }
-    let lease = RecordingLease::acquire().map_err(conflict)?;
-    let staging = StagedRecording::for_destination(&path).map_err(internal)?;
-    let id = NEXT_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .map_err(|_| internal("too many recording sessions"))?;
     let mut state = Control::new(&options);
     state.max_duration = max;
     let control = Arc::new(state);
+    let lease = RecordingLease::acquire(&control.stop).map_err(conflict)?;
+    let staging = StagedRecording::for_destination(&path).map_err(internal)?;
+    let id = NEXT_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .map_err(|_| internal("too many recording sessions"))?;
     let (c, staged_path, rect, layout) = (control.clone(), staging.path().to_path_buf(), target.rect, target.layout.clone());
     let worker = std::thread::Builder::new().name("jiffshot-control-record".into()).spawn(move || {
         let result = recorder::record_with_lease(&staged_path, rect, &options, &c, &layout, lease);
