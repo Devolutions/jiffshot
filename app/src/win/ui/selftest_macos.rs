@@ -715,11 +715,13 @@ pub(super) fn check_application_name() -> Result<(), String> {
         .localizedName()
         .map(|name| name.to_string());
     let menu = app.mainMenu().ok_or("the application menu bar is unavailable")?;
+    menu.update();
     if menu.numberOfItems() == 0 {
         return Err("the application menu bar is empty".into());
     }
     let item = menu.itemAtIndex(0).ok_or("the application menu item is unavailable")?;
     let submenu = item.submenu().ok_or("the application submenu is unavailable")?;
+    submenu.update();
     let item_title = item.title().to_string();
     let menu_title = submenu.title().to_string();
     if process_name != "Jiffshot"

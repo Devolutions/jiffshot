@@ -836,12 +836,20 @@ fn application_name_script() -> Script {
         crate::capture_window::show(&super::scope().expect("the editor scope is unavailable"));
         500
     }).step(|test| {
+        let scope = super::scope().expect("the editor scope is unavailable");
+        let window = crate::capture_window::window().expect("the Capture window is unavailable");
+        let handle = scope.platform_handle(&window).expect("the Capture window has no native handle");
+        let native = crate::mac_window::window(handle).expect("the Capture window is not live");
+        assert!(native.isKeyWindow(), "the Capture window did not become key");
         platform::check_application_name().expect("check the application name in the Capture window");
         test.line("application name: retained in the Capture window");
         let handle = super::main_window_handle().expect("the editor window is unavailable");
         crate::mac_window::activate(handle).expect("reactivate the editor");
         500
     }).step(|test| {
+        let handle = super::main_window_handle().expect("the editor window is unavailable");
+        let native = crate::mac_window::window(handle).expect("the editor window is not live");
+        assert!(native.isKeyWindow(), "the editor did not become key again");
         platform::check_application_name().expect("check the application name after returning to the editor");
         test.line("application name: retained after returning to the editor");
         0
