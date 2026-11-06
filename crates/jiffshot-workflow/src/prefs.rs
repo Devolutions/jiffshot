@@ -228,8 +228,9 @@ mod tests {
         let typed = if cfg!(windows) { crate::keys::display(crate::keys::SCREEN.2) } else { crate::keys::SCREEN.2.to_owned() };
         values[1] = json!(format!("{typed}  "));
         apply_hotkeys(&mut settings, &values).unwrap();
-        assert_eq!(settings.capture_hotkey.as_deref(), Some(crate::keys::SCREEN.2));
-        assert_eq!(settings.capture_key(), crate::keys::SCREEN.2);
+        let expected = if cfg!(target_os = "macos") { "Shift+Cmd+1" } else { "Ctrl+PrtScn" };
+        assert_eq!(settings.capture_hotkey.as_deref(), Some(expected));
+        assert_eq!(settings.capture_key(), expected);
         assert_eq!(settings.screen_key(), None, "the full-screen default gave up its key");
         assert_eq!(settings.repeat_key(), Some(crate::keys::REPEAT.2));
 
