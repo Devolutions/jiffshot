@@ -41,16 +41,31 @@ struct BorderView {
     area: [i32; 4],
 }
 
+/// A countdown before a delayed capture, centred on `area` (desktop
+/// pixels; a tiny area means its whole screen).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct CountdownView {
+    id: u64,
+    area: [i32; 4],
+    title: String,
+    /// Whole seconds left, rounded up.
+    seconds: u64,
+    /// The share of the countdown left, from 1 down to 0.
+    progress: f64,
+}
+
 /// Everything on screen, as the app receives it.
 #[derive(Default, Serialize)]
 struct Hud {
     panels: Vec<PanelView>,
     borders: Vec<BorderView>,
+    countdowns: Vec<CountdownView>,
 }
 
 static HUD: Mutex<Hud> = Mutex::new(Hud {
     panels: Vec::new(),
     borders: Vec::new(),
+    countdowns: Vec::new(),
 });
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -108,6 +123,76 @@ impl Drop for Border {
             let before = hud.borders.len();
             hud.borders.retain(|b| b.id != id);
             hud.borders.len() != before
+        });
+    }
+}
+
+/// A countdown on screen until dropped; [`Countdown::tick`] moves it on.
+/// Safe to use from any thread.
+pub struct Countdown {
+    id: u64,
+    start: Instant,
+    total: Duration,
+}
+
+impl Countdown {
+    pub fn show(area: Rect, title: &str, total: Duration) -> Countdown {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let countdown = Countdown {
+            id,
+            start: Instant::now(),
+            total,
+        };
+        let (seconds, progress) = countdown.left();
+        change(|hud| {
+            hud.countdowns.push(CountdownView {
+                id,
+                area: xywh(area),
+                title: title.to_owned(),
+                seconds,
+                progress,
+            });
+            true
+        });
+        countdown
+    }
+
+    /// Whole seconds left (rounded up) and the share left.
+    fn left(&self) -> (u64, f64) {
+        let left = self.total.saturating_sub(self.start.elapsed());
+        let seconds = left.as_millis().div_ceil(1000) as u64;
+        let progress = if self.total.is_zero() {
+            0.0
+        } else {
+            // Steps of 0.5 % keep the updates few but the ring smooth.
+            (left.as_secs_f64() / self.total.as_secs_f64() * 200.0).ceil() / 200.0
+        };
+        (seconds, progress)
+    }
+
+    /// Updates what shows; returns the time left.
+    pub fn tick(&self) -> Duration {
+        let (seconds, progress) = self.left();
+        let id = self.id;
+        change(|hud| match hud.countdowns.iter_mut().find(|c| c.id == id) {
+            Some(c) if c.seconds != seconds || c.progress != progress => {
+                c.seconds = seconds;
+                c.progress = progress;
+                true
+            }
+            _ => false,
+        });
+        self.total.saturating_sub(self.start.elapsed())
+    }
+}
+
+impl Drop for Countdown {
+    fn drop(&mut self) {
+        let id = self.id;
+        change(|hud| {
+            let before = hud.countdowns.len();
+            hud.countdowns.retain(|c| c.id != id);
+            hud.countdowns.len() != before
         });
     }
 }
@@ -580,6 +665,20 @@ mod tests {
             0
         );
         assert_eq!(message.message, WM_QUIT);
+    }
+
+    #[test]
+    fn a_countdown_counts_whole_seconds_and_goes_away() {
+        let countdown = Countdown::show(Rect::new(0, 0, 1, 1), "Capturing in", Duration::from_secs(3));
+        let id = countdown.id;
+        let view = |hud: &Hud| hud.countdowns.iter().find(|c| c.id == id).cloned();
+        let first = view(&HUD.lock().unwrap()).expect("the countdown shows");
+        assert_eq!((first.seconds, first.title.as_str()), (3, "Capturing in"));
+        assert!(first.progress > 0.99 && first.progress <= 1.0, "{}", first.progress);
+        let left = countdown.tick();
+        assert!(left <= Duration::from_secs(3));
+        drop(countdown);
+        assert!(view(&HUD.lock().unwrap()).is_none());
     }
 
     #[test]

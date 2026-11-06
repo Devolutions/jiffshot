@@ -12,7 +12,7 @@ use crate::settings::Settings;
 use crate::sys::{
     self, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, PostMessageW, PostQuitMessage,
     RegisterHotKey, SetTimer, TranslateMessage, UnregisterHotKey, HOT_KEY_MODIFIERS, HWND, LPARAM,
-    LRESULT, MOD_NOREPEAT, MSG, WM_APP, WM_DESTROY, WM_HOTKEY, WM_TIMER, WPARAM,
+    LRESULT, MOD_NOREPEAT, MSG, VK_ESCAPE, WM_APP, WM_DESTROY, WM_HOTKEY, WM_TIMER, WPARAM,
 };
 use crate::workflow::{self, Capture, Outcome};
 use crate::{log, modes};
@@ -47,6 +47,9 @@ const TIMER_MENU: usize = 3;
 const TIMER_INITIAL: usize = 4;
 #[cfg(target_os = "macos")]
 const TIMER_STARTUP_STATUS: usize = 9;
+/// Moves the on-screen countdown of a delayed capture on.
+const TIMER_COUNTDOWN: usize = 10;
+const COUNTDOWN_TICK_MS: u32 = 40;
 
 /// What a capture produces, passed as WM_APP_CAPTURE's wparam.
 pub const MODE_IMAGE: usize = 0;
@@ -251,6 +254,8 @@ mod startup;
 const HOTKEY_CAPTURE: i32 = 1;
 const HOTKEY_SCREEN: i32 = 2;
 const HOTKEY_REPEAT: i32 = 3;
+/// Esc, while a delayed capture counts down.
+const HOTKEY_CANCEL_COUNTDOWN: i32 = 4;
 
 const ID_CAPTURE: usize = 1;
 const ID_DELAYED: usize = 2;
@@ -365,6 +370,8 @@ struct App {
     /// A capture from the Capture window waiting for its delay: a mode, or
     /// a fixed rectangle.
     pending_mode: Option<PendingMode>,
+    /// The countdown on screen, and the timer that captures when it ends.
+    countdown: Option<(crate::hud::Countdown, usize)>,
 }
 
 thread_local! {
@@ -2836,12 +2843,7 @@ pub fn start_mode_after_delay(name: &str) {
         return;
     }
     with_app(|app| app.pending_mode = Some(PendingMode::Mode(mode)));
-    notify(
-        hwnd,
-        "Jiffshot",
-        &format!("Capturing in {delay} seconds…"),
-        false,
-    );
+    begin_countdown(hwnd, None, "Get ready to capture", delay, TIMER_MODE);
     // SAFETY: as above.
     unsafe { SetTimer(hwnd, TIMER_MODE, delay * 1000, None) };
 }
@@ -2936,6 +2938,9 @@ pub fn capture_rect_after_delay(rect: Rect) {
     }
     #[cfg(windows)]
     with_app(|app| app.pending_mode = Some(PendingMode::Fixed(rect)));
+    if delay > 0 {
+        begin_countdown(hwnd, Some(rect), "Get ready to capture", delay, TIMER_MODE);
+    }
     // SAFETY: a timer on our own window.
     unsafe { SetTimer(hwnd, TIMER_MODE, (delay * 1000).max(150), None) };
 }
@@ -3010,12 +3015,7 @@ fn run_preset(index: usize) {
     let Some(preset) = preset else { return };
     if preset.delay > 0 && with_app(|app| app.pending_preset.is_none()).unwrap_or(false) {
         with_app(|app| app.pending_preset = Some(index));
-        notify(
-            hwnd,
-            &preset.name,
-            &format!("Capturing in {} seconds…", preset.delay),
-            false,
-        );
+        begin_countdown(hwnd, None, &preset.name, preset.delay, TIMER_PRESET);
         // SAFETY: a timer on our own window.
         unsafe { SetTimer(hwnd, TIMER_PRESET, preset.delay * 1000, None) };
         return;
@@ -3078,12 +3078,7 @@ fn capture_menus() {
 
 fn start_menu_capture() {
     if let Some(hwnd) = with_app(|app| app.hwnd) {
-        notify(
-            hwnd,
-            "Menu capture",
-            "Open the menu to capture; it is captured in 3 seconds.",
-            false,
-        );
+        begin_countdown(hwnd, None, "Open the menu to capture", 3, TIMER_MENU);
         // SAFETY: a timer on our own window.
         unsafe { SetTimer(hwnd, TIMER_MENU, 3000, None) };
     }
@@ -3159,14 +3154,87 @@ fn repeat_last_region() {
 
 fn start_delayed() {
     if let Some((hwnd, seconds)) = with_app(|app| (app.hwnd, app.settings.delay_seconds.max(1))) {
-        notify(
-            hwnd,
-            "Jiffshot",
-            &format!("Capturing in {seconds} seconds…"),
-            false,
-        );
+        begin_countdown(hwnd, None, "Get ready to capture", seconds, TIMER_DELAY);
         // SAFETY: a timer on our own window.
         unsafe { SetTimer(hwnd, TIMER_DELAY, seconds * 1000, None) };
+    }
+}
+
+/// Shows a countdown of `seconds`, centred on `area` (else on the screen
+/// under the pointer), until `timer` (which captures) fires; Esc cancels.
+fn begin_countdown(hwnd: HWND, area: Option<Rect>, title: &str, seconds: u32, timer: usize) {
+    if let Some((previous, _)) = with_app(|app| app.countdown.take()).flatten() {
+        drop(previous);
+    }
+    let area = area.unwrap_or_else(|| {
+        let (x, y) = sys::cursor_pos();
+        Rect::new(x, y, 1, 1)
+    });
+    let countdown = crate::hud::Countdown::show(
+        area,
+        title,
+        std::time::Duration::from_secs(seconds as u64),
+    );
+    with_app(|app| app.countdown = Some((countdown, timer)));
+    // SAFETY: a hotkey and a timer on our own window, released in
+    // `end_countdown`; an Esc some other program holds stays unregistered.
+    unsafe {
+        RegisterHotKey(hwnd, HOTKEY_CANCEL_COUNTDOWN, MOD_NOREPEAT, VK_ESCAPE as u32);
+        SetTimer(hwnd, TIMER_COUNTDOWN, COUNTDOWN_TICK_MS, None);
+    }
+}
+
+/// Takes down the countdown of capture timer `timer`, if it shows.
+fn end_countdown(hwnd: HWND, timer: usize) -> bool {
+    let Some((countdown, _)) = with_app(|app| {
+        if app.countdown.as_ref().is_some_and(|(_, t)| *t == timer) {
+            app.countdown.take()
+        } else {
+            None
+        }
+    })
+    .flatten() else {
+        return false;
+    };
+    // SAFETY: the timer and hotkey `begin_countdown` set on our own window.
+    unsafe {
+        KillTimer(hwnd, TIMER_COUNTDOWN);
+        UnregisterHotKey(hwnd, HOTKEY_CANCEL_COUNTDOWN);
+    }
+    drop(countdown);
+    true
+}
+
+fn tick_countdown(hwnd: HWND) {
+    if with_app(|app| app.countdown.as_ref().map(|(countdown, _)| countdown.tick()))
+        .flatten()
+        .is_none()
+    {
+        // SAFETY: our own timer.
+        unsafe { KillTimer(hwnd, TIMER_COUNTDOWN) };
+    }
+}
+
+/// Esc during a countdown: nothing is captured.
+fn cancel_countdown(hwnd: HWND) {
+    let Some(timer) = with_app(|app| app.countdown.as_ref().map(|(_, timer)| *timer)).flatten()
+    else {
+        return;
+    };
+    end_countdown(hwnd, timer);
+    // SAFETY: our own timer.
+    unsafe { KillTimer(hwnd, timer) };
+    let from_capture_window = with_app(|app| match timer {
+        TIMER_MODE => app.pending_mode.take().is_some(),
+        TIMER_PRESET => {
+            app.pending_preset = None;
+            false
+        }
+        _ => false,
+    })
+    .unwrap_or(false);
+    if from_capture_window {
+        crate::show_capture_window();
     }
 }
 
@@ -3325,6 +3393,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 HOTKEY_CAPTURE => capture_interactive(MODE_IMAGE),
                 HOTKEY_SCREEN => capture_screen_under_cursor(),
                 HOTKEY_REPEAT => repeat_last_region(),
+                HOTKEY_CANCEL_COUNTDOWN => cancel_countdown(hwnd),
                 id if id >= HOTKEY_PRESET => run_preset((id - HOTKEY_PRESET) as usize),
                 _ => {}
             }
@@ -3380,16 +3449,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_TIMER if wparam == TIMER_DELAY => {
             KillTimer(hwnd, TIMER_DELAY);
+            end_countdown(hwnd, TIMER_DELAY);
             capture_interactive(MODE_IMAGE);
+            0
+        }
+        WM_TIMER if wparam == TIMER_COUNTDOWN => {
+            tick_countdown(hwnd);
             0
         }
         WM_TIMER if wparam == TIMER_MENU => {
             KillTimer(hwnd, TIMER_MENU);
+            end_countdown(hwnd, TIMER_MENU);
             capture_menus();
             0
         }
         WM_TIMER if wparam == TIMER_MODE => {
             KillTimer(hwnd, TIMER_MODE);
+            end_countdown(hwnd, TIMER_MODE);
             run_pending_mode();
             0
         }
@@ -3403,6 +3479,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_TIMER if wparam == TIMER_PRESET => {
             KillTimer(hwnd, TIMER_PRESET);
+            end_countdown(hwnd, TIMER_PRESET);
             if let Some(i) = with_app(|app| app.pending_preset).flatten() {
                 run_preset(i);
                 with_app(|app| app.pending_preset = None);
@@ -3506,6 +3583,7 @@ pub fn run(
             #[cfg(target_os = "macos")]
             deferred_schedule: None,
             pending_mode: None,
+            countdown: None,
         })
     });
     let settings_now = with_app(|app| app.settings.clone()).unwrap_or_default();
@@ -3651,6 +3729,7 @@ mod tests {
             schedule_armed: false,
             deferred_schedule: None,
             pending_mode: None,
+            countdown: None,
         }
     }
 
