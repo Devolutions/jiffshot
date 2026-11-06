@@ -123,7 +123,14 @@ fn set_widget(on: bool) -> Result<()> {
         return Ok(());
     }
     if with(|e| e.widget.is_none()) == Some(true) {
-        let widget = build_widget(&scope)?;
+        let widget = match build_widget(&scope) {
+            Ok(widget) => widget,
+            Err(error) => {
+                #[cfg(target_os = "macos")]
+                widget_failed(format!("could not create the window: {error:?}"));
+                return Err(error);
+            }
+        };
         with(|e| e.widget = Some(widget));
     }
     let Some((window, dark)) =
@@ -448,6 +455,8 @@ fn build_widget(scope: &AppScope) -> Result<Widget> {
         })
         .content(StackPanel::el().child(buttons).child(strip))
         .build(scope)?;
+    #[cfg(target_os = "macos")]
+    scope.set_transparent(&window, true)?;
     scope.set_topmost(&window, true)?;
     let theme_scope = scope.clone();
     window.clone().on_actual_theme_variant_changed(scope, move |_| {

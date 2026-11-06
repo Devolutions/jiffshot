@@ -327,6 +327,7 @@ pub(super) fn close_recording_shutdown_fixture() {
 
 pub(super) enum ProbeCommand {
     Raw,
+    PixelFrames,
     Refresh,
     StartSecond,
     RefreshSecond,
@@ -335,6 +336,7 @@ pub(super) enum ProbeCommand {
     Filtered,
     Still,
     Frozen,
+    FrozenFrame,
     Fresh,
     WatchClose(u32),
     WatchPopupClose(u32, Vec<usize>),
@@ -347,9 +349,14 @@ pub(super) enum ProbeReply {
     Ready,
     Refreshed,
     SecondReady,
+    PixelFrames { raw: Vec<u8>, filtered: Vec<u8> },
     DualFrames { first: Vec<Vec<u8>>, second: Vec<Vec<u8>>, raw: Vec<u8> },
     Pixel([u8; 3]),
-    PopupFrames { frames: Vec<Vec<u8>>, visible_frames: Vec<Vec<u8>>, raw: Vec<u8>, still: Vec<u8>, frozen: Vec<u8> },
+    Frame(Vec<u8>),
+    PopupFrames {
+        frames: Vec<Vec<u8>>, before_capture_frames: Vec<Vec<u8>>, visible_frames: Vec<Vec<u8>>,
+        raw: Vec<u8>, still: Vec<u8>, frozen: Vec<u8>,
+    },
     Fresh,
     Watching,
     CloseFrames { frames: u32, leaked: u32, first: Option<[u8; 3]>, registered: u32 },
@@ -367,6 +374,16 @@ fn probe_pixel(pixels: &[u8]) -> Result<[u8; 3], String> {
     let at = (32 * 210 + 105) * 4;
     let pixel = pixels.get(at..at + 3).ok_or("the exclusion probe frame is too small")?;
     Ok([pixel[0], pixel[1], pixel[2]])
+}
+
+fn popup_recording_frames(grabber: &mut screen::Grabber, duration: Duration) -> Result<Vec<Vec<u8>>, String> {
+    let deadline = Instant::now() + duration;
+    let mut frames = Vec::new();
+    while Instant::now() < deadline {
+        frames.push(grabber.grab().map_err(|error| error.to_string())?.to_vec());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(frames)
 }
 
 fn raw_frame(layout: &screen::DisplayLayout, area: Rect, width: usize, height: usize) -> Result<Vec<u8>, String> {
@@ -482,6 +499,11 @@ pub(super) fn start_exclusion_probe() -> Result<Rect, String> {
             while let Ok(command) = requests.recv() {
                 let result = match command {
                     ProbeCommand::Raw => raw_probe_frame(&layout, area).and_then(|pixels| probe_pixel(&pixels)).map(ProbeReply::Pixel),
+                    ProbeCommand::PixelFrames => {
+                        let raw = raw_probe_frame(&layout, area)?;
+                        let filtered = grabber.grab().map_err(|error| error.to_string())?.to_vec();
+                        Ok(ProbeReply::PixelFrames { raw, filtered })
+                    }
                     ProbeCommand::Refresh => grabber.refresh_exclusions().map(|()| ProbeReply::Refreshed).map_err(|error| error.to_string()),
                     ProbeCommand::StartSecond => {
                         if second.is_some() {
@@ -509,22 +531,13 @@ pub(super) fn start_exclusion_probe() -> Result<Rect, String> {
                         Ok(ProbeReply::DualFrames { first: first_frames, second: second_frames, raw })
                     }
                     ProbeCommand::Flow => {
-                        let deadline = Instant::now() + Duration::from_secs(1);
-                        let mut frames = Vec::new();
-                        while Instant::now() < deadline {
-                            frames.push(grabber.grab().map_err(|error| error.to_string())?.to_vec());
-                            std::thread::sleep(Duration::from_millis(20));
-                        }
+                        let frames = popup_recording_frames(&mut grabber, Duration::from_secs(1))?;
                         let raw = raw_probe_frame(&layout, area)?;
+                        let before_capture_frames = popup_recording_frames(&mut grabber, Duration::from_millis(400))?;
                         let still = layout.grab_mapped(mapping).map_err(|error| error.to_string())?.pixels;
                         let frozen = layout.freeze().and_then(|desktop| desktop.render(mapping)).map_err(|error| error.to_string())?.pixels;
-                        let deadline = Instant::now() + Duration::from_millis(400);
-                        let mut visible_frames = Vec::new();
-                        while Instant::now() < deadline {
-                            visible_frames.push(grabber.grab().map_err(|error| error.to_string())?.to_vec());
-                            std::thread::sleep(Duration::from_millis(20));
-                        }
-                        Ok(ProbeReply::PopupFrames { frames, visible_frames, raw, still, frozen })
+                        let visible_frames = popup_recording_frames(&mut grabber, Duration::from_millis(400))?;
+                        Ok(ProbeReply::PopupFrames { frames, before_capture_frames, visible_frames, raw, still, frozen })
                     }
                     ProbeCommand::Filtered => grabber.grab().map_err(|error| error.to_string())
                         .and_then(probe_pixel).map(ProbeReply::Pixel),
@@ -532,6 +545,8 @@ pub(super) fn start_exclusion_probe() -> Result<Rect, String> {
                         .and_then(|frame| probe_pixel(&frame.pixels)).map(ProbeReply::Pixel),
                     ProbeCommand::Frozen => layout.freeze().and_then(|frozen| frozen.render(mapping)).map_err(|error| error.to_string())
                         .and_then(|frame| probe_pixel(&frame.pixels)).map(ProbeReply::Pixel),
+                    ProbeCommand::FrozenFrame => layout.freeze().and_then(|frozen| frozen.render(mapping)).map_err(|error| error.to_string())
+                        .map(|frame| ProbeReply::Frame(frame.pixels)),
                     ProbeCommand::Fresh => {
                         let mut fresh = screen::Grabber::for_mapping(mapping, &layout).map_err(|error| error.to_string())?;
                         fresh.grab().map_err(|error| error.to_string())?;
@@ -610,15 +625,6 @@ pub(super) fn place_for_exclusion_probe(number: isize, x: i32, y: i32) -> Result
     let (x, y) = screen::to_points(x as f64, y as f64);
     window.setFrameTopLeftPoint(NSPoint::new(x, screen::main_height_points() - y));
     Ok(())
-}
-
-pub(super) fn hide_exclusion_background() -> Result<(), String> {
-    EXCLUSION_PROBE.with(|probe| {
-        let probe = probe.borrow();
-        let probe = probe.as_ref().ok_or("the exclusion probe is unavailable")?;
-        probe.background.orderOut(None);
-        Ok(())
-    })
 }
 
 pub(super) fn front_for_exclusion_probe(number: isize) -> Result<(), String> {

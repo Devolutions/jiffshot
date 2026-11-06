@@ -10,6 +10,7 @@
 //! `JIFFSHOT_UITEST_CAPTURE_MENUS` checks menu switching and DarkBlue popups.
 //! `JIFFSHOT_UITEST_WIDGET` checks the floating bar with an isolated tray model.
 //! On macOS, `JIFFSHOT_UITEST_OVERLAY` runs only the synthetic overlay test.
+//! `JIFFSHOT_UITEST_TRANSPARENCY` checks capture overlays and notifications.
 //! `JIFFSHOT_UITEST_STARTUP` checks login-item status without changing it.
 //! `JIFFSHOT_UITEST_RECENT` checks recent-file actions with a scratch library.
 //! `JIFFSHOT_UITEST_LIBRARY` checks library actions with synthetic captures.
@@ -142,7 +143,11 @@ struct Test {
     #[cfg(target_os = "macos")]
     popup_samples: Vec<usize>,
     #[cfg(target_os = "macos")]
+    editor_popup_rect: Option<Rect>,
+    #[cfg(target_os = "macos")]
     probe_deadline: Option<Instant>,
+    #[cfg(target_os = "macos")]
+    window_reveal: Option<(isize, Instant)>,
     #[cfg(target_os = "macos")]
     gate_probe: Option<super::hud::native_popup_macos::GateDropProbe>,
 }
@@ -628,6 +633,10 @@ fn script() -> Script {
     #[cfg(target_os = "macos")]
     if env("JIFFSHOT_UITEST_OVERLAY").is_some() {
         return overlay_script();
+    }
+    #[cfg(target_os = "macos")]
+    if env("JIFFSHOT_UITEST_TRANSPARENCY").is_some() {
+        return transparency_script();
     }
     #[cfg(target_os = "macos")]
     if env("JIFFSHOT_UITEST_SAVED_AREAS").is_some() {
@@ -5197,14 +5206,15 @@ fn green_pixel(pixels: &[u8], offset: usize) -> bool {
 #[cfg(target_os = "macos")]
 fn assert_popup_pixels(test: &mut Test, popup: (i64, u32)) {
     let reply = platform::exclusion_reply().expect("the popup recording probe did not finish");
-    let platform::ProbeReply::PopupFrames { frames, visible_frames, raw, still, frozen } = reply
+    let platform::ProbeReply::PopupFrames { frames, before_capture_frames, visible_frames, raw, still, frozen } = reply
         else { panic!("unexpected popup probe reply: {reply:?}") };
     assert_popup_visible(popup);
     let area = test.probe_area.expect("the popup probe area is unavailable");
     let samples = popup_visible_samples(area, window_rect(popup.1 as isize), &raw);
     assert!(frames.len() >= 10, "the popup probe recorded only {} frames", frames.len());
+    assert!(before_capture_frames.len() >= 5, "the pre-capture popup probe recorded only {} frames", before_capture_frames.len());
     assert!(visible_frames.len() >= 5, "the visible-popup probe recorded only {} frames", visible_frames.len());
-    for (phase, frames) in [("opening", &frames), ("visible", &visible_frames)] {
+    for (phase, frames) in [("opening", &frames), ("before still capture", &before_capture_frames), ("after still capture", &visible_frames)] {
         for (index, frame) in frames.iter().enumerate() {
             let leaked = samples.iter().filter(|&&offset| !green_pixel(frame, offset)).count();
             assert_eq!(leaked, 0, "popup pixels leaked into {phase} frame {index}: {leaked} of {} samples", samples.len());
@@ -5214,8 +5224,8 @@ fn assert_popup_pixels(test: &mut Test, popup: (i64, u32)) {
         let leaked = samples.iter().filter(|&&offset| !green_pixel(&pixels, offset)).count();
         assert_eq!(leaked, 0, "popup pixels leaked into the {name}: {leaked} of {} samples", samples.len());
     }
-    test.line(format!("popup excluded from {} opening and {} visible recording frames, a still capture and a frozen desktop ({} visible samples)",
-        frames.len(), visible_frames.len(), samples.len()));
+    test.line(format!("popup excluded from {} opening, {} pre-capture and {} post-capture recording frames, a still capture and a frozen desktop ({} visible samples)",
+        frames.len(), before_capture_frames.len(), visible_frames.len(), samples.len()));
     test.popup_samples = samples;
 }
 
@@ -5235,21 +5245,45 @@ fn editor_menu_for_selftest(open: bool) -> rustolonia::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
+fn editor_number_for_selftest() -> isize {
+    let handle = super::main_window_handle().expect("the editor window is unavailable");
+    crate::mac_window::number(handle).expect("the editor window has no number") as isize
+}
+
+#[cfg(target_os = "macos")]
+fn open_editor_popup_for_selftest(test: &mut Test) {
+    test.remember_windows();
+    let pending = super::hud::native_popup_macos::pending_for_selftest().expect("could not inspect popup registrations");
+    editor_menu_for_selftest(true).expect("could not open a normal editor menu");
+    let windows = test.new_windows();
+    assert_eq!(windows.len(), 1, "the normal editor menu did not appear immediately");
+    let number = u32::try_from(windows[0]).expect("the editor popup has no window number");
+    assert_eq!(platform::exclusion_window_visible(number), Some(true), "the normal editor menu was gated");
+    assert_eq!(affinity(windows[0]), 0, "the normal editor menu was incorrectly excluded");
+    assert_eq!(super::hud::native_popup_macos::pending_for_selftest().expect("could not inspect popup registrations"), pending,
+        "the normal editor menu registered with the capture popup gate");
+    test.popup = Some((0, number));
+}
+
+#[cfg(target_os = "macos")]
 fn assert_editor_popup_pixels(test: &mut Test, number: u32) {
     let reply = platform::exclusion_reply().expect("the editor popup recording probe did not finish");
-    let platform::ProbeReply::PopupFrames { visible_frames, raw, still, frozen, .. } = reply
+    let platform::ProbeReply::PopupFrames { before_capture_frames: visible_frames, raw, still, .. } = reply
         else { panic!("unexpected editor popup probe reply: {reply:?}") };
-    assert_eq!(platform::exclusion_window_visible(number), Some(true), "the editor popup disappeared");
     assert!(!jiffshot_capture::screen::is_excluded_window(number), "the editor popup was incorrectly excluded");
-    let samples = popup_visible_samples(test.probe_area.expect("the popup probe area is unavailable"), window_rect(number as isize), &raw);
+    let popup_rect = test.editor_popup_rect.take().expect("the editor popup bounds are unavailable");
+    let samples = popup_visible_samples(test.probe_area.expect("the popup probe area is unavailable"), popup_rect, &raw);
     assert!(visible_frames.len() >= 5, "too few editor popup frames were captured");
-    for (name, pixels) in visible_frames.iter().map(|pixels| ("recording", pixels))
-        .chain([("still", &still), ("frozen desktop", &frozen)])
-    {
+    for pixels in &visible_frames {
         let visible = samples.iter().filter(|&&offset| !green_pixel(pixels, offset)).count();
-        assert!(visible >= samples.len() / 4, "the normal editor popup was missing from the {name}: {visible} of {} samples", samples.len());
+        assert!(visible >= samples.len() / 4, "the normal editor popup was missing from the recording: {visible} of {} samples", samples.len());
     }
-    test.line("normal editor popups remain visible in recording, still and frozen captures");
+    let visible = samples.iter().filter(|&&offset| !green_pixel(&still, offset)).count();
+    assert_eq!(visible, 0, "the normal editor popup remained in the still capture: {visible} of {} samples", samples.len());
+    assert!(super::main_window().expect("the editor window is unavailable").get_is_visible().expect("could not inspect the editor"),
+        "the editor was not restored after still capture");
+    test.line(format!("normal editor popup captured in {} recording frames ({} visible samples) and hidden with its editor for still captures",
+        visible_frames.len(), samples.len()));
 }
 
 #[cfg(target_os = "macos")]
@@ -5400,6 +5434,284 @@ fn multistream_exclusion_script() -> Script {
         let number = t.note.parse::<u32>().expect("the closed tooltip number is invalid");
         assert!(!jiffshot_capture::screen::is_excluded_window(number), "the retired tooltip remained excluded after both recordings stopped");
         t.line("both recording exclusion probes cleaned up");
+        0
+    });
+    s
+}
+
+#[cfg(target_os = "macos")]
+fn assert_transparency_pixels(test: &mut Test, label: &str, blank: (usize, usize)) {
+    let reply = platform::exclusion_reply().expect("the transparency probe did not finish");
+    let platform::ProbeReply::PixelFrames { raw, filtered } = reply
+        else { panic!("unexpected transparency probe reply: {reply:?}") };
+    assert_eq!(raw.len(), 210 * 130 * 4, "the desktop probe has an invalid size");
+    assert_eq!(filtered.len(), raw.len(), "the recording probe has an invalid size");
+    let offset = (blank.1 * 210 + blank.0) * 4;
+    assert!(green_pixel(&raw, offset), "{label} obscured its background: {:?}", &raw[offset..offset + 4]);
+    let red = |pixel: &[u8]| pixel[2] > 140 && u16::from(pixel[2]) > u16::from(pixel[0].max(pixel[1])) + 40;
+    let samples: Vec<usize> = raw.chunks_exact(4).enumerate()
+        .filter_map(|(index, pixel)| red(pixel).then_some(index * 4)).collect();
+    assert!(samples.len() >= 30, "{label} did not render enough red pixels: {}", samples.len());
+    if super::hud::native::capturable() {
+        let visible = samples.iter().filter(|&&at| red(&filtered[at..at + 4])).count();
+        assert!(visible >= samples.len() / 4, "{label} was not captured in debug mode: {visible} of {}", samples.len());
+    } else {
+        let leaked = samples.iter().filter(|&&at| !green_pixel(&filtered, at)).count();
+        assert_eq!(leaked, 0, "{label} leaked into the recording: {leaked} of {} pixels", samples.len());
+    }
+    test.line(format!("{label}: transparent background and {} red pixels; capture behavior verified", samples.len()));
+}
+
+#[cfg(target_os = "macos")]
+fn assert_card_transparency(test: &mut Test, label: &str) {
+    let reply = platform::exclusion_reply().expect("the card transparency probe did not finish");
+    let platform::ProbeReply::PixelFrames { raw, filtered } = reply
+        else { panic!("unexpected card transparency probe reply: {reply:?}") };
+    assert_eq!(raw.len(), 210 * 130 * 4, "the desktop probe has an invalid size");
+    assert_eq!(filtered.len(), raw.len(), "the recording probe has an invalid size");
+    let area = test.probe_area.expect("the probe area is unavailable");
+    let window = test.note.parse::<isize>().expect("the card window number");
+    let rect = window_rect(window);
+    assert!(rect.x >= area.x && rect.y >= area.y, "{label} is outside the probe: {rect:?}");
+    let x = ((rect.x - area.x) * 210 / area.width) as usize;
+    let y = ((rect.y - area.y) * 130 / area.height) as usize;
+    assert!(x + 12 < 210 && y + 12 < 130, "{label} does not overlap the probe");
+    assert!(green_pixel(&raw, ((y + 1) * 210 + x + 1) * 4), "{label} has an opaque corner");
+    assert!(!green_pixel(&raw, ((y + 12) * 210 + x + 12) * 4), "{label} did not render");
+    let samples = popup_visible_samples(area, rect, &raw);
+    let visible = samples.iter().filter(|&&at| !green_pixel(&filtered, at)).count();
+    if super::hud::native::capturable() {
+        assert!(visible >= samples.len() / 4, "{label} was not captured in debug mode");
+    } else {
+        assert_eq!(visible, 0, "{label} leaked into the recording");
+    }
+    test.line(format!("{label}: transparent corner and capture behavior verified"));
+}
+
+#[cfg(target_os = "macos")]
+fn transparency_script() -> Script {
+    let mut s = Script(VecDeque::new());
+    let k = sink();
+    s.step(|t| {
+        t.probe_area = Some(platform::start_exclusion_probe().expect("start the recording exclusion probe"));
+        t.probe_deadline = Some(Instant::now() + Duration::from_secs(15));
+        0
+    })
+    .step(move |t| {
+        assert!(matches!(platform::exclusion_reply(), Ok(platform::ProbeReply::Ready)));
+        let area = t.probe_area.expect("the probe area is unavailable");
+        let background = platform::raw_desktop_pixels(area).expect("capture the transparency background");
+        let center = (((area.height / 2) * area.width + area.width / 2) * 4) as usize;
+        assert!(green_pixel(&background, center), "the transparency background is not green");
+        let outline = Rect::new(area.x + 20, area.y + 20, area.width - 40, area.height - 40);
+        t.remember_windows();
+        set(k.hud, serde_json::json!({
+            "panels": [],
+            "borders": [{ "id": 9002, "area": [outline.x, outline.y, outline.width, outline.height] }]
+        }).to_string());
+        500
+    })
+    .step(|t| {
+        let windows = t.new_windows();
+        assert_eq!(windows.len(), 1, "the capture outline was not created");
+        let window = windows[0];
+        assert_eq!(platform::exclusion_window_ignores_input(window), Some(true));
+        if super::hud::native::capturable() {
+            assert_eq!(affinity(window), 0);
+        } else {
+            assert_eq!(platform::exclusion_window_alpha(window), Some(0.0), "the outline appeared before exclusion");
+            assert_eq!(affinity(window), 0x11);
+        }
+        t.note = window.to_string();
+        platform::exclusion_command(platform::ProbeCommand::Refresh).expect("refresh the outline exclusion");
+        t.probe_deadline = Some(Instant::now() + Duration::from_secs(15));
+        0
+    })
+    .step(|t| {
+        assert!(matches!(platform::exclusion_reply(), Ok(platform::ProbeReply::Refreshed)));
+        let window = t.note.parse::<isize>().expect("the outline window number");
+        t.window_reveal = Some((window, Instant::now() + Duration::from_secs(15)));
+        0
+    })
+    .wait(500)
+    .step(|t| {
+        platform::exclusion_command(platform::ProbeCommand::PixelFrames).expect("capture the outline pixels");
+        t.probe_deadline = Some(Instant::now() + Duration::from_secs(15));
+        0
+    })
+    .step(move |t| {
+        assert_transparency_pixels(t, "capture outline", (105, 65));
+        set(k.hud, r#"{"panels":[],"borders":[]}"#.to_owned());
+        500
+    })
+    .step(move |t| {
+        assert!(t.new_windows().is_empty(), "the capture outline did not close");
+        let area = t.probe_area.expect("the probe area is unavailable");
+        let json = api::draw_demo_sized(area, 210, 130);
+        assert!(!json.is_empty(), "could not start Screen Draw");
+        t.remember_windows();
+        set(k.screen_draw, json);
+        500
+    })
+    .step(|t| {
+        let windows = t.new_windows();
+        assert_eq!(windows.len(), 1, "the Screen Draw window was not created");
+        let window = windows[0];
+        if super::hud::native::capturable() {
+            assert_eq!(affinity(window), 0);
+        } else {
+            assert_eq!(platform::exclusion_window_alpha(window), Some(0.0), "Screen Draw appeared before exclusion");
+            assert_eq!(platform::exclusion_window_ignores_input(window), Some(true));
+            assert_eq!(affinity(window), 0x11);
+        }
+        t.note = window.to_string();
+        super::overlay::feed_draw(api::KEY, 0.0, 0.0, i32::from(b'S'));
+        super::overlay::feed_draw(api::PRESS, 52.0, 32.0, 0);
+        super::overlay::feed_draw(api::MOVE, 157.0, 97.0, 0);
+        super::overlay::feed_draw(api::RELEASE, 157.0, 97.0, 0);
+        platform::exclusion_command(platform::ProbeCommand::Refresh).expect("refresh the Screen Draw exclusion");
+        t.probe_deadline = Some(Instant::now() + Duration::from_secs(15));
+        0
+    })
+    .step(|t| {
+        assert!(matches!(platform::exclusion_reply(), Ok(platform::ProbeReply::Refreshed)));
+        let window = t.note.parse::<isize>().expect("the Screen Draw window number");
+        t.window_reveal = Some((window, Instant::now() + Duration::from_secs(15)));
+        0
+    })
+    .step(|t| {
+        let window = t.note.parse::<isize>().expect("the Screen Draw window number");
+        assert_eq!(platform::exclusion_window_ignores_input(window), Some(false));
+        500
+    })
+    .step(|t| {
+        platform::exclusion_command(platform::ProbeCommand::PixelFrames).expect("capture the Screen Draw pixels");
+        t.probe_deadline = Some(Instant::now() + Duration::from_secs(15));
+        0
+    })
+    .step(move |t| {
+        assert_transparency_pixels(t, "Screen Draw", (12, 112));
+        api::draw_end();
+        set(k.screen_draw, String::new());
+        500
+    })
+    .step(move |t| {
+        assert!(t.new_windows().is_empty(), "the Screen Draw window did not close");
+        let area = t.probe_area.expect("the probe area is unavailable");
+        t.remember_windows();
+        set(k.hud, serde_json::json!({
+            "panels": [],
+            "borders": [],
+            "countdowns": [{
+                "id": 9005, "area": [area.x, area.y, area.width, area.height],
+                "title": "Get ready to capture", "seconds": 3, "progress": 0.72
+            }]
+        }).to_string());
+        500
+    })
+    .step(|t| {
+        let windows = t.new_windows();
+        assert_eq!(windows.len(), 1, "the capture countdown was not created");
+        let window = windows[0];
+        assert_eq!(platform::exclusion_window_ignores_input(window), Some(true));
+        if super::hud::native::capturable() {
+            assert_eq!(affinity(window), 0);
+        } else {
+            assert_eq!(platform::exclusion_window_alpha(window), Some(0.0), "the countdown appeared before exclusion");
+            assert_eq!(affinity(window), 0x11);
+        }
+        t.note = window.to_string();
+        platform::exclusion_command(platform::ProbeCommand::Refresh).expect("refresh the countdown exclusion");
+        t.probe_deadline = Some(Instant::now() + Duration::from_secs(15));
+        0
+    })
+    .step(|t| {
+        assert!(matches!(platform::exclusion_reply(), Ok(platform::ProbeReply::Refreshed)));
+        let window = t.note.parse::<isize>().expect("the countdown window number");
+        t.window_reveal = Some((window, Instant::now() + Duration::from_secs(15)));
+        0
+    })
+    .step(|t| {
+        let window = t.note.parse::<isize>().expect("the countdown window number");
+        let area = t.probe_area.expect("the probe area is unavailable");
+        platform::place_for_exclusion_probe(window, area.x + 20, area.y + 20).expect("position the test countdown");
+        500
+    })
+    .step(|t| {
+        platform::exclusion_command(platform::ProbeCommand::PixelFrames).expect("capture the countdown pixels");
+        t.probe_deadline = Some(Instant::now() + Duration::from_secs(15));
+        0
+    })
+    .step(move |t| {
+        assert_card_transparency(t, "capture countdown");
+        set(k.hud, r#"{"panels":[],"borders":[],"countdowns":[]}"#.to_owned());
+        500
+    })
+    .step(|t| {
+        assert!(t.new_windows().is_empty(), "the capture countdown did not close");
+        t.remember_windows();
+        0
+    });
+    let first_notice = Rc::new(RefCell::new(None));
+    for attempt in 1..=2 {
+        let first_notice = first_notice.clone();
+        s.step(move |_| {
+            set(k.toast, format!("{attempt}\u{1f}Recording notice\u{1f}Synthetic notification\u{1f}0"));
+            500
+        })
+        .step(move |t| {
+            let windows = t.new_windows();
+            assert_eq!(windows.len(), 1, "notification {attempt} was not created");
+            let window = windows[0];
+            if attempt == 1 {
+                *first_notice.borrow_mut() = Some(window);
+            } else {
+                assert_eq!(Some(window), *first_notice.borrow(), "the notification window was not reused");
+            }
+            if super::hud::native::capturable() {
+                assert_eq!(affinity(window), 0);
+            } else {
+                assert_eq!(platform::exclusion_window_alpha(window), Some(0.0), "notification {attempt} appeared before exclusion");
+                assert_eq!(affinity(window), 0x11);
+            }
+            t.note = window.to_string();
+            platform::exclusion_command(platform::ProbeCommand::Refresh).expect("refresh the notification exclusion");
+            t.probe_deadline = Some(Instant::now() + Duration::from_secs(15));
+            0
+        })
+        .step(|t| {
+            assert!(matches!(platform::exclusion_reply(), Ok(platform::ProbeReply::Refreshed)));
+            let window = t.note.parse::<isize>().expect("the notification window number");
+            t.window_reveal = Some((window, Instant::now() + Duration::from_secs(15)));
+            0
+        })
+        .step(|t| {
+            let window = t.note.parse::<isize>().expect("the notification window number");
+            let area = t.probe_area.expect("the probe area is unavailable");
+            platform::place_for_exclusion_probe(window, area.x + 30, area.y + 30).expect("position the test notification");
+            500
+        })
+        .step(|t| {
+            platform::exclusion_command(platform::ProbeCommand::PixelFrames).expect("capture the notification pixels");
+            t.probe_deadline = Some(Instant::now() + Duration::from_secs(15));
+            0
+        })
+        .step(move |t| {
+            assert_card_transparency(t, &format!("notification {attempt}"));
+            5500
+        })
+        .step(|t| {
+            assert!(t.new_windows().is_empty(), "the notification did not hide");
+            0
+        });
+    }
+    s.step(|_| {
+        platform::finish_exclusion_probe().expect("stop the recording exclusion probe");
+        500
+    })
+    .step(|t| {
+        platform::join_exclusion_probe().expect("join the recording exclusion probe");
+        t.line("transparency probe cleaned up");
         0
     });
     s
@@ -5770,48 +6082,92 @@ fn exclusion_script() -> Script {
     })
     .step(|t| {
         assert!(t.new_windows().is_empty(), "the capture controls did not close");
-        let editor = main_window().expect("the editor window is unavailable");
+        let editor_handle = super::main_window_handle().expect("the editor window is unavailable");
+        let editor = crate::mac_window::number(editor_handle).expect("the editor window has no number") as isize;
         assert_eq!(affinity(editor), 0, "the editor was incorrectly registered for exclusion");
         let area = t.probe_area.expect("the popup probe area is unavailable");
         let rect = window_rect(editor);
         platform::place_for_exclusion_probe(editor, area.x + (area.width - rect.width) / 2, area.y + (area.height - rect.height) / 2)
             .expect("could not position the test editor");
-        t.remember_windows();
-        let pending = super::hud::native_popup_macos::pending_for_selftest().expect("could not inspect popup registrations");
-        editor_menu_for_selftest(true).expect("could not open a normal editor menu");
-        let windows = t.new_windows();
-        assert_eq!(windows.len(), 1, "the normal editor menu did not appear immediately");
-        let number = u32::try_from(windows[0]).expect("the editor popup has no window number");
-        assert_eq!(platform::exclusion_window_visible(number), Some(true), "the normal editor menu was gated");
-        assert_eq!(affinity(windows[0]), 0, "the normal editor menu was incorrectly excluded");
-        assert_eq!(super::hud::native_popup_macos::pending_for_selftest().expect("could not inspect popup registrations"), pending,
-            "the normal editor menu registered with the capture popup gate");
-        t.popup = Some((0, number));
+        crate::mac_window::activate(editor_handle).expect("could not focus the test editor");
+        300
+    })
+    .step(|t| {
+        open_editor_popup_for_selftest(t);
+        300
+    })
+    .step(|t| {
+        let (_, number) = t.popup.expect("the editor popup was not recorded");
+        assert_eq!(platform::exclusion_window_visible(number), Some(true), "the editor popup disappeared before recording");
+        t.editor_popup_rect = Some(window_rect(number as isize));
         platform::exclusion_command(platform::ProbeCommand::Flow).expect("could not capture the normal editor menu");
-        5000
+        t.probe_deadline = Some(Instant::now() + Duration::from_secs(15));
+        0
     })
     .step(|t| {
         let (_, number) = t.popup.take().expect("the editor popup was not recorded");
         assert_editor_popup_pixels(t, number);
         editor_menu_for_selftest(false).expect("could not close the normal editor menu");
-        platform::hide_exclusion_background().expect("could not uncover the editor");
-        platform::front_for_exclusion_probe(main_window().expect("the editor window is unavailable"))
+        let handle = super::main_window_handle().expect("the editor window is unavailable");
+        crate::mac_window::activate(handle).expect("could not refocus the test editor");
+        300
+    })
+    .step(|t| {
+        open_editor_popup_for_selftest(t);
+        300
+    })
+    .step(|t| {
+        let (_, number) = t.popup.expect("the editor popup was not recorded");
+        assert_eq!(platform::exclusion_window_visible(number), Some(true), "the reopened editor popup disappeared");
+        t.editor_popup_rect = Some(window_rect(number as isize));
+        platform::exclusion_command(platform::ProbeCommand::PixelFrames).expect("could not capture the reopened editor menu");
+        t.probe_deadline = Some(Instant::now() + Duration::from_secs(15));
+        0
+    })
+    .step(|t| {
+        let platform::ProbeReply::PixelFrames { raw, filtered } = platform::exclusion_reply().expect("the reopened editor menu probe did not finish")
+            else { panic!("unexpected reopened editor menu probe reply") };
+        let (_, number) = t.popup.expect("the editor popup was not recorded");
+        assert_eq!(platform::exclusion_window_visible(number), Some(true), "the reopened editor popup disappeared before freezing");
+        assert!(!jiffshot_capture::screen::is_excluded_window(number), "the reopened editor popup was incorrectly excluded");
+        let rect = t.editor_popup_rect.take().expect("the editor popup bounds are unavailable");
+        let samples = popup_visible_samples(t.probe_area.expect("the popup probe area is unavailable"), rect, &raw);
+        let visible = samples.iter().filter(|&&offset| !green_pixel(&filtered, offset)).count();
+        assert!(visible >= samples.len() / 4, "the reopened editor popup was missing from the recording: {visible} of {} samples", samples.len());
+        t.popup_samples = samples;
+        platform::exclusion_command(platform::ProbeCommand::FrozenFrame).expect("could not freeze the reopened editor menu");
+        t.probe_deadline = Some(Instant::now() + Duration::from_secs(15));
+        0
+    })
+    .step(|t| {
+        let platform::ProbeReply::Frame(frozen) = platform::exclusion_reply().expect("the editor frozen desktop probe did not finish")
+            else { panic!("unexpected editor frozen desktop probe reply") };
+        let visible = t.popup_samples.iter().filter(|&&offset| !green_pixel(&frozen, offset)).count();
+        assert_eq!(visible, 0, "the normal editor popup remained in the frozen desktop: {visible} of {} samples", t.popup_samples.len());
+        assert!(super::main_window().expect("the editor window is unavailable").get_is_visible().expect("could not inspect the editor"),
+            "the editor was not restored after freezing");
+        editor_menu_for_selftest(false).expect("could not close the reopened editor menu");
+        t.popup = None;
+        t.line("the reopened editor popup is hidden with its editor for frozen captures");
+        platform::front_for_exclusion_probe(editor_number_for_selftest())
             .expect("could not bring the test editor forward");
         500
     })
     .step(|t| {
         let area = t.probe_area.expect("the popup probe area is unavailable");
-        let editor = main_window().expect("the editor window is unavailable");
+        let editor = editor_number_for_selftest();
         assert_eq!(platform::window_at(area.x + area.width / 2, area.y + area.height / 4), Some(editor),
             "the editor is not under the recording probe");
-        platform::exclusion_command(platform::ProbeCommand::Filtered).expect("could not capture the editor");
-        1000
+        platform::exclusion_command(platform::ProbeCommand::PixelFrames).expect("could not capture the editor");
+        t.probe_deadline = Some(Instant::now() + Duration::from_secs(15));
+        0
     })
     .step(|t| {
-        let platform::ProbeReply::Pixel(pixel) = platform::exclusion_reply().expect("the editor recording probe did not finish")
+        let platform::ProbeReply::PixelFrames { raw, filtered } = platform::exclusion_reply().expect("the editor recording probe did not finish")
             else { panic!("unexpected editor recording probe reply") };
-        assert!(!(pixel[1] > 160 && u16::from(pixel[1]) > u16::from(pixel[0].max(pixel[2])) + 100),
-            "the editor was missing from the recording: {pixel:?}");
+        let offset = (32 * 210 + 105) * 4;
+        assert!(!green_pixel(&raw, offset), "the editor was not visible over the test background");
+        assert!(!green_pixel(&filtered, offset), "the editor was missing from the recording");
         t.line("the normal editor window remains capturable");
         platform::finish_exclusion_probe().expect("could not stop the exclusion probe");
         500
@@ -6955,6 +7311,26 @@ fn next(runner: UiOnly<Rc<RefCell<Runner>>>) {
             }
         }
     }
+    #[cfg(target_os = "macos")]
+    let window_reveal = runner.get().borrow().test.window_reveal;
+    #[cfg(target_os = "macos")]
+    if let Some((window, deadline)) = window_reveal {
+        match platform::exclusion_window_alpha(window) {
+            Some(1.0) => runner.get().borrow_mut().test.window_reveal = None,
+            Some(_) if Instant::now() < deadline => {
+                schedule_next(runner, 50);
+                return;
+            }
+            Some(alpha) => {
+                fail_runner(runner.get(), format!("window {window} was not revealed (alpha {alpha})"));
+                return;
+            }
+            None => {
+                fail_runner(runner.get(), format!("window {window} closed before it was revealed"));
+                return;
+            }
+        }
+    }
     let step = runner.get().borrow_mut().steps.pop_front();
     let Some(step) = step else {
         finish(runner.get());
@@ -7504,7 +7880,11 @@ pub fn start(scope: &AppScope, dir: &Path) {
         #[cfg(target_os = "macos")]
         popup_samples: Vec::new(),
         #[cfg(target_os = "macos")]
+        editor_popup_rect: None,
+        #[cfg(target_os = "macos")]
         probe_deadline: None,
+        #[cfg(target_os = "macos")]
+        window_reveal: None,
         #[cfg(target_os = "macos")]
         gate_probe: None,
     };

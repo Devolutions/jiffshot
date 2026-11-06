@@ -30,10 +30,11 @@ pub struct ProtectedWindow {
 
 /// Creates the native window without exposing it before recording filters
 /// include it. The caller places it only when its exclusion is acknowledged.
+/// Configure transparency when constructing the window: repeating the hint
+/// can make Avalonia's macOS compositor switch back to opaque.
 pub fn show_protected(scope: &AppScope, window: &Window, click_through: bool) -> io::Result<Option<ProtectedWindow>> {
     let result = (|| {
         if !capturable() {
-            scope.set_transparent(window, true).map_err(io::Error::other)?;
             window.set_opacity(0.0).map_err(io::Error::other)?;
             window.set_enabled(false).map_err(io::Error::other)?;
             let pre_hwnd = handle(scope, window);
