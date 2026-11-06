@@ -523,15 +523,6 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p jiffshot -p jiffshot-cli --target ${{ matrix.target }}
 
-      - name: Check native application-name support
-        shell: bash
-        run: |
-          set -euo pipefail
-          nm -arch "${{ matrix.arch }}" -gU "target/${{ matrix.target }}/release/libAvaloniaNative.dylib" \
-            | awk '$NF == "__Z14SetProcessNameP8NSString" { found = 1 } END {
-                if (!found) { print "The Avalonia native application-name function is missing" > "/dev/stderr"; exit 1 }
-              }'
-
       - name: Test
         if: matrix.arch == 'arm64'
         run: |
@@ -657,7 +648,6 @@ jobs:
           fi
 
       - name: Test macOS application name
-        if: matrix.arch == 'arm64'
         timeout-minutes: 5
         shell: bash
         run: |

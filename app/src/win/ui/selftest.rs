@@ -150,6 +150,8 @@ struct Test {
     #[cfg(target_os = "macos")]
     window_reveal: Option<(isize, Instant)>,
     #[cfg(target_os = "macos")]
+    application_name_check: Option<(isize, Instant)>,
+    #[cfg(target_os = "macos")]
     gate_probe: Option<super::hud::native_popup_macos::GateDropProbe>,
 }
 
@@ -831,7 +833,11 @@ fn script() -> Script {
 fn application_name_script() -> Script {
     let mut script = Script(VecDeque::new());
     script.wait(500).step(|test| {
-        platform::check_application_name().expect("check the initial application name");
+        let handle = super::main_window_handle().expect("the editor window is unavailable");
+        crate::mac_window::activate(handle).expect("activate the editor");
+        test.application_name_check = Some((handle, Instant::now() + Duration::from_secs(10)));
+        0
+    }).step(|test| {
         test.line("application name: Jiffshot in the menu bar and running application");
         crate::capture_window::show(&super::scope().expect("the editor scope is unavailable"));
         500
@@ -839,18 +845,18 @@ fn application_name_script() -> Script {
         let scope = super::scope().expect("the editor scope is unavailable");
         let window = crate::capture_window::window().expect("the Capture window is unavailable");
         let handle = scope.platform_handle(&window).expect("the Capture window has no native handle");
-        let native = crate::mac_window::window(handle).expect("the Capture window is not live");
-        assert!(native.isKeyWindow(), "the Capture window did not become key");
-        platform::check_application_name().expect("check the application name in the Capture window");
+        test.application_name_check = Some((handle, Instant::now() + Duration::from_secs(10)));
+        0
+    }).step(|test| {
         test.line("application name: retained in the Capture window");
         let handle = super::main_window_handle().expect("the editor window is unavailable");
         crate::mac_window::activate(handle).expect("reactivate the editor");
         500
     }).step(|test| {
         let handle = super::main_window_handle().expect("the editor window is unavailable");
-        let native = crate::mac_window::window(handle).expect("the editor window is not live");
-        assert!(native.isKeyWindow(), "the editor did not become key again");
-        platform::check_application_name().expect("check the application name after returning to the editor");
+        test.application_name_check = Some((handle, Instant::now() + Duration::from_secs(10)));
+        0
+    }).step(|test| {
         test.line("application name: retained after returning to the editor");
         0
     });
@@ -7366,6 +7372,27 @@ fn next(runner: UiOnly<Rc<RefCell<Runner>>>) {
             }
         }
     }
+    #[cfg(target_os = "macos")]
+    let application_name_check = runner.get().borrow().test.application_name_check;
+    #[cfg(target_os = "macos")]
+    if let Some((window, deadline)) = application_name_check {
+        let result = match crate::mac_window::window(window) {
+            Some(window) if window.isKeyWindow() => platform::check_application_name(),
+            Some(_) => Err("the expected window is not key".into()),
+            None => Err("the expected window is not live".into()),
+        };
+        match result {
+            Ok(()) => runner.get().borrow_mut().test.application_name_check = None,
+            Err(_) if Instant::now() < deadline => {
+                schedule_next(runner, 50);
+                return;
+            }
+            Err(error) => {
+                fail_runner(runner.get(), format!("application name: {error}"));
+                return;
+            }
+        }
+    }
     let step = runner.get().borrow_mut().steps.pop_front();
     let Some(step) = step else {
         finish(runner.get());
@@ -7920,6 +7947,8 @@ pub fn start(scope: &AppScope, dir: &Path) {
         probe_deadline: None,
         #[cfg(target_os = "macos")]
         window_reveal: None,
+        #[cfg(target_os = "macos")]
+        application_name_check: None,
         #[cfg(target_os = "macos")]
         gate_probe: None,
     };

@@ -6,114 +6,17 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
     NSApplication, NSColor, NSStatusWindowLevel, NSWindow, NSWindowCollectionBehavior,
-    NSWindowDidBecomeKeyNotification, NSWindowWillCloseNotification,
+    NSWindowWillCloseNotification,
 };
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol, NSProcessInfo, NSString};
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol};
 use rustolonia::AppScope;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
-use std::os::unix::ffi::OsStrExt;
 use std::ptr::NonNull;
 
 thread_local! {
-    static NAME_OBSERVER: RefCell<Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>> = RefCell::new(None);
     static CLOSE_OBSERVER: RefCell<Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>> = RefCell::new(None);
     static PROTECTED_WINDOWS: RefCell<HashMap<isize, jiffshot_capture::screen::ExclusionTicket>> = RefCell::new(HashMap::new());
-}
-
-fn loader_error() -> String {
-    // SAFETY: dlerror returns a thread-local, NUL-terminated string or null.
-    unsafe {
-        let error = libc::dlerror();
-        if error.is_null() { "unknown dynamic loader error".into() } else { CStr::from_ptr(error).to_string_lossy().into_owned() }
-    }
-}
-
-fn name_running_application(name: &NSString) -> Result<(), String> {
-    let host = rustolonia::discover_host_path().map_err(|error| error.to_string())?;
-    let directory = host.parent().ok_or("the Rustolonia host has no parent directory")?;
-    let library_path = directory.join("libAvaloniaNative.dylib")
-        .canonicalize()
-        .map_err(|error| format!("could not locate the native Avalonia companion: {error}"))?;
-    let path = CString::new(library_path.as_os_str().as_bytes())
-        .map_err(|_| "the native Avalonia companion path contains a NUL")?;
-
-    // Rustolonia does not expose Application.Name. Reuse the pinned Avalonia
-    // native host's own LaunchServices update rather than duplicating its SPI.
-    // The exported C++ symbol and signature are verified by the macOS UI test.
-    // SAFETY: the companion is already loaded by Avalonia. The looked-up
-    // function takes a live NSString and uses the C calling convention.
-    unsafe {
-        let library = libc::dlopen(path.as_ptr(), libc::RTLD_NOLOAD | libc::RTLD_NOW | libc::RTLD_LOCAL);
-        if library.is_null() {
-            return Err(format!("could not access the loaded native Avalonia companion: {}", loader_error()));
-        }
-        libc::dlerror();
-        let symbol = libc::dlsym(library, c"_Z14SetProcessNameP8NSString".as_ptr());
-        let outcome = if symbol.is_null() {
-            Err(format!("the native Avalonia companion lacks its application-name function: {}", loader_error()))
-        } else {
-            let set_name: unsafe extern "C" fn(*const NSString) = std::mem::transmute(symbol);
-            set_name(name);
-            Ok(())
-        };
-        if libc::dlclose(library) != 0 {
-            return Err(format!("could not release the native Avalonia companion: {}", loader_error()));
-        }
-        outcome
-    }
-}
-
-fn name_application_menu() -> Result<(), String> {
-    let marker = MainThreadMarker::new().ok_or("application menu naming must run on the main thread")?;
-    let menu = NSApplication::sharedApplication(marker)
-        .mainMenu()
-        .ok_or("the application menu bar is unavailable")?;
-    if menu.numberOfItems() == 0 {
-        return Err("the application menu bar is empty".into());
-    }
-    let item = menu.itemAtIndex(0).ok_or("the application menu item is unavailable")?;
-    let submenu = item.submenu().ok_or("the application submenu is unavailable")?;
-    let name = NSString::from_str(jiffshot_capture::paths::NAME);
-    item.setTitle(&name);
-    submenu.setTitle(&name);
-    if let Some(hide) = submenu.itemWithTitle(&NSString::from_str("Hide Avalonia Application")) {
-        hide.setTitle(&NSString::from_str(&format!("Hide {}", jiffshot_capture::paths::NAME)));
-    }
-    Ok(())
-}
-
-/// Corrects the name set by the prebuilt Avalonia host and its native menu.
-pub fn name_application() -> Result<(), String> {
-    if MainThreadMarker::new().is_none() {
-        return Err("application naming must run on the main thread".into());
-    }
-    let name = NSString::from_str(jiffshot_capture::paths::NAME);
-    NSProcessInfo::processInfo().setProcessName(&name);
-    let running_name = name_running_application(&name);
-    NAME_OBSERVER.with(|slot| {
-        if slot.borrow().is_some() {
-            return;
-        }
-        // Avalonia installs its application menu when a window becomes key.
-        let callback = RcBlock::new(|_: NonNull<NSNotification>| {
-            if let Err(error) = name_application_menu() {
-                eprintln!("macOS application menu: {error}");
-            }
-        });
-        // SAFETY: AppKit delivers key-window notifications on the main thread.
-        let observer = unsafe {
-            NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
-                Some(NSWindowDidBecomeKeyNotification),
-                None,
-                None,
-                &callback,
-            )
-        };
-        *slot.borrow_mut() = Some(observer);
-    });
-    running_name
 }
 
 /// Resolves an opaque handle freshly obtained from a live Rustolonia window

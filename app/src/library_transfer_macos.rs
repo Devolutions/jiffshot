@@ -73,7 +73,7 @@ impl Prepared {
         &self.font_substitutions
     }
 
-    pub fn file_urls_json(&self) -> Result<Vec<u16>, String> {
+    pub fn file_urls_json(&self) -> Result<String, String> {
         let Content::Files(files) = &self.content else {
             return Err("the prepared transfer does not contain files".into());
         };
@@ -82,8 +82,7 @@ impl Prepared {
             url.absoluteString().map(|value| value.to_string())
                 .ok_or_else(|| format!("could not prepare a file URL for {}", path.display()))
         }).collect::<Result<Vec<_>, _>>()?;
-        let json = serde_json::to_string(&urls).map_err(|error| error.to_string())?;
-        Ok(json.encode_utf16().chain(std::iter::once(0)).collect())
+        serde_json::to_string(&urls).map_err(|error| error.to_string())
     }
 
     pub fn retain_for_destination(&mut self) {
@@ -383,8 +382,8 @@ mod tests {
         let Content::Files(files) = &prepared.content else { panic!("expected file URLs") };
         let exported = files[0].clone();
         let json = prepared.file_urls_json().unwrap();
-        assert_eq!(json.last(), Some(&0));
-        let urls: Vec<String> = serde_json::from_str(&String::from_utf16(&json[..json.len() - 1]).unwrap()).unwrap();
+        assert!(!json.contains('\0'));
+        let urls: Vec<String> = serde_json::from_str(&json).unwrap();
         assert_eq!(urls.len(), 1);
         assert!(urls[0].starts_with("file:///") && urls[0].contains("%20") && urls[0].contains("%23"));
         assert_eq!((io::load_image(&exported).unwrap().width(), io::load_image(&path).unwrap().width()), (9, 4));
@@ -404,7 +403,7 @@ mod tests {
         let video = root.0.join(OsString::from_vec(b"clip-\xff.mp4".to_vec()));
         let prepared = Prepared { content: Content::Files(vec![video]), exports: Exports::default(), font_substitutions: Vec::new() };
         let json = prepared.file_urls_json().unwrap();
-        let urls: Vec<String> = serde_json::from_str(&String::from_utf16(&json[..json.len() - 1]).unwrap()).unwrap();
+        let urls: Vec<String> = serde_json::from_str(&json).unwrap();
         assert_eq!(urls.len(), 1);
         assert!(urls[0].ends_with("clip-%FF.mp4"), "{:?}", urls[0]);
     }

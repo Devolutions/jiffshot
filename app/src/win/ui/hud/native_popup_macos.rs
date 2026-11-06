@@ -15,37 +15,12 @@ use std::sync::atomic::{fence, AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-const APPLICATION_IID: sys::Guid = sys::Guid {
-    data1: 0x6B2E8F10,
-    data2: 0x4C91,
-    data3: 0x4E3A,
-    data4: [0x9A, 0x77, 0x1F, 0x0C, 0x2B, 0x3A, 0x4D, 0xA2],
-};
 const HANDLER_IID: sys::Guid = sys::Guid {
     data1: 0x6B2E8F10,
     data2: 0x4C91,
     data3: 0x4E3A,
     data4: [0x9A, 0x77, 0x1F, 0x0C, 0x2B, 0x3A, 0x4D, 0xA3],
 };
-
-#[repr(C)]
-struct ApplicationVtbl {
-    query_interface: unsafe extern "system" fn(*mut sys::IUnknown, *const sys::Guid, *mut *mut c_void) -> i32,
-    add_ref: unsafe extern "system" fn(*mut sys::IUnknown) -> u32,
-    release: unsafe extern "system" fn(*mut sys::IUnknown) -> u32,
-    set_gate: unsafe extern "system" fn(*mut Application, *mut sys::IAvnWindow, *mut Handler) -> i32,
-    acknowledge: unsafe extern "system" fn(*mut Application, i64) -> i32,
-}
-
-#[repr(C)]
-struct Application {
-    vtable: *const ApplicationVtbl,
-}
-
-// SAFETY: IAvnApplication10 is a COM interface with an IUnknown prefix.
-unsafe impl sys::ComInterface for Application {
-    const IID: sys::Guid = APPLICATION_IID;
-}
 
 #[repr(C)]
 struct HandlerVtbl {
@@ -179,7 +154,7 @@ struct Owner {
 }
 
 struct Gate {
-    application: sys::ComPtr<Application>,
+    application: sys::ComPtr<sys::IAvnApplication>,
     scope: AppScope,
     pending: Mutex<HashMap<i64, Pending>>,
     retiring: Mutex<Vec<Arc<Retirement>>>,
@@ -202,28 +177,14 @@ fn window_interfaces(window: &Window) -> io::Result<(sys::ComPtr<sys::IAvnWindow
     Ok((interface, identity))
 }
 
-fn open_application_gate() -> io::Result<(sys::Host, sys::ComPtr<Application>)> {
-    let path = rustolonia::discover_host_path().map_err(io::Error::other)?;
-    let host = sys::Host::load(path).map_err(io::Error::other)?;
-    let application = host.activation_factory().and_then(|factory| factory.create_application()).map_err(io::Error::other)?;
-    let application = application.query_interface::<Application>().map_err(|error| {
-        if error.0 == sys::E_NOINTERFACE {
-            io::Error::other("the Rustolonia host does not support capture-safe native popups; a newer matching host is required")
-        } else {
-            io::Error::other(format!("could not initialize the native popup gate: {error}"))
-        }
-    })?;
-    Ok((host, application))
-}
-
 pub(in crate::ui) fn check_host_gate() -> io::Result<()> {
-    let (_host, _application) = open_application_gate()?;
-    Ok(())
+    let (_host, application) = crate::mac_host::open_application()?;
+    crate::mac_host::check_invalid_token_rejected(application.acknowledge_native_popup(0), "native popup gate")
 }
 
 impl Gate {
     fn new(scope: &AppScope) -> io::Result<Arc<Self>> {
-        let (host, application) = open_application_gate()?;
+        let (host, application) = crate::mac_host::open_application()?;
         Ok(Arc::new(Self {
             application,
             scope: scope.clone(),
@@ -246,14 +207,10 @@ impl Gate {
             }
         }).map_err(io::Error::other)?;
         let handler = handler(Arc::downgrade(self));
-        // SAFETY: both owned COM references remain live throughout this call.
-        let result = unsafe {
-            let application = self.application.as_raw();
-            ((*(*application).vtable).set_gate)(application, interface.as_raw(), handler.as_raw())
-        };
-        if result < 0 {
-            return Err(io::Error::other(format!("could not protect native popups: {}", sys::Error(result))));
-        }
+        let handler = handler.query_interface::<sys::IAvnNativePopupHandler>()
+            .map_err(|error| io::Error::other(format!("could not expose the native popup handler: {error}")))?;
+        self.application.set_native_popup_gate(&interface, Some(&handler))
+            .map_err(|error| io::Error::other(format!("could not protect native popups: {error}")))?;
         OWNERS.with(|owners| {
             owners.borrow_mut().insert(key, Owner {
                 window: window.clone(),
@@ -267,15 +224,8 @@ impl Gate {
     }
 
     fn clear(&self, window: &sys::ComPtr<sys::IAvnWindow>) -> io::Result<()> {
-        // SAFETY: the owned window and auxiliary application are live on the UI thread.
-        let result = unsafe {
-            let application = self.application.as_raw();
-            ((*(*application).vtable).set_gate)(application, window.as_raw(), ptr::null_mut())
-        };
-        if result < 0 {
-            return Err(io::Error::other(format!("could not clear native popup protection: {}", sys::Error(result))));
-        }
-        Ok(())
+        self.application.set_native_popup_gate(window, None)
+            .map_err(|error| io::Error::other(format!("could not clear native popup protection: {error}")))
     }
 
     fn prepare(self: &Arc<Self>, token: i64, number: i32) -> sys::Result<()> {
@@ -315,14 +265,8 @@ impl Gate {
                     return;
                 }
                 if screen::exclusion_ready(number) {
-                    // SAFETY: the gate is live and this task runs on the UI
-                    // dispatcher; the token belongs to this application.
-                    let result = unsafe {
-                        let application = gate.application.as_raw();
-                        ((*(*application).vtable).acknowledge)(application, token)
-                    };
-                    if result < 0 {
-                        report(format!("could not reveal the protected popup: {}", sys::Error(result)));
+                    if let Err(error) = gate.application.acknowledge_native_popup(token) {
+                        report(format!("could not reveal the protected popup: {error}"));
                     }
                     return;
                 }
@@ -615,11 +559,7 @@ pub(in crate::ui) fn pending_for_selftest() -> io::Result<Vec<(i64, u32)>> {
 
 pub(in crate::ui) fn acknowledge_for_selftest(token: i64) -> io::Result<i32> {
     let gate = GATE.with(|slot| slot.borrow().clone()).ok_or_else(|| io::Error::other("the native popup gate is unavailable"))?;
-    // SAFETY: self-tests call this on the UI dispatcher while the gate is live.
-    Ok(unsafe {
-        let application = gate.application.as_raw();
-        ((*(*application).vtable).acknowledge)(application, token)
-    })
+    Ok(gate.application.acknowledge_native_popup(token).map_or_else(|error| error.0, |()| sys::S_OK))
 }
 
 #[cfg(test)]
@@ -632,13 +572,13 @@ mod tests {
         // SAFETY: the test owns this live handler and observes only its count.
         assert_eq!(unsafe { (*handler.as_raw()).references.load(Ordering::Relaxed) }, 1);
         let unknown = handler.query_interface::<sys::IUnknown>().expect("IUnknown");
-        let same = handler.query_interface::<Handler>().expect("popup handler");
+        let same = handler.query_interface::<sys::IAvnNativePopupHandler>().expect("popup handler");
         // SAFETY: all three references are live until they are dropped below.
         assert_eq!(unsafe { (*handler.as_raw()).references.load(Ordering::Relaxed) }, 3);
         drop((unknown, same));
         // SAFETY: the original reference remains live.
         assert_eq!(unsafe { (*handler.as_raw()).references.load(Ordering::Relaxed) }, 1);
-        assert_eq!(handler.query_interface::<Application>().unwrap_err().0, sys::E_NOINTERFACE);
+        assert_eq!(handler.query_interface::<sys::IAvnApplication>().unwrap_err().0, sys::E_NOINTERFACE);
         // SAFETY: the host ABI accepts this live handler; the missing gate
         // must return a failure rather than unwind across the ABI.
         assert_eq!(unsafe { preparing(handler.as_raw(), 1, 1) }, sys::E_FAIL);

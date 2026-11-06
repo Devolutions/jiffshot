@@ -1,4 +1,4 @@
-//! Outgoing library file drags through Rustolonia's additive macOS ABI.
+//! Outgoing library file drags through Rustolonia's macOS ABI.
 
 use crate::library_transfer_macos::Prepared;
 use rustolonia::{AppScope, AsControl, Border, EventSubscription};
@@ -14,38 +14,12 @@ use std::sync::atomic::{fence, AtomicBool, AtomicI64, AtomicU32, AtomicU64, Orde
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
-const APPLICATION_IID: sys::Guid = sys::Guid {
-    data1: 0x6B2E8F10,
-    data2: 0x4C91,
-    data3: 0x4E3A,
-    data4: [0x9A, 0x77, 0x1F, 0x0C, 0x2B, 0x3A, 0x4D, 0xA6],
-};
 const HANDLER_IID: sys::Guid = sys::Guid {
     data1: 0x6B2E8F10,
     data2: 0x4C91,
     data3: 0x4E3A,
     data4: [0x9A, 0x77, 0x1F, 0x0C, 0x2B, 0x3A, 0x4D, 0xA7],
 };
-
-#[repr(C)]
-struct ApplicationVtbl {
-    query_interface: unsafe extern "system" fn(*mut sys::IUnknown, *const sys::Guid, *mut *mut c_void) -> i32,
-    add_ref: unsafe extern "system" fn(*mut sys::IUnknown) -> u32,
-    release: unsafe extern "system" fn(*mut sys::IUnknown) -> u32,
-    set_handler: unsafe extern "system" fn(*mut Application, *mut sys::IAvnControl, *mut Handler) -> i32,
-    complete: unsafe extern "system" fn(*mut Application, i64, *const u16) -> i32,
-    cancel: unsafe extern "system" fn(*mut Application, i64) -> i32,
-}
-
-#[repr(C)]
-struct Application {
-    vtable: *const ApplicationVtbl,
-}
-
-// SAFETY: IAvnApplication12 has an IUnknown prefix.
-unsafe impl sys::ComInterface for Application {
-    const IID: sys::Guid = APPLICATION_IID;
-}
 
 #[repr(C)]
 struct HandlerVtbl {
@@ -200,7 +174,7 @@ struct CompletionCleanup {
 }
 
 struct Coordinator {
-    application: sys::ComPtr<Application>,
+    application: sys::ComPtr<sys::IAvnApplication>,
     scope: AppScope,
     pending: Mutex<HashMap<i64, Pending>>,
     suspended: AtomicBool,
@@ -299,20 +273,6 @@ fn coordinator() -> io::Result<Arc<Coordinator>> {
     })?.ok_or_else(|| io::Error::other("macOS file-drag coordination is not installed"))
 }
 
-fn open_application() -> io::Result<(sys::Host, sys::ComPtr<Application>)> {
-    let path = rustolonia::discover_host_path().map_err(io::Error::other)?;
-    let host = sys::Host::load(path).map_err(io::Error::other)?;
-    let application = host.activation_factory().and_then(|factory| factory.create_application()).map_err(io::Error::other)?;
-    let application = application.query_interface::<Application>().map_err(|error| {
-        if error.0 == sys::E_NOINTERFACE {
-            io::Error::other("the Rustolonia host does not support macOS file dragging")
-        } else {
-            io::Error::other(format!("could not initialize macOS file dragging: {error}"))
-        }
-    })?;
-    Ok((host, application))
-}
-
 /// Run only in a dedicated package-probe process.
 pub(crate) fn check_native_companion() -> io::Result<()> {
     let host = rustolonia::discover_host_path().map_err(io::Error::other)?;
@@ -327,8 +287,8 @@ pub(crate) fn check_native_companion() -> io::Result<()> {
 
 /// Run in a separate package-probe process from the native companion probe.
 pub(crate) fn check_host_abi() -> io::Result<()> {
-    let (_host, _application) = open_application()?;
-    Ok(())
+    let (_host, application) = crate::mac_host::open_application()?;
+    crate::mac_host::check_invalid_token_rejected(application.cancel_file_drag(0), "file-drag host ABI")
 }
 
 pub(crate) fn install(scope: &AppScope) -> io::Result<()> {
@@ -338,7 +298,7 @@ pub(crate) fn install(scope: &AppScope) -> io::Result<()> {
     if COORDINATOR.with(|slot| slot.borrow().is_some()) {
         return Err(io::Error::other("macOS file dragging is already installed"));
     }
-    let (host, application) = open_application()?;
+    let (host, application) = crate::mac_host::open_application()?;
     COORDINATOR.with(|slot| *slot.borrow_mut() = Some(Arc::new(Coordinator {
         application,
         scope: scope.clone(),
@@ -382,20 +342,11 @@ fn finish_completion(coordinator: Arc<Coordinator>, mut cleanup: CompletionClean
 
 impl Coordinator {
     fn set_handler(&self, control: &sys::ComPtr<sys::IAvnControl>, handler: Option<&sys::ComPtr<Handler>>) -> io::Result<()> {
-        // SAFETY: both owned interfaces are live, and this method is called on the UI thread.
-        let result = unsafe {
-            let application = self.application.as_raw();
-            ((*(*application).vtable).set_handler)(
-                application,
-                control.as_raw(),
-                handler.map_or(ptr::null_mut(), sys::ComPtr::as_raw),
-            )
-        };
-        if result < 0 {
-            Err(io::Error::other(format!("could not change a macOS file-drag handler: {}", sys::Error(result))))
-        } else {
-            Ok(())
-        }
+        let handler = handler.map(|handler| handler.query_interface::<sys::IAvnFileDragHandler>())
+            .transpose()
+            .map_err(|error| io::Error::other(format!("could not expose the macOS file-drag handler: {error}")))?;
+        self.application.set_file_drag_handler(control, handler.as_ref())
+            .map_err(|error| io::Error::other(format!("could not change a macOS file-drag handler: {error}")))
     }
 
     fn has_tile(&self, tile: u64) -> bool {
@@ -683,14 +634,8 @@ pub(crate) fn preparation_finished(token: i64, result: Result<Prepared, String>)
         let Some(transfer) = pending.get_mut(&token).filter(|transfer| !transfer.completed) else { return };
         transfer.prepared = Some(prepared);
     }
-    // SAFETY: the application is live, the token is pending, and the host
-    // copies the NUL-terminated UTF-16 payload before returning.
-    let result = unsafe {
-        let application = coordinator.application.as_raw();
-        ((*(*application).vtable).complete)(application, token, urls.as_ptr())
-    };
-    if result < 0 {
-        fail_preparation(&coordinator, token, format!("could not start the file drag: {}", sys::Error(result)));
+    if let Err(error) = coordinator.application.complete_file_drag(token, &urls) {
+        fail_preparation(&coordinator, token, format!("could not start the file drag: {error}"));
     }
 }
 
@@ -699,13 +644,10 @@ fn fail_preparation(coordinator: &Coordinator, token: i64, error: String) {
         return;
     }
     crate::app::report_library_drag_error(format!("File drag failed: {error}"));
-    // SAFETY: this is outside the host callback on the UI thread.
-    let result = unsafe {
-        let application = coordinator.application.as_raw();
-        ((*(*application).vtable).cancel)(application, token)
-    };
-    if result < 0 && lock_pending(coordinator).contains_key(&token) {
-        crate::shutdown_ui_macos::report(&format!("could not cancel the failed library drag: {}", sys::Error(result)));
+    if let Err(error) = coordinator.application.cancel_file_drag(token) {
+        if lock_pending(coordinator).contains_key(&token) {
+            crate::shutdown_ui_macos::report(&format!("could not cancel the failed library drag: {error}"));
+        }
     }
 }
 
@@ -792,8 +734,8 @@ mod tests {
     fn callback_supports_both_interfaces_and_balances_references() {
         let callback = handler(Weak::new(), 7, PathBuf::from("/capture.png"), Arc::new(AtomicI64::new(0)));
         let unknown = callback.query_interface::<sys::IUnknown>().unwrap();
-        let same = unknown.query_interface::<Handler>().unwrap();
-        assert_eq!(callback.as_raw(), same.as_raw());
+        let same = unknown.query_interface::<sys::IAvnFileDragHandler>().unwrap();
+        assert_eq!(callback.as_raw().cast::<sys::IAvnFileDragHandler>(), same.as_raw());
         assert_eq!(unsafe { (*callback.as_raw()).references.load(Ordering::Relaxed) }, 3);
         drop(same);
         drop(unknown);

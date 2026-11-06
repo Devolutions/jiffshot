@@ -735,8 +735,12 @@ pub(super) fn check_application_name() -> Result<(), String> {
     }
     let hide = submenu.itemWithTitle(&NSString::from_str("Hide Jiffshot")).ok_or("Hide Jiffshot is unavailable")?;
     let quit = submenu.itemWithTitle(&NSString::from_str("Quit")).ok_or("Quit is unavailable")?;
-    if hide.keyEquivalent().to_string() != "h" || hide.action().is_none()
-        || quit.keyEquivalent().to_string() != "q" || quit.action().is_none()
+    if hide.keyEquivalent().to_string() != "h"
+        || hide.keyEquivalentModifierMask() != NSEventModifierFlags::Command
+        || hide.action().is_none()
+        || quit.keyEquivalent().to_string() != "q"
+        || quit.keyEquivalentModifierMask() != NSEventModifierFlags::Command
+        || quit.action().is_none()
     {
         return Err("the application menu shortcuts or actions changed".into());
     }
