@@ -647,6 +647,34 @@ jobs:
             ditto -c -k --keepParent macos-package/Jiffshot.app "$RUNNER_TEMP/Jiffshot-app.zip"
           fi
 
+      - name: Test macOS application name
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/jiffshot-application-name"
+          standalone="$root/standalone"
+          bundled="$root/bundled"
+          mkdir -p "$standalone"/{library,config,local} "$bundled"/{library,config,local}
+          JIFFSHOT_UITEST="$standalone" JIFFSHOT_UITEST_APP_NAME=1 \
+            JIFFSHOT_LIBRARY="$standalone/library" JIFFSHOT_CONFIG_DIR="$standalone/config" \
+            JIFFSHOT_LOCAL_DIR="$standalone/local" APPDATA="$standalone/config" LOCALAPPDATA="$standalone/local" \
+            "target/${{ matrix.target }}/release/jiffshot"
+          cat "$standalone/ui-log.txt"
+          grep -Fx 'application name: retained after returning to the editor' "$standalone/ui-log.txt"
+          env -u RUSTOLONIA_HOST_LIB open -n -W \
+            --env "JIFFSHOT_UITEST=$bundled" --env JIFFSHOT_UITEST_APP_NAME=1 \
+            --env "JIFFSHOT_LIBRARY=$bundled/library" --env "JIFFSHOT_CONFIG_DIR=$bundled/config" \
+            --env "JIFFSHOT_LOCAL_DIR=$bundled/local" --env "APPDATA=$bundled/config" \
+            --env "LOCALAPPDATA=$bundled/local" \
+            --stdout "$bundled/stdout.txt" --stderr "$bundled/stderr.txt" \
+            "$GITHUB_WORKSPACE/macos-package/Jiffshot.app"
+          cat "$bundled/stdout.txt" "$bundled/stderr.txt" "$bundled/ui-log.txt"
+          grep -Fx 'application name: retained after returning to the editor' "$bundled/ui-log.txt"
+          if grep -q '^FAILED:' "$bundled/ui-log.txt"; then
+            exit 1
+          fi
+
       - name: Notarize the macOS app
         if: steps.signing.outputs.kind == 'unigetui' && steps.signing.outputs.notarize == 'true'
         uses: ./.ci/devolutions-actions/macos-notarize

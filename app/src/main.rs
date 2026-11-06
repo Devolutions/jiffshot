@@ -62,6 +62,8 @@ mod file_drag_macos;
 #[cfg(target_os = "macos")]
 mod library_transfer_macos;
 #[cfg(target_os = "macos")]
+mod mac_host;
+#[cfg(target_os = "macos")]
 mod mac_window;
 #[cfg(target_os = "macos")]
 mod shutdown_ui_macos;

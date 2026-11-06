@@ -3,9 +3,9 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, ProtocolObject, Sel};
 use objc2::{ClassType, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSApplication, NSApplicationWillTerminateNotification, NSBackingStoreType, NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSFont, NSPasteboard, NSStatusWindowLevel, NSTextField, NSWindow, NSWindowStyleMask, NSWindowWillCloseNotification};
+use objc2_app_kit::{NSApplication, NSApplicationWillTerminateNotification, NSBackingStoreType, NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSFont, NSPasteboard, NSRunningApplication, NSStatusWindowLevel, NSTextField, NSWindow, NSWindowStyleMask, NSWindowWillCloseNotification};
 use objc2_core_foundation::CGRect;
-use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventSendOptions, NSDate, NSError, NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventSendOptions, NSDate, NSError, NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -706,6 +706,45 @@ pub(super) fn join_exclusion_probe() -> Result<(), String> {
 fn app() -> Option<(MainThreadMarker, Retained<NSApplication>)> {
     let marker = MainThreadMarker::new()?;
     Some((marker, NSApplication::sharedApplication(marker)))
+}
+
+pub(super) fn check_application_name() -> Result<(), String> {
+    let (_, app) = app().ok_or("application naming must be checked on the main thread")?;
+    let process_name = NSProcessInfo::processInfo().processName().to_string();
+    let running_name = NSRunningApplication::currentApplication()
+        .localizedName()
+        .map(|name| name.to_string());
+    let menu = app.mainMenu().ok_or("the application menu bar is unavailable")?;
+    menu.update();
+    if menu.numberOfItems() == 0 {
+        return Err("the application menu bar is empty".into());
+    }
+    let item = menu.itemAtIndex(0).ok_or("the application menu item is unavailable")?;
+    let submenu = item.submenu().ok_or("the application submenu is unavailable")?;
+    submenu.update();
+    let item_title = item.title().to_string();
+    let menu_title = submenu.title().to_string();
+    if process_name != "Jiffshot"
+        || running_name.as_deref() != Some("Jiffshot")
+        || item_title != "Jiffshot"
+        || menu_title != "Jiffshot"
+    {
+        return Err(format!(
+            "unexpected application names: process={process_name:?}, running={running_name:?}, item={item_title:?}, menu={menu_title:?}"
+        ));
+    }
+    let hide = submenu.itemWithTitle(&NSString::from_str("Hide Jiffshot")).ok_or("Hide Jiffshot is unavailable")?;
+    let quit = submenu.itemWithTitle(&NSString::from_str("Quit")).ok_or("Quit is unavailable")?;
+    if hide.keyEquivalent().to_string() != "h"
+        || hide.keyEquivalentModifierMask() != NSEventModifierFlags::Command
+        || hide.action().is_none()
+        || quit.keyEquivalent().to_string() != "q"
+        || quit.keyEquivalentModifierMask() != NSEventModifierFlags::Command
+        || quit.action().is_none()
+    {
+        return Err("the application menu shortcuts or actions changed".into());
+    }
+    Ok(())
 }
 
 pub(super) fn main_window() -> Option<isize> {

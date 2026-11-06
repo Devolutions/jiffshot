@@ -12,37 +12,12 @@ use std::ptr;
 use std::sync::atomic::{fence, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
-const APPLICATION_IID: sys::Guid = sys::Guid {
-    data1: 0x6B2E8F10,
-    data2: 0x4C91,
-    data3: 0x4E3A,
-    data4: [0x9A, 0x77, 0x1F, 0x0C, 0x2B, 0x3A, 0x4D, 0xA4],
-};
 const HANDLER_IID: sys::Guid = sys::Guid {
     data1: 0x6B2E8F10,
     data2: 0x4C91,
     data3: 0x4E3A,
     data4: [0x9A, 0x77, 0x1F, 0x0C, 0x2B, 0x3A, 0x4D, 0xA5],
 };
-
-#[repr(C)]
-struct ApplicationVtbl {
-    query_interface: unsafe extern "system" fn(*mut sys::IUnknown, *const sys::Guid, *mut *mut c_void) -> i32,
-    add_ref: unsafe extern "system" fn(*mut sys::IUnknown) -> u32,
-    release: unsafe extern "system" fn(*mut sys::IUnknown) -> u32,
-    set_handler: unsafe extern "system" fn(*mut Application, *mut Handler) -> i32,
-    complete: unsafe extern "system" fn(*mut Application, i64, i32) -> i32,
-}
-
-#[repr(C)]
-struct Application {
-    vtable: *const ApplicationVtbl,
-}
-
-// SAFETY: IAvnApplication11 has an IUnknown prefix.
-unsafe impl sys::ComInterface for Application {
-    const IID: sys::Guid = APPLICATION_IID;
-}
 
 #[repr(C)]
 struct HandlerVtbl {
@@ -168,7 +143,7 @@ impl Pending {
 }
 
 struct Coordinator {
-    application: sys::ComPtr<Application>,
+    application: sys::ComPtr<sys::IAvnApplication>,
     scope: AppScope,
     pending: Mutex<Pending>,
     _host: sys::Host,
@@ -188,20 +163,6 @@ fn lock_pending(pending: &Mutex<Pending>) -> MutexGuard<'_, Pending> {
 thread_local! {
     static COORDINATOR: RefCell<Option<Arc<Coordinator>>> = const { RefCell::new(None) };
     static TEST_REQUESTS: RefCell<Vec<(i64, i32)>> = const { RefCell::new(Vec::new()) };
-}
-
-fn open_application() -> io::Result<(sys::Host, sys::ComPtr<Application>)> {
-    let path = rustolonia::discover_host_path().map_err(io::Error::other)?;
-    let host = sys::Host::load(path).map_err(io::Error::other)?;
-    let application = host.activation_factory().and_then(|factory| factory.create_application()).map_err(io::Error::other)?;
-    let application = application.query_interface::<Application>().map_err(|error| {
-        if error.0 == sys::E_NOINTERFACE {
-            io::Error::other("the Rustolonia host does not support deferred macOS termination")
-        } else {
-            io::Error::other(format!("could not initialize macOS termination coordination: {error}"))
-        }
-    })?;
-    Ok((host, application))
 }
 
 fn dl_error() -> String {
@@ -257,8 +218,8 @@ pub(crate) fn check_host() -> io::Result<()> {
     let host = rustolonia::discover_host_path().map_err(io::Error::other)?;
     let directory = host.parent().ok_or_else(|| io::Error::other("the host has no parent directory"))?;
     check_native_companion(&directory.join("libAvaloniaNative.dylib"))?;
-    let (_host, _application) = open_application()?;
-    Ok(())
+    let (_host, application) = crate::mac_host::open_application()?;
+    crate::mac_host::check_invalid_token_rejected(application.complete_termination(0, false), "termination host ABI")
 }
 
 impl Coordinator {
@@ -308,17 +269,13 @@ pub(crate) fn install(scope: &AppScope) -> io::Result<()> {
     if COORDINATOR.with(|slot| slot.borrow().is_some()) {
         return Err(io::Error::other("macOS termination is already installed"));
     }
-    let (host, application) = open_application()?;
+    let (host, application) = crate::mac_host::open_application()?;
     let coordinator = Arc::new(Coordinator { application, scope: scope.clone(), pending: Mutex::new(Pending::default()), _host: host });
     let handler = handler(Arc::downgrade(&coordinator));
-    // SAFETY: both interfaces are live and the host retains the handler on success.
-    let result = unsafe {
-        let application = coordinator.application.as_raw();
-        ((*(*application).vtable).set_handler)(application, handler.as_raw())
-    };
-    if result < 0 {
-        return Err(io::Error::other(format!("could not install macOS termination coordination: {}", sys::Error(result))));
-    }
+    let handler = handler.query_interface::<sys::IAvnTerminationHandler>()
+        .map_err(|error| io::Error::other(format!("could not expose the macOS termination handler: {error}")))?;
+    coordinator.application.set_termination_handler(Some(&handler))
+        .map_err(|error| io::Error::other(format!("could not install macOS termination coordination: {error}")))?;
     COORDINATOR.with(|slot| *slot.borrow_mut() = Some(coordinator));
     Ok(())
 }
@@ -326,14 +283,8 @@ pub(crate) fn install(scope: &AppScope) -> io::Result<()> {
 pub(crate) fn uninstall() -> io::Result<()> {
     let coordinator = COORDINATOR.with(|slot| slot.borrow().clone())
         .ok_or_else(|| io::Error::other("macOS termination coordination is not installed"))?;
-    // SAFETY: the host interface is live and a null handler unregisters it.
-    let result = unsafe {
-        let application = coordinator.application.as_raw();
-        ((*(*application).vtable).set_handler)(application, ptr::null_mut())
-    };
-    if result < 0 {
-        return Err(io::Error::other(format!("could not remove macOS termination coordination: {}", sys::Error(result))));
-    }
+    coordinator.application.set_termination_handler(None)
+        .map_err(|error| io::Error::other(format!("could not remove macOS termination coordination: {error}")))?;
     COORDINATOR.with(|slot| { slot.borrow_mut().take(); });
     Ok(())
 }
@@ -345,15 +296,8 @@ pub(crate) fn complete(token: i64, accept: bool) -> io::Result<()> {
         return Err(io::Error::other("macOS termination must complete on the UI thread"));
     }
     lock_pending(&coordinator.pending).require(token)?;
-    // SAFETY: the host interface is live, the token is pending, and this is
-    // posted after OnRequested returned to AppKit.
-    let result = unsafe {
-        let application = coordinator.application.as_raw();
-        ((*(*application).vtable).complete)(application, token, i32::from(accept))
-    };
-    if result < 0 {
-        return Err(io::Error::other(format!("could not complete macOS termination: {}", sys::Error(result))));
-    }
+    coordinator.application.complete_termination(token, accept)
+        .map_err(|error| io::Error::other(format!("could not complete macOS termination: {error}")))?;
     lock_pending(&coordinator.pending).token = None;
     Ok(())
 }
@@ -364,6 +308,17 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn callback_exposes_the_rustolonia_termination_handler() {
+        let callback = handler(Weak::new());
+        let projected = callback.query_interface::<sys::IAvnTerminationHandler>().unwrap();
+        assert_eq!(callback.as_raw().cast::<sys::IAvnTerminationHandler>(), projected.as_raw());
+        assert_eq!(unsafe { (*callback.as_raw()).references.load(Ordering::Relaxed) }, 2);
+        drop(projected);
+        assert_eq!(unsafe { (*callback.as_raw()).references.load(Ordering::Relaxed) }, 1);
+        assert_eq!(unsafe { requested(callback.as_raw(), 1, 0) }, sys::E_FAIL);
+    }
 
     #[test]
     fn repeated_requests_share_one_pending_token() {
