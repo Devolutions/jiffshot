@@ -447,6 +447,13 @@ impl StagedRecording {
     pub fn publish(mut self) -> io::Result<PathBuf> {
         self.preserve = true;
         let publish = || -> io::Result<PathBuf> {
+            let metadata = std::fs::metadata(&self.path)?;
+            if !metadata.is_file() || metadata.len() == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the recorded video file is empty",
+                ));
+            }
             'candidate: for n in 1u64.. {
                 let path = if n == 1 {
                     self.folder.join(format!("{}.mp4", self.stem))
@@ -487,7 +494,17 @@ impl StagedRecording {
     /// On failure, the staged recording is kept for recovery.
     pub fn publish_to(mut self, destination: &Path) -> io::Result<PathBuf> {
         self.preserve = true;
-        match rename_recording_exclusively(&self.path, destination) {
+        let publish = || -> io::Result<()> {
+            let metadata = std::fs::metadata(&self.path)?;
+            if !metadata.is_file() || metadata.len() == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the recorded video file is empty",
+                ));
+            }
+            rename_recording_exclusively(&self.path, destination)
+        };
+        match publish() {
             Ok(()) => {
                 let directory = self.path.parent().expect("a staged recording has a parent");
                 if let Err(error) = std::fs::remove_dir(directory) {
@@ -974,6 +991,17 @@ mod tests {
         let error = staging.publish().unwrap_err();
         assert!(error.to_string().contains("temporary location"));
         assert_eq!(std::fs::read(&recoverable).unwrap(), b"recoverable");
+
+        let empty = library.stage_recording_at((2000, 1, 2, 3, 4, 6)).unwrap();
+        std::fs::write(empty.path(), b"").unwrap();
+        assert_eq!(empty.publish().unwrap_err().kind(), io::ErrorKind::InvalidData);
+        let empty_exact = StagedRecording::for_destination(&root.join("empty.mp4")).unwrap();
+        std::fs::write(empty_exact.path(), b"").unwrap();
+        assert_eq!(
+            empty_exact.publish_to(&root.join("empty.mp4")).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(!root.join("empty.mp4").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -36,13 +36,20 @@ pub fn show_protected(scope: &AppScope, window: &Window, click_through: bool) ->
             scope.set_transparent(window, true).map_err(io::Error::other)?;
             window.set_opacity(0.0).map_err(io::Error::other)?;
             window.set_enabled(false).map_err(io::Error::other)?;
-            window.set_position((-32000, -32000)).map_err(io::Error::other)?;
+            let pre_hwnd = handle(scope, window);
+            if let Some(native) = crate::mac_window::window(pre_hwnd) {
+                native.setAlphaValue(0.0);
+                native.setIgnoresMouseEvents(true);
+            } else {
+                window.set_position((-32000, -32000)).map_err(io::Error::other)?;
+            }
         }
         window.show().map_err(io::Error::other)?;
         let hwnd = handle(scope, window);
         let native = crate::mac_window::window(hwnd).ok_or_else(|| io::Error::other("the native capture window is unavailable"))?;
         if !capturable() {
             native.setAlphaValue(0.0);
+            window.set_position((-32000, -32000)).map_err(io::Error::other)?;
         }
         crate::mac_window::prepare(hwnd, click_through).map_err(io::Error::other)?;
         if capturable() {
@@ -118,14 +125,18 @@ pub fn reveal_when_excluded(
                 let Some(native) = crate::mac_window::window(hwnd) else {
                     break Err("the native capture window closed or was recreated".to_owned());
                 };
-                if let Err(error) = position() {
-                    break Err(error);
-                }
                 if let Err(error) = target.set_enabled(true) {
                     break Err(format!("could not enable the capture window: {error}"));
                 }
                 if let Err(error) = target.set_opacity(1.0) {
                     break Err(format!("could not reveal the capture window: {error}"));
+                }
+                if let Err(error) = crate::mac_window::prepare(hwnd, true) {
+                    break Err(error);
+                }
+                native.setAlphaValue(0.0);
+                if let Err(error) = position() {
+                    break Err(error);
                 }
                 native.setAlphaValue(1.0);
                 native.setIgnoresMouseEvents(click_through);
@@ -206,6 +217,25 @@ pub fn mapped_frame_bounds(mapping: CaptureMapping, scale: f64) -> io::Result<[f
     Ok(mapped_frame_at_height(mapping, scale, screen::main_height_points())?.desktop)
 }
 
+fn probe_frame_size(width: f64, height: f64) -> (f64, f64) {
+    let probe_size = |extent: f64| if extent > 1.5 { (extent - 1.0).max(1.0) } else { extent + 1.0 };
+    (probe_size(width), probe_size(height))
+}
+
+/// Moves `window` to `(x, y)` on its target display at a distinct probe size
+/// before applying `(width, height)`, so a cross-display backing-scale change
+/// in `viewDidChangeBackingProperties` cannot pre-populate `AvnView._lastPixelSize`
+/// and suppress `TopLevelEvents->Resized` during the final `setFrame:display:`.
+fn set_frame_on_screen(window: &objc2_app_kit::NSWindow, x: f64, y: f64, width: f64, height: f64) {
+    let (probe_width, probe_height) = probe_frame_size(width, height);
+    let probe = NSRect::new(
+        NSPoint::new(x, y),
+        NSSize::new(probe_width, probe_height),
+    );
+    window.setFrame_display(probe, false);
+    window.setFrame_display(NSRect::new(NSPoint::new(x, y), NSSize::new(width, height)), true);
+}
+
 /// Encloses a mapped image; its surface must be positioned within this frame.
 pub fn place_mapped_checked(handle: isize, mapping: CaptureMapping, scale: f64, expected: [f64; 4], show: bool) -> io::Result<()> {
     let frame = mapped_frame_at_height(mapping, scale, screen::main_height_points())?;
@@ -216,7 +246,7 @@ pub fn place_mapped_checked(handle: isize, mapping: CaptureMapping, scale: f64, 
     let [x, y, width, height] = frame.appkit;
     // At normal window levels AppKit clamps smaller frames below the menu bar.
     window.setLevel(NSStatusWindowLevel);
-    window.setFrame_display(NSRect::new(NSPoint::new(x, y), NSSize::new(width, height)), true);
+    set_frame_on_screen(&window, x, y, width, height);
     let actual = window.frame();
     if (actual.origin.x - x).abs() > 0.000_001
         || (actual.origin.y - y).abs() > 0.000_001
@@ -240,12 +270,9 @@ fn place_points_checked(handle: isize, x: f64, y: f64, width: f64, height: f64, 
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid capture window geometry"));
     }
     let window = crate::mac_window::window(handle).ok_or_else(|| io::Error::other("the native capture window is unavailable"))?;
-    let frame = NSRect::new(
-        NSPoint::new(x, screen::main_height_points() - y - height),
-        NSSize::new(width, height),
-    );
+    let y = screen::main_height_points() - y - height;
     window.setLevel(NSStatusWindowLevel);
-    window.setFrame_display(frame, true);
+    set_frame_on_screen(&window, x, y, width, height);
     if show {
         window.orderFrontRegardless();
     }
@@ -334,6 +361,16 @@ mod tests {
             assert!(frame.desktop[0] <= bounds[0] && frame.desktop[1] <= bounds[1]);
             assert!(frame.desktop[2] >= bounds[2] && frame.desktop[3] >= bounds[3]);
             assert!(frame.appkit.iter().all(|value| value.fract() == 0.0));
+        }
+    }
+
+    #[test]
+    fn screen_placement_probe_sizes_remain_positive_and_distinct() {
+        for (width, height) in [(1.0, 1.0), (1.5, 2.0), (320.0, 200.0), (1560.0, 862.0)] {
+            let (probe_w, probe_h) = probe_frame_size(width, height);
+            assert!(probe_w >= 1.0 && probe_h >= 1.0);
+            assert!((probe_w - width).abs() >= 0.5);
+            assert!((probe_h - height).abs() >= 0.5);
         }
     }
 

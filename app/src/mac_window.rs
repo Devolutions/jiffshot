@@ -4,7 +4,10 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSApplication, NSWindow, NSWindowCollectionBehavior, NSWindowWillCloseNotification, NSStatusWindowLevel};
+use objc2_app_kit::{
+    NSApplication, NSColor, NSStatusWindowLevel, NSWindow, NSWindowCollectionBehavior,
+    NSWindowWillCloseNotification,
+};
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol};
 use rustolonia::AppScope;
 use std::cell::RefCell;
@@ -59,6 +62,8 @@ pub fn protection(handle: isize) -> Option<jiffshot_capture::screen::ExclusionTi
 /// applications without activating it. Click-through is used for borders.
 pub fn prepare(handle: isize, click_through: bool) -> Result<(), String> {
     let window = window(handle).ok_or("the native window is no longer available")?;
+    window.setOpaque(false);
+    window.setBackgroundColor(Some(&NSColor::clearColor()));
     window.setIgnoresMouseEvents(click_through);
     window.setHidesOnDeactivate(false);
     window.setCollectionBehavior(
