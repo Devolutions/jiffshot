@@ -357,13 +357,15 @@ fn help_menu(ctx: &Ctx) -> MenuEntry {
 /// Shows a dialog over the editor window.
 fn with_owner(scope: &AppScope, show: fn(&AppScope, &Window) -> Result<()>) {
     if let Some(owner) = scope.main_window() {
-        let result = (|| {
-            #[cfg(target_os = "macos")]
-            if !owner.get_is_visible()? {
+        #[cfg(target_os = "macos")]
+        let result = owner.get_is_visible().and_then(|visible| {
+            if !visible {
                 owner.show()?;
             }
             show(scope, &owner)
-        })();
+        });
+        #[cfg(not(target_os = "macos"))]
+        let result = show(scope, &owner);
         if let Err(error) = result {
             eprintln!("could not show the dialog: {error}");
         }
