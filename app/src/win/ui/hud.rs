@@ -17,8 +17,8 @@ pub(in crate::ui) mod native;
 use hud_toolbar::RecordingToolbar;
 use jiffshot_capture::Rect;
 use rustolonia::{
-    size_to_content, AppScope, Border, Brush, Button, Color, Effect, EventSubscription, FontWeight, HorizontalAlignment, Orientation, Result, StackPanel,
-    TextBlock, TextWrapping, ThemeVariantScope, VerticalAlignment, Window, WindowDecorations,
+    size_to_content, AppScope, Arc as ArcShape, Border, Brush, Button, Color, Effect, Ellipse, EventSubscription, FontWeight, Grid, HorizontalAlignment, Orientation,
+    PenLineCap, Result, StackPanel, TextAlignment, TextBlock, TextWrapping, ThemeVariantScope, VerticalAlignment, Window, WindowDecorations,
 };
 use serde_json::Value;
 use std::cell::RefCell;
@@ -114,6 +114,7 @@ struct Hud {
     panels: HashMap<u64, HudPanel>,
     borders: HashMap<u64, HudBorder>,
     toolbars: HashMap<u64, RecordingToolbar>,
+    countdowns: HashMap<u64, HudCountdown>,
 }
 
 pub(super) fn has_recording_toolbar(state: &Value) -> bool {
@@ -155,7 +156,7 @@ fn area_of(e: &Value) -> Rect {
     Rect::new(v(0), v(1), v(2), v(3))
 }
 
-/// `{"panels":[{"id","area":[x,y,w,h],"status","buttons":[…]} or {"id","area","toolbar":{…}}],"borders":[{"id","area"}]}`.
+/// `{"panels":[{"id","area":[x,y,w,h],"status","buttons":[…]} or {"id","area","toolbar":{…}}],"borders":[{"id","area"}],"countdowns":[{"id","area","title","seconds","progress"}]}`.
 fn apply(scope: &AppScope, json: &str) {
     let _t = crate::trace::span("hud");
     if json.is_empty() {
@@ -265,6 +266,37 @@ fn apply(scope: &AppScope, json: &str) {
         for id in gone {
             if let Some(border) = hud.borders.remove(&id) {
                 closing.push(Box::new(move || border.close()));
+            }
+        }
+    });
+
+    let mut live = Vec::new();
+    for c in list("countdowns") {
+        let Some(id) = c.get("id").and_then(Value::as_u64) else { continue };
+        live.push(id);
+        let seconds = c.get("seconds").and_then(Value::as_u64).unwrap_or(0);
+        let progress = c.get("progress").and_then(Value::as_f64).unwrap_or(0.0);
+        if HUD.with(|h| h.borrow().countdowns.get(&id).map(|countdown| countdown.update(seconds, progress)).is_some()) {
+            continue;
+        }
+        let title = c.get("title").and_then(Value::as_str).unwrap_or_default();
+        match HudCountdown::new(scope, area_of(&c), title, seconds, progress) {
+            Ok(countdown) => {
+                HUD.with(|h| h.borrow_mut().countdowns.insert(id, countdown));
+            }
+            Err(error) => {
+                eprintln!("hud: no countdown: {error:?}");
+                #[cfg(target_os = "macos")]
+                report_failure(format!("Could not show the capture countdown: {error}"));
+            }
+        }
+    }
+    HUD.with(|h| {
+        let mut hud = h.borrow_mut();
+        let gone: Vec<u64> = hud.countdowns.keys().filter(|id| !live.contains(id)).copied().collect();
+        for id in gone {
+            if let Some(countdown) = hud.countdowns.remove(&id) {
+                closing.push(Box::new(move || countdown.close()));
             }
         }
     });
@@ -486,6 +518,156 @@ impl HudBorder {
     fn close(&self) {
         let _ = self.window.close();
     }
+}
+
+/// The countdown before a delayed capture: a ring that empties around the
+/// seconds left, with what is about to happen below. Click-through, centred
+/// on the area (or its screen, for a point).
+struct HudCountdown {
+    window: Window,
+    number: TextBlock,
+    ring: ArcShape,
+    _subscriptions: Vec<EventSubscription>,
+}
+
+impl HudCountdown {
+    const WIDTH: f64 = 196.0;
+    const RING: f64 = 116.0;
+    const STROKE: f64 = 7.0;
+
+    fn new(scope: &AppScope, area: Rect, title: &str, seconds: u64, progress: f64) -> HudResult<Self> {
+        let track = Ellipse::new()?
+            .width(Self::RING)?
+            .height(Self::RING)?
+            .stroke(Brush::solid(Color::rgb(0x3A, 0x3C, 0x42)))?
+            .stroke_thickness(Self::STROKE)?;
+        let ring = ArcShape::new()?
+            .width(Self::RING)?
+            .height(Self::RING)?
+            .stroke(Brush::solid(Self::ring_color(seconds)))?
+            .stroke_thickness(Self::STROKE)?
+            .stroke_line_cap(PenLineCap::Round)?
+            .start_angle(-90.0)?
+            .sweep_angle(Self::sweep(progress))?;
+        let number = TextBlock::new()?
+            .text(seconds.to_string())?
+            .font_size(50.0)?
+            .font_weight(FontWeight::Bold)?
+            .foreground(Brush::solid(Color::rgb(255, 255, 255)))?
+            .horizontal_alignment(HorizontalAlignment::Center)?
+            .vertical_alignment(VerticalAlignment::Center)?;
+        let dial = Grid::new()?
+            .width(Self::RING)?
+            .height(Self::RING)?
+            .horizontal_alignment(HorizontalAlignment::Center)?
+            .child(&track)?
+            .child(&ring)?
+            .child(&number)?;
+        let caption = TextBlock::new()?
+            .text(title)?
+            .font_size(14.0)?
+            .font_weight(FontWeight::DemiBold)?
+            .text_wrapping(TextWrapping::Wrap)?
+            .text_alignment(TextAlignment::Center)?
+            .foreground(Brush::solid(Color::rgb(0xE8, 0xEA, 0xED)))?;
+        let hint = TextBlock::new()?
+            .text("Esc to cancel")?
+            .font_size(12.0)?
+            .text_alignment(TextAlignment::Center)?
+            .foreground(Brush::solid(Color::rgb(0x9A, 0xA0, 0xA6)))?;
+        let card = Border::new()?
+            .background(Brush::new(Color::rgb(0x23, 0x24, 0x28), 0.94))?
+            .border_brush(Brush::solid(Color::rgb(0x3A, 0x3C, 0x42)))?
+            .border_thickness(1.0)?
+            .corner_radius(18.0)?
+            .padding((16.0, 18.0, 16.0, 14.0))?
+            .child(Some(&StackPanel::new()?.spacing(10.0)?.child(&dial)?.child(&caption)?.child(&hint)?))?;
+        let themed = ThemeVariantScope::new()?.requested_theme_variant("Dark")?.child(Some(&card))?;
+        let window = hud_window()?
+            .width(Self::WIDTH)?
+            .size_to_content(size_to_content::HEIGHT)?
+            .background(Brush::solid(Color::new(0, 0, 0, 0)))?
+            .content(Some(&themed))?;
+        scope.set_transparent(&window, true)?;
+        scope.set_topmost(&window, true)?;
+        let mut subscriptions = Vec::new();
+        let placed = window.clone();
+        let placement_scope = scope.clone();
+        #[cfg(target_os = "macos")]
+        let placement_ready = Arc::new(AtomicBool::new(false));
+        #[cfg(target_os = "macos")]
+        let event_ready = placement_ready.clone();
+        subscriptions.push(window.subscribe_size_changed(move |e| {
+            #[cfg(target_os = "macos")]
+            if !event_ready.load(Ordering::Acquire) {
+                return;
+            }
+            if let Err(error) = place_centred(&placement_scope, &placed, area, (e.new_size.width, e.new_size.height)) {
+                eprintln!("hud: placing a window failed: {error}");
+            }
+        })?);
+        #[cfg(windows)]
+        {
+            window.show()?;
+            native::prepare(scope, &window, true);
+        }
+        #[cfg(target_os = "macos")]
+        let positioned = window.clone();
+        #[cfg(target_os = "macos")]
+        let position_scope = scope.clone();
+        #[cfg(target_os = "macos")]
+        show_protected(
+            scope,
+            &window,
+            true,
+            move || {
+                placement_ready.store(true, Ordering::Release);
+                if let Some(size) = native::size(&position_scope, &positioned)? {
+                    place_centred(&position_scope, &positioned, area, size).map_err(std::io::Error::other)?;
+                }
+                Ok(())
+            },
+            |_| {},
+        )?;
+        Ok(HudCountdown { window, number, ring, _subscriptions: subscriptions })
+    }
+
+    fn sweep(progress: f64) -> f64 {
+        360.0 * progress.clamp(0.0, 1.0)
+    }
+
+    /// Blue, turning amber for the last second.
+    fn ring_color(seconds: u64) -> Color {
+        if seconds <= 1 {
+            Color::rgb(0xF2, 0xA9, 0x3B)
+        } else {
+            Color::rgb(0x4C, 0x8D, 0xF6)
+        }
+    }
+
+    fn update(&self, seconds: u64, progress: f64) {
+        let _ = self.number.set_text(seconds.to_string());
+        let _ = self.ring.set_sweep_angle(Self::sweep(progress));
+        let _ = self.ring.set_stroke(Brush::solid(Self::ring_color(seconds)));
+    }
+
+    fn close(&self) {
+        let _ = self.window.close();
+    }
+}
+
+/// Moves `window`, `size` DIPs, to the centre of `area` (desktop pixels),
+/// or of its screen when the area is just a point; kept on that screen.
+fn place_centred(_scope: &AppScope, window: &Window, area: Rect, size: (f64, f64)) -> std::result::Result<(), String> {
+    let (work, scale) = native::screen_of(area);
+    let (w, h) = ((size.0 * scale).ceil() as i32, (size.1 * scale).ceil() as i32);
+    let target = if area.width < 16 || area.height < 16 { work } else { area };
+    let x = (target.x + (target.width - w) / 2).clamp(work.x, (work.right() - w).max(work.x));
+    let y = (target.y + (target.height - h) / 2).clamp(work.y, (work.bottom() - h).max(work.y));
+    #[cfg(target_os = "macos")]
+    { native::position(_scope, window, x, y).map_err(|error| error.to_string()) }
+    #[cfg(windows)]
+    { window.set_position((x, y)).map_err(|error| error.to_string()) }
 }
 
 /// Starts following the main view model's signals. Called once, on the UI

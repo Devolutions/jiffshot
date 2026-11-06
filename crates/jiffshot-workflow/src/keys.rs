@@ -66,8 +66,10 @@ pub fn parse(text: &str) -> Option<(HOT_KEY_MODIFIERS, u16)> {
             "alt" | "option" | "opt" | "\u{2325}" => mods |= MOD_ALT,
             "win" | "cmd" | "command" | "\u{2318}" => mods |= MOD_WIN,
             k => {
+                let compact: String = k.chars().filter(|c| !c.is_whitespace()).collect();
                 let vk = match k {
-                    "prtscn" | "printscreen" | "print screen" => VK_SNAPSHOT,
+                    _ if matches!(compact.as_str(), "prtscn" | "prtsc" | "prtscr" | "printscreen" | "printscrn" | "printscr" | "prntscrn" | "prntscr")
+                        => VK_SNAPSHOT,
                     k if k.len() == 1 && k.chars().next().unwrap().is_ascii_alphanumeric() => k.to_ascii_uppercase().as_bytes()[0] as u16,
                     k if k.starts_with('f') && k[1..].parse::<u16>().is_ok_and(|n| (1..=24).contains(&n)) => 0x6F + k[1..].parse::<u16>().unwrap(),
                     _ => return None,
@@ -79,6 +81,44 @@ pub fn parse(text: &str) -> Option<(HOT_KEY_MODIFIERS, u16)> {
         }
     }
     key.map(|k| (mods, k))
+}
+
+/// Writes modifiers and a virtual key the way Jiffshot stores hotkeys
+/// ("Ctrl+Shift+1", "Cmd+Shift+2", "Ctrl+PrtScn"), so that [`parse`] reads
+/// it back. Returns `None` for keys [`parse`] does not support.
+pub fn format(modifiers: HOT_KEY_MODIFIERS, key: u16) -> Option<String> {
+    let name = match key {
+        VK_SNAPSHOT => "PrtScn".to_owned(),
+        k if (b'0' as u16..=b'9' as u16).contains(&k) || (b'A' as u16..=b'Z' as u16).contains(&k) => char::from(k as u8).to_string(),
+        k if (0x70..=0x87).contains(&k) => format!("F{}", k - 0x6F),
+        _ => return None,
+    };
+    let mut text = String::new();
+    for (bit, label) in [(MOD_CONTROL, "Ctrl"), (MOD_ALT, "Alt"), (MOD_SHIFT, "Shift"), (MOD_WIN, if cfg!(target_os = "macos") { "Cmd" } else { "Win" })] {
+        if modifiers & bit != 0 {
+            text.push_str(label);
+            text.push('+');
+        }
+    }
+    text.push_str(&name);
+    Some(text)
+}
+
+/// Rewrites a readable hotkey the way Jiffshot stores it ("ctrl + Print
+/// Screen" becomes "Ctrl+PrtScn"); other text is only trimmed.
+pub fn normalize(text: &str) -> String {
+    parse(text)
+        .and_then(|(modifiers, key)| format(modifiers, key))
+        .unwrap_or_else(|| text.trim().to_owned())
+}
+
+/// Whether two written hotkeys name the same keys ("Ctrl+Print Screen" and
+/// "ctrl+PrtScn" do). Unreadable keys only match the same text.
+pub fn same(a: &str, b: &str) -> bool {
+    match (parse(a), parse(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => a.trim().eq_ignore_ascii_case(b.trim()),
+    }
 }
 
 /// Apple's built-in screenshot shortcuts must remain available.
@@ -150,8 +190,18 @@ mod tests {
         assert_eq!(parse("Ctrl+"), None);
         assert_eq!(parse("Hyper+K"), None);
         assert_eq!(parse("Ctrl+A+B"), None);
+        for alias in ["PrtSc", "Prt Sc", "PrtScr", "Print Scrn", "print screen", "PrintScreen"] {
+            assert_eq!(parse(&format!("Ctrl+{alias}")), Some((MOD_CONTROL, VK_SNAPSHOT)), "{alias}");
+        }
+        assert!(same("Ctrl+Print Screen", "ctrl + PrtScn"));
+        assert!(!same("Ctrl+PrtScn", "Shift+PrtScn"));
+        assert_eq!(format(MOD_SHIFT | MOD_CONTROL, b'1' as u16).as_deref(), Some("Ctrl+Shift+1"));
+        assert_eq!(format(MOD_CONTROL, VK_SNAPSHOT).as_deref(), Some("Ctrl+PrtScn"));
+        assert_eq!(format(0, 0x7A).as_deref(), Some("F11"));
+        assert_eq!(format(0, 0x20), None);
         for key in [CAPTURE, SCREEN, REPEAT].iter().chain(CAPTURE_FALLBACKS) {
             assert_eq!(parse(key.2), Some((key.0, key.1)), "{}", key.2);
+            assert_eq!(parse(&format(key.0, key.1).unwrap()), Some((key.0, key.1)), "{}", key.2);
         }
         #[cfg(windows)]
         assert_eq!(display("Ctrl+PrtScn"), "Ctrl+Print Screen");

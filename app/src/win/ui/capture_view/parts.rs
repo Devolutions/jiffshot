@@ -6,13 +6,14 @@
 
 use rustolonia::{
     AnyEl, AppScope, Button, CheckBox, Color, ComboBox, ComboBoxItem, Control, Dock, DockPanel, El, EventSubscription, FolderPickerOptions, Grid,
-    HorizontalAlignment, NodeRef, NumericUpDown, PickerOutcome, Result, TextBlock, TextBox, TextWrapping, ThemeVariant, Upcast, VerticalAlignment,
+    HorizontalAlignment, Key, NodeRef, NumericUpDown, PickerOutcome, Result, TextBlock, TextBox, TextWrapping, ThemeVariant, Upcast, VerticalAlignment,
     Window, WindowCloseReason,
 };
 use serde::Deserialize;
 use serde_json::Value;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{HWND, RECT};
@@ -159,6 +160,14 @@ pub enum Row {
         #[serde(default)]
         value: String,
     },
+    Hotkey {
+        #[serde(default)]
+        label: String,
+        #[serde(default)]
+        value: String,
+        #[serde(default)]
+        placeholder: String,
+    },
     Note {
         #[serde(default)]
         text: String,
@@ -186,6 +195,8 @@ pub enum Input {
     Check(CheckBox),
     Choice(ComboBox),
     Text(TextBox),
+    /// A recorded hotkey ("Ctrl+PrtScn"), or empty.
+    Hotkey(Arc<Mutex<String>>),
     /// A note in Preferences: `null`, so that values line up with rows.
     Nothing,
 }
@@ -201,6 +212,7 @@ impl Input {
             Input::Check(control) => Value::from(control.get_is_checked().ok().flatten() == Some(true)),
             Input::Choice(control) => Value::from(control.get_selected_index().unwrap_or(0).max(0)),
             Input::Text(control) => Value::from(control.get_text().ok().flatten().unwrap_or_default()),
+            Input::Hotkey(value) => Value::from(value.lock().map(|v| v.clone()).unwrap_or_default()),
             Input::Nothing => Value::Null,
         }
     }
@@ -263,6 +275,10 @@ pub fn row(scope: &AppScope, form: Form, row: &Row, owner: NodeRef<Window>, inpu
             inputs.push(Input::Text(path));
             labeled(scope, form, label, line.upcast())?
         }
+        Row::Hotkey { label, value, placeholder } => {
+            let line = hotkey_field(scope, value, placeholder, inputs, subs)?;
+            labeled(scope, form, label, line.upcast())?
+        }
         Row::Note { text } => {
             if wide {
                 inputs.push(Input::Nothing);
@@ -281,6 +297,130 @@ pub fn row(scope: &AppScope, form: Form, row: &Row, owner: NodeRef<Window>, inpu
     Ok(control)
 }
 
+/// A box that records the hotkey pressed in it, with a Clear button.
+/// Jiffshot's own global hotkeys are off while it has the focus, so that
+/// pressing one records it instead of starting a capture.
+fn hotkey_field(scope: &AppScope, value: &str, placeholder: &str, inputs: &mut Vec<Input>, subs: &Subscriptions) -> Result<DockPanel> {
+    let stored = Arc::new(Mutex::new(value.to_owned()));
+    let placeholder = if placeholder.is_empty() { "None".to_owned() } else { placeholder.to_owned() };
+    let shown = TextBlock::el().text(hotkey_caption(value, &placeholder, false)).build(scope)?;
+    let field = Button::el()
+        .content(AnyEl::from_control(shown.clone()))
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .horizontal_content_alignment(HorizontalAlignment::Left)
+        .tool_tip_tip("Click, then press the keys; Backspace clears")
+        .build(scope)?;
+    let control: &Control = field.upcast_ref();
+    let set = {
+        let (stored, shown, placeholder) = (stored.clone(), shown.clone(), placeholder.clone());
+        move |text: String, focused: bool| {
+            let _ = shown.set_text(hotkey_caption(&text, &placeholder, focused));
+            if let Ok(mut stored) = stored.lock() {
+                *stored = text;
+            }
+        }
+    };
+    let current = {
+        let stored = stored.clone();
+        move || stored.lock().map(|v| v.clone()).unwrap_or_default()
+    };
+    {
+        let (set, current) = (set.clone(), current.clone());
+        subs.keep(control.subscribe_key_down(move |e| {
+            if e.handled {
+                return;
+            }
+            let Ok(key) = Key::try_from(e.key) else { return };
+            match key {
+                Key::Tab | Key::Escape | Key::Return => return,
+                Key::Back | Key::Delete if e.key_modifiers == 0 => set(String::new(), true),
+                _ => match hotkey_text(e.key, e.key_modifiers) {
+                    Some(text) => set(text, true),
+                    None => set(current(), true),
+                },
+            }
+            e.handled = true;
+        })?);
+    }
+    {
+        // Windows reports Print Screen only when it is released.
+        let set = set.clone();
+        subs.keep(control.subscribe_key_up(move |e| {
+            if !e.handled && e.key == Key::Snapshot as i32 {
+                if let Some(text) = hotkey_text(e.key, e.key_modifiers) {
+                    set(text, true);
+                }
+                e.handled = true;
+            }
+        })?);
+    }
+    {
+        let (set, current) = (set.clone(), current.clone());
+        subs.keep(control.subscribe_got_focus(move |_| {
+            set(current(), true);
+            pause_hotkeys(true);
+        })?);
+    }
+    {
+        let (set, current) = (set.clone(), current.clone());
+        subs.keep(control.subscribe_lost_focus(move |_| {
+            set(current(), false);
+            pause_hotkeys(false);
+        })?);
+    }
+    let clear = on_click(Button::el().content("Clear").margin((8.0, 0.0, 0.0, 0.0)).dock_panel_dock(Dock::Right), subs, move |_| set(String::new(), false));
+    inputs.push(Input::Hotkey(stored));
+    DockPanel::el().grid_column(1).child(clear).child(AnyEl::from_control(field)).build(scope)
+}
+
+/// What a hotkey box shows: the hotkey, what an empty one does, or a
+/// prompt while it records.
+fn hotkey_caption(value: &str, placeholder: &str, recording: bool) -> String {
+    match (value.is_empty(), recording) {
+        (false, _) if cfg!(windows) => value.replace("PrtScn", "Print Screen"),
+        (false, _) => value.to_owned(),
+        (true, true) => "Press the keys\u{2026}".to_owned(),
+        (true, false) => placeholder.to_owned(),
+    }
+}
+
+/// The hotkey for an Avalonia key and its modifiers, written the way
+/// Jiffshot stores hotkeys ("Ctrl+Shift+1", "Ctrl+PrtScn"). Letters and
+/// digits need Ctrl, Alt or the Windows (Command) key, so typing is not
+/// taken over; function keys and Print Screen may stand alone.
+pub fn hotkey_text(key: i32, modifiers: i32) -> Option<String> {
+    use rustolonia::key_modifiers::{ALT, CONTROL, META, SHIFT};
+    let d0 = Key::D0 as i32;
+    let a = Key::A as i32;
+    let f1 = Key::F1 as i32;
+    let (name, bare) = match key {
+        k if k == Key::Snapshot as i32 => ("PrtScn".to_owned(), true),
+        k if (d0..=d0 + 9).contains(&k) => (char::from(b'0' + (k - d0) as u8).to_string(), false),
+        k if (a..=a + 25).contains(&k) => (char::from(b'A' + (k - a) as u8).to_string(), false),
+        k if (f1..=f1 + 23).contains(&k) => (format!("F{}", k - f1 + 1), true),
+        _ => return None,
+    };
+    if !bare && modifiers & (CONTROL | ALT | META) == 0 {
+        return None;
+    }
+    let mut text = String::new();
+    for (bit, label) in [(CONTROL, "Ctrl"), (ALT, "Alt"), (SHIFT, "Shift"), (META, if cfg!(target_os = "macos") { "Cmd" } else { "Win" })] {
+        if modifiers & bit != 0 {
+            text.push_str(label);
+            text.push('+');
+        }
+    }
+    text.push_str(&name);
+    Some(text)
+}
+
+/// Turns Jiffshot's global hotkeys off while a hotkey box records, and on.
+pub fn pause_hotkeys(paused: bool) {
+    #[cfg(any(windows, target_os = "macos"))]
+    jiffshot_workflow::capture::pause_hotkeys(paused);
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = paused;
+}
 /// `control` (already in column 1) after its label.
 fn labeled(scope: &AppScope, form: Form, label: &str, control: Control) -> Result<Control> {
     let text = TextBlock::el().text(label.to_owned()).vertical_alignment(VerticalAlignment::Center);
@@ -429,5 +569,32 @@ pub fn set_native_title(hwnd: isize, title: &str) {
 pub fn set_native_title(handle: isize, title: &str) {
     if let Some(window) = crate::mac_window::window(handle) {
         window.setTitle(&objc2_foundation::NSString::from_str(title));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustolonia::key_modifiers::{ALT, CONTROL, META, SHIFT};
+
+    #[test]
+    fn hotkey_text_records_supported_keys() {
+        let win = if cfg!(target_os = "macos") { "Cmd" } else { "Win" };
+        assert_eq!(hotkey_text(Key::Snapshot as i32, CONTROL).as_deref(), Some("Ctrl+PrtScn"));
+        assert_eq!(hotkey_text(Key::Snapshot as i32, 0).as_deref(), Some("PrtScn"));
+        assert_eq!(hotkey_text(Key::D1 as i32, CONTROL | SHIFT).as_deref(), Some("Ctrl+Shift+1"));
+        assert_eq!(hotkey_text(Key::S as i32, SHIFT | ALT | META).as_deref(), Some(format!("Alt+Shift+{win}+S").as_str()));
+        assert_eq!(hotkey_text(Key::F12 as i32, 0).as_deref(), Some("F12"));
+        assert_eq!(hotkey_text(Key::A as i32, 0), None);
+        assert_eq!(hotkey_text(Key::A as i32, SHIFT), None);
+        assert_eq!(hotkey_text(Key::LeftCtrl as i32, CONTROL), None);
+    }
+
+    #[test]
+    fn hotkey_caption_shows_value_placeholder_or_prompt() {
+        assert_eq!(hotkey_caption("", "Default: F1", false), "Default: F1");
+        assert_eq!(hotkey_caption("", "Default: F1", true), "Press the keys\u{2026}");
+        let shown = hotkey_caption("Ctrl+PrtScn", "x", false);
+        assert_eq!(shown, if cfg!(windows) { "Ctrl+Print Screen" } else { "Ctrl+PrtScn" });
     }
 }

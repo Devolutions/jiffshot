@@ -4331,6 +4331,27 @@ fn capture_ux_steps(s: &mut Script) {
         set(k.hud, r#"{"panels":[],"borders":[]}"#.into());
         200
     })
+    .step(move |t| {
+        t.remember_windows();
+        let countdown = serde_json::json!({
+            "panels": [],
+            "borders": [],
+            "countdowns": [{ "id": 9005, "area": [200, 200, 640, 360], "title": "Get ready to capture", "seconds": 3, "progress": 0.72 }],
+        });
+        set(k.hud, countdown.to_string());
+        500
+    })
+    .step(move |t| {
+        let windows = t.new_windows();
+        if windows.is_empty() {
+            t.line("capture countdown: not shown");
+        }
+        for hwnd in windows {
+            t.shot_of(hwnd, "capture-countdown.png");
+        }
+        set(k.hud, r#"{"panels":[],"borders":[],"countdowns":[]}"#.into());
+        200
+    })
     .step(|t| {
         if env("JIFFSHOT_UITEST_KEEP").is_some() {
             run("theme:Dark");

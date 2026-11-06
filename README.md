@@ -133,7 +133,7 @@ The detailed feature list below describes the Windows application. The Linux bui
   - **Open Menus:** Delayed capture mode designed to grab open context menus and dropdowns.
   - **Grab Text (Windows OCR):** Select any area on screen to extract selectable, copyable text instantly.
   - **Step Capture:** Record a numbered click-by-click guide automatically—every click captures a screenshot and places a sequential step badge at the cursor.
-- **Timers, Schedules & Presets:** Delay captures by seconds, run an automatic **time-lapse** (skipping identical frames), schedule a daily capture at a set time (`HH:MM`), or save custom **Presets** with their own global hotkeys. Interval captures use the last area or the screen under the pointer; scheduled captures use the saved area or the screen under the pointer. They bypass the chooser and ignore the preview, clipboard, and cursor switches; the selected image share destination still applies. In Select or Image mode, the red button starts or stops automatic captures; Video mode remains independently available. The window shows active intervals and schedules and lets you stop or cancel them after changing timer modes. Changing the interval updates a running time-lapse.
+- **Timers, Schedules & Presets:** Delay captures by seconds, run an automatic **time-lapse** (skipping identical frames), schedule a daily capture at a set time (`HH:MM`), or save custom **Presets** with their own global hotkeys. On Windows and macOS, a delayed capture shows an on-screen countdown; press **Esc** to cancel it. Interval captures use the last area or the screen under the pointer; scheduled captures use the saved area or the screen under the pointer. They bypass the chooser and ignore the preview, clipboard, and cursor switches; the selected image share destination still applies. In Select or Image mode, the red button starts or stops automatic captures; Video mode remains independently available. The window shows active intervals and schedules and lets you stop or cancel them after changing timer modes. Changing the interval updates a running time-lapse.
 - **Post-Capture Sharing:** Send captures automatically to the clipboard, the editor, a file, email, Microsoft Word, PowerPoint, Excel, OneNote, Paint, any configured external program, or a printer.
 
 <p align="center">
@@ -378,7 +378,7 @@ workflow engine remains in `jiffshot-workflow`; Linux workflows live under
 
 ### Compiling
 
-Jiffshot requires **Rust 1.88+** and uses Rustolonia's `v12.1.3` release: the first build downloads the platform's prebuilt host, verified against the checksums pinned at the tag. No .NET SDK or Rustolonia checkout is required for that build.
+Jiffshot requires **Rust 1.88+** and uses Rustolonia's `v12.1.4` release: the first build downloads the platform's prebuilt host, verified against the checksums pinned at the tag. No .NET SDK or Rustolonia checkout is required for that build.
 
 ```powershell
 cargo run --release -p jiffshot
@@ -571,7 +571,7 @@ rustup target add aarch64-pc-windows-msvc
 cargo build --release -p jiffshot --target aarch64-pc-windows-msvc
 ```
 
-CI (`.github/workflows/ci.yml`) builds and tests Windows x64 and cross-builds Windows ARM64. Linux uses native `ubuntu-24.04` (x64) and `ubuntu-24.04-arm` (ARM64) hosted runners: each runs workspace tests, app Clippy, package-content tests, and portable smoke tests. The exhaustive Linux GUI suites are not run in CI; their scripts remain available under `app/tests` for local runs. Portable and installed-package startup smoke tests remain enabled in CI. Fedora 43 containers on each native runner separately compile and test the Fedora build and RPM. Windows artifacts include portable ZIP, MSI, and MSIX packages for both architectures (`jiffshot-win-x64`, `jiffshot-win-arm64`, and their `-msi` / `-msix` variants). Linux artifacts contain Ubuntu 24.04 tar.gz/DEB packages (`jiffshot-linux-x64`, `jiffshot-linux-arm64`) and separately compiled Fedora 43 RPMs (`jiffshot-linux-x64-rpm`, `jiffshot-linux-arm64-rpm`), with architecture/distro-specific caches. Clean Ubuntu/Fedora containers on both native architectures verify package and installed ELF architecture, checksums, dependency resolution, desktop/MIME registration, isolated graphical startup, and removal without deleting user settings. Release assembly requires all six Linux packages and verifies their builder checksums before collecting them, per-architecture Linux checksums, and `SHA256SUMS.txt`; Windows packages are signed, while Linux packages are currently unsigned. Rustolonia [v12.1.3](https://github.com/Devolutions/rustolonia/releases/tag/v12.1.3) publishes both Linux x64 and ARM64 runtime host assets; this availability alone does not establish a successful native Jiffshot ARM64 build or smoke test. To move to a newer Rustolonia, change the tag on the two lines in `Cargo.toml`'s `[workspace.dependencies]`.
+CI (`.github/workflows/ci.yml`) builds and tests Windows x64 and cross-builds Windows ARM64. Linux uses native `ubuntu-24.04` (x64) and `ubuntu-24.04-arm` (ARM64) hosted runners: each runs workspace tests, app Clippy, package-content tests, and portable smoke tests. The exhaustive Linux GUI suites are not run in CI; their scripts remain available under `app/tests` for local runs. Portable and installed-package startup smoke tests remain enabled in CI. Fedora 43 containers on each native runner separately compile and test the Fedora build and RPM. Windows artifacts include portable ZIP, MSI, and MSIX packages for both architectures (`jiffshot-win-x64`, `jiffshot-win-arm64`, and their `-msi` / `-msix` variants). Linux artifacts contain Ubuntu 24.04 tar.gz/DEB packages (`jiffshot-linux-x64`, `jiffshot-linux-arm64`) and separately compiled Fedora 43 RPMs (`jiffshot-linux-x64-rpm`, `jiffshot-linux-arm64-rpm`), with architecture/distro-specific caches. Clean Ubuntu/Fedora containers on both native architectures verify package and installed ELF architecture, checksums, dependency resolution, desktop/MIME registration, isolated graphical startup, and removal without deleting user settings. Release assembly requires all six Linux packages and verifies their builder checksums before collecting them, per-architecture Linux checksums, and `SHA256SUMS.txt`; Windows packages are signed, while Linux packages are currently unsigned. Rustolonia [v12.1.4](https://github.com/Devolutions/rustolonia/releases/tag/v12.1.4) publishes both Linux x64 and ARM64 runtime host assets; this availability alone does not establish a successful native Jiffshot ARM64 build or smoke test. To move to a newer Rustolonia, change the tag on the two lines in `Cargo.toml`'s `[workspace.dependencies]`, run `cargo update -p rustolonia`, and commit the manifest and lockfile together.
 
 ### Building and Installing Linux Packages
 
@@ -622,6 +622,15 @@ To export a square PNG from the SVG, choose a size from 1 through 4096 pixels:
 
 ```powershell
 cargo run --release -p jiffshot -- --write-logo 512 jiffshot-512.png
+```
+
+The notification-area artwork uses an enlarged version of the same logo. On
+Windows, regenerate the Windows/macOS tray icon and the 32-pixel Linux tray
+image with:
+
+```powershell
+cargo run --release -p jiffshot -- --write-tray-icon assets\jiffshot-tray.ico
+cargo run --release -p jiffshot -- --write-tray-logo 32 assets\jiffshot-tray.png
 ```
 
 ### Building the MSI Installer

@@ -247,16 +247,42 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Whether a hotkey the user chose uses `key`. Chosen
+    /// hotkeys win over defaults, so "Ctrl+PrtScn" can capture even though
+    /// it is the full-screen default.
+    fn chosen(&self, key: &crate::keys::Key) -> bool {
+        [&self.capture_hotkey, &self.screen_hotkey, &self.repeat_hotkey]
+            .into_iter()
+            .chain(self.presets.iter().map(|preset| &preset.hotkey))
+            .filter_map(Option::as_ref)
+            .filter_map(|chosen| crate::keys::parse(chosen))
+            .any(|parsed| parsed == (key.0, key.1))
+    }
+
+    /// The capture hotkey: the chosen one, else the default, else the first
+    /// fallback no other chosen hotkey uses.
     pub fn capture_key(&self) -> &str {
-        self.capture_hotkey.as_deref().unwrap_or(crate::keys::CAPTURE.2)
+        if let Some(key) = self.capture_hotkey.as_deref() {
+            return key;
+        }
+        std::iter::once(&crate::keys::CAPTURE)
+            .chain(crate::keys::CAPTURE_FALLBACKS)
+            .find(|key| !self.chosen(key))
+            .map_or(crate::keys::CAPTURE.2, |key| key.2)
     }
 
-    pub fn screen_key(&self) -> &str {
-        self.screen_hotkey.as_deref().unwrap_or(crate::keys::SCREEN.2)
+    /// The full-screen hotkey; none when another chosen hotkey took its default.
+    pub fn screen_key(&self) -> Option<&str> {
+        self.screen_hotkey.as_deref().or_else(|| {
+            (!self.chosen(&crate::keys::SCREEN)).then_some(crate::keys::SCREEN.2)
+        })
     }
 
-    pub fn repeat_key(&self) -> &str {
-        self.repeat_hotkey.as_deref().unwrap_or(crate::keys::REPEAT.2)
+    /// The repeat hotkey; none when another chosen hotkey took its default.
+    pub fn repeat_key(&self) -> Option<&str> {
+        self.repeat_hotkey.as_deref().or_else(|| {
+            (!self.chosen(&crate::keys::REPEAT)).then_some(crate::keys::REPEAT.2)
+        })
     }
 
     pub fn load() -> Settings {

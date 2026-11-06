@@ -3,7 +3,7 @@
 //!
 //! The model asks with the `prefs` signal ("serial\x1fJSON", from
 //! `crate::prefs::dialog`): the tabs and their rows, in the Capture window's
-//! row kinds (number, check, choice, text, folder, note). OK sends one value
+//! row kinds (number, check, choice, text, folder, hotkey, note). OK sends one value
 //! per row and tab as `prefs-apply:{"capture":[…],…}`. Each request builds a
 //! new dialog, replacing the one showing.
 
@@ -106,6 +106,7 @@ fn show(json: &str) -> Result<()> {
     if let Some(previous) = previous {
         let _ = previous.window.close();
         previous.subs.clear();
+        parts::pause_hotkeys(false);
     }
 
     let subs = Subscriptions::default();
@@ -202,6 +203,8 @@ fn show(json: &str) -> Result<()> {
         )
         .node_ref(window_ref)
         .build(&scope)?;
+    // A hotkey box may still have the focus.
+    subs.keep(window.subscribe_closing(|_| parts::pause_hotkeys(false))?);
 
     // Over the editor when it is showing.
     match scope.main_window().filter(|main| main.get_is_visible().unwrap_or(false)) {
@@ -240,6 +243,7 @@ fn close_later() {
             let _ = open.window.close();
             open.subs.clear();
         }
+        parts::pause_hotkeys(false);
         Ok(())
     });
 }
