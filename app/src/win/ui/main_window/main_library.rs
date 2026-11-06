@@ -195,11 +195,16 @@ pub(super) fn tile(s: MainViewModelSink, theme: Theme, key: u64) -> AnyEl {
         .height(height)
         .with_op(move |_, image| {
             let image = image.clone();
+            let mut loaded = None;
             rustolonia::Effect::new(move || {
                 // Thumbnails that are not there yet show nothing (ThumbnailConverter).
-                let path = fields.with(|f| f.thumbnail.clone());
-                if !path.is_empty() && std::path::Path::new(&path).is_file() {
-                    image.set_source(&path)?;
+                let thumbnail = fields.with(|f| (f.thumbnail.clone(), f.thumbnail_modified));
+                if loaded.as_ref() != Some(&thumbnail)
+                    && !thumbnail.0.is_empty()
+                    && std::path::Path::new(&thumbnail.0).is_file()
+                {
+                    image.set_source(&thumbnail.0)?;
+                    loaded = Some(thumbnail);
                 }
                 Ok(())
             })?;

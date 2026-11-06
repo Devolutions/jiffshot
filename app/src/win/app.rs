@@ -3813,6 +3813,11 @@ impl App {
         let limit = if view.expanded { 600 } else { 120 };
         self.library_selected
             .retain(|p| shown.iter().any(|e| &e.path == p));
+        let mut previous: std::collections::HashMap<PathBuf, library::Item> =
+            std::mem::take(&mut self.library_items)
+                .into_iter()
+                .map(|item| (item.path.clone(), item))
+                .collect();
         self.library_items = shown
             .into_iter()
             .take(limit)
@@ -3821,17 +3826,25 @@ impl App {
                     self.source.as_deref() == Some(e.path.as_path()),
                     self.library_selected.contains(&e.path),
                 );
-                library::Item::new(e, current, selected, view.thumb * 88.0 / 120.0)
+                let mut item = library::Item::new(e, current, selected, view.thumb * 88.0 / 120.0);
+                if let Some(old) = previous.remove(&item.path) {
+                    item.reuse_from(&old);
+                }
+                item
             })
             .collect();
         let filters = library::filters(entries);
         if let Some(sink) = &self.sink {
             #[cfg(target_os = "macos")]
-            crate::file_drag_macos::retire_tiles();
-            let _ = sink.clear_library();
-            for item in &self.library_items {
-                let _ = sink.add_library(item.clone());
-            }
+            crate::file_drag_macos::retain_tiles(
+                &self
+                    .library_items
+                    .iter()
+                    .filter(|item| item.attached_key().is_some())
+                    .map(|item| item.path.clone())
+                    .collect(),
+            );
+            let _ = sink.set_library(self.library_items.clone());
             if self.shown_filters != filters {
                 // A new list clears the box's choice: show it again.
                 self.shown.strings.remove("LibraryFilter");
@@ -4441,9 +4454,8 @@ impl App {
 
     /// A new capture arrived from the capture side (or another launch).
     pub fn incoming(&mut self, path: PathBuf) {
-        self.show_editor();
         self.open_path(&path);
-        self.refresh_library();
+        self.show_editor();
     }
 
     // ---- text recognition -------------------------------------------------

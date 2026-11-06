@@ -21,7 +21,7 @@ pub enum CaptureKind {
     Steps,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureMeta {
     pub kind: CaptureKind,
     /// Screen rectangle that was captured.

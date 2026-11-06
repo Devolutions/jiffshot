@@ -198,6 +198,7 @@ The detailed feature list below describes the Windows application. The Linux bui
 
 - **Searchable Capture Library:** Every capture is stored in `Pictures\Jiffshot` (grouped into `YYYY-MM` folders) alongside a metadata sidecar recording the window title, application process, browser URL, dimensions, timestamp, tags, and pin status.
 - **Instant Filtering & Organization:** Filter by *Images*, *Videos*, *Pinned*, *Today*, *Last 7 days*, *Tagged*, specific applications (`App: ...`), websites (`Site: ...`), or tags (`Tag: ...`). Pin important items to the front, tag or rename captures in place, and select multiple items to combine them into a single image or slideshow. Renaming moves companions along with the capture and refuses to replace existing files; if a partial rename cannot be rolled back, the error identifies the files needing recovery.
+- **Incremental Library Refresh:** Unchanged tiles and thumbnails are retained when a capture arrives or the editor reopens. List changes are published together, and a new capture is opened before refreshing the library.
 - **Copy & Drag Out:** Right-click any capture in the Library or the Recent Captures tray and choose **Copy** to put the image (with its edits) on the clipboard; videos and multiple picked captures are copied as files. Drag captures from the tray or Library straight into other applications such as Explorer, Outlook, Teams, or a browser. On macOS, see the platform notes below.
 - **Editable `.jsd` Documents & Multi-Format Export:** Edits to library captures are saved automatically as non-destructive `.jsd` companion files, so annotations stay movable and editable whenever you reopen a capture. To bound memory use when opening files, an image is limited to 160 MiB and 33.2 megapixels; `.jsd` archives are limited to 256 MiB and 33.2 megapixels total across the background and embedded images. Export flat files to **PNG**, **JPEG**, **PDF**, **BMP**, **GIF**, and **WebP**.
 - **One Preferences Dialog:** Configure Capture behavior, Editor layout and theme, Library location, Share destinations, and global Hotkeys from a single window (`Ctrl+,`).
@@ -677,6 +678,13 @@ cargo test --release --workspace                          # capture side, docume
 ./target/release/jiffshot.exe --selftest DIR                  # overlay logic, offscreen
 ./target/release/jiffshot.exe --record-selftest DIR 4         # records its own test window
 ```
+
+Set `JIFFSHOT_UITEST_LIBRARY_LATENCY=1` with `JIFFSHOT_UITEST` pointing to a scratch
+output folder and `JIFFSHOT_LIBRARY` to an empty folder inside it to check refreshes
+with 120 and 600 visible tiles and delivery of a new capture. Use isolated settings
+and cache directories (`JIFFSHOT_CONFIG_DIR` and `JIFFSHOT_LOCAL_DIR`); the test logs
+timings and asserts that unchanged refreshes rebuild no tiles and capture delivery
+creates only one.
 
 The editor drives its own UI when `JIFFSHOT_UITEST=DIR` is set (with `JIFFSHOT_UITEST_IMAGE`, `JIFFSHOT_UITEST_VIDEO`, an isolated `JIFFSHOT_LIBRARY` and, to leave your settings alone, scratch `APPDATA` and `LOCALAPPDATA`), writing screenshots of every window and `ui-log.txt` to `DIR`. Set `JIFFSHOT_UITEST_CAPTURE_ONLY=1` to check just the Capture window and chooser, or `JIFFSHOT_UITEST_HUD_ONLY=1` to check the recording toolbar, including restoring hidden controls. Set `JIFFSHOT_UITEST_KEEP=1` to leave the Capture window open for inspection. To exercise library edits, set `JIFFSHOT_LIBRARY` to an existing folder inside `DIR`; otherwise those steps are skipped to protect the normal library. `cargo run -p jiffshot-doc --example synthetic -- OUT.png` writes the test image its coordinates assume.
 Set `JIFFSHOT_UITEST_VIDEO_EDIT=1` with a short `JIFFSHOT_UITEST_VIDEO` fixture and an empty scratch library inside `DIR` for the focused multi-cut, undo/redo, playback, automatic-save and subsequent-save checks.

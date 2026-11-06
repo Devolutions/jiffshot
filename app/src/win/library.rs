@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 const THUMB_HEIGHT: u32 = 120;
 
 /// What the library knows about one capture.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub path: PathBuf,
     pub meta: Option<CaptureMeta>,
@@ -215,12 +215,14 @@ pub struct Item {
     new_name: String,
     tag_text: String,
     thumb_height: f64,
+    thumbnail_modified: Arc<Mutex<Option<SystemTime>>>,
     sink: ItemSink,
 }
 
 impl Item {
     pub fn new(entry: Entry, current: bool, selected: bool, thumb_height: f64) -> Item {
         let tags = entry.tags().join(", ");
+        let thumbnail_modified = modified(&thumbnail_path(&entry.path));
         Item {
             path: entry.path.clone(),
             new_name: entry.name(),
@@ -230,8 +232,35 @@ impl Item {
             selected: Arc::new(Mutex::new(selected)),
             unsaved: Arc::new(Mutex::new(false)),
             thumb_height,
+            thumbnail_modified: Arc::new(Mutex::new(thumbnail_modified)),
             sink: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Keeps the attached tile when neither its contents nor its size changed.
+    pub fn reuse_from(&mut self, previous: &Item) {
+        let thumbnail_modified = *self
+            .thumbnail_modified
+            .lock()
+            .expect("thumbnail lock poisoned");
+        let previous_modified = *previous
+            .thumbnail_modified
+            .lock()
+            .expect("thumbnail lock poisoned");
+        if self.entry == previous.entry
+            && self.thumb_height == previous.thumb_height
+            && thumbnail_modified == previous_modified
+        {
+            let current = *self.current.lock().expect("current lock poisoned");
+            let selected = *self.selected.lock().expect("selection lock poisoned");
+            *self = previous.clone();
+            self.set_current(current);
+            self.set_selected(selected);
+        }
+    }
+
+    pub(crate) fn attached_key(&self) -> Option<u64> {
+        self.sink().map(|sink| sink.key())
     }
 
     fn sink(&self) -> Option<LibraryItemViewModelSink> {
@@ -325,7 +354,12 @@ impl LibraryItemViewModel for Item {
         sink.set_thumb_height(self.thumb_height)?;
         let thumb = thumbnail_path(&self.path);
         if thumb.exists() {
-            sink.set_thumbnail(thumb.to_string_lossy())?;
+            let timestamp = modified(&thumb);
+            *self
+                .thumbnail_modified
+                .lock()
+                .expect("thumbnail lock poisoned") = timestamp;
+            sink.set_thumbnail(thumb.to_string_lossy(), timestamp)?;
         }
         *self.sink.lock().unwrap() = Some(sink);
         Ok(())
@@ -495,7 +529,12 @@ pub fn make_thumbnails(items: Vec<Item>) {
             {
                 // Sinks dispatch to the UI thread themselves.
                 if let Some(sink) = item.sink() {
-                    let _ = sink.set_thumbnail(thumb.to_string_lossy());
+                    let timestamp = modified(&thumb);
+                    *item
+                        .thumbnail_modified
+                        .lock()
+                        .expect("thumbnail lock poisoned") = timestamp;
+                    let _ = sink.set_thumbnail(thumb.to_string_lossy(), timestamp);
                 }
             }
         }
@@ -620,6 +659,51 @@ mod tests {
         assert_eq!(
             Item::new(captured, false, false, 88.0).label(),
             "Oct 28 14:15"
+        );
+    }
+
+    #[test]
+    fn unchanged_library_items_reuse_state_but_changed_content_does_not() {
+        let source = entry("capture", 1, None, None, &["docs"], false);
+        let previous = Item::new(source.clone(), false, false, 88.0);
+        previous.set_unsaved(true);
+        let mut unchanged = Item::new(source.clone(), true, true, 88.0);
+        unchanged.reuse_from(&previous);
+        assert!(
+            Arc::ptr_eq(&unchanged.sink, &previous.sink),
+            "retain the attached model"
+        );
+        assert!(*unchanged.current.lock().unwrap());
+        assert!(*unchanged.selected.lock().unwrap());
+        assert!(*unchanged.unsaved.lock().unwrap(), "retain unsaved state");
+
+        let mut changed_tag = source.clone();
+        changed_tag.meta.as_mut().unwrap().tags.push("new".into());
+        let mut changed_file = source.clone();
+        changed_file.modified += Duration::from_secs(1);
+        let mut changed_pin = source.clone();
+        changed_pin.meta.as_mut().unwrap().pinned = true;
+        for changed in [changed_tag, changed_file, changed_pin] {
+            let mut item = Item::new(changed, false, false, 88.0);
+            item.reuse_from(&previous);
+            assert!(
+                !Arc::ptr_eq(&item.sink, &previous.sink),
+                "changed content must refresh"
+            );
+        }
+        let mut resized = Item::new(source.clone(), false, false, 132.0);
+        resized.reuse_from(&previous);
+        assert!(
+            !Arc::ptr_eq(&resized.sink, &previous.sink),
+            "changed tile size must refresh"
+        );
+        let mut thumbnail = Item::new(source, false, false, 88.0);
+        *thumbnail.thumbnail_modified.lock().unwrap() =
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(123));
+        thumbnail.reuse_from(&previous);
+        assert!(
+            !Arc::ptr_eq(&thumbnail.sink, &previous.sink),
+            "overwritten thumbnails must reload"
         );
     }
 

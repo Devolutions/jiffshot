@@ -978,17 +978,15 @@ impl MainViewModelSink {
         let value = value.as_ref().to_owned();
         publish_update(self.fonts, move |list| list.push(value))
     }
-    pub fn add_library(&self, value: impl LibraryItemViewModel) -> Result<()> {
-        Element::add(
+    pub fn set_library(&self, values: Vec<crate::library::Item>) -> Result<()> {
+        Element::replace(
             self.library,
-            value,
+            values,
+            crate::library::Item::attached_key,
             |m| Box::new(m) as Box<dyn LibraryItemViewModel>,
             |m, sink| m.attach(LibraryItemViewModelSink(sink)),
             |m| m.detach(),
         )
-    }
-    pub fn clear_library(&self) -> Result<()> {
-        Element::clear(self.library)
     }
     pub fn add_quick_styles(&self, value: impl QuickStyleViewModel) -> Result<()> {
         Element::add(
@@ -1153,6 +1151,7 @@ pub struct LibraryItemFields {
     pub path_identity: std::path::PathBuf,
     pub label: String,
     pub thumbnail: String,
+    pub thumbnail_modified: Option<std::time::SystemTime>,
     pub is_current: bool,
     pub kind: String,
     pub is_pinned: bool,
@@ -1172,6 +1171,7 @@ impl Default for LibraryItemFields {
             path_identity: std::path::PathBuf::new(),
             label: String::new(),
             thumbnail: String::new(),
+            thumbnail_modified: None,
             is_current: false,
             kind: String::from("Image"),
             is_pinned: false,
@@ -1193,6 +1193,10 @@ pub type LibraryItemItem = Element<LibraryItemFields, dyn LibraryItemViewModel>;
 pub struct LibraryItemViewModelSink(ElementSink<LibraryItemFields>);
 
 impl LibraryItemViewModelSink {
+    pub(crate) fn key(&self) -> u64 {
+        self.0.key()
+    }
+
     pub fn set_path(&self, value: impl Into<String>) -> Result<()> {
         let value = value.into();
         self.0.update(move |f| f.path = value)
@@ -1204,9 +1208,16 @@ impl LibraryItemViewModelSink {
         let value = value.into();
         self.0.update(move |f| f.label = value)
     }
-    pub fn set_thumbnail(&self, value: impl Into<String>) -> Result<()> {
+    pub fn set_thumbnail(
+        &self,
+        value: impl Into<String>,
+        modified: Option<std::time::SystemTime>,
+    ) -> Result<()> {
         let value = value.into();
-        self.0.update(move |f| f.thumbnail = value)
+        self.0.update(move |f| {
+            f.thumbnail = value;
+            f.thumbnail_modified = modified;
+        })
     }
     pub fn set_is_current(&self, value: bool) -> Result<()> {
         self.0.update(move |f| f.is_current = value)

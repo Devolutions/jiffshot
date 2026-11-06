@@ -593,8 +593,8 @@ fn finish_tile(key: u64) {
     }
 }
 
-/// Retire the existing list before its controls are removed or rebuilt.
-pub(crate) fn retire_tiles() {
+/// Retire removed or rebuilt controls, leaving retained tiles registered.
+pub(crate) fn retain_tiles(retained: &std::collections::HashSet<PathBuf>) {
     let coordinator = match coordinator() {
         Ok(coordinator) => coordinator,
         Err(error) => {
@@ -602,7 +602,14 @@ pub(crate) fn retire_tiles() {
             return;
         }
     };
-    let keys = TILES.with(|tiles| tiles.borrow().keys().copied().collect::<Vec<_>>());
+    let keys = TILES.with(|tiles| {
+        tiles
+            .borrow()
+            .iter()
+            .filter(|(_, tile)| !retained.contains(&tile.path))
+            .map(|(key, _)| *key)
+            .collect::<Vec<_>>()
+    });
     for key in keys {
         let control = TILES.with(|tiles| {
             let mut tiles = tiles.borrow_mut();

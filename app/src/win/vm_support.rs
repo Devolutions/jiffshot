@@ -158,6 +158,12 @@ impl<F: 'static> Clone for ElementSink<F> {
 
 impl<F: 'static> Copy for ElementSink<F> {}
 
+impl<F: 'static> ElementSink<F> {
+    pub(crate) fn key(&self) -> u64 {
+        self.key
+    }
+}
+
 impl<F: 'static> std::fmt::Debug for ElementSink<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ElementSink").field("key", &self.key).finish()
@@ -259,6 +265,141 @@ mod tests {
             with_slots(|slots: &mut Vec<(Signal<u8>, u64)>| slots.push((signal, 1)));
         }).join().unwrap();
     }
+
+    #[test]
+    fn library_sized_replacements_retain_identity_and_publish_once() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        struct Model {
+            key: Option<u64>,
+            value: usize,
+            attached: Arc<AtomicUsize>,
+            detached: Arc<AtomicUsize>,
+        }
+
+        fn replace(list: Signal<Vec<Rc<Element<usize, Model>>>>, models: Vec<Model>) {
+            Element::replace_on_ui(
+                list,
+                models,
+                |model| model.key,
+                Box::new,
+                |model, sink| {
+                    model.attached.fetch_add(1, Ordering::Relaxed);
+                    sink.fields.set(model.value);
+                    Ok(())
+                },
+                |model| {
+                    model.detached.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                },
+            );
+        }
+
+        for size in [120, 600] {
+            let attached = Arc::new(AtomicUsize::new(0));
+            let detached = Arc::new(AtomicUsize::new(0));
+            let model = |key, value| Model {
+                key,
+                value,
+                attached: attached.clone(),
+                detached: detached.clone(),
+            };
+            let list = Signal::new(Vec::new());
+            let notifications = Rc::new(Cell::new(0));
+            let observed = notifications.clone();
+            let _effect = Effect::new(move || {
+                list.with(|_| ());
+                observed.set(observed.get() + 1);
+                Ok(())
+            })
+            .expect("observe collection publications");
+            let initial = notifications.get();
+            replace(list, (0..size).map(|i| model(None, i)).collect());
+            assert_eq!(notifications.get() - initial, 1, "initial {size}-item list");
+            assert_eq!(attached.load(Ordering::Relaxed), size);
+            let originals = list.get_untracked();
+            let keys: Vec<_> = originals.iter().map(|item| item.key).collect();
+            let published = notifications.get();
+            for _ in 0..10 {
+                replace(
+                    list,
+                    keys.iter()
+                        .enumerate()
+                        .map(|(i, key)| model(Some(*key), i))
+                        .collect(),
+                );
+            }
+            assert_eq!(
+                notifications.get(),
+                published,
+                "unchanged refresh must not publish"
+            );
+            assert_eq!(
+                attached.load(Ordering::Relaxed),
+                size,
+                "unchanged tiles must not reattach"
+            );
+            assert!(list
+                .get_untracked()
+                .iter()
+                .zip(&originals)
+                .all(|(a, b)| Rc::ptr_eq(a, b)));
+            drop(originals);
+
+            let mut incoming = vec![model(None, size)];
+            incoming.extend(
+                keys.iter()
+                    .take(size - 1)
+                    .enumerate()
+                    .map(|(i, key)| model(Some(*key), i)),
+            );
+            replace(list, incoming);
+            assert_eq!(
+                notifications.get() - published,
+                1,
+                "incoming capture must publish once"
+            );
+            assert_eq!(
+                attached.load(Ordering::Relaxed),
+                size + 1,
+                "only the new tile attaches"
+            );
+            assert_eq!(
+                detached.load(Ordering::Relaxed),
+                1,
+                "the truncated tile detaches"
+            );
+            assert_eq!(list.get_untracked()[0].fields.get_untracked(), size);
+            assert_eq!(list.get_untracked()[1].key, keys[0]);
+
+            let reversed: Vec<_> = list
+                .get_untracked()
+                .iter()
+                .rev()
+                .map(|item| model(Some(item.key), item.fields.get_untracked()))
+                .collect();
+            replace(list, reversed);
+            assert_eq!(
+                attached.load(Ordering::Relaxed),
+                size + 1,
+                "sorting retains tiles"
+            );
+            assert_eq!(
+                list.get_untracked().last().unwrap().fields.get_untracked(),
+                size
+            );
+            replace(list, Vec::new());
+            assert!(list.get_untracked().is_empty());
+            assert_eq!(
+                detached.load(Ordering::Relaxed),
+                size + 1,
+                "clearing detaches every tile"
+            );
+        }
+    }
 }
 
 impl<F: Clone + Default + PartialEq + 'static, M: ?Sized + 'static> Element<F, M> {
@@ -302,5 +443,46 @@ impl<F: Clone + Default + PartialEq + 'static, M: ?Sized + 'static> Element<F, M
             drop(old);
         });
         Ok(())
+    }
+
+    /// Publishes a collection once, retaining the elements whose keys are supplied.
+    pub fn replace<V: Send + 'static>(
+        list: Signal<Vec<Rc<Self>>>,
+        values: Vec<V>,
+        key: fn(&V) -> Option<u64>,
+        boxed: fn(V) -> Box<M>,
+        attach: Attach<M, F>,
+        detach: fn(&mut M) -> Result<()>,
+    ) -> Result<()> {
+        on_ui(move || {
+            Self::replace_on_ui(list, values, key, boxed, attach, detach);
+        });
+        Ok(())
+    }
+
+    fn replace_on_ui<V: Send + 'static>(
+        list: Signal<Vec<Rc<Self>>>,
+        values: Vec<V>,
+        key: fn(&V) -> Option<u64>,
+        boxed: fn(V) -> Box<M>,
+        attach: Attach<M, F>,
+        detach: fn(&mut M) -> Result<()>,
+    ) {
+        let old = list.get_untracked();
+        let mut retained: HashMap<u64, Rc<Self>> = old
+            .iter()
+            .map(|element| (element.key, element.clone()))
+            .collect();
+        let next: Vec<_> = values
+            .into_iter()
+            .map(|value| {
+                key(&value)
+                    .and_then(|key| retained.remove(&key))
+                    .unwrap_or_else(|| Self::make(value, boxed, attach, detach))
+            })
+            .collect();
+        if old.len() != next.len() || old.iter().zip(&next).any(|(a, b)| a.key != b.key) {
+            as_publisher(|| list.set(next));
+        }
     }
 }
