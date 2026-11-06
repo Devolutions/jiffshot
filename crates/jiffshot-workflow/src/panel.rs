@@ -520,6 +520,7 @@ pub struct FieldRow {
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct View {
     pub tab: usize,
+    pub recording: bool,
     pub timing: CaptureTiming,
     pub interval_running: bool,
     pub active_schedule: Option<String>,
@@ -555,6 +556,7 @@ pub fn view(s: &Settings, capture_key: &str, timelapse_running: bool) -> View {
     let timing = capture_timing(s, tab);
     View {
         tab,
+        recording: false,
         timing,
         interval_running: timelapse_running,
         active_schedule: s.schedule.clone(),
@@ -571,12 +573,26 @@ pub fn view(s: &Settings, capture_key: &str, timelapse_running: bool) -> View {
 /// One set of controls whose saved mode decides what the main button does:
 /// select then choose (0), capture an image (1), or record video (2). Ids are
 /// scoped "image:" or "video:" when they only affect one target.
-pub fn unified_view(s: &Settings, capture_key: &str, timelapse_running: bool) -> View {
+pub fn unified_view(
+    s: &Settings,
+    capture_key: &str,
+    timelapse_running: bool,
+    recording: bool,
+) -> View {
     let mode = s.capture_window.tab.min(2);
     let mut view = view(s, capture_key, timelapse_running);
-    view.capture = capture_button(s, mode, capture_key, timelapse_running);
+    view.recording = recording;
+    view.capture = if recording {
+        action(
+            "Stop",
+            "Finish and open the video".into(),
+            "or press Enter".into(),
+        )
+    } else {
+        capture_button(s, mode, capture_key, timelapse_running)
+    };
     let video_area = field_text(s, 2, Field::Selection);
-    if view.timing == CaptureTiming::Manual {
+    if !recording && view.timing == CaptureTiming::Manual {
         let mut notes = Vec::new();
         if mode == 0 {
             view.capture.verb = "Select".into();
@@ -1995,7 +2011,7 @@ mod tests {
 
                 assert_eq!(pick_unified(&mut s, &format!("tab:{target}")), Pick::Changed);
 
-                let view = unified_view(&s, "", false);
+                let view = unified_view(&s, "", false, false);
                 assert_eq!(s.capture_window.tab, target, "{previous} -> {target}");
                 assert_eq!(view.tab, target, "{previous} -> {target}");
                 assert_eq!(view.capture.verb, *verb, "{previous} -> {target}");
@@ -2203,6 +2219,31 @@ mod tests {
         assert_eq!(capture_button(&s, 0, "", false).detail, "Select an area · in 3 s");
         assert_eq!(capture_button(&s, 0, "", false).hint, "or press Enter");
         assert_eq!(capture_button(&s, 2, "PrtScn", false).verb, "Record");
+    }
+
+    #[test]
+    fn unified_capture_button_stops_recording_from_every_tab() {
+        let mut settings = Settings {
+            delay_seconds: 5,
+            ..Settings::default()
+        };
+        for tab in 0..=2 {
+            settings.capture_window.tab = tab;
+            let view = unified_view(&settings, "PrtScn", false, true);
+            assert!(
+                view.recording,
+                "recording recovery is available on tab {tab}"
+            );
+            assert_eq!(
+                view.capture,
+                action(
+                    "Stop",
+                    "Finish and open the video".into(),
+                    "or press Enter".into()
+                )
+            );
+            assert!(!unified_view(&settings, "PrtScn", false, false).recording);
+        }
     }
 
     #[test]

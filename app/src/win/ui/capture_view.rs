@@ -104,6 +104,8 @@ fn palette(dark: Signal<bool>) -> &'static Palette {
 struct View {
     tab: usize,
     #[serde(default)]
+    recording: bool,
+    #[serde(default)]
     timing: CaptureTiming,
     #[serde(default)]
     interval_running: bool,
@@ -202,6 +204,7 @@ struct Ui {
     window: NodeRef<Window>,
     dark: Signal<bool>,
     tab: Signal<usize>,
+    recording: Signal<bool>,
     timing: Signal<CaptureTiming>,
     interval_running: Signal<bool>,
     active_schedule: Signal<Option<String>>,
@@ -254,6 +257,7 @@ fn popup_target() -> Option<(AppScope, Window, Control, Subscriptions)> {
 pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
     let dark = scope.signal(parts::dark_theme(scope));
     let tab = scope.signal(0_usize);
+    let recording = scope.signal(false);
     let timing = scope.signal(CaptureTiming::Manual);
     let interval_running = scope.signal(false);
     let active_schedule = scope.signal(None::<String>);
@@ -377,6 +381,21 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         .child(detail.margin((0.0, 6.0, 0.0, 0.0)));
     let stop_interval = status_button(dark, &subs, "Stop", "Stop interval capture", "stop-interval");
     let cancel_schedule = status_button(dark, &subs, "Cancel", "Cancel daily scheduled capture", "cancel-schedule");
+    let show_recording_controls = status_button(
+        dark,
+        &subs,
+        "Show controls",
+        "Restore the recording toolbar without restarting the recording",
+        "show-recording-controls",
+    );
+    #[cfg(any(windows, target_os = "macos"))]
+    let show_recording_controls = show_recording_controls.visible(|| {
+        let json = super::main().sink.hud.get();
+        serde_json::from_str::<serde_json::Value>(&json)
+            .is_ok_and(|state| super::hud::has_recording_toolbar(&state))
+    });
+    #[cfg(target_os = "linux")]
+    let show_recording_controls = show_recording_controls.visible(false);
     let card = Border::el()
         .background(move || palette(dark).card)
         .border_brush(move || palette(dark).edge)
@@ -394,9 +413,24 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                             StackPanel::el()
                                 .spacing(2.0)
                                 .visible(move || {
-                                    (interval_running.get() && timing.get() != CaptureTiming::Interval)
+                                    recording.get()
+                                            || (interval_running.get() && timing.get() != CaptureTiming::Interval)
                                             || (active_schedule.get().is_some() && timing.get() != CaptureTiming::Schedule)
                                 })
+                                .child(
+                                    StackPanel::el()
+                                        .orientation(Orientation::Horizontal)
+                                        .spacing(8.0)
+                                        .visible(recording)
+                                        .child(
+                                            TextBlock::el()
+                                                .text("Recording is running.")
+                                                .font_size(12.0)
+                                                .vertical_alignment(VerticalAlignment::Center)
+                                                .foreground(move || palette(dark).muted),
+                                        )
+                                        .child(show_recording_controls),
+                                )
                                 .child(
                                     StackPanel::el()
                                         .orientation(Orientation::Horizontal)
@@ -555,6 +589,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
             window: window_ref,
             dark,
             tab,
+            recording,
             timing,
             interval_running,
             active_schedule,
@@ -712,13 +747,14 @@ fn glyph(text: &str, size: f64) -> El<TextBlock> {
 
 fn apply_view(json: &str) -> Result<()> {
     let Ok(view) = serde_json::from_str::<View>(json) else { return Ok(()) };
-    let Some((scope, dark, fields, rows, (tab, timing, interval_running, active_schedule, action))) =
-        with_ui(|ui| Some((ui.scope.clone(), ui.dark, ui.fields.get()?, ui.rows.clone(), (ui.tab, ui.timing, ui.interval_running, ui.active_schedule, ui.action))))
+    let Some((scope, dark, fields, rows, (tab, recording, timing, interval_running, active_schedule, action))) =
+        with_ui(|ui| Some((ui.scope.clone(), ui.dark, ui.fields.get()?, ui.rows.clone(), (ui.tab, ui.recording, ui.timing, ui.interval_running, ui.active_schedule, ui.action))))
             .flatten()
     else {
         return Ok(());
     };
     tab.set_if_changed(view.tab);
+    recording.set_if_changed(view.recording);
     timing.set_if_changed(view.timing);
     interval_running.set_if_changed(view.interval_running);
     active_schedule.set_if_changed(view.active_schedule);

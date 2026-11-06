@@ -89,6 +89,8 @@ pub struct Hooks {
     pub notify: Box<dyn Fn(&str, &str, bool) + Send + Sync>,
     /// What the tray menu should show, sent after anything in it changes.
     pub state: Box<dyn Fn(TrayState) + Send + Sync>,
+    /// Whether a screen recording is active, including one started from a CLI client.
+    pub recording: Box<dyn Fn(bool) + Send + Sync>,
     /// Login-item state may change in System Settings without other settings changing.
     #[cfg(target_os = "macos")]
     pub startup_status: Box<dyn Fn(StartupStatus) + Send + Sync>,
@@ -346,6 +348,16 @@ pub mod capture {
     /// Saves the window's settings.
     pub fn apply(s: Settings) {
         on_capture_thread(move || tray::apply_settings(s));
+    }
+
+    /// Requests that the active screen recording stop and be saved.
+    pub fn stop_recording() -> bool {
+        super::recorder::request_stop()
+    }
+
+    /// Whether a screen recording is currently active, including CLI recordings.
+    pub fn is_recording() -> bool {
+        super::recorder::is_recording()
     }
 
     /// Saves the settings and starts the window's capture (see

@@ -311,6 +311,12 @@ jiffshot.exe --list-windows                 # List detected window and child-ele
 jiffshot.exe --quit                         # Stop the running Jiffshot instance
 ```
 
+While recording, the Capture window's main button becomes **Stop** on every tab.
+Use **Show controls** beside **Recording is running** to restore the floating
+recording toolbar without restarting the take. On Windows, UAC and lock-screen
+desktop switches temporarily produce black video while audio continues; video
+resumes automatically when the normal desktop returns.
+
 ### Automation and AI agents: `jiffshot-cli` (Windows)
 
 On Linux, `jiffshot-cli` supports `status`, `screenshot`, `open`, `ocr --path`, `library list|search|tag|pin`, and `record start|status|pause|stop|cancel`, served by the running Jiffshot over a private per-user Unix socket in `$XDG_RUNTIME_DIR/jiffshot`. Portal-based screenshots and recordings may require desktop consent. `open PATH` loads a file into the running editor; the editing commands are not yet available. The rest of this section describes Windows.
@@ -663,7 +669,7 @@ cargo test --release --workspace                          # capture side, docume
 ./target/release/jiffshot.exe --record-selftest DIR 4         # records its own test window
 ```
 
-The editor drives its own UI when `JIFFSHOT_UITEST=DIR` is set (with `JIFFSHOT_UITEST_IMAGE`, `JIFFSHOT_UITEST_VIDEO`, an isolated `JIFFSHOT_LIBRARY` and, to leave your settings alone, scratch `APPDATA` and `LOCALAPPDATA`), writing screenshots of every window and `ui-log.txt` to `DIR`. Set `JIFFSHOT_UITEST_CAPTURE_ONLY=1` to check just the Capture window and chooser, and `JIFFSHOT_UITEST_KEEP=1` to leave it open for inspection. To exercise library edits, set `JIFFSHOT_LIBRARY` to an existing folder inside `DIR`; otherwise those steps are skipped to protect the normal library. `cargo run -p jiffshot-doc --example synthetic -- OUT.png` writes the test image its coordinates assume.
+The editor drives its own UI when `JIFFSHOT_UITEST=DIR` is set (with `JIFFSHOT_UITEST_IMAGE`, `JIFFSHOT_UITEST_VIDEO`, an isolated `JIFFSHOT_LIBRARY` and, to leave your settings alone, scratch `APPDATA` and `LOCALAPPDATA`), writing screenshots of every window and `ui-log.txt` to `DIR`. Set `JIFFSHOT_UITEST_CAPTURE_ONLY=1` to check just the Capture window and chooser, or `JIFFSHOT_UITEST_HUD_ONLY=1` to check the recording toolbar, including restoring hidden controls. Set `JIFFSHOT_UITEST_KEEP=1` to leave the Capture window open for inspection. To exercise library edits, set `JIFFSHOT_LIBRARY` to an existing folder inside `DIR`; otherwise those steps are skipped to protect the normal library. `cargo run -p jiffshot-doc --example synthetic -- OUT.png` writes the test image its coordinates assume.
 Set `JIFFSHOT_UITEST_VIDEO_EDIT=1` with a short `JIFFSHOT_UITEST_VIDEO` fixture and an empty scratch library inside `DIR` for the focused multi-cut, undo/redo, playback, automatic-save and subsequent-save checks.
 On macOS, set `JIFFSHOT_UITEST_OVERLAY=1` to run a focused synthetic selection-window lifecycle test without screen captures; also use scratch `JIFFSHOT_CONFIG_DIR` and `JIFFSHOT_LOCAL_DIR`.
 `JIFFSHOT_UITEST_PERMISSIONS=1` exercises permission guidance for synthetic screen, Accessibility, camera, microphone, and Automation denials, including duplicate failures, dismissal, retry, and a hidden editor. It does not request permissions, open System Settings, or capture the screen; use the same isolated test paths.

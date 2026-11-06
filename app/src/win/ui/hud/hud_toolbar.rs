@@ -613,8 +613,8 @@ impl RecordingToolbar {
         self.note.set_visible(!note.is_empty())
     }
 
-    pub fn close(&self) {
-        let _ = self.window.close();
+    pub fn close(&self) -> Result<()> {
+        self.window.close()
     }
 
     #[cfg(target_os = "macos")]

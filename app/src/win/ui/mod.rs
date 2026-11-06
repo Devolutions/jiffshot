@@ -55,6 +55,11 @@ pub(crate) fn selftest_failed() -> bool {
     selftest::failed()
 }
 
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn restore_recording_controls() -> std::result::Result<(), String> {
+    hud::restore_recording_controls()
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn check_native_popup_gate() -> std::io::Result<()> {
     hud::native_popup_macos::check_host_gate()
