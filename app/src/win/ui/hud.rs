@@ -363,6 +363,8 @@ impl HudPanel {
             .size_to_content(size_to_content::HEIGHT)?
             .background(Brush::solid(Color::rgb(0x23, 0x24, 0x28)))?
             .content(Some(&themed))?;
+        #[cfg(target_os = "macos")]
+        scope.set_transparent(&window, true)?;
         scope.set_topmost(&window, true)?;
         let placed = window.clone();
         let placement_scope = scope.clone();
