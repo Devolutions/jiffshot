@@ -82,6 +82,7 @@ current Rustolonia host.
 2. **Take a capture:** Press **Print Screen** (`PrtScn`) at any time, or left-click the tray icon to open the **Capture Window** and choose a capture mode.
    - **Capture a window or UI element:** Move the pointer over any window and click. Roll the **mouse wheel** up or down while hovering to step between the top-level window and individual child UI controls.
    - **Capture a region:** Click and drag a rectangle. Hold `Shift` for a square, `Ctrl` for `16:9`, or `Ctrl+Shift` for `4:3`.
+   - **Include an open context menu:** Open the menu, press the capture hotkey without clicking Jiffshot, then drag around it. The desktop is frozen before the selection overlay takes focus. If the shortcut itself dismisses the menu, use **Print Screen** or start a delayed capture before opening it.
    - **Capture a full monitor or desktop:** Press `F` for the current screen or `A` for all screens.
 3. **Annotate & share:** By default, captures are saved to `Pictures\Jiffshot`, copied to the clipboard, and opened in the **Jiffshot Editor** where you can add arrows, callouts, numbered steps, blur, or effects, then copy (`Ctrl+Shift+C`), export (`Ctrl+E`), or share directly to other apps.
 4. **Stay ready in the tray:** Closing the editor window keeps Jiffshot running quietly in the notification area so your hotkeys stay active. To quit completely, right-click the tray icon and choose **Exit**.

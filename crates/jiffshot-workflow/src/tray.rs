@@ -840,10 +840,13 @@ fn select_create_mode(choice: Option<usize>) -> Option<usize> {
 /// Freezes the screen and runs the selection overlay; `mode` says what to
 /// do with the selection.
 fn capture_interactive(mode: usize) {
+    // Construct lazily: dropping an unused guard would activate Capture and
+    // dismiss other apps' menus before the desktop is frozen.
     #[cfg(target_os = "macos")]
-    let _reopen = (mode == MODE_SCHEDULE_AREA).then_some(ReopenCaptureWindow);
+    let _reopen = (mode == MODE_SCHEDULE_AREA).then(|| ReopenCaptureWindow);
     #[cfg(windows)]
-    let _reopen = matches!(mode, MODE_PICK_REGION | MODE_PICK_VIDEO_REGION).then_some(ReopenCaptureWindow);
+    let _reopen =
+        matches!(mode, MODE_PICK_REGION | MODE_PICK_VIDEO_REGION).then(|| ReopenCaptureWindow);
     let Some((hwnd, settings)) = with_app(|app| {
         if app.busy {
             return None;
@@ -3711,7 +3714,6 @@ mod tests {
         0
     }
 
-    #[cfg(target_os = "macos")]
     fn test_app(hwnd: HWND, settings: Settings) -> App {
         App {
             hwnd,
@@ -3726,10 +3728,131 @@ mod tests {
             override_effects: None,
             override_share: None,
             scheduled_fired: None,
+            #[cfg(target_os = "macos")]
             schedule_armed: false,
+            #[cfg(target_os = "macos")]
             deferred_schedule: None,
             pending_mode: None,
             countdown: None,
+        }
+    }
+
+    #[test]
+    fn interactive_capture_only_reopens_region_pickers() {
+        const CHILD: &str = "JIFFSHOT_TEST_CAPTURE_REOPEN";
+        if std::env::var_os(CHILD).is_none() {
+            // The host hooks are process-wide; do not install them in other tests.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tray::tests::interactive_capture_only_reopens_region_pickers",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "capture reopen regression failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        use std::sync::{Arc, Mutex};
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let reopened = events.clone();
+        let notified = events.clone();
+        assert!(crate::HOOKS
+            .set(crate::Hooks {
+                open_in_editor: Box::new(|_| panic!("capture must not reach the editor")),
+                show_editor: Box::new(|| panic!("capture must not show the editor")),
+                quit: Box::new(|| panic!("capture must not quit")),
+                notify: Box::new(move |title, text, warning| {
+                    assert_eq!(title, "Capture failed");
+                    assert_eq!(text, "synthetic preparation failure");
+                    assert!(warning);
+                    notified.lock().unwrap().push("error");
+                }),
+                state: Box::new(|_| {}),
+                recording: Box::new(|_| {}),
+                #[cfg(target_os = "macos")]
+                startup_status: Box::new(|_| {}),
+                show_capture_window: Box::new(move || reopened.lock().unwrap().push("reopen")),
+                show_text: Box::new(|_| panic!("capture must not show text")),
+                hud: Box::new(|_| panic!("capture must not show a HUD")),
+                overlay: Box::new(|_| panic!("failed preparation must not show the overlay")),
+                screen_draw: Box::new(|_| panic!("capture must not start Screen Draw")),
+            })
+            .is_ok());
+        let hidden = events.clone();
+        jiffshot_capture::visibility::install(move || {
+            hidden.lock().unwrap().push("hide");
+            Err(std::io::Error::other("synthetic preparation failure"))
+        })
+        .unwrap();
+
+        #[cfg(windows)]
+        let pickers = [MODE_PICK_REGION, MODE_PICK_VIDEO_REGION];
+        #[cfg(target_os = "macos")]
+        let pickers = [MODE_SCHEDULE_AREA];
+        for mode in [
+            MODE_IMAGE,
+            MODE_WINDOW,
+            MODE_ALL,
+            MODE_FREEHAND,
+            MODE_MULTI,
+            MODE_FIXED,
+            MODE_TEXT,
+            MODE_VIDEO,
+            MODE_VIDEO_FIXED,
+            MODE_SCROLLING,
+            MODE_SCROLL_H,
+            MODE_SCROLL_BOTH,
+            MODE_PANORAMIC,
+        ]
+        .into_iter()
+        .chain(pickers)
+        {
+            let should_reopen = pickers.contains(&mode);
+            APP.with(|app| {
+                *app.borrow_mut() = Some(test_app(std::ptr::null_mut(), Settings::default()))
+            });
+            capture_interactive(mode);
+            let mut expected = vec!["hide", "error"];
+            if should_reopen {
+                expected.push("reopen");
+            }
+            assert_eq!(
+                *events.lock().unwrap(),
+                expected,
+                "mode {mode} must not activate Capture before freezing the desktop"
+            );
+            assert_eq!(with_app(|app| app.busy), Some(false));
+            events.lock().unwrap().clear();
+
+            with_app(|app| app.busy = true);
+            capture_interactive(mode);
+            let expected = if should_reopen {
+                vec!["reopen"]
+            } else {
+                vec![]
+            };
+            assert_eq!(
+                *events.lock().unwrap(),
+                expected,
+                "busy capture, mode {mode}"
+            );
+            events.lock().unwrap().clear();
+            APP.with(|app| *app.borrow_mut() = None);
+            capture_interactive(mode);
+            assert_eq!(
+                *events.lock().unwrap(),
+                expected,
+                "unavailable capture, mode {mode}"
+            );
+            events.lock().unwrap().clear();
         }
     }
 
