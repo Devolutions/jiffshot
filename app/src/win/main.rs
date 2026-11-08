@@ -624,9 +624,11 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         .map(std::path::PathBuf::from)
         .collect();
     let capture = jiffshot_workflow::capture_flag(&args);
-    // The UI self-test drives the editor alone: no tray, hotkeys or
-    // single-instance claim, and closing its window ends it.
+    // Ordinary UI self-tests drive the editor alone. Capture-engine tests opt
+    // into the tray and single-instance claim.
     let tray = std::env::var_os("JIFFSHOT_UITEST").is_none();
+    #[cfg(windows)]
+    let test_capture_engine = !tray && std::env::var_os("JIFFSHOT_UITEST_GRAB_TEXT").is_some();
     #[cfg(target_os = "macos")]
     let test_capture_engine = !tray
         && (std::env::var_os("JIFFSHOT_UITEST_SAVED_AREAS_ENGINE").is_some()
@@ -655,10 +657,36 @@ pub(crate) fn run() -> rustolonia::Result<()> {
             }
         }
     }
+    #[cfg(windows)]
+    if test_capture_engine {
+        let root = std::env::var_os("JIFFSHOT_UITEST").expect("self-test directory is set");
+        let root = std::fs::canonicalize(&root).unwrap_or_else(|error| {
+            eprintln!("could not resolve self-test directory {root:?}: {error}");
+            std::process::exit(2);
+        });
+        for name in [
+            "JIFFSHOT_LIBRARY",
+            "JIFFSHOT_CONFIG_DIR",
+            "JIFFSHOT_LOCAL_DIR",
+        ] {
+            let path = std::env::var_os(name).unwrap_or_else(|| {
+                eprintln!("{name} must name an existing isolated test directory");
+                std::process::exit(2);
+            });
+            let resolved = std::fs::canonicalize(&path).unwrap_or_else(|error| {
+                eprintln!("could not resolve {name} {path:?}: {error}");
+                std::process::exit(2);
+            });
+            if resolved == root || !resolved.starts_with(&root) {
+                eprintln!("{name} must be inside the self-test directory");
+                std::process::exit(2);
+            }
+        }
+    }
     // One Jiffshot per session: a second launch hands its file or capture
     // to the running one and exits.
     #[cfg(windows)]
-    let primary_instance = !tray || jiffshot_workflow::claim_instance();
+    let primary_instance = !(tray || test_capture_engine) || jiffshot_workflow::claim_instance();
     #[cfg(target_os = "macos")]
     let primary_instance = !(tray || test_capture_engine)
         || jiffshot_workflow::claim_instance().unwrap_or_else(|error| {
@@ -666,7 +694,6 @@ pub(crate) fn run() -> rustolonia::Result<()> {
             std::process::exit(1);
         });
     if !primary_instance {
-        #[cfg(target_os = "macos")]
         if test_capture_engine {
             eprintln!("the isolated capture self-test is already running");
             std::process::exit(1);
@@ -707,6 +734,12 @@ pub(crate) fn run() -> rustolonia::Result<()> {
     let app = App::load_from_env()?;
     #[cfg(target_os = "macos")]
     let app = app.with_application_name(jiffshot_capture::paths::NAME)?;
+    #[cfg(windows)]
+    let test_engine = test_capture_engine.then(|| {
+        std::sync::Arc::new(std::sync::Mutex::new(None::<std::thread::JoinHandle<i32>>))
+    });
+    #[cfg(windows)]
+    let test_engine_in_app = test_engine.clone();
     let result = app.run(move |scope| {
         #[cfg(target_os = "macos")]
         if let Err(error) = jiffshot_capture::screen::watch_displays() {
@@ -759,10 +792,7 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         let _ = jiffshot_capture::ipc::serve(|path| app::post(move |app| app.incoming(path)));
         #[cfg(target_os = "macos")]
         let editor_ipc_error = jiffshot_capture::ipc::serve(app::post_incoming).err();
-        #[cfg(target_os = "macos")]
         let run_capture = tray || test_capture_engine;
-        #[cfg(windows)]
-        let run_capture = tray;
         if run_capture {
             // The tray keeps Jiffshot running with the editor closed.
             scope.set_shutdown_mode(rustolonia::ShutdownMode::OnExplicitShutdown)?;
@@ -807,6 +837,10 @@ pub(crate) fn run() -> rustolonia::Result<()> {
                 }),
                 show_editor: Box::new(|| app::post(|app| app.show_editor())),
                 quit: Box::new(move || {
+                    #[cfg(windows)]
+                    if test_capture_engine {
+                        return;
+                    }
                     #[cfg(target_os = "macos")]
                     if test_capture_engine
                         && std::env::var_os("JIFFSHOT_UITEST_ENGINE_QUIT").is_none()
@@ -857,14 +891,59 @@ pub(crate) fn run() -> rustolonia::Result<()> {
             let started =
                 capture_engine_macos::start(|| jiffshot_workflow::start_engine(capture, hooks));
             #[cfg(windows)]
-            let started = jiffshot_workflow::start_engine(capture, hooks).map(|_| ());
+            let started = jiffshot_workflow::start_engine(capture, hooks).map(|handle| {
+                if let Some(slot) = &test_engine_in_app {
+                    *slot.lock().expect("self-test engine lock") = Some(handle);
+                }
+            });
             if let Err(error) = started {
+                #[cfg(windows)]
+                if test_capture_engine {
+                    return Err(rustolonia::Error::Load(format!(
+                        "the self-test capture engine did not start: {error}"
+                    )));
+                }
                 eprintln!("the capture side did not start: {error}");
             }
             ui::mount_tray(scope, tray::TrayModel)?;
         }
         Ok(())
     });
+    #[cfg(windows)]
+    if let Some(slot) = test_engine {
+        jiffshot_workflow::stop_engine();
+        let handle = match slot.lock().expect("self-test engine lock").take() {
+            Some(handle) => handle,
+            None => {
+                result?;
+                return Err(rustolonia::Error::Load(
+                    "the self-test capture engine did not start".into(),
+                ));
+            }
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !handle.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !handle.is_finished() {
+            return Err(rustolonia::Error::Load(
+                "the self-test capture engine did not stop".into(),
+            ));
+        }
+        match handle.join() {
+            Ok(0) => {}
+            Ok(code) => {
+                return Err(rustolonia::Error::Load(format!(
+                    "the self-test capture engine exited with {code}"
+                )))
+            }
+            Err(_) => {
+                return Err(rustolonia::Error::Load(
+                    "the self-test capture engine panicked".into(),
+                ))
+            }
+        }
+    }
     #[cfg(target_os = "macos")]
     let file_drag_error = file_drag_macos::uninstall().err();
     #[cfg(target_os = "macos")]

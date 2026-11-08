@@ -9,7 +9,7 @@
 //! without running the editor and overlay walk.
 //! `JIFFSHOT_UITEST_CAPTURE_MENUS` checks menu switching and DarkBlue popups.
 //! `JIFFSHOT_UITEST_WIDGET` checks the floating bar with an isolated tray model.
-//! On macOS, `JIFFSHOT_UITEST_GRAB_TEXT` checks a live screen-text capture.
+//! `JIFFSHOT_UITEST_GRAB_TEXT` checks a live screen-text capture.
 //! On macOS, `JIFFSHOT_UITEST_APP_NAME` checks the native application menu name.
 //! On macOS, `JIFFSHOT_UITEST_NATIVE_MENU` checks native menus and shortcuts.
 //! On macOS, `JIFFSHOT_UITEST_OVERLAY` runs only the synthetic overlay test.
@@ -458,7 +458,6 @@ fn editor_walk(s: &mut Script) {
 /// The whole walk, in order.
 fn script() -> Script {
     let mut s = Script(VecDeque::new());
-    #[cfg(target_os = "macos")]
     if env("JIFFSHOT_UITEST_GRAB_TEXT").is_some() {
         return grab_text_script();
     }
@@ -1048,13 +1047,14 @@ fn application_name_script() -> Script {
     script
 }
 
-#[cfg(target_os = "macos")]
 fn grab_text_script() -> Script {
     use jiffshot_capture::clipboard::{self, Pasted};
 
     let area = Rc::new(std::cell::Cell::new(None::<Rect>));
     let before = Rc::new(RefCell::new(None::<(u32, u32, Vec<u8>)>));
     let selected = Rc::new(std::cell::Cell::new(false));
+    #[cfg(windows)]
+    let session = Rc::new(std::cell::Cell::new(None::<u64>));
     let shown = Rc::new(std::cell::Cell::new(false));
     let displayed = Rc::new(RefCell::new(None::<String>));
     let clipboard_result = Rc::new(RefCell::new(None::<std::result::Result<String, String>>));
@@ -1084,9 +1084,33 @@ fn grab_text_script() -> Script {
             let frame = crate::winutil::frame_from_pixmap(&editor.document().flatten());
             *original.borrow_mut() = Some((frame.width, frame.height, frame.pixels));
         }).expect("read the edited document");
+        #[cfg(target_os = "macos")]
         let (_, number) = platform::start_control_capture_fixture().expect("show the screen text fixture");
+        #[cfg(target_os = "macos")]
         let rect = window_rect(number as isize);
+        #[cfg(windows)]
+        let rect = {
+            let bounds = env("JIFFSHOT_UITEST_GRAB_TEXT_FIXTURE").expect("the fixture bounds are missing");
+            let values = bounds.split(',').map(|value| value.parse::<i32>().expect("invalid fixture bounds")).collect::<Vec<_>>();
+            let [x, y, width, height] = values.as_slice() else { panic!("expected four fixture bounds: {bounds}") };
+            let rect = Rect::new(*x, *y, *width, *height);
+            assert_eq!(rect.intersect(jiffshot_capture::screen::virtual_screen()), Some(rect), "the fixture is outside the desktop");
+            rect
+        };
         assert!(rect.width > 4 && rect.height > 4, "the text fixture has invalid bounds: {rect:?}");
+        #[cfg(windows)]
+        {
+            let height = rect.height.checked_add(120).expect("the fixture height overflowed");
+            let full = Rect::new(rect.x, rect.y, rect.width, height);
+            assert_eq!(full.intersect(jiffshot_capture::screen::virtual_screen()), Some(full), "the full fixture is outside the desktop");
+            let frame = jiffshot_capture::screen::grab(full).expect("capture the full text fixture");
+            let text = jiffshot_capture::ocr::recognize(frame.width, frame.height, &frame.pixels)
+                .expect("recognize the full text fixture")
+                .into_iter().map(|line| line.text).collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+            assert!(text.contains("jiffshot") && text.contains("fixture") && text.contains("outside"),
+                "the full screen fixture did not contain both labels: {text:?}");
+            test.line("grab text: both fixture labels were visible to native OCR");
+        }
         prepared_area.set(Some(rect));
         test.line("grab text: displayed the screen fixture");
         500
@@ -1097,24 +1121,51 @@ fn grab_text_script() -> Script {
         100
     });
     for _ in 0..150 {
+        #[cfg(target_os = "macos")]
         let area = area.clone();
         let selected = selected.clone();
-        script.step(move |_| {
+        #[cfg(windows)]
+        let session = session.clone();
+        script.step(move |_test| {
             if selected.get() {
                 return 0;
             }
-            let Some(id) = super::overlay::session_for_selftest() else { return 100 };
-            if !api::pending(id) {
-                return 100;
+            #[cfg(target_os = "macos")]
+            {
+                let Some(id) = super::overlay::session_for_selftest() else { return 100 };
+                if !api::pending(id) {
+                    return 100;
+                }
+                let rect = area.get().expect("the fixture bounds are unavailable");
+                let (left, top) = (f64::from(rect.x + 2), f64::from(rect.y + 2));
+                let (right, bottom) = (f64::from(rect.right() - 2), f64::from(rect.bottom() - 2));
+                api::input(id, api::PRESS, left, top, 0, 0);
+                api::input(id, api::MOVE, right, bottom, 0, 0);
+                assert!(api::input(id, api::RELEASE, right, bottom, 0, 0).has(api::FLAG_DONE), "the selection did not finish");
+                selected.set(true);
+                0
             }
-            let rect = area.get().expect("the fixture bounds are unavailable");
-            let (left, top) = (f64::from(rect.x + 2), f64::from(rect.y + 2));
-            let (right, bottom) = (f64::from(rect.right() - 2), f64::from(rect.bottom() - 2));
-            api::input(id, api::PRESS, left, top, 0, 0);
-            api::input(id, api::MOVE, right, bottom, 0, 0);
-            assert!(api::input(id, api::RELEASE, right, bottom, 0, 0).has(api::FLAG_DONE), "the selection did not finish");
-            selected.set(true);
-            0
+            #[cfg(windows)]
+            {
+                let id = match session.get() {
+                    Some(id) => id,
+                    None => {
+                        let Some(id) = super::overlay::session_for_selftest() else { return 100 };
+                        if !api::pending(id) {
+                            return 100;
+                        }
+                        session.set(Some(id));
+                        std::fs::write(_test.path("grab-text-ready"), id.to_string()).expect("publish overlay readiness");
+                        return 100;
+                    }
+                };
+                if api::pending(id) {
+                    100
+                } else {
+                    selected.set(true);
+                    0
+                }
+            }
         });
     }
     let selection = selected.clone();
@@ -1147,13 +1198,19 @@ fn grab_text_script() -> Script {
         let text = text.get_text().expect("read the result window").expect("the result has no text");
         let recognized = text.to_ascii_lowercase();
         assert!(recognized.contains("jiffshot") && recognized.contains("fixture"), "the screen text was not recognized: {text:?}");
+        #[cfg(windows)]
+        assert!(!recognized.contains("outside"), "OCR included text outside the selection: {text:?}");
         *result_text.borrow_mut() = Some(text);
         jiffshot_workflow::on_capture_thread(move || {
-            let result = objc2::rc::autoreleasepool(|_| match clipboard::read(0) {
+            let read = || match clipboard::read(0) {
                 Ok(Some(Pasted::Text(text))) => Ok(text),
-                Ok(_) => Err("Grab Text did not copy text to the private pasteboard".to_owned()),
-                Err(error) => Err(format!("could not read the private pasteboard: {error}")),
-            });
+                Ok(_) => Err("Grab Text did not copy text to the clipboard".to_owned()),
+                Err(error) => Err(format!("could not read the clipboard: {error}")),
+            };
+            #[cfg(target_os = "macos")]
+            let result = objc2::rc::autoreleasepool(|_| read());
+            #[cfg(windows)]
+            let result = read();
             if send.send(result).is_err() {
                 eprintln!("ui self-test: the Grab Text clipboard check stopped waiting");
             }
@@ -1206,6 +1263,7 @@ fn grab_text_script() -> Script {
     });
     script.step(|test| {
         assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(2), "Grab Text lost redo history");
+        #[cfg(target_os = "macos")]
         platform::close_recording_shutdown_fixture();
         test.line("grab text: editor undo and redo history remained intact");
         0
@@ -7881,6 +7939,10 @@ fn finish(runner: &Rc<RefCell<Runner>>) {
         r.scope.clone()
     };
     if env("JIFFSHOT_UITEST_KEEP").is_none() {
+        #[cfg(windows)]
+        if env("JIFFSHOT_UITEST_GRAB_TEXT").is_some() {
+            jiffshot_workflow::stop_engine();
+        }
         #[cfg(target_os = "macos")]
         if let Err(error) = crate::capture_engine_macos::stop() {
             FAILED.store(true, Ordering::Release);

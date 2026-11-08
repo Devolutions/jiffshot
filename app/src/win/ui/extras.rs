@@ -549,7 +549,6 @@ pub(super) fn widget_menu_open_for_selftest() -> Result<bool> {
 
 // ---- Grab Text ----------------------------------------------------------------
 
-#[cfg(target_os = "macos")]
 pub(super) fn grab_text_for_selftest() -> Option<(Window, TextBox)> {
     with(|extras| extras.grab_text.as_ref().map(|grab| (grab.window.clone(), grab.text.clone()))).flatten()
 }
