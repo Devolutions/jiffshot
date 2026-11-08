@@ -100,7 +100,7 @@ screenshot pixels against a visible test window; this requires Screen Recording 
 
 ## Features
 
-The detailed feature list below describes the Windows application. The Linux build currently supports the subset described in [Building from Source](#building-from-source). On Linux, a plain launch or opening a file now uses the same editor window as Windows and macOS (GStreamer media backend); it includes the Capture window (Image/Record tabs, cursor, delay and audio options over the desktop portal) and the opt-in tray; preferences and shortcuts are available; selecting a capture shows a frozen-screenshot overlay (dim, crosshair, magnifier, size label, F1 help; drag a region, click or F for the whole screen, freehand, multi-area, fixed-size and repeat-last modes) like Windows and macOS. Wayland cannot read the screen or place windows, so the overlay selects on a portal screenshot taken first (the desktop may flicker briefly or ask permission once), covers the screenshot's whole desktop in one fullscreen window, and cannot highlight individual windows. Set `JIFFSHOT_CLASSIC_UI=1` to use the earlier Linux-specific UI, which is also used for capture, scrolling and text-grab launch modes.
+The detailed feature list below describes the Windows application. The Linux build currently supports the subset described in [Building from Source](#building-from-source). On Linux, interactive launches, including capture and text-grab modes, use the same editor window as Windows and macOS (GStreamer media backend); it includes the Capture window (Image/Record tabs, cursor, delay and audio options over the desktop portal) and the opt-in tray; preferences and shortcuts are available; selecting a capture shows a frozen-screenshot overlay (dim, crosshair, magnifier, size label, F1 help; drag a region, click or F for the whole screen, freehand, multi-area, fixed-size and repeat-last modes) like Windows and macOS. Wayland cannot read the screen or place windows, so the overlay selects on a portal screenshot taken first (the desktop may flicker briefly or ask permission once), covers the screenshot's whole desktop in one fullscreen window, and cannot highlight individual windows. Set `JIFFSHOT_CLASSIC_UI=1` to use the earlier Linux-specific UI; background-only mode also uses it.
 
 ### Platform Availability
 
@@ -138,7 +138,7 @@ The detailed feature list below describes the Windows application. The Linux bui
   - **Panoramic Capture:** Pan across a scrollable area at your own pace and stitch it live.
   - **Freehand, Multi-Area & Fixed Size:** Lasso an arbitrary shape (transparent outside), select multiple distinct rectangles in one shot, or stamp a fixed-pixel rectangle. Set the fixed size and an optional exact position in the Region options (the gear beside **Area**); on Windows, **Select region on screen…** takes them from a rectangle you drag.
   - **Open Menus:** Delayed capture mode designed to grab open context menus and dropdowns.
-  - **Grab Text (Windows OCR):** Select any area on screen to extract selectable, copyable text instantly.
+  - **Grab Text (Windows OCR):** Select an area on screen to copy recognized text and open the text result window, without replacing the editor image or saving a capture. macOS also retains the text result window.
   - **Step Capture:** Record a numbered click-by-click guide automatically—every click captures a screenshot and places a sequential step badge at the cursor.
 - **Timers, Schedules & Presets:** Delay captures by seconds, run an automatic **time-lapse** (skipping identical frames), schedule a daily capture at a set time (`HH:MM`), or save custom **Presets** with their own global hotkeys. On Windows and macOS, a delayed capture shows an on-screen countdown; press **Esc** to cancel it. Interval captures use the last area or the screen under the pointer; scheduled captures use the saved area or the screen under the pointer. They bypass the chooser and ignore the preview, clipboard, and cursor switches; the selected image share destination still applies. In Select or Image mode, the red button starts or stops automatic captures; Video mode remains independently available. The window shows active intervals and schedules and lets you stop or cancel them after changing timer modes. Changing the interval updates a running time-lapse.
 - **Post-Capture Sharing:** Send captures automatically to the clipboard, the editor, a file, email, Microsoft Word, PowerPoint, Excel, OneNote, Paint, any configured external program, or a printer.
@@ -435,7 +435,7 @@ Set **Recording frame rate** to **Source** (the default), 15, 24, 30, or 60 fps 
 
 **Desktop screenshot chooser…** (also `--capture-interactive`) uses the desktop's XDG Screenshot portal. Depending on the desktop, the chooser may offer a rectangular region, window, or full-screen selection; its available modes and permission prompts are controlled by the desktop. Cancelling saves nothing, and a missing portal is reported. Capture results are still saved and copied when enabled if the editor changed while the chooser was open, but they do not replace newer editor changes.
 
-**Grab text…** (also `--grab-text`) uses that chooser to select a screenshot, recognizes text with English Tesseract data, and copies the result to the text clipboard without changing the editor or saving a Jiffshot capture. If nothing is recognized, the chooser is cancelled, or an error occurs, the clipboard is left unchanged. Recognition can be imperfect, so review the copied text.
+**Grab text…** (also `--grab-text`, the Capture window's **Text from screen**, and text presets) uses that chooser to select an area, recognizes text with English Tesseract data, and copies the result to the text clipboard without changing the editor, its undo history, or saving a Jiffshot capture. Cancelling, finding no text, or an error before copying leaves the clipboard unchanged; clipboard errors are reported. Recognition can be imperfect, so review the copied text.
 
 For a timed screen or window capture, set **Screen capture delay (seconds)** to 1–60 and choose **Save capture delay**. After selecting a source in the portal, the countdown gives you time to open the content to capture. **Cancel delayed capture** stops the countdown without saving; if the desktop chooser is still open, close it as well. A delay of 0 captures immediately. The setting also applies to `--capture` and the global capture shortcut, but not to the desktop screenshot chooser, scrolling capture, interval capture, daily capture, or recording.
 
@@ -691,6 +691,12 @@ cargo test --release --workspace                          # capture side, docume
 ./target/release/jiffshot.exe --selftest DIR                  # overlay logic, offscreen
 ./target/release/jiffshot.exe --record-selftest DIR 4         # records its own test window
 ```
+
+The native OCR selection regression runs with the workspace tests on macOS. On Windows,
+it is ignored by default because it requires an English-capable OCR language; run it with
+`cargo test --locked -p jiffshot-workflow text_capture_recognizes_only_the_selected_area -- --ignored`.
+This test uses a synthetic image and mocked clipboard and result-window callbacks; it
+does not exercise live screen capture or pointer input.
 
 Set `JIFFSHOT_UITEST_LIBRARY_LATENCY=1` with `JIFFSHOT_UITEST` pointing to a scratch
 output folder and `JIFFSHOT_LIBRARY` to an empty folder inside it to check refreshes

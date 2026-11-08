@@ -1,6 +1,6 @@
 use super::{
     autostart, capture, clipboard, editor, file_dialog, interval, launch, library, notification,
-    ocr, schedule, screenshot, scroll, settings, share, shortcut, template, tray, video,
+    ocr, schedule, screen_text, screenshot, scroll, settings, share, shortcut, template, tray, video,
 };
 use crate::{canvas, ui};
 use file_dialog::PickerOutcome;
@@ -4033,12 +4033,6 @@ fn capture_interactive(
     }
 }
 
-enum GrabTextResult {
-    Cancelled,
-    NoText,
-    Copied(usize),
-}
-
 fn grab_screen_text(scope: &AppScope, status: Signal<String>) {
     if SCHEDULED_CAPTURE_ACTIVE.load(Ordering::Acquire) {
         status.set_if_changed("Finish the daily capture before grabbing text.".to_owned());
@@ -4050,34 +4044,10 @@ fn grab_screen_text(scope: &AppScope, status: Signal<String>) {
     if let Err(error) = std::thread::Builder::new()
         .name("jiffshot-grab-screen-text".to_owned())
         .spawn(move || {
-            let result: std::result::Result<GrabTextResult, String> = (|| {
-                let Some(document) =
-                    futures_lite::future::block_on(screenshot::capture_interactive())?
-                else {
-                    return Ok(GrabTextResult::Cancelled);
-                };
-                let lines = ocr::Recognizer::new()?.recognize(&document.flatten())?;
-                let text = editor::recognized_text(&lines);
-                if text.is_empty() {
-                    return Ok(GrabTextResult::NoText);
-                }
-                let count = text.lines().count();
-                clipboard::copy_text(text)?;
-                Ok(GrabTextResult::Copied(count))
-            })();
+            let result = screen_text::grab();
             drop(active);
             if let Err(error) = task_scope.post(move || {
-                let message = match result {
-                    Ok(GrabTextResult::Cancelled) => "Text capture cancelled.".to_owned(),
-                    Ok(GrabTextResult::NoText) => {
-                        "No text recognized; the clipboard was not changed.".to_owned()
-                    }
-                    Ok(GrabTextResult::Copied(count)) => {
-                        format!("Copied {count} recognized line(s) from the screen.")
-                    }
-                    Err(error) => format!("Could not grab screen text: {error}"),
-                };
-                status.set_if_changed(message);
+                status.set_if_changed(screen_text::message(result));
             }) {
                 eprintln!("Could not report screen text capture: {error}");
             }

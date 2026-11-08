@@ -78,25 +78,31 @@ try {
         $server = Start-E2EXvfb $xvfbLog
         $displayName = $server.Display
         $environment = New-E2EEnvironment $displayName $work $runtime
+        $environment['JIFFSHOT_CLASSIC_UI'] = '1'
+        $environment['JIFFSHOT_LIBRARY'] = $captures
+        $environment['JIFFSHOT_CONFIG_DIR'] = $config
+        $environment['JIFFSHOT_LOCAL_DIR'] = Join-Path $work 'local'
+        $text = New-E2ETextReader
         foreach ($mode in @('text', 'empty', 'cancel', 'invalid')) {
             $sentinel = "clipboard-$mode-unchanged"
             Set-ClipboardText $environment $sentinel
-            $expectedRequests = $portal.ScreenshotRequests.Count + 1
-            $app = Start-E2EProcess @($binaryPath, '--grab-text') $environment $work $appLog
+            $app = Start-E2EProcess @($binaryPath) $environment $work $appLog
             Wait-E2EUntil { $null -ne (Get-E2EWindowInfo $environment) } "the editor for $mode" 12
             $driver = New-E2EX11Driver $displayName (Get-E2EWindowInfo $environment)
-            Wait-E2EUntil { $portal.ScreenshotRequests.Count -eq $expectedRequests } "the screenshot request for $mode"
-            # A script-scope $request would overwrite the module's exported $PortalRequestInterface interface name.
-            $requestPath, $options = $portal.ScreenshotRequests[$portal.ScreenshotRequests.Count - 1]
-            Assert-TrueVariant $options 'interactive'
-            Assert-TrueVariant $options 'modal'
             Wait-E2ESeconds 0.5
+            $position = Find-E2EScrollingLabel $text $driver 'Grab text'
             if ($mode -eq 'text') {
                 Invoke-DrawArrow $driver
                 Wait-E2EUntil { $driver.RedCanvasPixels() -gt 40 } 'an editor annotation'
                 $beforePixels = $driver.RedCanvasPixels()
             }
-            $beforeStatus = Get-E2EStatusFrame $driver
+            $expectedRequests = $portal.ScreenshotRequests.Count + 1
+            $driver.Click($position[0], $position[1])
+            Wait-E2EUntil { $portal.ScreenshotRequests.Count -eq $expectedRequests } "the screenshot request for $mode"
+            # A script-scope $request would overwrite the module's exported $PortalRequestInterface interface name.
+            $requestPath, $options = $portal.ScreenshotRequests[$portal.ScreenshotRequests.Count - 1]
+            Assert-TrueVariant $options 'interactive'
+            Assert-TrueVariant $options 'modal'
             if ($mode -eq 'cancel') {
                 Send-PortalResponse $portal $requestPath 1 @{}
             }
@@ -108,15 +114,28 @@ try {
                 }
                 Send-PortalResponse $portal $requestPath 0 @{ uri = (New-DBusVariant 's' $uri) }
             }
+            Wait-E2EUntil { $null -ne (Get-E2EWindowInfo $environment) } "the editor after $mode"
             if ($mode -eq 'text') {
                 Wait-E2EUntil {
                     (Get-ClipboardText $environment).ToLowerInvariant().Contains('capture')
                 } 'recognized screenshot text in the clipboard' 25
+                Wait-E2EStatus $text $driver 'Copied' 25
                 $afterPixels = $driver.RedCanvasPixels()
                 Assert-E2E ($beforePixels * 0.8 -le $afterPixels -and $afterPixels -le $beforePixels * 1.5 + 50) "screen OCR must not replace the edited document ($beforePixels, $afterPixels)"
+                Close-E2EX11Driver $driver
+                $driver = New-E2EX11Driver $displayName (Get-E2EWindowInfo $environment)
+                Invoke-E2EHotkey $driver 'z'
+                Wait-E2EUntil { $driver.RedCanvasPixels() -lt $beforePixels * 0.2 } 'Undo after screen OCR'
+                Invoke-E2EHotkey $driver 'y'
+                Wait-E2EUntil { $driver.RedCanvasPixels() -ge $beforePixels * 0.8 } 'Redo after screen OCR'
             }
             else {
-                Wait-E2EUntil { -not (Get-E2EStatusFrame $driver).SameAs($beforeStatus) } "the $mode result"
+                $expectedStatus = switch ($mode) {
+                    'empty' { 'No text recognized' }
+                    'cancel' { 'Text capture cancelled' }
+                    'invalid' { 'Could not grab screen text' }
+                }
+                Wait-E2EStatus $text $driver $expectedStatus 25
                 Assert-E2E ((Get-ClipboardText $environment) -ceq $sentinel) "$mode must leave the clipboard unchanged"
             }
             Assert-E2E (@(Get-ChildItem -LiteralPath $captures -Force).Count -eq 0) 'grabbing text must not save a capture'
@@ -127,25 +146,21 @@ try {
             Stop-E2EProcess $app
             $app = $null
         }
-        $app = Start-E2EProcess @($binaryPath) $environment $work $appLog
-        Wait-E2EUntil { $null -ne (Get-E2EWindowInfo $environment) } 'the editor for the Grab text control' 12
-        $driver = New-E2EX11Driver $displayName (Get-E2EWindowInfo $environment)
-        Wait-E2ESeconds 0.5
-        $text = New-E2ETextReader
-        $position = Find-E2EScrollingLabel $text $driver 'Grab text'
-        Write-E2ETrace $driver 'grab-text-control'
-        Set-ClipboardText $environment 'from-gui-before'
+        Set-ClipboardText $environment 'from-command-line-before'
         $expectedRequests = $portal.ScreenshotRequests.Count + 1
-        $driver.Click($position[0], $position[1])
-        Wait-E2EUntil { $portal.ScreenshotRequests.Count -eq $expectedRequests } "the Grab text control's screenshot chooser"
+        $app = Start-E2EProcess @($binaryPath, '--grab-text') $environment $work $appLog
+        Wait-E2EUntil { $portal.ScreenshotRequests.Count -eq $expectedRequests } 'the command-line screenshot chooser'
         $requestPath, $options = $portal.ScreenshotRequests[$portal.ScreenshotRequests.Count - 1]
         Assert-TrueVariant $options 'interactive'
+        Assert-TrueVariant $options 'modal'
         Send-PortalResponse $portal $requestPath 0 @{ uri = (New-DBusVariant 's' (ConvertTo-E2EFileUri $fixture)) }
         Wait-E2EUntil {
             (Get-ClipboardText $environment).ToLowerInvariant().Contains('capture')
-        } 'recognized text from the Grab text control' 25
+        } 'recognized text from the command line' 25
+        Wait-E2EUntil { $null -ne (Get-E2EWindowInfo $environment) } 'the editor after command-line OCR'
         Assert-E2E (@(Get-ChildItem -LiteralPath $captures -Force).Count -eq 0) 'grabbing text must not save a capture'
         Test-GrabTextNeverCreatesAutomaticCopy $automaticCopies
+        Assert-E2E ($portal.CaptureRequests -eq 0) 'grabbing text must use Screenshot, not ScreenCast'
         Write-E2EPass 'test_grab_text_never_creates_automatic_copy'
         Write-E2ELine 'Screen text OCR copied selected text from CLI and GUI, preserved the editor, and left the clipboard unchanged for empty, cancelled and invalid selections'
     }

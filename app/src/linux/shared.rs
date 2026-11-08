@@ -173,7 +173,7 @@ pub fn start_shortcuts() {
                                     matches!(preset.cursor(), super::capture::CaptureCursor::Included),
                                     preset.delay_seconds(),
                                 ),
-                                super::settings::PresetMode::Desktop => capture_desktop(false),
+                                super::settings::PresetMode::Desktop => capture_desktop(),
                                 super::settings::PresetMode::Text => capture_text(),
                             },
                             None => report(format!("There is no capture preset number {}.", index + 1)),
@@ -204,7 +204,7 @@ pub fn run_launch_action(flag: &str) {
     match flag {
         "--capture" => capture_overlay(super::overlay::Mode::Normal, false, 0),
         "--record" => toggle_recording(),
-        "--capture-interactive" => capture_desktop(false),
+        "--capture-interactive" => capture_desktop(),
         "--grab-text" => capture_text(),
         "--scrolling" => capture_scrolling(super::scroll::Mode::Scrolling(
             super::scroll::Direction::Vertical,
@@ -295,7 +295,7 @@ pub(crate) fn capture_overlay(mode: super::overlay::Mode, repeat: bool, delay: u
             Ok(None) => return report("Capture cancelled".into()),
             Err(error) => {
                 eprintln!("jiffshot: {error}; using the desktop dialog");
-                return capture_desktop(false);
+                return capture_desktop();
             }
         };
         let last = *LAST_AREA.lock().unwrap();
@@ -309,7 +309,7 @@ pub(crate) fn capture_overlay(mode: super::overlay::Mode, repeat: bool, delay: u
             });
             if let Err(error) = shown {
                 eprintln!("jiffshot: the selection overlay failed: {error}; using the desktop dialog");
-                capture_desktop(false);
+                capture_desktop();
             }
         });
         if posted.is_err() {
@@ -347,12 +347,12 @@ pub(crate) fn capture_full_screen(cursor: bool, delay: u64) {
                 eprintln!("jiffshot: {error}; using the screen-sharing chooser");
                 capture_image_with(cursor, 0);
             }
-            other => finish_single(other, false),
+            other => finish_single(other),
         }
     });
 }
 
-pub(crate) fn capture_desktop(then_text: bool) {
+pub(crate) fn capture_desktop() {
     report("Choose what to capture in the desktop dialog…".into());
     std::thread::spawn(move || {
         let result = futures_lite::future::block_on(super::screenshot::capture_interactive())
@@ -360,34 +360,29 @@ pub(crate) fn capture_desktop(then_text: bool) {
                 Some(document) => super::capture::save_capture(&document).map(Some),
                 None => Ok(None),
             });
-        finish_single(result, then_text);
+        finish_single(result);
     });
 }
 
-fn finish_single(result: Result<Option<PathBuf>, String>, then_text: bool) {
+fn finish_single(result: Result<Option<PathBuf>, String>) {
     match result {
         Ok(Some(path)) => {
-            app::post(move |app| {
-                app.incoming(path);
-                if then_text {
-                    app.grab_text();
-                }
-            });
+            app::post(move |app| app.incoming(path));
         }
         Ok(None) => report("Capture cancelled".into()),
         Err(error) => report(format!("Capture failed: {error}")),
     }
 }
 
-/// Captures a monitor or window and copies the text found in it.
+/// Copies text from a desktop-selected area without opening an image.
 pub(crate) fn capture_text() {
-    report("Choose a screen or window to read text from…".into());
-    std::thread::spawn(|| {
-        let cursor = super::capture::CaptureCursor::Hidden;
-        let result = futures_lite::future::block_on(super::capture::capture_monitor(cursor))
-            .and_then(|document| super::capture::save_capture(&document).map(Some));
-        finish_single(result, true);
-    });
+    report("Choose an area containing text in the desktop dialog…".into());
+    if let Err(error) = std::thread::Builder::new()
+        .name("jiffshot-grab-screen-text".to_owned())
+        .spawn(|| report(super::screen_text::message(super::screen_text::grab())))
+    {
+        report(format!("Could not start screen text capture: {error}"));
+    }
 }
 
 /// Starts a scrolling or panoramic capture; call [`finish_active`] to end it.
@@ -436,7 +431,7 @@ pub(super) fn capture_scrolling(mode: super::scroll::Mode) {
                     report("Capture limit reached; saved what was captured".into());
                 }
                 let saved = super::capture::save_capture(&captured.document);
-                finish_single(saved.map(Some), false);
+                finish_single(saved.map(Some));
             }
             Ok(None) => report("Capture cancelled".into()),
             Err(error) => report(format!("Capture failed: {error}")),

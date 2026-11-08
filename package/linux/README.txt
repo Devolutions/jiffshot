@@ -388,6 +388,8 @@ xwininfo, and English Tesseract data:
     -Binary target/release/jiffshot -RuntimeDir target/release
   dbus-run-session -- pwsh -NoProfile -File app/tests/linux_grab_text_e2e.ps1 \
     -Binary target/release/jiffshot -RuntimeDir target/release
+  dbus-run-session -- pwsh -NoProfile -File app/tests/linux_shared_grab_text_e2e.ps1 \
+    -Binary target/release/jiffshot -RuntimeDir target/release
   dbus-run-session -- pwsh -NoProfile -File app/tests/linux_timed_capture_e2e.ps1 \
     -Binary target/release/jiffshot -RuntimeDir target/release
   dbus-run-session -- pwsh -NoProfile -File app/tests/linux_screen_presets_e2e.ps1 \
