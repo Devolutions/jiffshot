@@ -92,6 +92,82 @@ jobs:
           $env:JIFFSHOT_CLI_E2E = Join-Path (Get-Location) 'target\${{ matrix.target }}\release\jiffshot-cli.exe'
           cargo test --release --locked -p jiffshot-workflow --target ${{ matrix.target }} cli_edits_artifacts_over_real_ipc_without_desktop_input -- --ignored --test-threads=1
 
+      - name: Probe Windows live-screen input for Grab Text verification
+        if: matrix.test
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class JiffshotInputProbe {
+            [StructLayout(LayoutKind.Sequential)]
+            public struct MouseInput {
+              public int dx, dy;
+              public uint mouseData, flags, time;
+              public UIntPtr extraInfo;
+            }
+            [StructLayout(LayoutKind.Explicit)]
+            public struct InputData { [FieldOffset(0)] public MouseInput mouse; }
+            [StructLayout(LayoutKind.Sequential)]
+            public struct Input { public uint type; public InputData data; }
+            [DllImport("user32.dll", SetLastError = true)]
+            public static extern bool SetCursorPos(int x, int y);
+            [DllImport("user32.dll", SetLastError = true)]
+            public static extern uint SendInput(uint count, Input[] inputs, int size);
+            public static void Click(int x, int y) {
+              if (!SetCursorPos(x, y)) throw new System.ComponentModel.Win32Exception();
+              var events = new Input[2];
+              events[0].data.mouse.flags = 2;
+              events[1].data.mouse.flags = 4;
+              if (SendInput((uint)events.Length, events, Marshal.SizeOf(typeof(Input))) != events.Length)
+                throw new System.ComponentModel.Win32Exception();
+            }
+          }
+          '@
+          $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          if ($screen.Width -lt 400 -or $screen.Height -lt 240) { throw "No suitable desktop: $screen" }
+          $form = [System.Windows.Forms.Form]::new()
+          $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+          $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+          $form.Bounds = [System.Drawing.Rectangle]::new($screen.Left + 40, $screen.Top + 40, 320, 180)
+          $form.BackColor = [System.Drawing.Color]::FromArgb(230, 20, 180)
+          $form.TopMost = $true
+          $script:pressed = $false
+          $script:released = $false
+          $form.add_MouseDown({ $script:pressed = $true })
+          $form.add_MouseUp({ $script:released = $true })
+          try {
+            $form.Show()
+            $form.Activate()
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 500
+            $pixel = [System.Drawing.Bitmap]::new(1, 1)
+            $graphics = [System.Drawing.Graphics]::FromImage($pixel)
+            try {
+              $graphics.CopyFromScreen($form.Left + 10, $form.Top + 10, 0, 0, $pixel.Size)
+              $color = $pixel.GetPixel(0, 0)
+              if ($color.R -lt 200 -or $color.G -gt 50 -or $color.B -lt 150) { throw "Fixture was not captured: $color" }
+            } finally {
+              $graphics.Dispose()
+              $pixel.Dispose()
+            }
+            [JiffshotInputProbe]::Click($form.Left + 160, $form.Top + 90)
+            for ($i = 0; $i -lt 100 -and (-not $script:pressed -or -not $script:released); $i++) {
+              [System.Windows.Forms.Application]::DoEvents()
+              Start-Sleep -Milliseconds 20
+            }
+            if (-not $script:pressed -or -not $script:released) { throw 'The fixture did not receive real mouse input' }
+            Write-Host 'Windows live-screen pixel and real mouse input are available'
+          } finally {
+            $form.Close()
+            $form.Dispose()
+          }
+          cargo test --release --locked -p jiffshot-workflow --target ${{ matrix.target }} text_capture_recognizes_only_the_selected_area -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { throw "Windows OCR test failed with exit code $LASTEXITCODE" }
+
       - name: Package
         shell: pwsh
         env:
