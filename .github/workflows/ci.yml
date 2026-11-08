@@ -528,6 +528,12 @@ jobs:
         run: |
           cargo test --release --locked --workspace --target ${{ matrix.target }}
 
+      - name: Probe macOS screen capture for Grab Text verification
+        if: matrix.arch == 'arm64'
+        timeout-minutes: 2
+        run: |
+          cargo test --release --locked -p jiffshot-capture --target ${{ matrix.target }} stream_screenshot_waits_for_a_complete_frame -- --ignored --nocapture
+
       - name: Test macOS PowerShell scripts
         if: matrix.arch == 'arm64'
         shell: pwsh
