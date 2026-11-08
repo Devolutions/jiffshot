@@ -528,11 +528,21 @@ jobs:
         run: |
           cargo test --release --locked --workspace --target ${{ matrix.target }}
 
-      - name: Probe macOS screen capture for Grab Text verification
+      - name: Test macOS Grab Text
         if: matrix.arch == 'arm64'
-        timeout-minutes: 2
+        timeout-minutes: 5
+        shell: bash
         run: |
-          cargo test --release --locked -p jiffshot-capture --target ${{ matrix.target }} stream_screenshot_waits_for_a_complete_frame -- --ignored --nocapture
+          set -euo pipefail
+          root="$RUNNER_TEMP/jiffshot-grab-text"
+          mkdir -p "$root"/{library,config,local}
+          trap 'if [[ -f "$root/ui-log.txt" ]]; then cat "$root/ui-log.txt"; fi' EXIT
+          JIFFSHOT_UITEST="$root" JIFFSHOT_UITEST_GRAB_TEXT=1 \
+            JIFFSHOT_LIBRARY="$root/library" JIFFSHOT_CONFIG_DIR="$root/config" \
+            JIFFSHOT_LOCAL_DIR="$root/local" APPDATA="$root/config" LOCALAPPDATA="$root/local" \
+            "target/${{ matrix.target }}/release/jiffshot"
+          grep -Fx 'grab text: editor undo and redo history remained intact' "$root/ui-log.txt"
+          if grep -q '^FAILED:' "$root/ui-log.txt"; then exit 1; fi
 
       - name: Test macOS PowerShell scripts
         if: matrix.arch == 'arm64'

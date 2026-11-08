@@ -638,6 +638,7 @@ pub(crate) fn run() -> rustolonia::Result<()> {
             || std::env::var_os("JIFFSHOT_UITEST_TERMINATION_TRAY_ONLY").is_some()
             || std::env::var_os("JIFFSHOT_UITEST_ENGINE_QUIT").is_some()
             || std::env::var_os("JIFFSHOT_UITEST_CONTROL").is_some()
+            || std::env::var_os("JIFFSHOT_UITEST_GRAB_TEXT").is_some()
             || std::env::var("JIFFSHOT_UITEST_POPUP_SHUTDOWN").is_ok_and(|case| {
                 case.starts_with("native-engine-") || case.starts_with("exit-engine-")
             }));

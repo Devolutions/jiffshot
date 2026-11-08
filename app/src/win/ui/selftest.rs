@@ -9,6 +9,7 @@
 //! without running the editor and overlay walk.
 //! `JIFFSHOT_UITEST_CAPTURE_MENUS` checks menu switching and DarkBlue popups.
 //! `JIFFSHOT_UITEST_WIDGET` checks the floating bar with an isolated tray model.
+//! On macOS, `JIFFSHOT_UITEST_GRAB_TEXT` checks a live screen-text capture.
 //! On macOS, `JIFFSHOT_UITEST_APP_NAME` checks the native application menu name.
 //! On macOS, `JIFFSHOT_UITEST_NATIVE_MENU` checks native menus and shortcuts.
 //! On macOS, `JIFFSHOT_UITEST_OVERLAY` runs only the synthetic overlay test.
@@ -457,6 +458,10 @@ fn editor_walk(s: &mut Script) {
 /// The whole walk, in order.
 fn script() -> Script {
     let mut s = Script(VecDeque::new());
+    #[cfg(target_os = "macos")]
+    if env("JIFFSHOT_UITEST_GRAB_TEXT").is_some() {
+        return grab_text_script();
+    }
     if env("JIFFSHOT_UITEST_LIBRARY_LATENCY").is_some() {
         return library_latency_script();
     }
@@ -1038,6 +1043,171 @@ fn application_name_script() -> Script {
         0
     }).step(|test| {
         test.line("application name: retained after returning to the editor");
+        0
+    });
+    script
+}
+
+#[cfg(target_os = "macos")]
+fn grab_text_script() -> Script {
+    use jiffshot_capture::clipboard::{self, Pasted};
+
+    let area = Rc::new(std::cell::Cell::new(None::<Rect>));
+    let before = Rc::new(RefCell::new(None::<(u32, u32, Vec<u8>)>));
+    let selected = Rc::new(std::cell::Cell::new(false));
+    let shown = Rc::new(std::cell::Cell::new(false));
+    let displayed = Rc::new(RefCell::new(None::<String>));
+    let clipboard_result = Rc::new(RefCell::new(None::<std::result::Result<String, String>>));
+    let (send, receive) = std::sync::mpsc::channel();
+    let receive = Rc::new(receive);
+    let mut script = Script(VecDeque::new());
+
+    script.wait(800).step(|test| {
+        empty_scratch_library(test);
+        crate::app::act(|app| {
+            app.load(jiffshot_doc::Document::blank(61, 37, jiffshot_doc::Rgba::WHITE), None, None);
+            for rgba in [[255, 0, 0, 255], [0, 0, 255, 255]] {
+                app.paste_from_clipboard(Ok(Some(Pasted::Image { width: 1, height: 1, rgba: rgba.to_vec() })));
+            }
+        }).expect("prepare the edited document");
+        150
+    });
+    script.step(|_| {
+        call(|model| model.undo());
+        150
+    });
+    let prepared_area = area.clone();
+    let original = before.clone();
+    script.step(move |test| {
+        crate::canvas::with_editor(|editor| {
+            assert_eq!(editor.document().objects.len(), 1, "the document must have an undo and a redo");
+            let frame = crate::winutil::frame_from_pixmap(&editor.document().flatten());
+            *original.borrow_mut() = Some((frame.width, frame.height, frame.pixels));
+        }).expect("read the edited document");
+        let (_, number) = platform::start_control_capture_fixture().expect("show the screen text fixture");
+        let rect = window_rect(number as isize);
+        assert!(rect.width > 4 && rect.height > 4, "the text fixture has invalid bounds: {rect:?}");
+        prepared_area.set(Some(rect));
+        test.line("grab text: displayed the screen fixture");
+        500
+    });
+    script.step(|test| {
+        run("widget:text");
+        test.line("grab text: requested a live-screen selection from the widget");
+        100
+    });
+    for _ in 0..150 {
+        let area = area.clone();
+        let selected = selected.clone();
+        script.step(move |_| {
+            if selected.get() {
+                return 0;
+            }
+            let Some(id) = super::overlay::session_for_selftest() else { return 100 };
+            if !api::pending(id) {
+                return 100;
+            }
+            let rect = area.get().expect("the fixture bounds are unavailable");
+            let (left, top) = (f64::from(rect.x + 2), f64::from(rect.y + 2));
+            let (right, bottom) = (f64::from(rect.right() - 2), f64::from(rect.bottom() - 2));
+            api::input(id, api::PRESS, left, top, 0, 0);
+            api::input(id, api::MOVE, right, bottom, 0, 0);
+            assert!(api::input(id, api::RELEASE, right, bottom, 0, 0).has(api::FLAG_DONE), "the selection did not finish");
+            selected.set(true);
+            0
+        });
+    }
+    let selection = selected.clone();
+    script.step(move |test| {
+        assert!(selection.get(), "the selection overlay did not open: {}", sink().toast.get_untracked());
+        test.line("grab text: selected the visible fixture in the real overlay");
+        100
+    });
+    for _ in 0..300 {
+        let shown = shown.clone();
+        script.step(move |_| {
+            if shown.get() {
+                return 0;
+            }
+            if let Some((window, _)) = super::extras::grab_text_for_selftest() {
+                if window.get_is_visible().expect("inspect the result window") {
+                    shown.set(true);
+                    return 0;
+                }
+            }
+            100
+        });
+    }
+    let result_shown = shown.clone();
+    let result_text = displayed.clone();
+    script.step(move |test| {
+        assert!(result_shown.get(), "the Grab Text result window did not appear: {}", sink().toast.get_untracked());
+        let (window, text) = super::extras::grab_text_for_selftest().expect("the result window is unavailable");
+        assert!(window.get_is_visible().expect("inspect the result window"));
+        let text = text.get_text().expect("read the result window").expect("the result has no text");
+        let recognized = text.to_ascii_lowercase();
+        assert!(recognized.contains("jiffshot") && recognized.contains("fixture"), "the screen text was not recognized: {text:?}");
+        *result_text.borrow_mut() = Some(text);
+        jiffshot_workflow::on_capture_thread(move || {
+            let result = objc2::rc::autoreleasepool(|_| match clipboard::read(0) {
+                Ok(Some(Pasted::Text(text))) => Ok(text),
+                Ok(_) => Err("Grab Text did not copy text to the private pasteboard".to_owned()),
+                Err(error) => Err(format!("could not read the private pasteboard: {error}")),
+            });
+            if send.send(result).is_err() {
+                eprintln!("ui self-test: the Grab Text clipboard check stopped waiting");
+            }
+        });
+        test.line("grab text: the native result window displays the recognized screen text");
+        100
+    });
+    for _ in 0..100 {
+        let receive = receive.clone();
+        let result = clipboard_result.clone();
+        script.step(move |_| {
+            if result.borrow().is_some() {
+                return 0;
+            }
+            match receive.try_recv() {
+                Ok(value) => {
+                    *result.borrow_mut() = Some(value);
+                    0
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => 100,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => panic!("the clipboard check stopped unexpectedly"),
+            }
+        });
+    }
+    let copied = clipboard_result.clone();
+    let result_text = displayed.clone();
+    let original = before.clone();
+    script.step(move |test| {
+        let copied = copied.borrow_mut().take().expect("the clipboard check timed out").expect("read the copied text");
+        assert_eq!(Some(&copied), result_text.borrow().as_ref(), "the result and copied text differ");
+        crate::canvas::with_editor(|editor| {
+            let frame = crate::winutil::frame_from_pixmap(&editor.document().flatten());
+            assert_eq!(Some(&(frame.width, frame.height, frame.pixels)), original.borrow().as_ref(), "Grab Text changed the editor image");
+            assert_eq!(editor.document().objects.len(), 1, "Grab Text changed the annotations");
+        }).expect("read the edited document");
+        empty_scratch_library(test);
+        call(|model| model.undo());
+        test.line("grab text: copied text without changing or saving the editor image");
+        150
+    });
+    script.step(|_| {
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(0), "Grab Text lost undo history");
+        call(|model| model.redo());
+        150
+    });
+    script.step(|_| {
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(1), "Grab Text changed the first redo");
+        call(|model| model.redo());
+        150
+    });
+    script.step(|test| {
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(2), "Grab Text lost redo history");
+        platform::close_recording_shutdown_fixture();
+        test.line("grab text: editor undo and redo history remained intact");
         0
     });
     script

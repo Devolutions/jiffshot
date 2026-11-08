@@ -79,7 +79,8 @@ thread_local! {
 
 fn pasteboard() -> Retained<NSPasteboard> {
     if std::env::var_os("JIFFSHOT_UITEST").is_some()
-        && std::env::var_os("JIFFSHOT_UITEST_LIBRARY_COPY").is_some()
+        && (std::env::var_os("JIFFSHOT_UITEST_LIBRARY_COPY").is_some()
+            || std::env::var_os("JIFFSHOT_UITEST_GRAB_TEXT").is_some())
     {
         return TEST_BOARD.with(Clone::clone);
     }
