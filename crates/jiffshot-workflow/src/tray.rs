@@ -837,6 +837,45 @@ fn select_create_mode(choice: Option<usize>) -> Option<usize> {
     choice.and_then(|index| MODES.get(index).copied())
 }
 
+fn take_text_capture(
+    mode: usize,
+    capture: Capture,
+    deliver: impl FnOnce(&jiffshot_capture::Frame),
+) -> Option<Capture> {
+    if mode == MODE_TEXT {
+        deliver(&capture.frame);
+        None
+    } else {
+        Some(capture)
+    }
+}
+
+fn deliver_screen_text(
+    frame: &jiffshot_capture::Frame,
+    recognize: impl FnOnce(&jiffshot_capture::Frame) -> Result<String, String>,
+    copy: impl FnOnce(&str) -> std::io::Result<()>,
+    notice: impl FnOnce(&str, &str, bool),
+    show: impl FnOnce(&str),
+) {
+    match recognize(frame) {
+        Ok(text) if !text.trim().is_empty() => {
+            let copied = copy(&text);
+            let preview: String = text.chars().take(180).collect();
+            match copied {
+                Ok(()) => notice("Text copied", &preview, false),
+                Err(error) => notice(
+                    "Grab text",
+                    &format!("Text was found but could not be copied: {error}"),
+                    true,
+                ),
+            }
+            show(&text);
+        }
+        Ok(_) => notice("Grab text", "No text found in the selection", true),
+        Err(error) => notice("Grab text failed", &error, true),
+    }
+}
+
 /// Freezes the screen and runs the selection overlay; `mode` says what to
 /// do with the selection.
 fn capture_interactive(mode: usize) {
@@ -1122,35 +1161,22 @@ fn capture_interactive(mode: usize) {
         });
         publish_state();
     }
-    match mode {
-        MODE_TEXT => match modes::text(&capture.frame) {
-            Ok(text) if !text.trim().is_empty() => {
-                let copied = jiffshot_capture::clipboard::copy_text(&text, hwnd as isize);
-                let preview: String = text.chars().take(180).collect();
-                #[cfg(windows)]
-                let title = if copied.is_ok() {
-                    "Text copied"
-                } else {
-                    "Text found (clipboard busy)"
-                };
+    let Some(capture) = take_text_capture(mode, capture, |frame| {
+        deliver_screen_text(
+            frame,
+            modes::text,
+            |text| jiffshot_capture::clipboard::copy_text(text, hwnd as isize),
+            |title, text, warning| notify(hwnd, title, text, warning),
+            |text| {
                 log(&format!("grab text: {} characters", text.chars().count()));
-                #[cfg(windows)]
-                notify(hwnd, title, &preview, false);
-                #[cfg(target_os = "macos")]
-                match copied {
-                    Ok(()) => notify(hwnd, "Text copied", &preview, false),
-                    Err(error) => notify(
-                        hwnd,
-                        "Grab text",
-                        &format!("Text was found but could not be copied: {error}"),
-                        true,
-                    ),
-                }
-                crate::show_text(&text);
-            }
-            Ok(_) => notify(hwnd, "Grab text", "No text found in the selection", true),
-            Err(error) => notify(hwnd, "Grab text failed", &error, true),
-        },
+                crate::show_text(text);
+            },
+        )
+    }) else {
+        with_app(|app| app.busy = false);
+        return;
+    };
+    match mode {
         // These run until done, so they stay busy until then.
         MODE_SCROLLING => {
             return spawn_scrolling(
@@ -3641,6 +3667,236 @@ mod tests {
     use jiffshot_capture::wide;
     #[cfg(windows)]
     use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, PeekMessageW, HWND_MESSAGE, PM_REMOVE};
+
+    fn text_test_capture() -> Capture {
+        let frame = jiffshot_capture::Frame::new(2, 1);
+        workflow::from_frame(CaptureKind::Region, Rect::new(0, 0, 2, 1), frame)
+    }
+
+    #[test]
+    fn text_capture_copies_and_shows_text_without_image_delivery() {
+        let events = RefCell::new(Vec::new());
+        let remaining = take_text_capture(MODE_TEXT, text_test_capture(), |frame| {
+            deliver_screen_text(
+                frame,
+                |frame| {
+                    assert_eq!((frame.width, frame.height), (2, 1));
+                    Ok("first line\nsecond line".to_owned())
+                },
+                |text| {
+                    events.borrow_mut().push(format!("copy:{text}"));
+                    Ok(())
+                },
+                |title, text, warning| {
+                    events
+                        .borrow_mut()
+                        .push(format!("notice:{title}:{text}:{warning}"));
+                },
+                |text| events.borrow_mut().push(format!("show:{text}")),
+            );
+        });
+        assert!(
+            remaining.is_none(),
+            "text must not enter the normal image workflow"
+        );
+        assert_eq!(
+            events.into_inner(),
+            [
+                "copy:first line\nsecond line",
+                "notice:Text copied:first line\nsecond line:false",
+                "show:first line\nsecond line",
+            ]
+        );
+    }
+
+    #[test]
+    fn text_capture_entry_point_mappings_preserve_text_mode() {
+        let mut settings = Settings::default();
+        settings.capture_window.tab = 1;
+        settings.capture_window.fixed = true;
+        settings.capture_window.fixed_at = Some((10, 20));
+        assert_eq!(
+            crate::panel::pick_unified(&mut settings, "image:sel:text"),
+            crate::panel::Pick::Changed
+        );
+        let panel_mode = crate::panel::mode_of(&settings, 1);
+        let preset = crate::settings::Preset {
+            mode: "text".to_owned(),
+            ..Default::default()
+        };
+        let routes = [
+            ("capture window", mode_named(&panel_mode)),
+            ("preset", mode_named(&preset.mode)),
+            ("command line", crate::capture_flag(&["--text".to_owned()])),
+        ];
+        for (source, mode) in routes {
+            let Some(mode) = mode else {
+                panic!("{source} did not select a capture mode");
+            };
+            assert_eq!(mode, MODE_TEXT, "{source} did not select Grab Text");
+            let delivered = std::cell::Cell::new(false);
+            let capture = take_text_capture(mode, text_test_capture(), |_| delivered.set(true));
+            assert!(delivered.get(), "{source} did not deliver text");
+            assert!(capture.is_none(), "{source} returned an image capture");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "requires an installed English-capable Windows OCR language"
+    )]
+    fn text_capture_recognizes_only_the_selected_area() {
+        use jiffshot_doc::object::{Kind, Style};
+        use jiffshot_doc::{Box2, Document, Rgba};
+
+        let mut document = Document::blank(800, 320, Rgba::WHITE);
+        let style = Style {
+            font: "Arial".to_owned(),
+            font_size: 72.0,
+            text_color: Rgba::BLACK,
+            ..Style::default()
+        };
+        document.add(
+            Kind::Text {
+                rect: Box2::from_xywh(25.0, 10.0, 750.0, 110.0),
+                text: "CAPTURE TEXT".to_owned(),
+            },
+            style.clone(),
+        );
+        document.add(
+            Kind::Text {
+                rect: Box2::from_xywh(25.0, 170.0, 750.0, 110.0),
+                text: "OUTSIDE TEXT".to_owned(),
+            },
+            style,
+        );
+        let mut overlay = Overlay::new(
+            workflow::frame_from_pixmap(&document.flatten()),
+            (0, 0),
+            jiffshot_capture::targets::Targets::default(),
+            Vec::new(),
+            (0, 0),
+        )
+        .expect("the text fixture should form an overlay");
+        let full_text = modes::text(&overlay.snapshot)
+            .expect("OCR should read the whole fixture")
+            .to_ascii_uppercase();
+        assert!(
+            full_text.contains("CAPTURE") && full_text.contains("OUTSIDE"),
+            "OCR did not recognize both fixture labels: {full_text:?}"
+        );
+        overlay.pointer_pressed(5, 5);
+        overlay.pointer_moved(795, 145);
+        overlay
+            .pointer_released(795, 145)
+            .expect("the text selection should finish");
+        let selection = overlay
+            .outcome
+            .as_ref()
+            .and_then(Option::as_ref)
+            .expect("the drag should select a region");
+        let capture = workflow::from_overlay(&overlay, selection, None, false, false)
+            .expect("the selected frame should be cropped")
+            .expect("the selection should intersect the fixture");
+        let copied = RefCell::new(None);
+        let shown = RefCell::new(None);
+        let notice = RefCell::new(None);
+        let remaining = take_text_capture(MODE_TEXT, capture, |frame| {
+            deliver_screen_text(
+                frame,
+                modes::text,
+                |text| {
+                    *copied.borrow_mut() = Some(text.to_owned());
+                    Ok(())
+                },
+                |title, _, warning| *notice.borrow_mut() = Some((title.to_owned(), warning)),
+                |text| *shown.borrow_mut() = Some(text.to_owned()),
+            );
+        });
+        assert!(
+            remaining.is_none(),
+            "text should not return an image capture"
+        );
+        let copied = copied
+            .into_inner()
+            .expect("the selected text should be copied");
+        assert!(
+            copied.to_ascii_uppercase().contains("CAPTURE"),
+            "OCR did not recognize the selected text: {copied:?}"
+        );
+        assert!(
+            !copied.to_ascii_uppercase().contains("OUTSIDE"),
+            "OCR included text outside the selection: {copied:?}"
+        );
+        assert_eq!(shown.into_inner().as_deref(), Some(copied.as_str()));
+        assert_eq!(notice.into_inner(), Some(("Text copied".to_owned(), false)));
+    }
+
+    #[test]
+    fn text_capture_routing_preserves_the_normal_image_workflow() {
+        let remaining = take_text_capture(MODE_IMAGE, text_test_capture(), |_| {
+            panic!("image capture must not run screen OCR")
+        })
+        .expect("an ordinary image capture must be delivered");
+        assert_eq!((remaining.frame.width, remaining.frame.height), (2, 1));
+    }
+
+    #[test]
+    fn text_capture_reports_empty_ocr_and_clipboard_failures() {
+        let frame = jiffshot_capture::Frame::new(1, 1);
+        let events = RefCell::new(Vec::new());
+        deliver_screen_text(
+            &frame,
+            |_| Ok(" \n ".to_owned()),
+            |_| panic!("empty text must not be copied"),
+            |title, text, warning| {
+                events
+                    .borrow_mut()
+                    .push(format!("{title}:{text}:{warning}"))
+            },
+            |_| panic!("empty text must not open the result window"),
+        );
+        assert_eq!(
+            events.borrow_mut().drain(..).collect::<Vec<_>>(),
+            ["Grab text:No text found in the selection:true"]
+        );
+
+        deliver_screen_text(
+            &frame,
+            |_| Err("OCR unavailable".into()),
+            |_| panic!("failed OCR must not copy"),
+            |title, text, warning| {
+                events
+                    .borrow_mut()
+                    .push(format!("{title}:{text}:{warning}"))
+            },
+            |_| panic!("failed OCR must not open the result window"),
+        );
+        assert_eq!(
+            events.borrow_mut().drain(..).collect::<Vec<_>>(),
+            ["Grab text failed:OCR unavailable:true"]
+        );
+
+        deliver_screen_text(
+            &frame,
+            |_| Ok("readable text".into()),
+            |_| Err(std::io::Error::other("clipboard unavailable")),
+            |title, text, warning| {
+                events
+                    .borrow_mut()
+                    .push(format!("{title}:{text}:{warning}"))
+            },
+            |text| events.borrow_mut().push(format!("show:{text}")),
+        );
+        assert_eq!(
+            events.into_inner(),
+            [
+                "Grab text:Text was found but could not be copied: clipboard unavailable:true",
+                "show:readable text",
+            ]
+        );
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

@@ -549,6 +549,10 @@ pub(super) fn widget_menu_open_for_selftest() -> Result<bool> {
 
 // ---- Grab Text ----------------------------------------------------------------
 
+pub(super) fn grab_text_for_selftest() -> Option<(Window, TextBox)> {
+    with(|extras| extras.grab_text.as_ref().map(|grab| (grab.window.clone(), grab.text.clone()))).flatten()
+}
+
 /// Shows the recognized text, in front.
 fn show_grab_text(text: String) -> Result<()> {
     let Some(scope) = with(|e| e.scope.clone()) else { return Ok(()) };

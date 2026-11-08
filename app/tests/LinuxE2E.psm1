@@ -454,6 +454,9 @@ function Invoke-MockPortalMessage {
             $bound = [System.Collections.Generic.List[object]]::new()
             foreach ($shortcut in $shortcuts) {
                 $shortcutId, $properties = $shortcut
+                if ($shortcutId -match '^preset-([1-9])$') {
+                    $names[$shortcutId] = "Ctrl+Alt+$($Matches[1])"
+                }
                 $bound.Add(@($shortcutId, [ordered]@{
                             description         = $properties['description']
                             trigger_description = (New-DBusVariant 's' $names[$shortcutId])

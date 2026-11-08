@@ -92,6 +92,15 @@ jobs:
           $env:JIFFSHOT_CLI_E2E = Join-Path (Get-Location) 'target\${{ matrix.target }}\release\jiffshot-cli.exe'
           cargo test --release --locked -p jiffshot-workflow --target ${{ matrix.target }} cli_edits_artifacts_over_real_ipc_without_desktop_input -- --ignored --test-threads=1
 
+      - name: Test Windows Grab Text
+        if: matrix.test
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          cargo test --release --locked -p jiffshot-workflow --target ${{ matrix.target }} text_capture_recognizes_only_the_selected_area -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\app\tests\windows_grab_text_e2e.ps1 -Binary "target\${{ matrix.target }}\release\jiffshot.exe" -AllowDesktopInput
+
       - name: Package
         shell: pwsh
         env:
@@ -527,6 +536,22 @@ jobs:
         if: matrix.arch == 'arm64'
         run: |
           cargo test --release --locked --workspace --target ${{ matrix.target }}
+
+      - name: Test macOS Grab Text
+        if: matrix.arch == 'arm64'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/jiffshot-grab-text"
+          mkdir -p "$root"/{library,config,local}
+          trap 'if [[ -f "$root/ui-log.txt" ]]; then cat "$root/ui-log.txt"; fi' EXIT
+          JIFFSHOT_UITEST="$root" JIFFSHOT_UITEST_GRAB_TEXT=1 \
+            JIFFSHOT_LIBRARY="$root/library" JIFFSHOT_CONFIG_DIR="$root/config" \
+            JIFFSHOT_LOCAL_DIR="$root/local" APPDATA="$root/config" LOCALAPPDATA="$root/local" \
+            "target/${{ matrix.target }}/release/jiffshot"
+          grep -Fx 'grab text: editor undo and redo history remained intact' "$root/ui-log.txt"
+          if grep -q '^FAILED:' "$root/ui-log.txt"; then exit 1; fi
 
       - name: Test macOS PowerShell scripts
         if: matrix.arch == 'arm64'

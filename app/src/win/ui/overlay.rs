@@ -43,7 +43,6 @@ thread_local! {
     static DRAW: RefCell<Option<ScreenDraw>> = const { RefCell::new(None) };
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn session_for_selftest() -> Option<u64> {
     HOST.with(|host| host.borrow().session.as_ref().map(|session| session.id))
 }

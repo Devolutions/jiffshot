@@ -19,6 +19,7 @@ mod portal;
 mod portal_frame;
 pub(crate) mod prefs;
 mod schedule;
+mod screen_text;
 mod screenshot;
 mod scroll;
 mod settings;

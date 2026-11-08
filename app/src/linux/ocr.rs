@@ -62,10 +62,25 @@ impl Recognizer {
             .set_image_from_mem(&encoded)
             .map_err(|error| format!("Tesseract could not read the selected image: {error}"))?;
 
-        let lines = self
+        let lines = match self
             .api
             .get_component_boxes(capi::TessPageIteratorLevel_RIL_TEXTLINE, true)
-            .ok_or_else(|| "Tesseract did not return text line bounds".to_owned())?;
+        {
+            Some(lines) => lines,
+            None => {
+                // Blank images can have no line boxes; verify recognition before treating this as empty.
+                if self.api.recognize() != 0 {
+                    return Err("Tesseract could not recognize the selected image".to_owned());
+                }
+                let text = self.api.get_utf8_text().map_err(|error| {
+                    format!("Tesseract could not read the selected image: {error}")
+                })?;
+                if text.trim().is_empty() {
+                    return Ok(Vec::new());
+                }
+                return Err("Tesseract did not return text line bounds".to_owned());
+            }
+        };
         let words = self
             .api
             .get_component_boxes(capi::TessPageIteratorLevel_RIL_WORD, true)
