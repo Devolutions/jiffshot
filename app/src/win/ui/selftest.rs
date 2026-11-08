@@ -1263,6 +1263,11 @@ fn grab_text_script() -> Script {
     });
     script.step(|test| {
         assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(2), "Grab Text lost redo history");
+        // Discard the unsaved fixture only after verifying its history.
+        crate::canvas::with_editor(|editor| {
+            editor.load(jiffshot_doc::Document::blank(61, 37, jiffshot_doc::Rgba::WHITE));
+        }).expect("discard the self-test document");
+        empty_scratch_library(test);
         #[cfg(target_os = "macos")]
         platform::close_recording_shutdown_fixture();
         test.line("grab text: editor undo and redo history remained intact");
