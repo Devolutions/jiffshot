@@ -74,6 +74,11 @@ pub fn side_bar(ctx: &Ctx) -> El<Border> {
         .child(quick_styles(s, theme))
         .child(variant_section(s, theme))
         .child(
+            part(s, "region")
+                .child(section(theme, "IMAGE REGION"))
+                .child(chip("Copy background only").tool_tip_tip("Copy the selected region without annotations").command(action("copy-background"))),
+        )
+        .child(
             part(s, "tails")
                 .child(section(theme, "TAILS"))
                 .child(WrapPanel::el().child(chip("Add tail").tool_tip_tip("Point the callout at one more place").command(action("tail:add"))).child(chip("Remove tail").command(action("tail:remove")))),

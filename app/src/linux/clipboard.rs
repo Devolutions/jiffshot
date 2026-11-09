@@ -1,20 +1,39 @@
 //! Image clipboard access with Wayland data-control and X11 support.
 
 use arboard::{Clipboard, ImageData};
+use jiffshot_doc::object::Object;
 use jiffshot_doc::{Document, Pixmap};
 use std::borrow::Cow;
 
 static CLIPBOARD: parking_lot::Mutex<Option<Clipboard>> = parking_lot::Mutex::new(None);
+static OBJECT_CLIPBOARD: parking_lot::Mutex<Option<ObjectClipboard>> =
+    parking_lot::Mutex::new(None);
 
 pub fn copy_pixmap(pixmap: Pixmap) -> Result<(), String> {
+    copy_pixmap_inner(pixmap, None)
+}
+
+pub fn copy_objects(pixmap: Pixmap, objects: Vec<Object>) -> Result<(), String> {
+    copy_pixmap_inner(pixmap, Some(objects))
+}
+
+fn copy_pixmap_inner(pixmap: Pixmap, objects: Option<Vec<Object>>) -> Result<(), String> {
     let image = image_data_from_pixmap(&pixmap);
+    let object_clipboard = objects.map(|objects| ObjectClipboard {
+        width: image.width,
+        height: image.height,
+        rgba: image.bytes.to_vec(),
+        objects,
+    });
     let mut clipboard = clipboard()?;
     let clipboard = clipboard
         .as_mut()
         .ok_or_else(|| "could not initialize the system clipboard".to_owned())?;
     clipboard
         .set_image(image)
-        .map_err(|error| format!("could not copy image to the clipboard: {error}"))
+        .map_err(|error| format!("could not copy image to the clipboard: {error}"))?;
+    *OBJECT_CLIPBOARD.lock() = object_clipboard;
+    Ok(())
 }
 
 pub fn copy_text(text: String) -> Result<(), String> {
@@ -24,7 +43,9 @@ pub fn copy_text(text: String) -> Result<(), String> {
         .ok_or_else(|| "could not initialize the system clipboard".to_owned())?;
     clipboard
         .set_text(text)
-        .map_err(|error| format!("could not copy text to the clipboard: {error}"))
+        .map_err(|error| format!("could not copy text to the clipboard: {error}"))?;
+    *OBJECT_CLIPBOARD.lock() = None;
+    Ok(())
 }
 
 pub fn paste_document() -> Result<Document, String> {
@@ -35,6 +56,70 @@ pub fn paste_document() -> Result<Document, String> {
         .get_image()
         .map_err(|error| format!("could not read an image from the clipboard: {error}"))?;
     document_from_image(image)
+}
+
+pub(super) struct ClipboardContents {
+    pub(super) document: Document,
+    pub(super) objects: Option<Vec<Object>>,
+}
+
+struct ObjectClipboard {
+    width: usize,
+    height: usize,
+    rgba: Vec<u8>,
+    objects: Vec<Object>,
+}
+
+impl ObjectClipboard {
+    fn matches(&self, width: usize, height: usize, rgba: &[u8]) -> bool {
+        self.width == width && self.height == height && self.rgba.as_slice() == rgba
+    }
+}
+
+fn take_matching_objects(
+    clipboard: &mut Option<ObjectClipboard>,
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+) -> Option<Vec<Object>> {
+    match clipboard.as_ref() {
+        Some(copied) if copied.matches(width, height, rgba) => Some(copied.objects.clone()),
+        Some(_) => {
+            *clipboard = None;
+            None
+        }
+        None => None,
+    }
+}
+
+pub(super) fn paste_contents() -> Result<ClipboardContents, String> {
+    let mut clipboard = clipboard()?;
+    let image = match clipboard
+        .as_mut()
+        .ok_or_else(|| "could not initialize the system clipboard".to_owned())?
+        .get_image()
+    {
+        Ok(image) => image,
+        Err(error) => {
+            *OBJECT_CLIPBOARD.lock() = None;
+            return Err(format!(
+                "could not read an image from the clipboard: {error}"
+            ));
+        }
+    };
+    let (width, height, rgba) = (image.width, image.height, image.bytes.to_vec());
+    let document = match document_from_image(image) {
+        Ok(document) => document,
+        Err(error) => {
+            *OBJECT_CLIPBOARD.lock() = None;
+            return Err(error);
+        }
+    };
+    let objects = {
+        let mut object_clipboard = OBJECT_CLIPBOARD.lock();
+        take_matching_objects(&mut object_clipboard, width, height, &rgba)
+    };
+    Ok(ClipboardContents { document, objects })
 }
 
 fn clipboard() -> Result<parking_lot::MutexGuard<'static, Option<Clipboard>>, String> {
@@ -120,6 +205,26 @@ mod tests {
         assert!(
             document_from_image(image).is_err(),
             "truncated clipboard image data must not be accepted"
+        );
+    }
+
+    #[test]
+    fn object_clipboard_is_used_only_for_matching_system_image_pixels() {
+        let mut clipboard = Some(ObjectClipboard {
+            width: 1,
+            height: 1,
+            rgba: vec![10, 20, 30, 255],
+            objects: Vec::new(),
+        });
+        let matching = take_matching_objects(&mut clipboard, 1, 1, &[10, 20, 30, 255])
+            .expect("matching contents retain editable annotations");
+        assert!(matching.is_empty());
+        assert!(clipboard.is_some(), "matching contents remain reusable");
+
+        assert!(take_matching_objects(&mut clipboard, 1, 1, &[30, 20, 10, 255]).is_none());
+        assert!(
+            clipboard.is_none(),
+            "a different system image discards stale annotations"
         );
     }
 }

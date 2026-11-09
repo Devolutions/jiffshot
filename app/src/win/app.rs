@@ -921,7 +921,7 @@ pub struct App {
     focus: i64,
     zoom: i64,
     status: String,
-    object_clipboard: Option<Object>,
+    object_clipboard: Option<ObjectClipboard>,
     library_items: Vec<library::Item>,
     library_selected: std::collections::HashSet<PathBuf>,
     #[cfg(target_os = "macos")]
@@ -936,6 +936,32 @@ pub struct App {
     pub video: Option<crate::video::Session>,
     pub narration: Option<crate::video::Narration>,
     pub(crate) narration_request: Option<u64>,
+}
+
+#[derive(Clone)]
+struct ObjectClipboard {
+    objects: Vec<Object>,
+    frame: jiffshot_capture::Frame,
+}
+
+impl ObjectClipboard {
+    fn matches_image(&self, width: u32, height: u32, rgba: &[u8]) -> bool {
+        self.frame.width == width
+            && self.frame.height == height
+            && rgba.len() == self.frame.pixels.len()
+            && rgba
+                .chunks_exact(4)
+                .zip(self.frame.pixels.chunks_exact(4))
+                .all(|(actual, expected)| {
+                    actual
+                        == [
+                            expected[2],
+                            expected[1],
+                            expected[0],
+                            if self.frame.alpha { expected[3] } else { 255 },
+                        ]
+                })
+    }
 }
 
 #[cfg(windows)]
@@ -1035,6 +1061,8 @@ fn panel_for(kind: &str) -> &'static str {
         "Image" => "stroke;width;shadow;opacity;rotation",
         "Drop zone" => "zone;stroke;width;shadow",
         "Fill" => "fill;amount",
+        "Select" => "fill;backfill",
+        "Image region" => "region;fill;backfill",
         "Cut Out" => "variant;backfill",
         "Selection" => "variant;backfill",
         "Magic Wand" => "amount;backfill",
@@ -1235,13 +1263,17 @@ impl App {
         let e = guard.as_mut()?;
         let selected = e.selected().cloned();
         let tool = e.tool();
-        let kind = selected.as_ref().map(|o| {
-            if o.zone.is_some() {
-                "Drop zone".to_owned()
-            } else {
-                o.kind_name().to_owned()
-            }
-        });
+        let kind = if e.selected_region().is_some() {
+            Some("Image region".to_owned())
+        } else {
+            selected.as_ref().map(|o| {
+                if o.zone.is_some() {
+                    "Drop zone".to_owned()
+                } else {
+                    o.kind_name().to_owned()
+                }
+            })
+        };
         let variant_tool = selected.as_ref().map(ed::tool_for).unwrap_or(tool);
         let variant = selected
             .as_ref()
@@ -1266,7 +1298,7 @@ impl App {
             modified: e.is_modified(),
             damage: e.has_damage(),
             picked: e.picked_color(),
-            selected_count: e.selected_ids().len(),
+            selected_count: e.selected_ids().len() + usize::from(e.selected_region().is_some()),
             background_fill: e.background_fill.name(),
         })
     }
@@ -1281,6 +1313,10 @@ impl App {
             self.set_status(error);
         } else if events & ed::EVENT_CANVAS_RESIZED != 0 {
             self.set_status(format!("Resized canvas to {} × {} px", s.size.0, s.size.1));
+        } else if events & ed::EVENT_REGION_OVERLAP != 0 {
+            self.set_status(
+                "Operation blocked: flatten annotations first to cut or move across them",
+            );
         }
         if let Some(color) = s.picked {
             let hex = color.to_hex();
@@ -1361,6 +1397,8 @@ impl App {
         let status = self.status.clone();
         self.put_str("Status", &status, |k, v| k.set_status(v));
         let has_sel = s.kind.is_some();
+        let safe_selection = s.kind.as_deref() != Some("Image region")
+            || !with_editor(|e| e.region_overlaps_annotations()).unwrap_or(false);
         self.put_flag("UndoEnabled", self.video.as_ref().map_or(s.undo.is_some(), |v| v.can_undo()), |k, v| {
             k.set_undo_enabled(v)
         });
@@ -1392,7 +1430,17 @@ impl App {
             ),
         ] {
             let enabled = if matches!(name, "DeleteEnabled" | "CutEnabled") {
-                self.video.as_ref().map_or(has_sel, |v| v.can_cut())
+                self.video
+                    .as_ref()
+                    .map_or(has_sel && safe_selection, |v| v.can_cut())
+            } else if matches!(
+                name,
+                "BringToFrontEnabled"
+                    | "BringForwardEnabled"
+                    | "SendBackwardEnabled"
+                    | "SendToBackEnabled"
+            ) {
+                has_sel && s.kind.as_deref() != Some("Image region")
             } else {
                 has_sel
             };
@@ -1538,7 +1586,7 @@ impl App {
             _ => None,
         };
         let Some(path) = target else {
-            return Err("Save the current document before quitting.".into());
+            return Err("Save the current document as a Jiffshot document (.jsd) before leaving it.".into());
         };
         if !self.save_to(&path) {
             return Err(format!(
@@ -1713,9 +1761,14 @@ impl App {
     }
 
     pub fn open_path(&mut self, path: &Path) {
+        self.open_path_checked(path);
+    }
+
+    fn open_path_checked(&mut self, path: &Path) -> bool {
         if self.video.is_some() {
             if let Err(error) = self.autosave_checked() {
-                return self.set_status(error);
+                self.set_status(error);
+                return false;
             }
         }
         let ext = path
@@ -1755,8 +1808,12 @@ impl App {
                 let status =
                     font_notice.map_or(status.clone(), |notice| format!("{notice}; {status}"));
                 self.set_status(status);
+                true
             }
-            Err(error) => self.set_status(format!("Could not open {}: {error}", file.display())),
+            Err(error) => {
+                self.set_status(format!("Could not open {}: {error}", file.display()));
+                false
+            }
         }
     }
 
@@ -2009,47 +2066,86 @@ impl App {
         &mut self,
         copy: impl FnOnce(&jiffshot_capture::Frame, isize) -> std::io::Result<()>,
     ) -> bool {
-        match with_editor(|e| e.selected().cloned()).flatten() {
-            Some(o) => {
-                if let Kind::Image { rect, .. } = &o.kind {
-                    let area = if o.rotation.abs() > 0.01
-                        || o.style.shadow
-                        || o.style.outline_width > 0.0
-                    {
-                        o.bounds()
-                    } else {
-                        *rect
-                    }
-                    .to_irect();
-                    if area.is_empty() {
-                        self.set_status("Copy failed: the selected image has no pixels");
-                        return false;
-                    }
-                    let Some(mut image) = jiffshot_doc::Pixmap::new(area.w as u32, area.h as u32)
-                    else {
-                        self.set_status("Copy failed: could not allocate the selected image");
-                        return false;
-                    };
-                    o.draw(&mut image, (area.x, area.y));
-                    let frame = winutil::frame_from_pixmap(&image);
-                    if let Err(error) = copy(&frame, winutil::main_hwnd()) {
-                        self.set_status(format!("Copy failed: {error}"));
-                        return false;
-                    }
-                    self.set_status(format!(
-                        "Copied the selection ({} × {}) to the clipboard",
-                        image.width(),
-                        image.height()
-                    ));
-                    self.object_clipboard = None;
-                    return true;
+        self.copy_with_annotations(copy, true)
+    }
+
+    fn copy_with_annotations(
+        &mut self,
+        copy: impl FnOnce(&jiffshot_capture::Frame, isize) -> std::io::Result<()>,
+        include_annotations: bool,
+    ) -> bool {
+        let region = with_editor(|e| {
+            e.selected_region().and_then(|area| {
+                if include_annotations {
+                    let (rendered_area, rendered) =
+                        e.document().render_area(area, false)?;
+                    let clipped = area.intersect(&e.document().bounds())?;
+                    jiffshot_doc::raster::extract(
+                        &rendered,
+                        jiffshot_doc::IRect::new(
+                            clipped.x - rendered_area.x,
+                            clipped.y - rendered_area.y,
+                            clipped.w,
+                            clipped.h,
+                        ),
+                    )
+                } else {
+                    jiffshot_doc::raster::extract(e.document().background(), area)
                 }
-                self.set_status(format!("Copied the {}", o.kind_name().to_lowercase()));
-                self.object_clipboard = Some(o);
-                true
+            })
+        })
+        .flatten();
+        if with_editor(|e| e.selected_region().is_some()).unwrap_or(false) {
+            let Some(image) = region else {
+                self.set_status("Copy failed: could not render the selected image");
+                return false;
+            };
+            let frame = winutil::frame_from_pixmap(&image);
+            if let Err(error) = copy(&frame, winutil::main_hwnd()) {
+                self.set_status(format!("Copy failed: {error}"));
+                return false;
             }
-            None => self.copy_image_with(copy),
+            self.set_status(format!(
+                "Copied the selection ({} × {}) to the clipboard",
+                image.width(),
+                image.height()
+            ));
+            self.object_clipboard = None;
+            return true;
         }
+        let selected = with_editor(|e| {
+            (e.selected_objects(), e.selected_objects_image())
+        });
+        if let Some((objects, image)) = selected.filter(|(objects, _)| !objects.is_empty()) {
+            let Some(image) = image else {
+                self.set_status("Copy failed: could not render the selected annotations");
+                return false;
+            };
+            let frame = winutil::frame_from_pixmap(&image);
+            if let Err(error) = copy(&frame, winutil::main_hwnd()) {
+                self.set_status(format!("Copy failed: {error}"));
+                return false;
+            }
+            self.set_status(if objects.len() == 1 {
+                format!("Copied the {}", objects[0].kind_name().to_lowercase())
+            } else {
+                format!("Copied {} annotations", objects.len())
+            });
+            self.object_clipboard = Some(ObjectClipboard { objects, frame });
+            return true;
+        }
+        self.copy_image_with(copy)
+    }
+
+    pub fn copy_background(&mut self) {
+        self.copy_background_with(jiffshot_capture::clipboard::copy);
+    }
+
+    pub(crate) fn copy_background_with(
+        &mut self,
+        copy: impl FnOnce(&jiffshot_capture::Frame, isize) -> std::io::Result<()>,
+    ) -> bool {
+        self.copy_with_annotations(copy, false)
     }
 
     pub fn cut(&mut self) {
@@ -2063,8 +2159,16 @@ impl App {
         &mut self,
         copy: impl FnOnce(&jiffshot_capture::Frame, isize) -> std::io::Result<()>,
     ) {
-        if self.copy_with(copy) {
-            with_editor(|e| e.delete_selected());
+        if with_editor(|e| e.selected_region().is_some_and(|_| e.region_overlaps_annotations()))
+            .unwrap_or(false)
+        {
+            self.set_status(
+                "Cut blocked: flatten annotations first to cut across the selected region",
+            );
+            return;
+        }
+        if self.copy_with(copy) && !with_editor(|e| e.delete_selected()).unwrap_or(false) {
+            self.set_status("Cut failed: nothing could be removed from the selection");
         }
     }
 
@@ -2077,6 +2181,25 @@ impl App {
         contents: std::io::Result<Option<jiffshot_capture::clipboard::Pasted>>,
     ) {
         use jiffshot_capture::clipboard::Pasted;
+        if let Some(clipboard) = self.object_clipboard.as_ref() {
+            match &contents {
+                Ok(Some(Pasted::Image {
+                    width,
+                    height,
+                    rgba,
+                })) if clipboard.matches_image(*width, *height, rgba) => {
+                    let objects = clipboard.objects.clone();
+                    let count = objects.len();
+                    if with_editor(|e| e.paste_objects(objects)).is_some() {
+                        self.set_status(format!("Pasted {count} annotation(s)"));
+                    } else {
+                        self.set_status("Paste failed: the editor is not available");
+                    }
+                    return;
+                }
+                _ => self.object_clipboard = None,
+            }
+        }
         match contents {
             Ok(Some(Pasted::Image {
                 width,
@@ -2090,7 +2213,6 @@ impl App {
                     self.object_clipboard = None;
                     self.set_status(format!("Pasted a {width} × {height} image"));
                 } else {
-                    #[cfg(target_os = "macos")]
                     self.set_status(
                         "Paste failed: the clipboard image has invalid dimensions or pixels",
                     );
@@ -2124,7 +2246,7 @@ impl App {
                 #[cfg(windows)]
                 self.set_status(format!("Pasted {n} image file(s)"));
             }
-            Ok(Some(Pasted::Text(text))) if self.object_clipboard.is_none() => {
+            Ok(Some(Pasted::Text(text))) => {
                 with_editor(|e| {
                     let (w, h) = e.document().size();
                     let style = Style {
@@ -2148,14 +2270,8 @@ impl App {
                     e.set_selected_text(&text);
                 });
             }
-            #[cfg(target_os = "macos")]
             Err(error) => self.set_status(format!("Paste failed: {error}")),
-            _ => match self.object_clipboard.clone() {
-                Some(o) => {
-                    with_editor(|e| e.paste_object(o));
-                }
-                None => self.set_status("Nothing to paste"),
-            },
+            Ok(None) => self.set_status("Nothing to paste"),
         }
     }
 
@@ -3045,6 +3161,9 @@ impl App {
             e.set_tool(tool);
         });
         let hint = match tool {
+            Tool::Move => "Click or drag annotations to select and move them. Drag empty space to select multiple annotations.",
+            Tool::Select => "Drag to select an image region. Use Move to select and edit annotations.",
+            Tool::Arrow => "Drag to draw an arrow. Use Move to select and edit annotations.",
             Tool::Crop => "Drag to crop the image.",
             Tool::CutOut => "Drag a rectangle to lift it, then move it or use Cut. Horizontal and Vertical remove a band and close the gap.",
             Tool::Selection => "Drag to select part of the image, then move it.",
@@ -3074,6 +3193,7 @@ impl App {
                     self.set_tool(t);
                 }
             }
+            "copy-background" => self.copy_background(),
             "effect" => self.effect(arg),
             "template" => self.template(arg),
             "zoom" => self.zoom(arg),
@@ -3806,22 +3926,38 @@ impl App {
                 if let Some(pm) = image::RgbaImage::from_raw(width, height, rgba)
                     .and_then(|i| io::from_rgba_image(&i))
                 {
+                    if let Err(error) = self.autosave_checked() {
+                        return self.set_status(error);
+                    }
                     self.load(Document::new(pm), None, None);
+                    with_editor(|editor| editor.mark_unsaved());
+                    self.show_clipboard_document();
                     self.set_status(format!("New image from the clipboard ({width} × {height})"));
                 } else {
-                    #[cfg(target_os = "macos")]
                     self.set_status(
                         "New from clipboard failed: the image has invalid dimensions or pixels",
                     );
                 }
             }
             Ok(Some(Pasted::Files(files))) => match files.first() {
-                Some(f) => self.open_path(f),
+                Some(f) => {
+                    if let Err(error) = self.autosave_checked() {
+                        return self.set_status(error);
+                    }
+                    if self.open_path_checked(f) {
+                        self.show_clipboard_document();
+                    }
+                }
                 None => self.set_status("The clipboard has no image"),
             },
-            #[cfg(target_os = "macos")]
             Err(error) => self.set_status(format!("New from clipboard failed: {error}")),
             _ => self.set_status("The clipboard has no image"),
+        }
+    }
+
+    fn show_clipboard_document(&mut self) {
+        if self.settings.library_view.expanded {
+            self.library_view(|view| view.expanded = false);
         }
     }
 
@@ -4715,9 +4851,10 @@ impl App {
         }
     }
 
-    fn open_video(&mut self, path: &Path) {
+    fn open_video(&mut self, path: &Path) -> bool {
         if let Err(error) = self.autosave_checked() {
-            return self.set_status(error);
+            self.set_status(error);
+            return false;
         }
         self.stop_video();
         match crate::video::Session::open(path) {
@@ -4735,9 +4872,11 @@ impl App {
                 self.bump_frame();
                 self.mark_current();
                 self.set_status(format!("Opened video {}", path.display()));
+                true
             }
             Err(error) => {
-                self.set_status(format!("Could not open video {}: {error}", path.display()))
+                self.set_status(format!("Could not open video {}: {error}", path.display()));
+                false
             }
         }
     }

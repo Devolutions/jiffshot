@@ -7,8 +7,8 @@
 //! editor call only the damaged rectangle of the raster is copied.
 //!
 //! Pointer input goes to the editor in document pixels (see
-//! [`crate::canvas`]); the middle or right button, or Alt with the left one,
-//! pans instead, and the wheel zooms around the pointer.
+//! [`crate::canvas`]); the middle or right button pans, as does Alt with the
+//! left button outside Select, and the wheel zooms around the pointer.
 
 #[path = "canvas_view/canvas_overlay.rs"]
 mod canvas_overlay;
@@ -19,6 +19,7 @@ use crate::canvas::{
     POINTER_RELEASED,
 };
 use canvas_overlay::{OverlayLayer, Scene};
+use jiffshot_doc::editor::Tool;
 use jiffshot_doc::IRect;
 use rustolonia::pixel_surface::{
     Cursor, Interpolation, Modifiers, MouseButton, PixelFormat, Placement, PointerInput,
@@ -239,6 +240,13 @@ fn modifier_bits(m: Modifiers) -> i32 {
         | (if m.alt() { MOD_ALT } else { 0 })
 }
 
+fn pans_with_pointer(button: MouseButton, modifiers: Modifiers, tool: Option<Tool>) -> bool {
+    matches!(button, MouseButton::Middle | MouseButton::Right)
+        || (button == MouseButton::Left
+            && modifiers.alt()
+            && (modifiers.shift() || tool != Some(Tool::Select)))
+}
+
 /// The pointer shape for an editor cursor code.
 fn cursor_of(code: i32) -> Cursor {
     match code {
@@ -401,6 +409,17 @@ impl CanvasView {
 
     #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn selftest_view_pointer(&self, kind: PointerKind, x: f64, y: f64) -> Result<bool> {
+        self.selftest_view_pointer_with_modifiers(kind, x, y, Modifiers::default())
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    pub(crate) fn selftest_view_pointer_with_modifiers(
+        &self,
+        kind: PointerKind,
+        x: f64,
+        y: f64,
+        modifiers: Modifiers,
+    ) -> Result<bool> {
         self.inner.handle_pointer(PointerEvent {
             kind,
             x,
@@ -410,7 +429,7 @@ impl CanvasView {
             } else {
                 MouseButton::Left
             },
-            modifiers: Modifiers::default(),
+            modifiers,
             click_count: 1,
             delta_y: 0.0,
         })
@@ -677,8 +696,12 @@ impl Inner {
         let handled = match (p.kind, st.gesture) {
             // One drag at a time: other buttons are ignored until it ends.
             (PointerKind::Pressed, Gesture::Idle) => {
-                let pan = matches!(p.button, MouseButton::Middle | MouseButton::Right)
-                    || (p.button == MouseButton::Left && p.modifiers.alt());
+                let tool = if p.button == MouseButton::Left && p.modifiers.alt() {
+                    canvas::with_editor(|editor| editor.tool())
+                } else {
+                    None
+                };
+                let pan = pans_with_pointer(p.button, p.modifiers, tool);
                 if pan {
                     st.gesture = Gesture::Pan { anchor: (p.x, p.y) };
                     self.set_cursor(&mut st, Cursor::SizeAll)?;
@@ -805,6 +828,24 @@ impl Inner {
 mod tests {
     use super::*;
 
+    #[test]
+    fn alt_select_is_routed_to_the_editor_without_disabling_other_pan_gestures() {
+        let alt = Modifiers(rustolonia::key_modifiers::ALT);
+        let shift_alt =
+            Modifiers(rustolonia::key_modifiers::SHIFT | rustolonia::key_modifiers::ALT);
+        assert!(!pans_with_pointer(MouseButton::Left, alt, Some(Tool::Select)));
+        assert!(pans_with_pointer(MouseButton::Left, alt, Some(Tool::Arrow)));
+        assert!(pans_with_pointer(MouseButton::Left, alt, None));
+        assert!(pans_with_pointer(MouseButton::Left, shift_alt, Some(Tool::Select)));
+        assert!(pans_with_pointer(MouseButton::Middle, alt, Some(Tool::Select)));
+        assert!(pans_with_pointer(MouseButton::Right, alt, Some(Tool::Select)));
+        assert!(!pans_with_pointer(
+            MouseButton::Left,
+            Modifiers::default(),
+            Some(Tool::Select)
+        ));
+    }
+
     fn state(view: (f64, f64), image: (u32, u32)) -> State {
         State {
             metrics: SurfaceMetrics {
@@ -864,7 +905,7 @@ mod tests {
         st.zoom = 1.75;
         st.offset = (30.0, 45.0);
         let mut editor = Editor::new(Document::blank(400, 300, Rgba::WHITE));
-        editor.set_tool(Tool::Select);
+        editor.set_tool(Tool::Move);
         for (document, expected) in [
             ((0.0, 0.0), EditorCursor::ResizeNwse),
             ((200.0, 0.0), EditorCursor::ResizeNs),
@@ -893,6 +934,7 @@ mod tests {
         };
         let start = st.to_document(st.offset.0, st.offset.1 + 150.0 * st.zoom);
         let end = st.to_document(st.offset.0 + 25.0 * st.zoom, st.offset.1 + 150.0 * st.zoom);
+        editor.set_tool(Tool::Arrow);
         editor.pointer_down(
             Pt::new(start.0 as f32, start.1 as f32),
             modifiers,

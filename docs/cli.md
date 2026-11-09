@@ -212,6 +212,13 @@ jiffshot-cli doc close --id $d
   `duplicate`, `group`, `ungroup`, `flatten`, `move` (x/y offsets), `text`,
   `front`, `back`, `forward`, `backward`, `rotate-right`, `rotate-left`,
   `flip-horizontal`, `flip-vertical` and `align-left/right/top/bottom/center/middle`.
+  A rectangular Select region is reported as `selected_region: {x,y,w,h}`; it is
+  separate from the `selected` object IDs. Use `doc draw --tool Select` to draw
+  one. The Move tool selects and edits annotations; Select is for image regions.
+  `select-all` selects the image in Select mode and annotations in Move mode.
+  Region copies use visible composited pixels, while destructive region edits are
+  blocked when the region overlaps editable annotations; flatten annotations
+  explicitly before cutting or moving through them.
 - For comparisons/step layouts, open the source images, then `doc combine` with
   their ids. Use `--template "Before and after"` or `"Step by step"` and a theme.
   Captions/title/footer remain editable objects returned by `doc status`.

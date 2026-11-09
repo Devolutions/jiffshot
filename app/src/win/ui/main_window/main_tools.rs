@@ -5,24 +5,31 @@
 use super::main_common::{act, action, chip, note, run, section, solid, with_context_menu, Ctx, Tone, ACCENT, TRANSPARENT, WHITE};
 use crate::vm::MainViewModelSink;
 use rustolonia::{
-    AnyEl, AppScope, Border, Button, Dock, DockPanel, Effect, El, FontWeight, HorizontalAlignment, MenuFlyout, MenuItem, MenuItemToggleType, Orientation, Panel, ScrollBarVisibility, ScrollViewer, Separator, Signal, StackPanel, TextBlock,
+    AnyEl, AppScope, Border, Button, Dock, DockPanel, Effect, El, FontWeight, HorizontalAlignment, MenuFlyout, MenuItem, MenuItemToggleType, Orientation, Panel, Path, ScrollBarVisibility, ScrollViewer, Separator, Signal, StackPanel, TextBlock,
     VerticalAlignment, WrapPanel,
 };
 
 /// A palette tool: its view-model name, icon glyph and caption.
 pub struct ToolDef {
     pub name: &'static str,
-    glyph: &'static str,
+    icon: ToolIcon,
     caption: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolIcon {
+    Glyph(&'static str),
+    Region,
+}
+
 const fn tool(name: &'static str, glyph: &'static str, caption: &'static str) -> ToolDef {
-    ToolDef { name, glyph, caption }
+    ToolDef { name, icon: ToolIcon::Glyph(glyph), caption }
 }
 
 /// Every tool, in the usual order.
-pub const TOOLS: [ToolDef; 22] = [
-    tool("Select", "\u{E7C9}", "Select"),
+pub const TOOLS: [ToolDef; 23] = [
+    tool("Move", "\u{E7C9}", "Move"),
+    ToolDef { name: "Select", icon: ToolIcon::Region, caption: "Select Region" },
     tool("Arrow", "\u{E72A}", "Arrow"),
     tool("Line", "\u{E738}", "Line"),
     tool("Shape", "\u{E739}", "Shape"),
@@ -38,7 +45,7 @@ pub const TOOLS: [ToolDef; 22] = [
     tool("Fill", "\u{E790}", "Fill"),
     tool("Crop", "\u{E7A8}", "Crop"),
     tool("Cut Out", "\u{E8C6}", "Cut Out"),
-    tool("Selection", "\u{E8B3}", "Selection"),
+    tool("Selection", "\u{E8B3}", "Lift Selection"),
     tool("Magic Wand", "✨", "Magic Wand"),
     tool("Eraser", "\u{E75C}", "Eraser"),
     tool("Eyedropper", "⌖", "Pick color"),
@@ -157,20 +164,35 @@ pub fn tool_bar(ctx: &Ctx) -> El<Panel> {
         })
 }
 
-/// A palette button's glyph above its caption (hidden without labels).
-fn tool_content(sink: MainViewModelSink, theme: super::main_common::Theme, glyph: &str, caption: &str, active: impl Fn() -> bool + Clone + 'static) -> El<StackPanel> {
+/// A palette button's icon above its caption (hidden without labels).
+fn tool_content(sink: MainViewModelSink, theme: super::main_common::Theme, icon: ToolIcon, caption: &str, active: impl Fn() -> bool + Clone + 'static) -> El<StackPanel> {
     let glyph_active = active.clone();
+    let icon: AnyEl = match icon {
+        ToolIcon::Glyph(glyph) => TextBlock::el()
+            .text(super::super::icons::glyph(glyph).to_owned())
+            .font_family(ICON_FONT)
+            .font_size(18.0)
+            .height(if cfg!(target_os = "linux") { 28.0 } else { f64::NAN })
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .foreground(move || if glyph_active() { solid(WHITE) } else { theme.get(Tone::Text) })
+            .into(),
+        ToolIcon::Region => Border::el()
+            .height(if cfg!(target_os = "linux") { 28.0 } else { 21.0 })
+            .child(
+                Path::el()
+                    .width(18.0)
+                    .height(18.0)
+                    .data("M 2,7 L 2,2 L 7,2 M 11,2 L 16,2 L 16,7 M 16,11 L 16,16 L 11,16 M 7,16 L 2,16 L 2,11")
+                    .stroke(move || Some(if glyph_active() { solid(WHITE) } else { theme.get(Tone::Text) }))
+                    .stroke_thickness(1.5)
+                    .horizontal_alignment(HorizontalAlignment::Center)
+                    .vertical_alignment(VerticalAlignment::Center),
+            )
+            .into(),
+    };
     StackPanel::el()
         .spacing(2.0)
-        .child(
-            TextBlock::el()
-                .text(super::super::icons::glyph(glyph).to_owned())
-                .font_family(ICON_FONT)
-                .font_size(18.0)
-                .height(if cfg!(target_os = "linux") { 28.0 } else { f64::NAN })
-                .horizontal_alignment(HorizontalAlignment::Center)
-                .foreground(move || if glyph_active() { solid(WHITE) } else { theme.get(Tone::Text) }),
-        )
+        .child(icon)
         .child(
             TextBlock::el()
                 .text(caption.to_owned())
@@ -223,7 +245,7 @@ fn tool_button(sink: MainViewModelSink, theme: super::main_common::Theme, index:
                 solid(TRANSPARENT)
             }
         })
-        .content(tool_content(sink, theme, def.glyph, def.caption, active))
+        .content(tool_content(sink, theme, def.icon, def.caption, active))
         .command(action(format!("tool:{name}")));
     with_context_menu(
         button,
@@ -245,7 +267,7 @@ fn more_button(scope: AppScope, sink: MainViewModelSink, theme: super::main_comm
     palette_button(sink)
         .tool_tip_tip("More tools")
         .background(solid(TRANSPARENT))
-        .content(tool_content(sink, theme, "⋯", "More", || false))
+        .content(tool_content(sink, theme, ToolIcon::Glyph("⋯"), "More", || false))
         .with_op(move |_, button| {
             let target = button.clone();
             button.clone().on_click(&scope.clone(), move |_| {
@@ -354,6 +376,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn object_and_region_selection_use_distinct_icons() {
+        let move_tool = &TOOLS[index_of("Move").unwrap()];
+        let region_tool = &TOOLS[index_of("Select").unwrap()];
+        assert!(matches!(move_tool.icon, ToolIcon::Glyph(_)));
+        assert_eq!(region_tool.icon, ToolIcon::Region);
+    }
+
+    #[test]
     fn layout_puts_the_rest_under_more() {
         let (fits, more) = layout("", 3, None);
         assert_eq!(fits, [0, 1, 2]);
@@ -371,7 +401,7 @@ mod tests {
     #[test]
     fn hidden_tools_go_under_more() {
         let (fits, more) = layout("Arrow,Text", 5, None);
-        assert_eq!(fits, [1, 4]);
+        assert_eq!(fits, [2, 5]);
         assert!(more.contains(&0));
     }
 

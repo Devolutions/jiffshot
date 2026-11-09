@@ -370,7 +370,7 @@ mod tests {
         let mut s = scene();
         let mut editor =
             jiffshot_doc::editor::Editor::new(jiffshot_doc::Document::blank(100, 50, Rgba::WHITE));
-        editor.set_tool(jiffshot_doc::Tool::Select);
+        editor.set_tool(jiffshot_doc::Tool::Move);
         s.overlay.canvas_handles = true;
         s.overlay.handles = editor.canvas_handles();
         let (w, h) = s.physical_size();

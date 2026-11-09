@@ -1365,6 +1365,12 @@ namespace JiffshotE2E
             XTestFakeMotionEvent(Display, Screen, x + OriginX, y + OriginY, 0);
         }
 
+        public void Resize(uint width, uint height)
+        {
+            XResizeWindow(Display, (nuint)Window, width, height);
+            Sync();
+        }
+
         public void Button(int button, bool down)
         {
             XTestFakeButtonEvent(Display, (uint)button, down ? 1 : 0, 0);
@@ -1417,9 +1423,11 @@ namespace JiffshotE2E
             Sync();
         }
 
-        public Frame Capture(int x, int y, int width, int height)
+        public Frame Capture(int x, int y, int width, int height) => CaptureWindow(Window, x, y, width, height);
+
+        public Frame CaptureWindow(long window, int x, int y, int width, int height)
         {
-            IntPtr pointer = XGetImage(Display, (nuint)Window, x, y, (uint)width, (uint)height, nuint.MaxValue, 2);
+            IntPtr pointer = XGetImage(Display, (nuint)window, x, y, (uint)width, (uint)height, nuint.MaxValue, 2);
             if (pointer == IntPtr.Zero)
             {
                 var detail = new List<string>();

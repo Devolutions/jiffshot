@@ -17,6 +17,7 @@ use tiny_skia::Pixmap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tool {
+    Move,
     Select,
     Arrow,
     Line,
@@ -42,6 +43,7 @@ pub enum Tool {
 }
 
 pub const TOOLS: &[Tool] = &[
+    Tool::Move,
     Tool::Select,
     Tool::Arrow,
     Tool::Line,
@@ -69,6 +71,7 @@ pub const TOOLS: &[Tool] = &[
 impl Tool {
     pub fn name(self) -> &'static str {
         match self {
+            Tool::Move => "Move",
             Tool::Select => "Select",
             Tool::Arrow => "Arrow",
             Tool::Line => "Line",
@@ -156,12 +159,12 @@ impl Tool {
         }
     }
 
-    /// Tools that draw new annotation objects (and so also pick existing
-    /// ones up when clicked).
+    /// Tools that draw new annotation objects.
     fn creates_objects(self) -> bool {
         !matches!(
             self,
             Tool::Select
+            | Tool::Move
                 | Tool::Fill
                 | Tool::Crop
                 | Tool::CutOut
@@ -185,7 +188,11 @@ impl Tool {
     pub fn lifts(self) -> bool {
         matches!(
             self,
-            Tool::Selection | Tool::CutOut | Tool::MagicWand | Tool::SmartMove
+            Tool::Select
+                | Tool::Selection
+                | Tool::CutOut
+                | Tool::MagicWand
+                | Tool::SmartMove
         )
     }
 }
@@ -252,7 +259,7 @@ pub fn default_style(tool: Tool) -> Style {
             width: 24.0,
             ..base
         },
-        Tool::Selection | Tool::MagicWand | Tool::SmartMove => Style {
+        Tool::Select | Tool::Selection | Tool::MagicWand | Tool::SmartMove => Style {
             fill: Rgba::WHITE,
             ..base
         },
@@ -269,6 +276,7 @@ pub const EVENT_TOOL: u32 = 16;
 pub const EVENT_COLOR_PICKED: u32 = 32;
 pub const EVENT_CANVAS_RESIZE_ERROR: u32 = 64;
 pub const EVENT_CANVAS_RESIZED: u32 = 128;
+pub const EVENT_REGION_OVERLAP: u32 = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Modifiers {
@@ -309,10 +317,18 @@ enum Drag {
         last: Pt,
         moved: bool,
     },
-    /// Drawing a box to select the objects it touches.
+    /// Moving an image region for the first time.
+    MoveRegion {
+        start: Pt,
+    },
+    /// Resizing an image region without changing its pixels.
+    RegionHandle {
+        handle: Handle,
+        original: Box2,
+    },
+    /// Shift-dragging a box to add the objects it touches to the selection.
     Select {
         start: Pt,
-        add: bool,
     },
     Handle {
         id: u64,
@@ -398,6 +414,7 @@ pub struct Editor {
     variants: HashMap<Tool, String>,
     amounts: HashMap<Tool, f32>,
     selection: Option<u64>,
+    region: Option<IRect>,
     /// A polygon being drawn corner by corner.
     building: Option<u64>,
     /// Further selected objects (Shift-click, Select all, box select);
@@ -536,6 +553,7 @@ impl Editor {
             variants: HashMap::new(),
             amounts: HashMap::new(),
             selection: None,
+            region: None,
             building: None,
             others: Vec::new(),
             drag: None,
@@ -567,6 +585,12 @@ impl Editor {
         self.modified
     }
 
+    /// Marks a newly created document unsaved without adding an undo step.
+    pub fn mark_unsaved(&mut self) {
+        self.modified = true;
+        self.events |= EVENT_DOCUMENT;
+    }
+
     pub fn mark_saved(&mut self) {
         self.modified = false;
     }
@@ -577,6 +601,8 @@ impl Editor {
         self.undo.clear();
         self.redo.clear();
         self.selection = None;
+        self.region = None;
+        self.others.clear();
         self.drag = None;
         self.marquee = None;
         self.canvas_resize_error = None;
@@ -598,6 +624,11 @@ impl Editor {
     pub fn set_tool(&mut self, tool: Tool) {
         self.finish_polygon();
         if self.tool != tool {
+            if let Some(Drag::Create { id, history, .. }) = self.drag.take() {
+                self.discard_creation(id, history);
+            }
+            self.seal();
+            self.select(None);
             self.tool = tool;
             self.set_marquee(None);
             self.events |= EVENT_TOOL;
@@ -718,6 +749,11 @@ impl Editor {
         self.selection
     }
 
+    /// A selected background region, before it is moved or otherwise edited.
+    pub fn selected_region(&self) -> Option<IRect> {
+        self.region
+    }
+
     pub fn selected(&self) -> Option<&Object> {
         self.selection.and_then(|id| self.doc.get(id))
     }
@@ -727,6 +763,17 @@ impl Editor {
         self.selection
             .into_iter()
             .chain(self.others.iter().copied())
+            .collect()
+    }
+
+    /// Clones every selected annotation in document stacking order.
+    pub fn selected_objects(&self) -> Vec<Object> {
+        let selected: HashSet<_> = self.selected_ids().into_iter().collect();
+        self.doc
+            .objects
+            .iter()
+            .filter(|object| selected.contains(&object.id))
+            .cloned()
             .collect()
     }
 
@@ -771,33 +818,82 @@ impl Editor {
         }
     }
 
-    /// Selects every annotation, or the whole image when there are no annotations.
+    /// Selects the image in Select mode and annotations in Move mode.
     pub fn select_all(&mut self) {
-        if self.doc.objects.is_empty() {
-            let image = self.doc.background().clone();
-            let rect = self.doc.bounds().to_box();
-            let key = crate::object::fresh_key("selection");
-            let mut selected = None;
-            self.edit_document("Select image", |doc| {
-                doc.background_mut().fill(tiny_skia::Color::TRANSPARENT);
-                selected = Some(doc.add(
-                    Kind::Image {
-                        rect,
-                        image: ImageRef::new(key, image),
-                    },
-                    Style {
-                        width: 0.0,
-                        ..Style::default()
-                    },
-                ));
-                true
-            });
-            self.select(selected);
+        if self.tool == Tool::Select {
+            self.select_region(self.doc.bounds());
+            return;
+        }
+        if self.doc.objects.is_empty() && self.tool != Tool::Move {
             self.set_tool(Tool::Select);
+            self.select_region(self.doc.bounds());
             return;
         }
         let ids = self.doc.objects.iter().rev().map(|o| o.id).collect();
+        if self.tool != Tool::Move {
+            self.set_tool(Tool::Move);
+        }
         self.set_selection(ids);
+    }
+
+    /// Returns whether the active region intersects any editable annotation.
+    pub fn region_overlaps_annotations(&self) -> bool {
+        self.region
+            .is_some_and(|region| self.intersects_annotation(region))
+    }
+
+    fn intersects_annotation(&self, region: IRect) -> bool {
+        let region = region.to_box();
+        self.doc
+            .objects
+            .iter()
+            .any(|object| object.bounds().intersects(&region))
+    }
+
+    /// Renders selected annotations into a transparent image in document order.
+    pub fn selected_objects_image(&self) -> Option<Pixmap> {
+        let selected: HashSet<_> = self.selected_ids().into_iter().collect();
+        if selected.is_empty() {
+            return None;
+        }
+        let objects: Vec<_> = self
+            .doc
+            .objects
+            .iter()
+            .filter(|object| selected.contains(&object.id))
+            .collect();
+        let bounds = match objects.as_slice() {
+            [object]
+                if matches!(object.kind, Kind::Image { .. })
+                    && object.rotation.abs() <= 0.01
+                    && object.style.width <= 0.0
+                    && !object.style.shadow
+                    && object.style.outline_width <= 0.0
+                    && object.zone.is_none() =>
+            {
+                object.rect()?
+            }
+            _ => objects
+                .iter()
+                .map(|object| object.bounds())
+                .reduce(|bounds, object| bounds.union(&object))?,
+        };
+        let mut area = bounds.to_irect();
+        let mut width = u32::try_from(area.w).ok()?;
+        let mut height = u32::try_from(area.h).ok()?;
+        if !valid_canvas_size(width, height) {
+            area = area.intersect(&self.doc.bounds())?;
+            width = u32::try_from(area.w).ok()?;
+            height = u32::try_from(area.h).ok()?;
+            if !valid_canvas_size(width, height) {
+                return None;
+            }
+        }
+        let mut pixels = Pixmap::new(width, height)?;
+        for object in objects {
+            object.draw(&mut pixels, (area.x, area.y));
+        }
+        Some(pixels)
     }
 
     pub fn invert_selection(&mut self) {
@@ -955,6 +1051,9 @@ impl Editor {
 
     /// Selects just `id` (or nothing).
     pub fn select(&mut self, id: Option<u64>) {
+        if self.region.take().is_some() {
+            self.events |= EVENT_SELECTION;
+        }
         let id = id.filter(|id| self.doc.get(*id).is_some());
         if !self.others.is_empty() {
             self.others.clear();
@@ -981,12 +1080,24 @@ impl Editor {
         self.events |= EVENT_SELECTION;
     }
 
+    fn select_region(&mut self, region: IRect) {
+        self.select(None);
+        self.region = region.intersect(&self.doc.bounds());
+        self.events |= EVENT_SELECTION;
+    }
+
     /// Handles of the selection, for the UI to draw.
     pub fn selection_handles(&self) -> Vec<(Handle, Pt)> {
+        if let Some(region) = self.region {
+            return box_handles(&region.to_box());
+        }
         self.selected().map(|o| o.handles()).unwrap_or_default()
     }
 
     pub fn selection_box(&self) -> Option<Box2> {
+        if let Some(region) = self.region {
+            return Some(region.to_box());
+        }
         let o = self.selected()?;
         match &o.kind {
             Kind::Spotlight { rect, .. } => Some(*rect),
@@ -1089,6 +1200,7 @@ impl Editor {
 
     fn after_history(&mut self) {
         self.drag = None;
+        self.region = None;
         self.prune_selection();
         self.modified = true;
         self.refresh_all();
@@ -1171,6 +1283,7 @@ impl Editor {
         }
         self.redo.clear();
         self.modified = true;
+        self.region = None;
         self.prune_selection();
         self.events |= EVENT_DOCUMENT | EVENT_SELECTION;
         if let Some(display) = display {
@@ -1223,6 +1336,16 @@ impl Editor {
     }
 
     pub fn delete_selected(&mut self) -> bool {
+        if self.region.is_some() {
+            let Some(id) = self.lift_selected_region() else {
+                return false;
+            };
+            if let Some(o) = self.doc.remove(id) {
+                self.invalidate_box(o.bounds());
+            }
+            self.select(None);
+            return true;
+        }
         let ids = self.selected_ids();
         if ids.is_empty() {
             return false;
@@ -1273,6 +1396,21 @@ impl Editor {
     }
 
     pub fn duplicate_selected(&mut self) -> Option<u64> {
+        if let Some(region) = self.region {
+            let image = raster::extract(self.doc.background(), region)?;
+            let rect = region.to_box().offset(20.0, 20.0);
+            return Some(self.add_object(
+                "Duplicate",
+                Kind::Image {
+                    rect,
+                    image: ImageRef::new(crate::object::fresh_key("selection"), image),
+                },
+                Style {
+                    width: 0.0,
+                    ..Style::default()
+                },
+            ));
+        }
         if !self.others.is_empty() {
             let copies: Vec<Object> = self
                 .selected_ids()
@@ -1314,14 +1452,43 @@ impl Editor {
     }
 
     /// Inserts a copied object (for paste), offset so it is visible.
-    pub fn paste_object(&mut self, mut object: Object) -> u64 {
-        object.translate(16.0, 16.0);
+    pub fn paste_object(&mut self, object: Object) -> u64 {
+        self.paste_objects(vec![object])
+            .into_iter()
+            .next()
+            .expect("one object was pasted")
+    }
+
+    /// Inserts copied annotations together in one undoable operation.
+    pub fn paste_objects(&mut self, objects: Vec<Object>) -> Vec<u64> {
+        if objects.is_empty() {
+            return Vec::new();
+        }
         self.checkpoint("Paste", None);
-        let id = self.doc.insert(object);
-        let b = self.doc.get(id).unwrap().bounds();
-        self.invalidate_box(b);
-        self.select(Some(id));
-        id
+        let mut ids = Vec::with_capacity(objects.len());
+        let mut bounds = None;
+        for mut object in objects {
+            object.translate(16.0, 16.0);
+            if let Kind::Step { label, .. } = &mut object.kind {
+                *label = self.doc.next_step_label();
+            }
+            let id = self.doc.insert(object);
+            if matches!(self.doc.get(id).map(|object| &object.kind), Some(Kind::Group { .. })) {
+                self.relabel_duplicated_group_steps(id);
+            }
+            let object_bounds = self
+                .doc
+                .get(id)
+                .expect("pasted object was inserted")
+                .bounds();
+            bounds = Some(bounds.map_or(object_bounds, |current: Box2| current.union(&object_bounds)));
+            ids.push(id);
+        }
+        if let Some(bounds) = bounds {
+            self.invalidate_box(bounds);
+        }
+        self.set_selection(ids.clone());
+        ids
     }
 
     /// Spotlight and magnify: the selected object's area (or the middle of
@@ -1581,6 +1748,21 @@ impl Editor {
     }
 
     pub fn nudge(&mut self, dx: f32, dy: f32) {
+        if self.region.is_some() {
+            if dx == 0.0 && dy == 0.0 {
+                return;
+            }
+            if let Some(id) = self.lift_selected_region() {
+                if let Some(o) = self.doc.get_mut(id) {
+                    let before = o.bounds();
+                    o.translate(dx, dy);
+                    let after = o.bounds();
+                    self.invalidate_box(before.union(&after));
+                    self.events |= EVENT_SELECTION;
+                }
+            }
+            return;
+        }
         for id in self.selected_ids() {
             self.edit(id, "Move", Some("nudge".to_owned()), |o| {
                 o.translate(dx, dy)
@@ -1676,12 +1858,14 @@ impl Editor {
 
     // ---- pointer -----------------------------------------------------------
 
-    /// Handles at the canvas's edges and corners, shown when nothing is selected.
+    /// Handles at the canvas's edges and corners, shown when nothing is selected
+    /// and the active tool is not selecting a region.
     pub fn canvas_handles(&self) -> Vec<(Handle, Pt)> {
         if self.selection.is_some()
+            || self.region.is_some()
             || !matches!(
                 self.tool,
-                Tool::Select | Tool::Arrow | Tool::Shape | Tool::Line
+                Tool::Move | Tool::Arrow | Tool::Shape | Tool::Line
             )
         {
             return Vec::new();
@@ -1700,14 +1884,19 @@ impl Editor {
     }
 
     fn canvas_handle_at(&self, p: Pt, tolerance: f32) -> Option<Handle> {
-        self.canvas_handles()
+        let handle = self
+            .canvas_handles()
             .into_iter()
             .filter_map(|(handle, point)| {
                 let distance = point.dist(p);
                 (distance <= tolerance * 1.5).then_some((handle, distance))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(handle, _)| handle)
+            .map(|(handle, _)| handle)?;
+        if self.tool == Tool::Move && self.pick_at(p, tolerance).is_some() {
+            return None;
+        }
+        Some(handle)
     }
 
     /// Grows the canvas to include every object (in the canvas color).
@@ -1761,21 +1950,61 @@ impl Editor {
         {
             return Cursor::Cross;
         }
-        if let Some(o) = self.selected() {
+        if let Some(region) = self.region {
+            for (handle, point) in box_handles(&region.to_box()) {
+                if point.dist(p) <= tolerance * 1.5 {
+                    return handle_cursor(handle);
+                }
+            }
+            if region.to_box().contains(p) {
+                return Cursor::Move;
+            }
+        }
+        if let Some(o) = self.selected().filter(|o| self.can_use_handles(o)) {
             for (h, q) in o.handles() {
                 if q.dist(p) <= tolerance * 1.5 {
                     return handle_cursor(h);
                 }
             }
         }
-        if self.doc.hit(p, tolerance).is_some() && self.tool != Tool::Pen {
+        if self.pick_at(p, tolerance).is_some() {
             return Cursor::Move;
         }
         match self.tool {
-            Tool::Select => Cursor::Default,
             Tool::Text => Cursor::Text,
             _ => Cursor::Cross,
         }
+    }
+
+    fn can_use_handles(&self, object: &Object) -> bool {
+        if self.tool == Tool::Move {
+            return true;
+        }
+        if !self.tool.creates_objects()
+            || (self.selection != Some(object.id) && !self.others.contains(&object.id))
+        {
+            return false;
+        }
+        match (&object.kind, self.tool) {
+            (Kind::Line { .. }, Tool::Arrow | Tool::Line)
+            | (Kind::Pen { .. }, Tool::Pen | Tool::Highlight) => true,
+            (Kind::Image { image, .. }, Tool::Stamp) => image.key.starts_with("stamp-"),
+            _ => tool_for(object) == self.tool,
+        }
+    }
+
+    fn can_pick(&self, object: &Object) -> bool {
+        self.can_use_handles(object)
+            && (self.tool == Tool::Move
+                || (self.tool != Tool::Pen
+                    && !(self.tool == Tool::Highlight
+                        && self.variant(Tool::Highlight) == "Freehand")))
+    }
+
+    fn pick_at(&self, p: Pt, tolerance: f32) -> Option<u64> {
+        self.doc
+            .hit(p, tolerance)
+            .filter(|id| self.doc.get(*id).is_some_and(|o| self.can_pick(o)))
     }
 
     pub fn pointer_down(&mut self, p: Pt, m: Modifiers, tolerance: f32) {
@@ -1853,7 +2082,29 @@ impl Editor {
             }
             _ => {}
         }
-        if let Some(o) = self.selected().filter(|_| pick_existing) {
+        if self.tool == Tool::Select && !m.shift && !m.alt {
+            if let Some(region) = self.region {
+                let rect = region.to_box();
+                if let Some((handle, _)) = box_handles(&rect)
+                    .into_iter()
+                    .find(|(_, point)| point.dist(p) <= tolerance * 1.5)
+                {
+                    self.drag = Some(Drag::RegionHandle {
+                        handle,
+                        original: rect,
+                    });
+                    return;
+                }
+                if rect.contains(p) {
+                    self.drag = Some(Drag::MoveRegion { start: p });
+                    return;
+                }
+            }
+        }
+        if let Some(o) = self
+            .selected()
+            .filter(|o| pick_existing && self.tool != Tool::Select && self.can_use_handles(o))
+        {
             let id = o.id;
             if let Some((h, _)) = o
                 .handles()
@@ -1865,10 +2116,8 @@ impl Editor {
                 return;
             }
         }
-        let picks_up = self.tool != Tool::Pen
-            && !(self.tool == Tool::Highlight && self.variant(Tool::Highlight) == "Freehand");
-        if (picks_up && pick_existing) || self.tool == Tool::Select {
-            if let Some(id) = self.doc.hit(p, tolerance) {
+        if self.tool != Tool::Select && (pick_existing || self.tool == Tool::Move) {
+            if let Some(id) = self.pick_at(p, tolerance) {
                 if m.shift {
                     self.toggle_selected(id);
                     return;
@@ -1906,13 +2155,16 @@ impl Editor {
             }
         }
         if self.tool == Tool::Select {
+            self.set_selection(Vec::new());
+            self.drag = Some(Drag::Marquee { start: p });
+            self.set_marquee(Some(Box2::from_points(p, p)));
+            return;
+        }
+        if self.tool == Tool::Move {
             if !m.shift {
                 self.set_selection(Vec::new());
             }
-            self.drag = Some(Drag::Select {
-                start: p,
-                add: m.shift,
-            });
+            self.drag = Some(Drag::Select { start: p });
             self.set_marquee(Some(Box2::from_points(p, p)));
             return;
         }
@@ -2042,6 +2294,34 @@ impl Editor {
                     moved: true,
                 });
             }
+            Drag::MoveRegion { start } => {
+                if start.dist(p) < 1.0 {
+                    return;
+                }
+                if let Some(id) = self.lift_selected_region() {
+                    self.drag = Some(Drag::Move {
+                        id,
+                        last: start,
+                        moved: true,
+                    });
+                    self.pointer_move(p, m);
+                }
+            }
+            Drag::RegionHandle { handle, original } => {
+                let p = Pt::new(
+                    p.x.clamp(0.0, self.doc.width() as f32),
+                    p.y.clamp(0.0, self.doc.height() as f32),
+                );
+                let region = resize_box(original, handle, p, m.shift)
+                    .to_irect()
+                    .intersect(&self.doc.bounds());
+                if let Some(region) = region {
+                    if self.region != Some(region) {
+                        self.region = Some(region);
+                        self.events |= EVENT_SELECTION;
+                    }
+                }
+            }
             Drag::Pan { id, last, moved } => {
                 if !moved && last.dist(p) < 1.0 {
                     return;
@@ -2081,7 +2361,7 @@ impl Editor {
                 let b = self.marquee_box(start, p, m.shift);
                 self.set_marquee(Some(b));
             }
-            Drag::Select { start, .. } => self.set_marquee(Some(Box2::from_points(start, p))),
+            Drag::Select { start } => self.set_marquee(Some(Box2::from_points(start, p))),
             Drag::Lasso { mut points } => {
                 if points.last().is_some_and(|q| q.dist(p) >= 2.0) {
                     points.push(p);
@@ -2140,21 +2420,7 @@ impl Editor {
                         self.invalidate_box(before.union(&after));
                     } else {
                         // A click with a drawing tool: nothing to keep.
-                        self.selection = None;
-                        if let Some(o) = self.doc.remove(id) {
-                            self.invalidate_box(o.bounds());
-                        }
-                        if let Some(s) = self.undo.pop() {
-                            self.doc = s.doc;
-                        }
-                        let history = std::sync::Arc::try_unwrap(history)
-                            .unwrap_or_else(|history| (*history).clone());
-                        if let Some(evicted) = history.evicted {
-                            self.undo.insert(0, evicted);
-                        }
-                        self.redo = history.redo;
-                        self.modified = history.modified;
-                        self.events |= EVENT_SELECTION;
+                        self.discard_creation(id, history);
                         return;
                     }
                 }
@@ -2198,10 +2464,14 @@ impl Editor {
                     Err(error) => self.report_canvas_resize_error(error),
                 }
             }
-            Drag::Select { start, add } => {
+            Drag::Select { start } => {
                 let b = Box2::from_points(start, p);
                 self.set_marquee(None);
-                let mut ids: Vec<u64> = if add { self.selected_ids() } else { Vec::new() };
+                let mut ids = if m.shift {
+                    self.selected_ids()
+                } else {
+                    Vec::new()
+                };
                 ids.extend(
                     self.doc
                         .objects
@@ -2246,6 +2516,7 @@ impl Editor {
                     Tool::Selection if self.variant(Tool::Selection) == "Ellipse" => {
                         self.lift_ellipse(r)
                     }
+                    Tool::Select => self.select_region(r),
                     Tool::Selection => self.lift_selection(r, false),
                     Tool::SmartMove => self.lift_selection(r, true),
                     Tool::TextReplace => self.replace_text_in(r),
@@ -2254,6 +2525,30 @@ impl Editor {
             }
             _ => self.events |= EVENT_SELECTION,
         }
+    }
+
+    fn discard_creation(&mut self, id: u64, history: std::sync::Arc<CreationHistory>) {
+        // A later edit owns the latest checkpoint; restoring it would discard that edit.
+        if self.doc.get(id).is_none()
+            || self.undo.last().is_none_or(|snapshot| snapshot.doc.get(id).is_some())
+        {
+            return;
+        }
+        self.selection = None;
+        if let Some(o) = self.doc.remove(id) {
+            self.invalidate_box(o.bounds());
+        }
+        if let Some(s) = self.undo.pop() {
+            self.doc = s.doc;
+        }
+        let history =
+            std::sync::Arc::try_unwrap(history).unwrap_or_else(|history| (*history).clone());
+        if let Some(evicted) = history.evicted {
+            self.undo.insert(0, evicted);
+        }
+        self.redo = history.redo;
+        self.modified = history.modified;
+        self.events |= EVENT_SELECTION;
     }
 
     fn marquee_box(&self, start: Pt, p: Pt, square: bool) -> Box2 {
@@ -2399,6 +2694,20 @@ impl Editor {
         });
     }
 
+    fn lift_selected_region(&mut self) -> Option<u64> {
+        if self.region_overlaps_annotations() {
+            self.events |= EVENT_REGION_OVERLAP;
+            return None;
+        }
+        let region = self.region.take()?;
+        self.lift_selection(region, false);
+        if self.selection.is_none() {
+            self.region = Some(region);
+            self.events |= EVENT_SELECTION;
+        }
+        self.selection
+    }
+
     /// Lifts the pixels in `r` off the background into a movable image.
     /// Smart Move cuts out just the object and fills the hole from its
     /// surroundings; plain Selection lifts the rectangle and leaves the
@@ -2407,6 +2716,10 @@ impl Editor {
         let Some(r) = r.intersect(&self.doc.bounds()) else {
             return;
         };
+        if self.intersects_annotation(r) {
+            self.events |= EVENT_REGION_OVERLAP;
+            return;
+        }
         let lifted = if smart {
             crate::smart::lift_mask(self.doc.background(), r)
         } else {
@@ -2428,6 +2741,10 @@ impl Editor {
         let Some(r) = r.intersect(&self.doc.bounds()) else {
             return;
         };
+        if self.intersects_annotation(r) {
+            self.events |= EVENT_REGION_OVERLAP;
+            return;
+        }
         let (cx, cy, rx, ry) = (
             r.w as f32 / 2.0,
             r.h as f32 / 2.0,
@@ -2594,6 +2911,7 @@ impl Editor {
             at.x ^ (at.y << 12)
         );
         let mut new_id = 0;
+        let below_annotations = self.tool == Tool::Select;
         self.edit_document(label, |d| {
             d.set_background(filled);
             new_id = d.add(
@@ -2606,11 +2924,13 @@ impl Editor {
                     ..Style::default()
                 },
             );
+            if below_annotations {
+                d.objects.rotate_right(1);
+            }
             true
         });
-        self.selection = Some(new_id);
         self.set_tool(Tool::Select);
-        self.events |= EVENT_SELECTION;
+        self.select(Some(new_id));
     }
 
     fn replace_text_in(&mut self, r: IRect) {
@@ -2853,30 +3173,43 @@ mod tests {
     };
 
     #[test]
-    fn select_all_lifts_the_whole_image_without_changing_pixels() {
+    fn marking_a_new_document_unsaved_does_not_change_history() {
+        let mut e = editor();
+        let (kind, style) = square(10.0, Rgba::RED);
+        e.add_object("Add", kind, style);
+        assert!(e.undo());
+        e.mark_saved();
+        e.take_events();
+        assert_eq!(e.undo_label(), None);
+        assert_eq!(e.redo_label(), Some("Add"));
+
+        e.mark_unsaved();
+        assert!(e.is_modified());
+        assert_eq!(e.undo_label(), None);
+        assert_eq!(e.redo_label(), Some("Add"));
+        assert_ne!(e.take_events() & EVENT_DOCUMENT, 0);
+
+        e.mark_saved();
+        assert!(!e.is_modified());
+    }
+
+    #[test]
+    fn select_all_selects_the_whole_image_without_changing_pixels() {
         let mut pixels = raster::solid(12, 8, Rgba::rgb(40, 80, 120)).unwrap();
         raster::set_pixel(&mut pixels, 3, 2, Rgba::new(200, 100, 50, 128));
         raster::set_pixel(&mut pixels, 4, 2, Rgba::TRANSPARENT);
         let mut e = Editor::new(Document::new(pixels.clone()));
         e.select_all();
         assert_eq!(e.selection_box(), Some(Box2::new(0.0, 0.0, 12.0, 8.0)));
-        assert_eq!(e.selected_ids().len(), 1);
+        assert_eq!(e.selected_region(), Some(IRect::new(0, 0, 12, 8)));
+        assert!(e.selected_ids().is_empty());
         assert_eq!(e.document().flatten().data(), pixels.data());
         assert_eq!(e.tool(), Tool::Select);
-        let selected = e.selection();
         e.select_all();
-        assert_eq!(
-            e.selection(),
-            selected,
-            "selecting all twice must not lift twice"
-        );
-        assert_eq!(e.document().objects.len(), 1);
-        assert!(e.undo(), "lifting the background must be undoable");
+        assert_eq!(e.selected_region(), Some(IRect::new(0, 0, 12, 8)));
         assert!(e.document().objects.is_empty());
-        assert_eq!(e.document().background().data(), pixels.data());
-        assert!(e.redo(), "the lifted image must be restorable");
-        assert_eq!(e.document().objects.len(), 1);
-        assert_eq!(e.document().flatten().data(), pixels.data());
+        assert!(!e.is_modified());
+        assert_eq!(e.undo_label(), None);
     }
 
     #[test]
@@ -2909,10 +3242,874 @@ mod tests {
         assert_eq!(e.document().flatten().data(), before.data());
     }
 
+    #[test]
+    fn select_all_targets_the_active_selection_mode() {
+        let mut e = editor();
+        let first = e.add_object(
+            "First",
+            Kind::Shape {
+                rect: Box2::new(20.0, 20.0, 60.0, 60.0),
+                shape: ShapeKind::Rectangle,
+            },
+            Style::default(),
+        );
+        let second = e.add_object(
+            "Second",
+            Kind::Shape {
+                rect: Box2::new(80.0, 20.0, 120.0, 60.0),
+                shape: ShapeKind::Ellipse,
+            },
+            Style::default(),
+        );
+
+        e.set_tool(Tool::Select);
+        e.select_all();
+        assert_eq!(e.selected_region(), Some(IRect::new(0, 0, 400, 300)));
+        assert!(
+            e.selected_ids().is_empty(),
+            "Select All selects image pixels in Select mode"
+        );
+
+        e.set_tool(Tool::Move);
+        e.select_all();
+        assert_eq!(e.selected_region(), None);
+        assert_eq!(e.selected_ids(), vec![second, first]);
+    }
+
+    #[test]
+    fn select_all_in_empty_move_mode_does_not_select_the_image() {
+        let mut e = editor();
+        e.set_tool(Tool::Move);
+
+        e.select_all();
+
+        assert_eq!(e.tool(), Tool::Move);
+        assert!(e.selected_ids().is_empty());
+        assert_eq!(e.selected_region(), None);
+        assert!(!e.is_modified());
+    }
+
+    #[test]
+    fn select_region_starts_at_canvas_edges_without_modifiers() {
+        let mut e = editor();
+        e.set_tool(Tool::Select);
+        e.mark_saved();
+
+        for (start, end, expected) in [
+            ((0.0, 0.0), (40.0, 30.0), IRect::new(0, 0, 40, 30)),
+            ((200.0, 0.0), (240.0, 30.0), IRect::new(200, 0, 40, 30)),
+            ((400.0, 0.0), (360.0, 30.0), IRect::new(360, 0, 40, 30)),
+            ((400.0, 150.0), (360.0, 180.0), IRect::new(360, 150, 40, 30)),
+            ((400.0, 300.0), (360.0, 270.0), IRect::new(360, 270, 40, 30)),
+            ((200.0, 300.0), (240.0, 270.0), IRect::new(200, 270, 40, 30)),
+            ((0.0, 300.0), (40.0, 270.0), IRect::new(0, 270, 40, 30)),
+            ((0.0, 150.0), (40.0, 180.0), IRect::new(0, 150, 40, 30)),
+        ] {
+            e.select(None);
+            drag(&mut e, start, end);
+            assert_eq!(e.selected_region(), Some(expected), "start {start:?}");
+            assert_eq!(e.document().size(), (400, 300), "start {start:?}");
+            assert!(!e.is_modified(), "start {start:?}");
+        }
+    }
+
+    #[test]
+    fn canvas_resize_handles_remain_available_in_move_mode() {
+        let mut e = editor();
+        e.set_tool(Tool::Move);
+
+        assert_eq!(e.canvas_handles().len(), 8);
+        drag(&mut e, (0.0, 150.0), (-20.0, 150.0));
+
+        assert_eq!(e.document().size(), (420, 300));
+        assert!(e.is_modified());
+    }
+
+    #[test]
+    fn move_picks_an_annotation_under_a_canvas_handle() {
+        let mut e = editor();
+        let rect = Box2::new(0.0, 0.0, 60.0, 40.0);
+        let id = e.add_object(
+            "Edge annotation",
+            Kind::Shape {
+                rect,
+                shape: ShapeKind::Rectangle,
+            },
+            Style {
+                fill: Rgba::WHITE,
+                ..Style::default()
+            },
+        );
+        e.set_tool(Tool::Move);
+        e.select(None);
+
+        assert_eq!(e.hover(Pt::new(0.0, 0.0), 4.0), Cursor::Move);
+        drag(&mut e, (0.0, 0.0), (20.0, 20.0));
+
+        assert_eq!(e.document().size(), (400, 300));
+        assert_eq!(e.doc.get(id).unwrap().rect(), Some(rect.offset(20.0, 20.0)));
+    }
+
+    #[test]
+    fn alt_drag_canvas_handle_still_resizes_with_a_drawing_tool() {
+        let mut e = editor();
+        e.set_tool(Tool::Arrow);
+        let alt = Modifiers { alt: true, ..NONE };
+
+        e.pointer_down(Pt::new(0.0, 150.0), alt, 4.0);
+        e.pointer_move(Pt::new(-20.0, 150.0), alt);
+        e.pointer_up(Pt::new(-20.0, 150.0), alt);
+
+        assert_eq!(e.document().size(), (420, 300));
+        assert!(e.document().objects.is_empty());
+    }
+
+    #[test]
+    fn move_picks_annotations_while_select_starts_an_image_region() {
+        let mut e = editor();
+        let id = e.add_object(
+            "Shape",
+            Kind::Shape {
+                rect: Box2::new(40.0, 40.0, 80.0, 80.0),
+                shape: ShapeKind::Rectangle,
+            },
+            Style {
+                width: 0.0,
+                fill: Rgba::RED,
+                ..Style::default()
+            },
+        );
+
+        e.set_tool(Tool::Move);
+        drag(&mut e, (50.0, 50.0), (60.0, 60.0));
+        assert_eq!(e.selected_ids(), vec![id]);
+        assert_eq!(
+            e.doc.get(id).unwrap().rect(),
+            Some(Box2::new(50.0, 50.0, 90.0, 90.0))
+        );
+
+        e.set_tool(Tool::Select);
+        drag(&mut e, (45.0, 45.0), (75.0, 75.0));
+        assert_eq!(e.selected_ids(), Vec::<u64>::new());
+        assert_eq!(e.selected_region(), Some(IRect::new(45, 45, 30, 30)));
+        assert_eq!(
+            e.doc.get(id).unwrap().rect(),
+            Some(Box2::new(50.0, 50.0, 90.0, 90.0))
+        );
+    }
+
+    #[test]
+    fn move_marquee_replaces_selection_by_default_and_shift_adds_objects() {
+        let mut e = editor();
+        let add_shape = |e: &mut Editor, x| {
+            e.add_object(
+                "Shape",
+                Kind::Shape {
+                    rect: Box2::new(x, 10.0, x + 20.0, 30.0),
+                    shape: ShapeKind::Rectangle,
+                },
+                Style::default(),
+            )
+        };
+        let first = add_shape(&mut e, 10.0);
+        let second = add_shape(&mut e, 50.0);
+        let third = add_shape(&mut e, 90.0);
+        e.set_tool(Tool::Move);
+        e.set_selection(vec![first]);
+
+        drag(&mut e, (45.0, 5.0), (65.0, 35.0));
+        assert_eq!(e.selected_ids(), vec![second]);
+
+        let shift = Modifiers { shift: true, ..NONE };
+        e.pointer_down(Pt::new(85.0, 5.0), shift, 4.0);
+        e.pointer_move(Pt::new(95.0, 20.0), shift);
+        e.pointer_up(Pt::new(105.0, 35.0), shift);
+        assert_eq!(e.selected_ids(), vec![second, third]);
+
+        e.pointer_down(Pt::new(150.0, 150.0), NONE, 4.0);
+        e.pointer_up(Pt::new(150.0, 150.0), NONE);
+        assert!(e.selected_ids().is_empty());
+    }
+
+    #[test]
+    fn selected_objects_image_renders_selected_objects_in_document_order() {
+        let mut e = editor();
+        let red = e.add_object(
+            "Red",
+            Kind::Shape {
+                rect: Box2::new(10.0, 10.0, 30.0, 30.0),
+                shape: ShapeKind::Rectangle,
+            },
+            Style {
+                width: 0.0,
+                fill: Rgba::RED,
+                ..Style::default()
+            },
+        );
+        let blue = e.add_object(
+            "Blue",
+            Kind::Shape {
+                rect: Box2::new(20.0, 20.0, 40.0, 40.0),
+                shape: ShapeKind::Rectangle,
+            },
+            Style {
+                width: 0.0,
+                fill: Rgba::rgb(20, 40, 200),
+                ..Style::default()
+            },
+        );
+        e.set_selection(vec![blue, red]);
+
+        let image = e
+            .selected_objects_image()
+            .expect("selected annotations render");
+        assert_eq!((image.width(), image.height()), (34, 34));
+        assert_eq!(raster::pixel(&image, 5, 5), Rgba::RED);
+        assert_eq!(
+            raster::pixel(&image, 15, 15),
+            Rgba::rgb(20, 40, 200),
+            "the later object in document order is on top"
+        );
+        assert_eq!(raster::pixel(&image, 1, 1), Rgba::TRANSPARENT);
+    }
+
+    #[test]
+    fn selected_plain_image_copy_keeps_its_pixel_bounds() {
+        let mut e = editor();
+        let image = raster::solid(20, 16, Rgba::RED).unwrap();
+        e.add_object(
+            "Image",
+            Kind::Image {
+                rect: Box2::from_xywh(30.0, 40.0, 20.0, 16.0),
+                image: ImageRef::new("clipboard-image", image),
+            },
+            Style { width: 0.0, ..Style::default() },
+        );
+
+        let copied = e.selected_objects_image().expect("selected image renders");
+        assert_eq!((copied.width(), copied.height()), (20, 16));
+        assert_eq!(raster::pixel(&copied, 0, 0), Rgba::RED);
+    }
+
+    #[test]
+    fn selected_spotlight_copy_is_bounded_by_the_document() {
+        let mut e = editor();
+        e.add_object(
+            "Spotlight",
+            Kind::Spotlight {
+                rect: Box2::new(100.0, 100.0, 200.0, 200.0),
+                ellipse: false,
+                dim: 0.5,
+                blur: 0.0,
+                rounded: false,
+            },
+            Style { width: 0.0, ..Style::default() },
+        );
+
+        let copied = e.selected_objects_image().expect("spotlight renders within the document");
+        assert_eq!((copied.width(), copied.height()), (400, 300));
+        assert!(raster::pixel(&copied, 20, 20).a > 0);
+        assert_eq!(raster::pixel(&copied, 150, 150), Rgba::TRANSPARENT);
+    }
+
+    #[test]
+    fn paste_objects_inserts_the_group_in_one_undo_step() {
+        let mut e = editor();
+        let first = e.add_object(
+            "First",
+            Kind::Shape {
+                rect: Box2::new(10.0, 10.0, 30.0, 30.0),
+                shape: ShapeKind::Rectangle,
+            },
+            Style::default(),
+        );
+        let second = e.add_object(
+            "Second",
+            Kind::Shape {
+                rect: Box2::new(40.0, 10.0, 60.0, 30.0),
+                shape: ShapeKind::Ellipse,
+            },
+            Style::default(),
+        );
+        e.set_selection(vec![first, second]);
+        let copies = e.selected_objects();
+
+        let pasted = e.paste_objects(copies);
+        assert_eq!(pasted.len(), 2);
+        assert_eq!(e.document().objects.len(), 4);
+        assert_eq!(e.selected_ids(), pasted);
+        assert_eq!(
+            e.doc.get(pasted[0]).unwrap().rect(),
+            Some(Box2::new(26.0, 26.0, 46.0, 46.0))
+        );
+        assert_eq!(
+            e.doc.get(pasted[1]).unwrap().rect(),
+            Some(Box2::new(56.0, 26.0, 76.0, 46.0))
+        );
+        assert_eq!(e.undo_label(), Some("Paste"));
+
+        assert!(e.undo(), "one undo removes the complete pasted selection");
+        assert_eq!(e.document().objects.len(), 2);
+        assert!(pasted.iter().all(|id| e.doc.get(*id).is_none()));
+        assert!(e.doc.get(first).is_some());
+        assert!(e.doc.get(second).is_some());
+    }
+
     fn drag(e: &mut Editor, a: (f32, f32), b: (f32, f32)) {
         e.pointer_down(Pt::new(a.0, a.1), NONE, 4.0);
         e.pointer_move(Pt::new((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0), NONE);
         e.pointer_up(Pt::new(b.0, b.1), NONE);
+    }
+
+    #[test]
+    fn selecting_transparent_pixels_does_not_change_the_document() {
+        for fill in [
+            BackgroundFill::Auto,
+            BackgroundFill::Transparent,
+            BackgroundFill::Color,
+        ] {
+            let mut original = raster::solid(100, 80, Rgba::rgb(20, 100, 200)).unwrap();
+            raster::set_pixel(&mut original, 30, 30, Rgba::new(200, 80, 40, 128));
+            raster::set_pixel(&mut original, 31, 30, Rgba::TRANSPARENT);
+            let mut e = Editor::new(Document::new(original.clone()));
+            e.background_fill = fill;
+            e.set_tool(Tool::Select);
+            drag(&mut e, (20.0, 20.0), (60.0, 50.0));
+
+            assert_eq!(e.selection_box(), Some(Box2::new(20.0, 20.0, 60.0, 50.0)));
+            assert!(
+                e.document().flatten().data() == original.data(),
+                "{fill:?} must not change pixels until the selection is edited"
+            );
+            assert!(e.document().objects.is_empty());
+            assert!(!e.is_modified());
+            assert_eq!(e.undo_label(), None);
+        }
+    }
+
+    #[test]
+    fn drawing_tool_selection_handles_remain_interactive() {
+        for (tool, variant) in [(Tool::Pen, "Pen"), (Tool::Highlight, "Freehand")] {
+            let mut e = editor();
+            e.set_tool(tool);
+            e.set_variant(variant);
+            drag(&mut e, (60.0, 60.0), (140.0, 120.0));
+            let before = e.selection_box().unwrap();
+            let handle = e
+                .selection_handles()
+                .into_iter()
+                .find(|(h, _)| *h == H_BR)
+                .unwrap()
+                .1;
+            assert_eq!(e.hover(handle, 4.0), Cursor::ResizeNwse, "{tool:?}");
+            drag(&mut e, (handle.x, handle.y), (handle.x + 30.0, handle.y + 20.0));
+            assert_eq!(e.document().objects.len(), 1, "{tool:?}");
+            assert_ne!(e.selection_box(), Some(before), "{tool:?} resize");
+        }
+
+        let mut e = editor();
+        e.set_tool(Tool::Arrow);
+        drag(&mut e, (60.0, 60.0), (140.0, 120.0));
+        e.update_style("end-cap", |style| style.end_cap = Cap::OpenArrow);
+        let end = Pt::new(140.0, 120.0);
+        assert_eq!(e.hover(end, 4.0), Cursor::Point);
+        drag(&mut e, (end.x, end.y), (180.0, 150.0));
+        assert_eq!(e.document().objects.len(), 1);
+        assert!(matches!(e.selected().map(|o| &o.kind),
+            Some(Kind::Line { b, .. }) if *b == Pt::new(180.0, 150.0)));
+
+        let mut e = editor();
+        e.custom_stamps.push((
+            "Custom".to_owned(),
+            std::sync::Arc::new(raster::solid(32, 32, Rgba::RED).unwrap()),
+        ));
+        e.set_tool(Tool::Stamp);
+        e.set_variant("Custom");
+        e.pointer_down(Pt::new(100.0, 100.0), NONE, 4.0);
+        e.pointer_up(Pt::new(100.0, 100.0), NONE);
+        let before = e.selection_box().unwrap();
+        let handle = e
+            .selection_handles()
+            .into_iter()
+            .find(|(h, _)| *h == H_BR)
+            .unwrap()
+            .1;
+        assert_eq!(e.hover(handle, 4.0), Cursor::ResizeNwse);
+        drag(&mut e, (handle.x, handle.y), (handle.x + 20.0, handle.y + 20.0));
+        assert_eq!(e.document().objects.len(), 1);
+        assert_ne!(e.selection_box(), Some(before));
+    }
+
+    #[test]
+    fn select_drag_creates_a_movable_image_region() {
+        let original = raster::solid(400, 300, Rgba::rgb(20, 100, 200)).unwrap();
+        let mut e = Editor::new(Document::new(original.clone()));
+        e.background_fill = BackgroundFill::Transparent;
+        e.set_tool(Tool::Select);
+        e.pointer_down(Pt::new(40.0, 30.0), NONE, 4.0);
+        e.pointer_move(Pt::new(160.0, 120.0), NONE);
+        assert_eq!(e.marquee(), Some(Box2::new(40.0, 30.0, 160.0, 120.0)));
+        assert!(!e.marquee_is_box_selection(), "plain Select selects pixels");
+        e.pointer_up(Pt::new(160.0, 120.0), NONE);
+        assert_eq!(e.selection_box(), Some(Box2::new(40.0, 30.0, 160.0, 120.0)));
+        assert_eq!(e.doc.flatten().data(), original.data());
+        assert_eq!(e.selected_region(), Some(IRect::new(40, 30, 120, 90)));
+        assert!(e.doc.objects.is_empty());
+        assert!(!e.is_modified());
+
+        drag(&mut e, (80.0, 60.0), (200.0, 160.0));
+        assert_eq!(
+            e.selection_box(),
+            Some(Box2::new(160.0, 130.0, 280.0, 220.0))
+        );
+        assert_eq!(raster::pixel(&e.doc.flatten(), 80, 60), Rgba::TRANSPARENT);
+        assert_eq!(
+            raster::pixel(&e.doc.flatten(), 200, 160),
+            Rgba::rgb(20, 100, 200)
+        );
+        assert!(e.undo(), "moving the region is undoable");
+        assert_eq!(e.doc.flatten().data(), original.data());
+        assert!(e.doc.objects.is_empty());
+        assert_eq!(e.doc.background().data(), original.data());
+        assert!(!e.undo(), "selecting a region does not add an undo step");
+        assert!(e.redo());
+        e.select(e.doc.objects.first().map(|o| o.id));
+        assert_eq!(
+            e.selection_box(),
+            Some(Box2::new(160.0, 130.0, 280.0, 220.0))
+        );
+        assert!(e.delete_selected(), "the region can be cut independently");
+        assert_eq!(raster::pixel(&e.doc.flatten(), 80, 60), Rgba::TRANSPARENT);
+    }
+
+    #[test]
+    fn select_region_clips_reverse_drags_and_ignores_clicks() {
+        let mut e = editor();
+        e.set_tool(Tool::Select);
+        drag(&mut e, (70.0, 60.0), (71.0, 61.0));
+        assert!(e.doc.objects.is_empty());
+        assert!(!e.is_modified());
+        assert_eq!(e.undo_label(), None);
+        drag(&mut e, (100.0, 80.0), (-20.0, -10.0));
+        assert_eq!(e.selection_box(), Some(Box2::new(0.0, 0.0, 100.0, 80.0)));
+    }
+
+    #[test]
+    fn region_move_applies_the_selected_fill_and_is_one_undo_step() {
+        let surround = Rgba::rgb(10, 20, 30);
+        let picked = Rgba::rgb(200, 80, 40);
+        let color = Rgba::rgb(30, 180, 90);
+        for fill in [
+            BackgroundFill::Auto,
+            BackgroundFill::Transparent,
+            BackgroundFill::Color,
+        ] {
+            let mut original = raster::solid(100, 80, surround).unwrap();
+            for y in 20..50 {
+                for x in 20..50 {
+                    raster::set_pixel(&mut original, x, y, picked);
+                }
+            }
+            raster::set_pixel(&mut original, 25, 25, picked.with_alpha(128));
+            raster::set_pixel(&mut original, 26, 25, Rgba::TRANSPARENT);
+            let mut e = Editor::new(Document::new(original.clone()));
+            e.set_tool(Tool::Select);
+            e.update_style("fill", |style| style.fill = color);
+            e.background_fill = fill;
+            drag(&mut e, (20.0, 20.0), (50.0, 50.0));
+            drag(&mut e, (30.0, 30.0), (70.0, 50.0));
+
+            let expected_fill = match fill {
+                BackgroundFill::Auto => surround,
+                BackgroundFill::Transparent => Rgba::TRANSPARENT,
+                BackgroundFill::Color => color,
+            };
+            assert_eq!(
+                raster::pixel(e.document().background(), 30, 30),
+                expected_fill,
+                "{fill:?} fills the source only when it moves"
+            );
+            assert_eq!(raster::pixel(&e.document().flatten(), 70, 50), picked);
+            let Some(Kind::Image { image, .. }) = e.selected().map(|o| &o.kind) else {
+                panic!("moving {fill:?} must create a movable image");
+            };
+            let image = image.pixmap.as_ref().unwrap();
+            assert_eq!(raster::pixel(image, 5, 5), raster::pixel(&original, 25, 25));
+            assert_eq!(raster::pixel(image, 6, 5), Rgba::TRANSPARENT);
+            assert!(e.undo());
+            assert!(e.document().objects.is_empty());
+            assert!(e.document().flatten().data() == original.data());
+            assert!(!e.undo(), "{fill:?} selection must not add another undo step");
+            assert!(e.redo());
+            assert_eq!(raster::pixel(e.document().background(), 30, 30), expected_fill);
+            assert_eq!(raster::pixel(&e.document().flatten(), 70, 50), picked);
+        }
+    }
+
+    #[test]
+    fn region_handles_resize_the_selection_without_editing_pixels() {
+        let mut e = editor();
+        let before = e.document().background().clone();
+        e.set_tool(Tool::Select);
+        drag(&mut e, (40.0, 30.0), (120.0, 100.0));
+        assert_eq!(e.hover(Pt::new(120.0, 100.0), 4.0), Cursor::ResizeNwse);
+        drag(&mut e, (120.0, 100.0), (160.0, 140.0));
+        assert_eq!(e.selected_region(), Some(IRect::new(40, 30, 120, 110)));
+        assert!(e.document().background().data() == before.data());
+        assert!(e.document().objects.is_empty());
+        assert!(!e.is_modified());
+        assert_eq!(e.undo_label(), None);
+    }
+
+    #[test]
+    fn selecting_and_cancelling_a_region_preserves_redo() {
+        let mut e = editor();
+        drag(&mut e, (200.0, 100.0), (300.0, 180.0));
+        assert!(e.undo());
+        e.mark_saved();
+        e.set_tool(Tool::Select);
+        drag(&mut e, (40.0, 30.0), (160.0, 120.0));
+        assert_eq!(e.redo_label(), Some("Add Arrow"));
+        assert!(!e.is_modified());
+        e.set_tool(Tool::Arrow);
+        assert_eq!(e.selected_region(), None);
+        assert!(!e.is_modified());
+        assert!(e.redo());
+        assert_eq!(e.document().objects.len(), 1);
+    }
+
+    #[test]
+    fn region_delete_duplicate_and_nudge_preserve_undo() {
+        for action in ["delete", "duplicate", "nudge"] {
+            let mut e = editor();
+            let original = e.document().background().clone();
+            e.set_tool(Tool::Select);
+            e.background_fill = BackgroundFill::Transparent;
+            drag(&mut e, (40.0, 30.0), (160.0, 120.0));
+            match action {
+                "delete" => assert!(e.delete_selected()),
+                "duplicate" => assert!(e.duplicate_selected().is_some()),
+                _ => e.nudge(15.0, 12.0),
+            }
+            assert!(e.is_modified(), "{action}");
+            assert_eq!(e.selected_region(), None, "{action}");
+            assert!(e.undo(), "{action}");
+            assert!(e.document().background().data() == original.data(), "{action}");
+            assert!(e.document().objects.is_empty(), "{action}");
+            assert!(!e.undo(), "{action} must use one undo step");
+        }
+    }
+
+    #[test]
+    fn select_drag_keeps_overlapping_annotations_editable() {
+        let mut e = editor();
+        let rect = Box2::new(80.0, 60.0, 120.0, 100.0);
+        let annotation = e.add_object(
+            "Existing shape",
+            Kind::Shape {
+                rect,
+                shape: ShapeKind::Rectangle,
+            },
+            Style::default(),
+        );
+        e.mark_saved();
+        let before = e.doc.flatten();
+        e.set_tool(Tool::Select);
+        drag(&mut e, (40.0, 30.0), (160.0, 120.0));
+        assert_eq!(e.selection_box(), Some(Box2::new(40.0, 30.0, 160.0, 120.0)));
+        assert_eq!(e.selected_region(), Some(IRect::new(40, 30, 120, 90)));
+        assert_eq!(e.doc.get(annotation).unwrap().rect(), Some(rect));
+        assert!(e.selected_ids().is_empty());
+        assert_eq!(e.doc.objects.len(), 1);
+        assert!(
+            e.doc.flatten().data() == before.data(),
+            "selecting must not hide annotations"
+        );
+
+        e.background_fill = BackgroundFill::Transparent;
+        drag(&mut e, (60.0, 50.0), (220.0, 180.0));
+        assert_eq!(e.doc.get(annotation).unwrap().rect(), Some(rect));
+        assert_eq!(e.selected_region(), Some(IRect::new(40, 30, 120, 90)));
+        assert_eq!(e.doc.objects.len(), 1);
+        assert!(
+            !e.is_modified(),
+            "a rejected overlapping move must not edit the document"
+        );
+        assert_eq!(e.doc.get(annotation).unwrap().rect(), Some(rect));
+        assert!(e.doc.flatten().data() == before.data());
+    }
+
+    #[test]
+    fn deleting_an_overlapping_image_region_preserves_the_annotation_and_pixels() {
+        let mut e = editor();
+        let annotation = e.add_object(
+            "Existing shape",
+            Kind::Shape {
+                rect: Box2::new(80.0, 60.0, 120.0, 100.0),
+                shape: ShapeKind::Rectangle,
+            },
+            Style {
+                width: 0.0,
+                fill: Rgba::rgb(20, 40, 200),
+                ..Style::default()
+            },
+        );
+        e.set_tool(Tool::Select);
+        drag(&mut e, (40.0, 30.0), (160.0, 120.0));
+        let before = e.document().flatten();
+        let region = e.selected_region();
+        let undo_label = e.undo_label().map(str::to_owned);
+        assert!(e.region_overlaps_annotations());
+
+        assert!(!e.delete_selected(), "overlapping region cuts are rejected");
+        assert_eq!(e.selected_region(), region);
+        assert_eq!(
+            e.doc.get(annotation).unwrap().rect(),
+            Some(Box2::new(80.0, 60.0, 120.0, 100.0))
+        );
+        assert_eq!(e.document().flatten().data(), before.data());
+        assert_eq!(
+            e.undo_label(),
+            undo_label.as_deref(),
+            "selection rejection does not add an undo step"
+        );
+    }
+
+    #[test]
+    fn alt_drag_starts_a_region_over_objects_and_existing_handles() {
+        for image in [false, true] {
+            let mut e = editor();
+            let rect = Box2::new(50.0, 50.0, 180.0, 140.0);
+            let kind = if image {
+                Kind::Image {
+                    rect,
+                    image: ImageRef::new(
+                        "test-image",
+                        raster::solid(130, 90, Rgba::WHITE).unwrap(),
+                    ),
+                }
+            } else {
+                Kind::Shape {
+                    rect,
+                    shape: ShapeKind::Rectangle,
+                }
+            };
+            let id = e.add_object(
+                "Existing object",
+                kind,
+                Style {
+                    fill: Rgba::WHITE,
+                    ..Style::default()
+                },
+            );
+            e.set_tool(Tool::Select);
+            e.select(Some(id));
+            e.mark_saved();
+            let before = e.doc.flatten();
+            let alt = Modifiers { alt: true, ..NONE };
+
+            for (start, end, expected) in [
+                (Pt::new(50.0, 50.0), Pt::new(100.0, 90.0), IRect::new(50, 50, 50, 40)),
+                (Pt::new(70.0, 70.0), Pt::new(130.0, 120.0), IRect::new(70, 70, 60, 50)),
+                (Pt::new(0.0, 150.0), Pt::new(60.0, 200.0), IRect::new(0, 150, 60, 50)),
+            ] {
+                e.select(None);
+                e.pointer_down(start, alt, 4.0);
+                e.pointer_move(end, alt);
+                e.pointer_up(end, alt);
+                assert_eq!(e.selected_region(), Some(expected));
+                assert_eq!(e.doc.get(id).unwrap().rect(), Some(rect));
+                assert_eq!(e.doc.size(), (400, 300));
+                assert!(!e.is_modified());
+                assert_eq!(e.doc.flatten().data(), before.data());
+            }
+
+            e.select(None);
+            e.set_tool(Tool::Move);
+            drag(&mut e, (90.0, 80.0), (110.0, 100.0));
+            assert_eq!(e.doc.get(id).unwrap().rect(), Some(rect.offset(20.0, 20.0)));
+        }
+    }
+
+    #[test]
+    fn select_region_and_arrow_support_repeated_tool_switches() {
+        let mut e = editor();
+        for i in 0..3 {
+            e.set_tool(Tool::Select);
+            drag(&mut e, (40.0, 30.0), (160.0, 120.0));
+            let region = Some(IRect::new(40, 30, 120, 90));
+            assert_eq!(e.selected_region(), region);
+            e.pointer_down(Pt::new(70.0, 60.0), NONE, 4.0);
+            e.pointer_up(Pt::new(70.0, 60.0), NONE);
+            assert_eq!(e.selected_region(), region);
+            e.set_tool(Tool::Arrow);
+            assert_eq!(e.selected_region(), None);
+            let start = Pt::new(90.0, 80.0 + i as f32 * 15.0);
+            let end = Pt::new(250.0, 180.0 + i as f32 * 15.0);
+            e.pointer_down(start, NONE, 4.0);
+            e.pointer_up(end, NONE);
+            let arrow = e.selection().expect("Arrow must create an annotation");
+            assert!(matches!(e.selected().map(|o| &o.kind),
+                Some(Kind::Line { a, b, .. }) if *a == start && *b == end));
+            assert_eq!(e.doc.objects.len(), i + 1);
+            e.set_tool(Tool::Move);
+            e.pointer_down(end, NONE, 4.0);
+            e.pointer_up(end, NONE);
+            assert_eq!(e.selection(), Some(arrow));
+        }
+    }
+
+    #[test]
+    fn arrow_after_select_draws_over_images_and_other_annotations() {
+        for image in [false, true] {
+            for start in [Pt::new(50.0, 50.0), Pt::new(90.0, 80.0)] {
+                let mut e = editor();
+                let rect = Box2::new(50.0, 50.0, 180.0, 140.0);
+                let kind = if image {
+                    Kind::Image {
+                        rect,
+                        image: ImageRef::new(
+                            "test-image",
+                            raster::solid(130, 90, Rgba::WHITE).unwrap(),
+                        ),
+                    }
+                } else {
+                    Kind::Shape {
+                        rect,
+                        shape: ShapeKind::Rectangle,
+                    }
+                };
+                let id = e.add_object(
+                    "Existing object",
+                    kind,
+                    Style {
+                        fill: Rgba::WHITE,
+                        ..Style::default()
+                    },
+                );
+                e.set_tool(Tool::Select);
+                e.select(Some(id));
+                e.set_tool(Tool::Arrow);
+                assert_eq!(e.hover(start, 4.0), Cursor::Cross);
+                let end = Pt::new(240.0, 200.0);
+                e.pointer_down(start, NONE, 4.0);
+                e.pointer_up(end, NONE);
+                assert_eq!(
+                    e.doc.get(id).unwrap().rect(),
+                    Some(rect),
+                    "existing object must not move"
+                );
+                assert_eq!(e.doc.objects.len(), 2, "Arrow must create a new annotation");
+                assert!(matches!(e.selected().map(|o| &o.kind),
+                    Some(Kind::Line { a, b, .. }) if *a == start && *b == end));
+                assert_eq!(e.selected().unwrap().style.end_cap, Cap::Arrow);
+                e.set_tool(Tool::Arrow);
+                let arrow = e.doc.objects.last().unwrap().id;
+                let midpoint = Pt::new((start.x + end.x) / 2.0, (start.y + end.y) / 2.0);
+                e.pointer_down(midpoint, NONE, 4.0);
+                e.pointer_up(midpoint, NONE);
+                assert_eq!(e.selection(), Some(arrow), "Move picks annotations");
+            }
+        }
+    }
+
+    #[test]
+    fn move_then_arrow_starts_a_new_arrow_on_an_existing_arrow() {
+        let mut e = editor();
+        drag(&mut e, (50.0, 50.0), (200.0, 50.0));
+        let first = e.selection().unwrap();
+        e.set_tool(Tool::Move);
+        e.pointer_down(Pt::new(100.0, 50.0), NONE, 4.0);
+        e.pointer_up(Pt::new(100.0, 50.0), NONE);
+        assert_eq!(e.selection(), Some(first));
+        e.set_tool(Tool::Arrow);
+        assert_eq!(e.hover(Pt::new(100.0, 50.0), 4.0), Cursor::Cross);
+        drag(&mut e, (100.0, 50.0), (100.0, 180.0));
+        assert_eq!(e.doc.objects.len(), 2);
+        assert!(matches!(e.doc.get(first).map(|o| &o.kind),
+            Some(Kind::Line { a, b, .. })
+                if *a == Pt::new(50.0, 50.0) && *b == Pt::new(200.0, 50.0)));
+        assert!(matches!(e.selected().map(|o| &o.kind),
+            Some(Kind::Line { a, b, .. })
+                if *a == Pt::new(100.0, 50.0) && *b == Pt::new(100.0, 180.0)));
+    }
+
+    #[test]
+    fn switching_tools_cancels_pending_region_drags() {
+        for tool in [Tool::Select, Tool::Selection, Tool::Crop] {
+            let mut e = editor();
+            e.set_tool(tool);
+            e.pointer_down(Pt::new(40.0, 30.0), NONE, 4.0);
+            e.pointer_move(Pt::new(160.0, 120.0), NONE);
+            e.set_tool(Tool::Arrow);
+            assert_eq!(e.marquee(), None);
+            e.pointer_move(Pt::new(180.0, 150.0), NONE);
+            assert_eq!(e.marquee(), None, "old {tool:?} drag must not resume");
+            e.pointer_up(Pt::new(200.0, 180.0), NONE);
+            assert!(
+                e.doc.objects.is_empty(),
+                "old {tool:?} gesture must not commit"
+            );
+            assert_eq!(e.doc.size(), (400, 300));
+            assert_eq!(e.undo_label(), None);
+            drag(&mut e, (60.0, 60.0), (180.0, 160.0));
+            assert_eq!(e.doc.objects.len(), 1);
+            assert_eq!(e.selected().map(tool_for), Some(Tool::Arrow));
+        }
+    }
+
+    #[test]
+    fn switching_tools_cancels_unfinished_annotations_without_losing_redo() {
+        let mut e = editor();
+        drag(&mut e, (40.0, 40.0), (160.0, 100.0));
+        assert!(e.undo());
+        e.mark_saved();
+        e.pointer_down(Pt::new(60.0, 60.0), NONE, 4.0);
+        e.pointer_move(Pt::new(180.0, 160.0), NONE);
+        e.set_tool(Tool::Select);
+        e.pointer_up(Pt::new(180.0, 160.0), NONE);
+        assert!(
+            e.doc.objects.is_empty(),
+            "unfinished Arrow must be cancelled"
+        );
+        assert!(!e.is_modified());
+        assert_eq!(e.undo_label(), None);
+        assert_eq!(e.redo_label(), Some("Add Arrow"));
+        assert!(e.redo());
+        assert_eq!(e.doc.objects.len(), 1);
+    }
+
+    #[test]
+    fn switching_tools_preserves_edits_made_during_annotation_creation() {
+        let mut e = editor();
+        let before = Box2::new(20.0, 20.0, 60.0, 60.0);
+        let after = before.offset(10.0, 15.0);
+        let shape = e.add_object(
+            "Shape",
+            Kind::Shape { rect: before, shape: ShapeKind::Rectangle },
+            Style::default(),
+        );
+        e.set_tool(Tool::Arrow);
+        e.pointer_down(Pt::new(100.0, 100.0), NONE, 4.0);
+        e.pointer_move(Pt::new(200.0, 160.0), NONE);
+        let arrow = e.selection().unwrap();
+        e.edit(shape, "Edit shape", None, |object| {
+            if let Kind::Shape { rect, .. } = &mut object.kind {
+                *rect = after;
+            }
+        });
+
+        e.set_tool(Tool::Select);
+        assert_eq!(e.doc.get(shape).unwrap().rect(), Some(after));
+        assert!(matches!(e.doc.get(arrow).map(|object| &object.kind),
+            Some(Kind::Line { a, b, .. })
+                if *a == Pt::new(100.0, 100.0) && *b == Pt::new(200.0, 160.0)));
+        assert!(e.undo());
+        assert_eq!(e.doc.get(shape).unwrap().rect(), Some(before));
+        assert!(e.doc.get(arrow).is_some());
+        assert!(e.undo());
+        assert!(e.doc.get(arrow).is_none());
+        assert_eq!(e.doc.get(shape).unwrap().rect(), Some(before));
     }
 
     #[test]
@@ -2989,7 +4186,7 @@ mod tests {
             Style::default(),
         );
         let mut e = Editor::new(doc);
-        e.set_tool(Tool::Select);
+        e.set_tool(Tool::Arrow);
         e.canvas_color = Rgba::new(20, 40, 60, 192);
         e.take_events();
         e.take_damage();
@@ -2999,7 +4196,7 @@ mod tests {
     #[test]
     fn canvas_handles_cover_each_edge_and_corner() {
         let mut e = editor();
-        e.set_tool(Tool::Select);
+        e.set_tool(Tool::Move);
         let expected = [
             (H_TL, Pt::new(0.0, 0.0), Cursor::ResizeNwse),
             (H_T, Pt::new(200.0, 0.0), Cursor::ResizeNs),
@@ -3021,15 +4218,15 @@ mod tests {
             assert_eq!(e.hover(point, 4.0), cursor, "handle {handle}");
         }
 
-        for tool in [Tool::Select, Tool::Arrow, Tool::Shape, Tool::Line] {
+        for tool in [Tool::Move, Tool::Arrow, Tool::Shape, Tool::Line] {
             e.set_tool(tool);
             assert_eq!(e.canvas_handles().len(), 8, "tool {tool:?}");
         }
-        for tool in [Tool::Crop, Tool::Text, Tool::Pen] {
+        for tool in [Tool::Select, Tool::Crop, Tool::Text, Tool::Pen] {
             e.set_tool(tool);
             assert!(e.canvas_handles().is_empty(), "tool {tool:?}");
         }
-        e.set_tool(Tool::Select);
+        e.set_tool(Tool::Move);
         let id = e.doc.add(
             Kind::Shape {
                 rect: Box2::new(20.0, 20.0, 60.0, 60.0),
@@ -3234,7 +4431,7 @@ mod tests {
     #[test]
     fn canvas_handles_choose_the_nearest_overlapping_hit() {
         let mut e = Editor::new(Document::blank(8, 8, Rgba::WHITE));
-        e.set_tool(Tool::Select);
+        e.set_tool(Tool::Arrow);
         for (point, cursor) in [
             (Pt::new(0.0, 0.0), Cursor::ResizeNwse),
             (Pt::new(4.0, 0.0), Cursor::ResizeNs),
@@ -3252,7 +4449,7 @@ mod tests {
             ((0.0, 4.0), (-4.0, 4.0), (12, 8)),
         ] {
             let mut e = Editor::new(Document::blank(8, 8, Rgba::WHITE));
-            e.set_tool(Tool::Select);
+            e.set_tool(Tool::Arrow);
             drag(&mut e, start, end);
             assert_eq!(e.document().size(), expected, "handle at {start:?}");
         }
@@ -3335,7 +4532,7 @@ mod tests {
     #[test]
     fn canvas_handles_keep_existing_tiny_images_unchanged_on_click() {
         let mut e = Editor::new(Document::blank(1, 1, Rgba::WHITE));
-        e.set_tool(Tool::Select);
+        e.set_tool(Tool::Arrow);
         e.pointer_down(Pt::new(0.5, 0.0), NONE, 4.0);
         e.pointer_up(Pt::new(0.5, 0.0), NONE);
         assert_eq!(e.document().size(), (1, 1));

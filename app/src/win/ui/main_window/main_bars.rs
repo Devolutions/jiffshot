@@ -87,7 +87,7 @@ pub fn status_bar(ctx: &Ctx, zoom: ZoomView) -> El<Border> {
             DockPanel::el()
                 .child(zoom_bar)
                 .child(history)
-                .child(TextBlock::el().text(s.status).margin((10.0, 0.0)).vertical_alignment(VerticalAlignment::Center).font_size(12.0).foreground(theme.brush(Tone::Subtle)).text_trimming("CharacterEllipsis")),
+                .child(TextBlock::el().text(s.status).tool_tip_tip(s.status).margin((10.0, 0.0)).vertical_alignment(VerticalAlignment::Center).font_size(12.0).foreground(theme.brush(Tone::Subtle)).text_trimming("CharacterEllipsis")),
         )
 }
 

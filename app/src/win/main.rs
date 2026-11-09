@@ -567,6 +567,7 @@ impl MainViewModel for Model {
     command!(record_video, |app| app.video_action("record"));
     command!(canvas_changed, |_app| ());
     tool!(tool_select, Tool::Select);
+    tool!(tool_move, Tool::Move);
     tool!(tool_arrow, Tool::Arrow);
     tool!(tool_line, Tool::Line);
     tool!(tool_shape, Tool::Shape);

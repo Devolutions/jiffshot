@@ -276,6 +276,11 @@ On macOS, Jiffshot leaves Apple's `Cmd+Shift+3`, `Cmd+Shift+4`, and `Cmd+Shift+5
 ### Editor Shortcuts
 
 On macOS, use `Cmd` in place of `Ctrl` in the following editor shortcuts.
+To create an image from the clipboard, choose **New from clipboard** on the
+**File** menu (`Ctrl+Shift+V`); the classic Linux editor offers it on the toolbar.
+Clipboard image data opens as a new, unsaved document; copied image files open
+from their original paths.
+Save the current document as a `.jsd` first if its edits cannot be autosaved.
 
 | Shortcut | Action |
 |---|---|
@@ -288,7 +293,7 @@ On macOS, use `Cmd` in place of `Ctrl` in the following editor shortcuts.
 | `Ctrl+P` / `Ctrl+W` | Print / Close current capture |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / Redo |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / Cut / Paste selected objects or image regions |
-| `Ctrl+A` / `Ctrl+D` / `Ctrl+Shift+I` | Select all annotations (or the whole image when there are none) / Deselect / Invert selection |
+| `Ctrl+A` / `Ctrl+D` / `Ctrl+Shift+I` | Select the whole image in Select Region mode or all annotations in Move mode / Deselect / Invert selection |
 | `Ctrl+Shift+G` / `Ctrl+Shift+U` | Group / Ungroup selected objects |
 | `Ctrl+Shift+F` / `Ctrl+Shift+B` | Bring forward / Send backward |
 | `Ctrl+T` / `Ctrl+Shift+T` | Flatten selected objects / Flatten all objects into background |
@@ -299,10 +304,27 @@ On macOS, use `Cmd` in place of `Ctrl` in the following editor shortcuts.
 | `Ctrl+,` | Open Preferences |
 | `F1` | Show Keyboard Shortcuts dialog |
 
-Use the **Selection** tool's Rectangle variant to lift an image region, then
-`Ctrl+C` or `Ctrl+X` to copy its pixels to the system clipboard. Cut removes the
-region only after copying succeeds; Undo restores it. With nothing selected,
-the canvas has resize handles at every edge and corner, including the top and left.
+With **Select Region**, drag on the image to select a rectangular region. Use **Move**
+to click or drag annotations; drag empty space to select objects in a marquee.
+Shift-click toggles an annotation, and Shift-drag adds annotations to the selection.
+The region remains unchanged until it is moved or deleted; choose its background
+fill in the properties panel. **Lift Selection** offers ellipse and freehand regions.
+`Ctrl+C` copies the visible, composited pixels in a region; **Copy background
+only** omits annotations. Annotations remain separate and editable. Cutting a
+region that overlaps annotations is blocked to protect them; select annotations
+with **Move** to edit or delete them. To cut across annotations, explicitly
+flatten them first with **Flatten all**. Cut removes a safe region only after
+copying succeeds, and Undo restores it. `Ctrl+A` selects the whole image in **Select Region**
+mode and all annotations in **Move** mode. Pan with the middle or right mouse
+button; Alt-drag pans with other tools. With nothing selected, **Move**, Arrow,
+Line, and Shape show canvas resize handles at every edge and corner. **Select Region**
+leaves the image edges free for drawing a region.
+Drawing tools adjust only currently selected annotations of the same type; use
+**Move** to select another object. Switching to **Arrow** starts a new arrow,
+even over an existing arrow, another annotation, or an image region.
+In the classic Linux editor, enable **Editor properties and effects** to choose
+the selection background or use **Copy background only**. For **Color**, enter
+a Fill value and apply the style.
 
 ---
 
@@ -472,7 +494,7 @@ Enable **Interval options** to set an interval of at least one whole second and 
 
 Enable **Daily schedule options**, enter a local time in `HH:MM`, select **Enable daily capture**, and choose **Save daily schedule**. Jiffshot must remain open at the scheduled time; it requests a screen or window from the desktop portal, which may prompt for selection and authorization each time. The image is saved to the captures folder without replacing the editor or clipboard. The schedule makes at most one attempt per local date, including across restarts and time changes; a declined or failed request, or an active capture or recording, is not retried that day. A scheduled minute skipped by a clock change or daylight-saving transition is missed. Disabling the schedule prevents future attempts but does not close an already open desktop chooser; close it to cancel that request.
 
-Completed screenshots, scrolling captures, and panoramic captures are also copied to the image clipboard by default. To change this, toggle **Copy captures to clipboard** and choose **Save capture preferences**; a clipboard error is reported without discarding the capture. **Copy image** and **Paste image** also use the system image clipboard. Wayland desktops need a supported data-control protocol; when that is unavailable the clipboard backend can fall back to X11/XWayland.
+Completed screenshots, scrolling captures, and panoramic captures are also copied to the image clipboard by default. To change this, toggle **Copy captures to clipboard** and choose **Save capture preferences**; a clipboard error is reported without discarding the capture. **Copy image** and **New from clipboard** also use the system image clipboard. In the classic editor, save the current document as a `.jsd` before creating an image from the clipboard if it has unsaved edits. Wayland desktops need a supported data-control protocol; when that is unavailable the clipboard backend can fall back to X11/XWayland.
 
 The **Capture library** initially lists the eight newest screenshots and recordings; select one to open its image or import a video's first frame. **Search all**, **Images**, **Videos**, **Pinned**, and **Tagged** search the whole capture folder, including Windows-style `YYYY-MM` subfolders. Search matches filenames and any existing Jiffshot metadata (window title, app, URL, timestamp, and tags). Use `app:browser`, `site:example.com`, or `tag:planning` to match only those metadata fields, and `age:day` or `age:week` to filter by the last 24 hours or seven days of file modification time. Terms can be combined and are case-insensitive; field values match substrings, and unknown prefixes are treated as ordinary text. Enable **Organize captures**, select a capture, and use **Save tags** or **Pin / unpin** to update its sidecar. Tags are comma- or semicolon-separated; existing metadata is preserved, malformed or symbolic-link sidecars are rejected, and changes detected during an edit are reported. New sidecars include image dimensions and Windows-compatible defaults; video dimensions and capture time are left unspecified when unavailable. **Recent** returns to the recent-capture strip. Scroll the controls above the canvas to reach additional options when the window is small. The editor supports Ctrl+O to open, Ctrl+S to save a `.jsd`, and Ctrl+Z/Ctrl+Y for undo/redo. **Theme: System / Light / Dark** switches the app theme; the choice persists alongside the capture-folder setting in the Linux settings file. **Combine horizontal…**, **Combine vertical…**, and **Combine as grid…** accept multiple image files and create an editable document. **Video frame (seconds) / Import frame…** imports a frame at the requested timestamp into the editor. Opening AVI, MKV, MOV, MP4, or WebM also imports its first video frame; **Play video… / Stop** starts or stops GStreamer video and audio playback, and **Pause/resume video** controls playback. Set the **Trim range (seconds)** start and end values, select a video, and choose **Trim video to MP4…** to export that interval or **Cut range out…** to remove it and join the remaining parts. **Combine videos…** joins at least two clips in case-sensitive filename order (full path breaks filename ties), scales them to the first clip's dimensions, and exports at 30 frames per second. These MP4 edits preserve the selected source audio track as AAC; when combining clips with and without audio, silent clips contribute silence. The destination must differ from every source. **Export video as GIF…** creates a looping animated GIF using the source frame timing, rounded to GIF's 10 ms resolution; very short frames may be omitted. The GIF destination must differ from the source.
 
@@ -728,7 +750,9 @@ creates only one.
 
 The editor drives its own UI when `JIFFSHOT_UITEST=DIR` is set (with `JIFFSHOT_UITEST_IMAGE`, `JIFFSHOT_UITEST_VIDEO`, an isolated `JIFFSHOT_LIBRARY` and, to leave your settings alone, scratch `APPDATA` and `LOCALAPPDATA`), writing screenshots of every window and `ui-log.txt` to `DIR`. Set `JIFFSHOT_UITEST_CAPTURE_ONLY=1` to check just the Capture window and chooser, or `JIFFSHOT_UITEST_HUD_ONLY=1` to check the recording toolbar, including restoring hidden controls. Set `JIFFSHOT_UITEST_KEEP=1` to leave the Capture window open for inspection. To exercise library edits, set `JIFFSHOT_LIBRARY` to an existing folder inside `DIR`; otherwise those steps are skipped to protect the normal library. `cargo run -p jiffshot-doc --example synthetic -- OUT.png` writes the test image its coordinates assume.
 Set `JIFFSHOT_UITEST_CANVAS=1` to check all canvas handle cursors and view-coordinate crop and expansion at fit and zoom, without moving the system pointer.
-Set `JIFFSHOT_UITEST_SELECTION=1` to check full-image selection, rectangular Copy/Cut, clipboard failure reporting and undo without changing the system clipboard.
+Set `JIFFSHOT_UITEST_SELECTION=1` to check full-image and Select-region selection, Alt-drag routing, background-fill controls, rectangular Copy/Cut, clipboard failure reporting and undo without changing the system clipboard.
+Set `JIFFSHOT_UITEST_NEW_FROM_CLIPBOARD=1` to check clipboard imports and unsaved-document protection with synthetic data, without changing the system clipboard.
+On Linux, `dbus-run-session -- pwsh -File app/tests/linux_selection_e2e.ps1 -Binary target/release/jiffshot -RuntimeDir target/release` checks selection, clipboard shortcuts and Select-to-Arrow transitions in the classic editor, plus the shared editor's responsive toolbar and clipboard File-menu command. It requires Xvfb, xclip, xwininfo and libXtst, and uses a private X11 display and clipboard.
 On Windows, `JIFFSHOT_UITEST_CAPTURE_MENUS=1` checks Capture menu hover switching, click-to-dismiss, dismissal cleanup, and DarkBlue popup backgrounds and borders without changing the system pointer. It also checks that changing to Light closes the old popup and preserves the light palette. Use the same isolated settings and library paths.
 Set `JIFFSHOT_UITEST_VIDEO_EDIT=1` with a short `JIFFSHOT_UITEST_VIDEO` fixture and an empty scratch library inside `DIR` for the focused multi-cut, undo/redo, playback, automatic-save and subsequent-save checks.
 On macOS, set `JIFFSHOT_UITEST_APP_NAME=1` to check the native application name and menu across editor and Capture windows. Set `JIFFSHOT_UITEST_OVERLAY=1` to run a focused synthetic selection-window lifecycle test without screen captures. Use scratch `JIFFSHOT_CONFIG_DIR` and `JIFFSHOT_LOCAL_DIR` for both.

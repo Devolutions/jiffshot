@@ -207,6 +207,7 @@ fn info(id: &str, session: &Session) -> Value {
     json!({
         "id": id, "path": session.path, "width": e.document().width(), "height": e.document().height(),
         "modified": e.is_modified(), "objects": e.document().objects, "selected": e.selected_ids(),
+        "selected_region": e.selected_region(),
         "undo": e.undo_label(), "redo": e.redo_label(),
         "font_substitutions": font_substitutions(e.document()),
     })
@@ -782,7 +783,12 @@ fn action(e: &mut Editor, a: &Args) -> Result<(), Error> {
         "group" => { e.group_selected().ok_or_else(|| invalid("select at least two objects"))?; }
         "ungroup" => if !e.ungroup_selected() { return Err(invalid("select a group")); },
         "flatten" => if !e.flatten_selected() { return Err(not_found("nothing selected")); },
-        "move" => { require_selection(e)?; e.nudge(x, y); }
+        "move" => {
+            if e.selected_region().is_none() {
+                require_selection(e)?;
+            }
+            e.nudge(x, y);
+        }
         "text" => { require_selection(e)?; e.set_selected_text(text.as_deref().ok_or_else(|| invalid("text is required"))?); }
         "front" => { require_selection(e)?; e.arrange(2); }
         "back" => { require_selection(e)?; e.arrange(-2); }
@@ -831,6 +837,77 @@ mod tests {
             e.document().flatten().data(),
             e.document().background().data()
         );
+    }
+
+    #[test]
+    fn document_commands_report_and_move_background_regions() {
+        let created = dispatch(
+            "doc.new",
+            &args(json!({"width":80,"height":60,"color":"#123456"})),
+        )
+        .unwrap();
+        let id = created["id"].as_str().unwrap();
+        assert_eq!(created.get("selected_region"), Some(&Value::Null));
+
+        let region = dispatch(
+            "doc.draw",
+            &args(json!({"id":id,"tool":"Select","from":"10,12","to":"30,28"})),
+        )
+        .unwrap();
+        assert_eq!(region["selected_region"], json!({"x":10,"y":12,"w":20,"h":16}));
+        assert_eq!(region["selected"], json!([]));
+        assert_eq!(region["objects"], json!([]));
+        assert_eq!(region["modified"], false);
+
+        let moved = dispatch(
+            "doc.action",
+            &args(json!({"id":id,"name":"move","x":10,"y":6})),
+        )
+        .unwrap();
+        assert!(moved["selected_region"].is_null());
+        assert_eq!(moved["selected"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            moved["objects"][0]["kind"]["rect"],
+            json!({"x0":20.0,"y0":18.0,"x1":40.0,"y1":34.0})
+        );
+        let undone = dispatch("doc.action", &args(json!({"id":id,"name":"undo"}))).unwrap();
+        assert_eq!(undone["objects"], json!([]));
+        assert!(undone["selected_region"].is_null());
+
+        let all = dispatch("doc.action", &args(json!({"id":id,"name":"select-all"}))).unwrap();
+        assert_eq!(all["selected_region"], json!({"x":0,"y":0,"w":80,"h":60}));
+        let duplicate =
+            dispatch("doc.action", &args(json!({"id":id,"name":"duplicate"}))).unwrap();
+        assert!(duplicate["selected_region"].is_null());
+        assert_eq!(duplicate["selected"].as_array().unwrap().len(), 1);
+        dispatch("doc.action", &args(json!({"id":id,"name":"undo"}))).unwrap();
+
+        let annotation = dispatch(
+            "doc.add",
+            &args(json!({
+                "id":id,
+                "kind":{"type":"Shape","rect":{"x0":15,"y0":15,"x1":35,"y1":35},"shape":"Rectangle"},
+                "style":{"fill":"#FFFFFF"}
+            })),
+        )
+        .unwrap();
+        let annotation_id = annotation["object_id"].as_u64().unwrap();
+        let overlap = dispatch(
+            "doc.draw",
+            &args(json!({
+                "id":id,"tool":"Select","from":"20,20","to":"50,40","alt":true
+            })),
+        )
+        .unwrap();
+        assert_eq!(overlap["selected_region"], json!({"x":20,"y":20,"w":30,"h":20}));
+        assert_eq!(overlap["selected"], json!([]));
+        assert_eq!(overlap["objects"].as_array().unwrap().len(), 1);
+        assert_eq!(overlap["objects"][0]["id"], annotation_id);
+        assert_eq!(
+            overlap["objects"][0]["kind"]["rect"],
+            json!({"x0":15.0,"y0":15.0,"x1":35.0,"y1":35.0})
+        );
+        dispatch("doc.close", &args(json!({"id":id}))).unwrap();
     }
 
     #[test]

@@ -817,10 +817,22 @@ function ConvertTo-E2ELabelKey {
 }
 
 function Find-E2ELabel {
-    <# Returns @(x, y) window coordinates of the label's center in the top 270 pixels, or $null. #>
-    param([Parameter(Mandatory)][JiffshotE2E.TextReader]$Reader, [Parameter(Mandatory)][JiffshotE2E.X11Driver]$Driver, [Parameter(Mandatory)][string]$Label)
+    <# Returns @(x, y) coordinates of the label's center in the captured window, or $null. #>
+    param(
+        [Parameter(Mandatory)][JiffshotE2E.TextReader]$Reader,
+        [Parameter(Mandatory)][JiffshotE2E.X11Driver]$Driver,
+        [Parameter(Mandatory)][string]$Label,
+        [long]$Window = 0,
+        [int]$Width = 800,
+        [int]$Height = 270
+    )
     $scale = 3
-    $data = $Reader.Recognize($Driver.Capture(0, 0, 800, 270), 6, $true)
+    $frame = if ($Window -eq 0) {
+        $Driver.Capture(0, 0, $Width, $Height)
+    } else {
+        $Driver.CaptureWindow($Window, 0, 0, $Width, $Height)
+    }
+    $data = $Reader.Recognize($frame, 6, $true)
     $lines = [ordered]@{}
     foreach ($row in ($data -split "`n")) {
         $fields = $row.TrimEnd("`r") -split "`t", 12

@@ -1409,7 +1409,7 @@ impl Object {
     }
 }
 
-fn box_handles(r: &Box2) -> Vec<(Handle, Pt)> {
+pub(crate) fn box_handles(r: &Box2) -> Vec<(Handle, Pt)> {
     let c = r.center();
     vec![
         (H_TL, Pt::new(r.x0, r.y0)),
