@@ -180,7 +180,7 @@ The detailed feature list below describes the Windows application. The Linux bui
 - **Smart Move:** Drag around a button, card, or UI element to lift it off its background (automatically filling the hole left behind) so you can reposition it anywhere.
 - **Smart Redact:** Scan the screenshot with one click to automatically detect and cover sensitive patterns such as email addresses and phone numbers with removable redaction boxes.
 - **Simplify UI:** Convert dense UI text across a screenshot into clean, color-matched placeholder bars for simplified documentation graphics.
-- **Cut Out & Auto-Trim:** Drag horizontally or vertically across a section to slice it out and join the remaining halves (with a straight seam or torn edge), or auto-trim solid-colored margins in one click.
+- **Cut Out & Auto-Trim:** Cut Out defaults to a rectangular image selection: drag to lift a region, then move it or use Copy/Cut. Choose Horizontal or Vertical to remove a full-width or full-height band and join the remaining halves (with a straight seam or torn edge). Auto-trim removes solid-colored margins in one click.
 - **Canvas Handles:** With nothing selected and the Select, Arrow, Shape, or Line tool active, drag any edge or corner inward to crop or outward to add canvas in the selected color. Existing image transparency and annotation positions are preserved.
 
 ### Effects, Templates & Image Combining

@@ -132,6 +132,7 @@ impl Tool {
                 "Thumbs up",
             ],
             Tool::CutOut => &[
+                "Rectangle",
                 "Horizontal",
                 "Vertical",
                 "Horizontal sawtooth",
@@ -182,7 +183,10 @@ impl Tool {
 
     /// Tools that lift part of the image and so use a background fill.
     pub fn lifts(self) -> bool {
-        matches!(self, Tool::Selection | Tool::MagicWand | Tool::SmartMove)
+        matches!(
+            self,
+            Tool::Selection | Tool::CutOut | Tool::MagicWand | Tool::SmartMove
+        )
     }
 }
 
@@ -2222,6 +2226,9 @@ impl Editor {
                     Tool::Crop => {
                         self.edit_document("Crop", |d| d.crop(r));
                     }
+                    Tool::CutOut if self.variant(Tool::CutOut) == "Rectangle" => {
+                        self.lift_selection(r, false)
+                    }
                     Tool::CutOut => {
                         let v = self.variant(Tool::CutOut);
                         let vertical = v.starts_with("Vertical");
@@ -2253,7 +2260,7 @@ impl Editor {
         let (w, h) = (self.doc.width() as f32, self.doc.height() as f32);
         let p = Pt::new(p.x.clamp(0.0, w), p.y.clamp(0.0, h));
         let b = Box2::from_points(start, p);
-        if self.tool == Tool::CutOut {
+        if self.tool == Tool::CutOut && self.variant(Tool::CutOut) != "Rectangle" {
             return if self.variant(Tool::CutOut).starts_with("Vertical") {
                 Box2::new(b.x0, 0.0, b.x1, h)
             } else {

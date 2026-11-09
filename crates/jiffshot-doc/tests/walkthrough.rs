@@ -109,6 +109,56 @@ fn wand_selection_and_eraser() {
 }
 
 #[test]
+fn cut_out_defaults_to_a_rectangular_selection() {
+    use jiffshot_doc::editor::BackgroundFill;
+    use jiffshot_doc::{raster, Box2};
+
+    let original = raster::solid(100, 80, Rgba::rgb(20, 100, 200)).unwrap();
+    let mut e = Editor::new(Document::new(original.clone()));
+    e.set_tool(Tool::CutOut);
+    e.background_fill = BackgroundFill::Transparent;
+    assert_eq!(e.variant(Tool::CutOut), "Rectangle");
+    e.pointer_down(Pt::new(20.0, 15.0), NONE, 4.0);
+    e.pointer_move(Pt::new(60.0, 45.0), NONE);
+    assert_eq!(e.marquee(), Some(Box2::new(20.0, 15.0, 60.0, 45.0)));
+    e.pointer_up(Pt::new(60.0, 45.0), NONE);
+    assert_eq!(e.document().size(), (100, 80), "a rectangle must not remove a band");
+    assert_eq!(e.selection_box(), Some(Box2::new(20.0, 15.0, 60.0, 45.0)));
+    assert_eq!(e.document().flatten().data(), original.data(), "lifting preserves appearance");
+    assert_eq!(raster::pixel(e.document().background(), 30, 25).a, 0);
+    assert_eq!(raster::pixel(e.document().background(), 10, 25).a, 255);
+    assert!(e.delete_selected(), "the rectangle can be cut independently");
+    assert_eq!(raster::pixel(&e.document().flatten(), 30, 25).a, 0);
+    assert!(e.undo());
+    assert_eq!(e.document().flatten().data(), original.data());
+    assert!(e.undo());
+    assert!(e.document().objects.is_empty());
+    assert_eq!(e.document().background().data(), original.data());
+}
+
+#[test]
+fn cut_out_explicit_band_variants_still_close_the_gap() {
+    use jiffshot_doc::Box2;
+
+    for (variant, preview, size) in [
+        ("Horizontal", Box2::new(0.0, 15.0, 100.0, 45.0), (100, 50)),
+        ("Vertical", Box2::new(20.0, 0.0, 60.0, 80.0), (60, 80)),
+    ] {
+        let mut e = Editor::new(Document::blank(100, 80, Rgba::WHITE));
+        e.set_tool(Tool::CutOut);
+        e.set_variant(variant);
+        e.pointer_down(Pt::new(20.0, 15.0), NONE, 4.0);
+        e.pointer_move(Pt::new(60.0, 45.0), NONE);
+        assert_eq!(e.marquee(), Some(preview), "{variant} preview");
+        e.pointer_up(Pt::new(60.0, 45.0), NONE);
+        assert_eq!(e.document().size(), size, "{variant} closes the gap");
+        assert!(e.selected_ids().is_empty(), "{variant} does not lift a rectangle");
+        assert!(e.undo(), "{variant} must be undoable");
+        assert_eq!(e.document().size(), (100, 80));
+    }
+}
+
+#[test]
 fn canvas_resize_by_dragging_and_expand_to_fit() {
     let mut e = Editor::new(Document::blank(400, 300, Rgba::WHITE));
     e.set_tool(Tool::Select);

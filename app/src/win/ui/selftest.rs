@@ -1007,14 +1007,15 @@ fn selection_clipboard_script() -> Script {
                 app.load(Document::blank(80, 60, Rgba::rgb(200, 40, 20)), None, None);
             }).unwrap();
             crate::canvas::with_editor(|e| {
-                e.set_tool(Tool::Selection);
+                e.set_tool(Tool::CutOut);
+                assert_eq!(e.variant(Tool::CutOut), "Rectangle", "Cut Out defaults to a rectangle");
                 e.background_fill = BackgroundFill::Transparent;
                 let mods = jiffshot_doc::editor::Modifiers::default();
                 e.pointer_down(Pt::new(10.0, 12.0), mods, 1.0);
                 e.pointer_move(Pt::new(30.0, 28.0), mods);
                 e.pointer_up(Pt::new(30.0, 28.0), mods);
             }).unwrap();
-            test.line("selection: full-image Copy delivers only the selected pixels");
+            test.line("selection: full-image Copy delivers pixels; Cut Out defaults to a rectangle");
             100
         })
         .step(|test| {
@@ -2880,17 +2881,17 @@ fn fonts_script() -> Script {
         assert_eq!(fields.len(), 4, "{toast:?}");
         assert_eq!(fields[1], "Font substitution");
         assert!(fields[2].contains(SHOWN_FAMILY));
-        crate::app::act(|app| app.copy_image_with(|frame, _| {
+        crate::app::act(|app| assert!(app.copy_image_with(|frame, _| {
             assert!(frame.pixels.chunks_exact(4).any(|pixel| pixel[..3] != [255, 255, 255]), "the substitute text was not drawn");
             Ok(())
-        })).unwrap();
+        }))).unwrap();
         test.line("opening the document reported a sanitized substitution");
         150
     });
     script.step(|test| {
         let status = sink().status.get_untracked();
         assert!(status.contains(SHOWN_FAMILY) && status.contains("Copied the image"), "{status}");
-        crate::app::act(|app| app.copy_image_with(|_, _| Err(std::io::Error::other("fixture copy failure")))).unwrap();
+        crate::app::act(|app| assert!(!app.copy_image_with(|_, _| Err(std::io::Error::other("fixture copy failure"))))).unwrap();
         test.line("copying the flattened image reported the substitution");
         150
     });
@@ -4415,6 +4416,8 @@ fn image_tools(s: &mut Script, fresh: String) {
     .shot("ui-4-image-tools.png")
     .step(|_| {
         call(|m| m.undo());
+        run("tool:Cut Out");
+        set(sink().variant, "Horizontal".into());
         0
     })
     .drag("Cut Out", (0.3, 0.33), (0.3, 0.40), 12)

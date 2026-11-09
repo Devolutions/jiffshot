@@ -1035,7 +1035,7 @@ fn panel_for(kind: &str) -> &'static str {
         "Image" => "stroke;width;shadow;opacity;rotation",
         "Drop zone" => "zone;stroke;width;shadow",
         "Fill" => "fill;amount",
-        "Cut Out" => "variant",
+        "Cut Out" => "variant;backfill",
         "Selection" => "variant;backfill",
         "Magic Wand" => "amount;backfill",
         "Smart Move" => "backfill",
@@ -3046,7 +3046,7 @@ impl App {
         });
         let hint = match tool {
             Tool::Crop => "Drag to crop the image.",
-            Tool::CutOut => "Drag across the part to remove; the rest closes the gap.",
+            Tool::CutOut => "Drag a rectangle to lift it, then move it or use Cut. Horizontal and Vertical remove a band and close the gap.",
             Tool::Selection => "Drag to select part of the image, then move it.",
             Tool::SmartMove => "Drag around an object to lift it off the background.",
             Tool::TextReplace => "Drag around text to make it editable.",
