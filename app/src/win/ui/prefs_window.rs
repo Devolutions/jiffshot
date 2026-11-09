@@ -24,7 +24,7 @@ struct Dialog {
     tab: String,
     #[serde(default)]
     tabs: Vec<Tab>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(windows, target_os = "macos"))]
     #[serde(default)]
     startup_initial: Option<bool>,
     #[cfg(target_os = "macos")]
@@ -124,7 +124,7 @@ fn show(json: &str) -> Result<()> {
         items.push(TabItem::el().header(tab.title.clone()).content(ScrollViewer::el().content(AnyEl::from_control(rows))));
     }
     let selected = dialog.tabs.iter().position(|t| t.id == dialog.tab).unwrap_or(0);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(windows, target_os = "macos"))]
     let startup_initial = dialog.startup_initial;
     #[cfg(target_os = "macos")]
     let share_initial = dialog.share_initial;
@@ -158,12 +158,13 @@ fn show(json: &str) -> Result<()> {
                 }
                 values
             };
-            #[cfg(target_os = "macos")]
+            #[cfg(any(windows, target_os = "macos"))]
             let values = {
                 let mut values = values;
                 if let Some(initial) = startup_initial {
                     values.insert("_startup_initial".into(), Value::Bool(initial));
                 }
+                #[cfg(target_os = "macos")]
                 if let Some(initial) = &share_initial {
                     values.insert("_share_initial".into(), initial.clone());
                 }

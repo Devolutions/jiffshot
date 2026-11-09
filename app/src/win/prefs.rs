@@ -31,7 +31,7 @@ struct Dialog {
     /// The tab to open on.
     tab: String,
     tabs: Vec<Tab>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(windows, target_os = "macos"))]
     startup_initial: bool,
     #[cfg(target_os = "macos")]
     share_initial: ShareSnapshot,
@@ -70,7 +70,7 @@ pub fn dialog(app: &App, tab: &str) -> String {
     }
     let dialog = Dialog {
         tab: tab.to_owned(),
-        #[cfg(target_os = "macos")]
+        #[cfg(any(windows, target_os = "macos"))]
         startup_initial: startup.requested,
         #[cfg(target_os = "macos")]
         share_initial: ShareSnapshot::from_app(app),
@@ -116,10 +116,8 @@ pub fn apply(app: &mut App, json: &str) {
         app.set_status(format!("Could not apply Preferences: {error}"));
         return;
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(windows, target_os = "macos"))]
     let startup_initial = tabs.get("_startup_initial").and_then(Value::as_bool).unwrap_or_else(capture::runs_at_startup);
-    #[cfg(windows)]
-    let startup_initial = capture::runs_at_startup();
     #[cfg(target_os = "macos")]
     if !apply_editor(app, &values("editor"), &values("library")) {
         return;

@@ -6,6 +6,7 @@
 //!
 //! ```text
 //! jiffshot                              tray (or, if already running, the Capture window)
+//! jiffshot --background                 start the tray without opening windows (Windows)
 //! jiffshot FILE...                      open files in the editor
 //! jiffshot --capture|--scrolling|--panoramic|--text|--record|--menu|--steps|--freehand|--window
 //!                                       start that capture (starting Jiffshot if needed)
@@ -56,6 +57,8 @@ pub mod settings;
 mod shutdown_macos;
 mod stepcap;
 mod sys;
+#[cfg(windows)]
+mod startup_windows;
 mod tray;
 pub mod ui_api;
 mod vfx;
@@ -89,6 +92,9 @@ pub struct Hooks {
     pub quit: Box<dyn Fn() + Send + Sync>,
     /// A notice for the user (title, text, whether it reports a problem).
     pub notify: Box<dyn Fn(&str, &str, bool) + Send + Sync>,
+    /// An automatic startup notice, which may be deferred until the app is opened.
+    #[cfg(windows)]
+    pub startup_notice: Box<dyn Fn(&str, &str, bool) + Send + Sync>,
     /// What the tray menu should show, sent after anything in it changes.
     pub state: Box<dyn Fn(TrayState) + Send + Sync>,
     /// Whether a screen recording is active, including one started from a CLI client.
@@ -141,6 +147,19 @@ pub fn settings_snapshot() -> settings::Settings {
     #[cfg(target_os = "macos")]
     let settings = capture_state_snapshot().map(|(settings, _)| settings);
     settings.unwrap_or_else(settings::Settings::load)
+}
+
+/// Initializes Windows startup once for this user, returning whether a legacy
+/// startup command makes this no-argument launch ambiguous.
+#[cfg(windows)]
+pub fn prepare_windows_startup() -> Result<bool, String> {
+    startup_windows::prepare()
+}
+
+/// Whether Windows launched the packaged app through its startup task.
+#[cfg(windows)]
+pub fn is_windows_startup_activation() -> Result<bool, String> {
+    startup_windows::is_startup_activation()
 }
 
 /// The capture settings and tray state from the same publication.
@@ -455,14 +474,15 @@ pub mod capture {
             tray::set_run_at_startup(on);
             tray::publish_state();
         }) {
-            if let Some(hooks) = super::hooks() {
-                (hooks.notify)(
-                    "Open at login not changed",
-                    "The capture service is unavailable.",
-                    true,
-                );
+            let title = if cfg!(windows) {
+                "Windows startup not changed"
             } else {
-                super::log("Open at login not changed: the capture service is unavailable");
+                "Open at login not changed"
+            };
+            if let Some(hooks) = super::hooks() {
+                (hooks.notify)(title, "The capture service is unavailable.", true);
+            } else {
+                super::log(&format!("{title}: the capture service is unavailable"));
             }
         }
     }
@@ -1058,9 +1078,9 @@ pub fn claim_instance() -> std::io::Result<bool> {
 }
 
 /// Asks the running Jiffshot to start `mode` (a [`capture_flag`]), or to
-/// open its Capture window when there is none.
+/// open its Capture window when there is none. Returns whether it was posted.
 #[cfg(windows)]
-pub fn forward_to_running(mode: Option<usize>) {
+pub fn forward_to_running(mode: Option<usize>) -> bool {
     match mode {
         Some(usize::MAX) => sys::post_to_instance(tray::CLASS, tray::WM_APP_MENU, 0, 0),
         m => sys::post_to_instance(
@@ -1069,7 +1089,7 @@ pub fn forward_to_running(mode: Option<usize>) {
             m.unwrap_or(tray::OPEN_CAPTURE_WINDOW),
             0,
         ),
-    };
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1325,6 +1345,10 @@ pub fn request_capture(mode: usize, delay_ms: u32) {
 /// `--selftest` and the rest), returning its exit code; `None` when `args`
 /// ask for the app itself (nothing, a capture flag, or files to open).
 pub fn run_command(args: &[String]) -> Option<i32> {
+    #[cfg(windows)]
+    if args == ["--background"] {
+        return None;
+    }
     if args.is_empty() || capture_flag(args).is_some() || !args[0].starts_with("--") {
         return None;
     }

@@ -44,7 +44,7 @@ Prebuilt, Authenticode-signed packages for **Windows 10 and Windows 11** (`x64` 
 | **`Devolutions.Jiffshot-windows-arm64-<version>.msi`** | Windows ARM64 | Standard Windows Installer for Windows on ARM devices. |
 | **`Devolutions.Jiffshot-windows-x64-<version>.msix`** | Windows x64 (Intel / AMD) | Signed MSIX package. Install it to add Jiffshot to Windows; uninstall it from Installed apps. |
 | **`Devolutions.Jiffshot-windows-arm64-<version>.msix`** | Windows ARM64 | Signed MSIX package for Windows on ARM devices. |
-| **`Devolutions.Jiffshot-windows-x64-<version>.zip`** | Windows x64 (Intel / AMD) | Portable archive—unzip anywhere and run `jiffshot.exe`. Nothing is installed in the system. |
+| **`Devolutions.Jiffshot-windows-x64-<version>.zip`** | Windows x64 (Intel / AMD) | Portable archive—unzip anywhere and run `jiffshot.exe`; startup is registered per user by default. |
 | **`Devolutions.Jiffshot-windows-arm64-<version>.zip`** | Windows ARM64 | Portable archive for Windows on ARM devices. |
 | **`Devolutions.Jiffshot-macos-arm64-<version>.dmg`** | macOS Apple Silicon | Disk image for Macs with Apple Silicon. |
 | **`Devolutions.Jiffshot-macos-x86_64-<version>.dmg`** | macOS Intel | Disk image for Intel-based Macs. |
@@ -86,6 +86,18 @@ current Rustolonia host.
    - **Capture a full monitor or desktop:** Press `F` for the current screen or `A` for all screens.
 3. **Annotate & share:** By default, captures are saved to `Pictures\Jiffshot`, copied to the clipboard, and opened in the **Jiffshot Editor** where you can add arrows, callouts, numbered steps, blur, or effects, then copy (`Ctrl+Shift+C`), export (`Ctrl+E`), or share directly to other apps.
 4. **Stay ready in the tray:** Closing the editor window keeps Jiffshot running quietly in the notification area so your hotkeys stay active. To quit completely, right-click the tray icon and choose **Exit**.
+
+On the first full launch for each Windows user, Jiffshot enables startup at
+sign-in by default, including once for existing users of older versions. It
+starts in the tray without opening any windows or the Capture Widget; opening
+Jiffshot restores the widget if it was previously enabled and shows any
+startup warnings. Turn off **Run when Windows starts** in the tray menu or
+Capture preferences to opt out. Windows can also disable or restrict startup
+in **Settings > Apps > Startup** or Task Manager; a Windows-disabled MSIX
+startup task must be re-enabled there. For portable and MSI installations,
+the Jiffshot switch shows its registration, not whether Windows has
+independently disabled it. Before uninstalling an MSI or moving or removing a
+portable copy, turn the switch off for each Windows user who registered it.
 
 On Windows, macOS, and Linux, screenshots and recordings automatically hide
 Jiffshot's visible windows, including the editor and preferences. Windows that
@@ -295,6 +307,9 @@ On macOS, use `Cmd` in place of `Ctrl` in the following editor shortcuts.
 ```powershell
 # Start Jiffshot in the system tray (or open the Capture Window if already running)
 jiffshot.exe
+
+# Start hidden without opening a running instance
+jiffshot.exe --background
 
 # Open one or more image, video, or .jsd files in the editor
 jiffshot.exe screenshot.png recording.mp4
@@ -711,6 +726,8 @@ Set `JIFFSHOT_UITEST_VIDEO_EDIT=1` with a short `JIFFSHOT_UITEST_VIDEO` fixture 
 On macOS, set `JIFFSHOT_UITEST_APP_NAME=1` to check the native application name and menu across editor and Capture windows. Set `JIFFSHOT_UITEST_OVERLAY=1` to run a focused synthetic selection-window lifecycle test without screen captures. Use scratch `JIFFSHOT_CONFIG_DIR` and `JIFFSHOT_LOCAL_DIR` for both.
 On macOS, `JIFFSHOT_UITEST_GRAB_TEXT=1` captures a visible fixture from the real screen with programmatic selection, then checks the OCR result, private pasteboard, unchanged editor and undo/redo history, and empty scratch library. It requires Screen Recording permission, an empty library inside `JIFFSHOT_UITEST`, and isolated configuration and local-data directories. It starts the capture engine and temporarily registers capture hotkeys, but does not move the pointer or modify the system clipboard.
 On Windows, `pwsh -NoProfile -File app\tests\windows_grab_text_e2e.ps1 -Binary <jiffshot.exe> -AllowDesktopInput` checks the same behavior with real screen capture, pointer input, native OCR and the system clipboard. Run it only on an isolated interactive desktop: it moves the pointer, sends mouse input, replaces the system clipboard and temporarily registers capture hotkeys. It uses scratch settings and library directories and refuses to start the capture engine if another Jiffshot instance is running.
+On Windows, `cargo test -p jiffshot-workflow startup` includes a subprocess that redirects its registry access to a unique, temporary volatile key outside the real startup locations. It verifies Run-entry registration, migration, ownership and Windows approval markers without changing the user's startup settings.
+On Windows, `pwsh -NoProfile -File app\tests\windows_startup_e2e_tests.ps1` checks the startup harness without launching Jiffshot or changing the registry. The separate `app\tests\windows_startup_e2e.ps1` requires an explicitly identified disposable, interactive Windows profile: it changes that profile's startup registration and launches the app. Follow the script's instructions for actual sign-in, tray, and installed-MSIX checks; running its automated checks alone does not verify those behaviors.
 `JIFFSHOT_UITEST_NATIVE_MENU=1` checks the exported macOS editor, Capture window and application menus, Command shortcuts, single-dispatch clicks and shortcuts, reactive enabled states and checkmarks, and changing recent-file and share submenus. Use the same isolated settings, cache and library paths; it sends keyboard input only to the fixture application and does not capture the screen or move the pointer.
 `JIFFSHOT_UITEST_PERMISSIONS=1` exercises permission guidance for synthetic screen, Accessibility, camera, microphone, and Automation denials, including duplicate failures, dismissal, retry, and a hidden editor. It does not request permissions, open System Settings, or capture the screen; use the same isolated test paths.
 `JIFFSHOT_UITEST_RECENT=1` uses an empty `JIFFSHOT_LIBRARY` inside `JIFFSHOT_UITEST` to check editor and tray recent-file actions with a synthetic image whose name contains Unicode and URI-reserved characters, including malformed-URI reporting.

@@ -20,6 +20,99 @@ use jiffshot_doc::{Document, Editor, Rgba};
 use rustolonia::{App, Result};
 use vm::{MainViewModel, MainViewModelSink};
 
+#[cfg(windows)]
+fn is_background_launch(args: &[String], startup_activation: bool) -> bool {
+    args == ["--background"] || (args.is_empty() && startup_activation)
+}
+
+#[cfg(windows)]
+fn wait_for_running_instance(wait: std::time::Duration, mut forward: impl FnMut() -> bool) -> bool {
+    let started = std::time::Instant::now();
+    if forward() {
+        return true;
+    }
+    loop {
+        let remaining = wait.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return false;
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(50)));
+        if started.elapsed() >= wait {
+            return false;
+        }
+        if forward() {
+            return true;
+        }
+    }
+}
+
+#[cfg(windows)]
+fn report_forward_failure(detail: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    jiffshot_workflow::log(detail);
+    // SAFETY: both strings are nul-terminated and remain alive for the call.
+    let shown = unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            jiffshot_capture::wide(detail).as_ptr(),
+            jiffshot_capture::wide("Jiffshot").as_ptr(),
+            MB_OK | MB_ICONERROR,
+        )
+    };
+    if shown == 0 {
+        jiffshot_workflow::log(&format!(
+            "Could not display the forwarding error: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+}
+
+#[cfg(windows)]
+fn windows_taskbar_present() -> bool {
+    // SAFETY: this reads the existence of the system taskbar window.
+    unsafe {
+        !windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW(
+            jiffshot_capture::wide("Shell_TrayWnd").as_ptr(),
+            std::ptr::null(),
+        )
+        .is_null()
+    }
+}
+
+#[cfg(windows)]
+fn report_tray_unavailable(detail: String) {
+    jiffshot_workflow::log(&format!("Windows tray unavailable: {detail}"));
+    if let Err(error) = app::act(|app| {
+        app.show_editor();
+        app.toast("Windows tray unavailable", &detail, true);
+    }) {
+        jiffshot_workflow::log(&format!("Could not report the missing Windows tray: {error}"));
+    }
+}
+
+#[cfg(windows)]
+fn watch_windows_taskbar(scope: rustolonia::AppScope) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("jiffshot-taskbar".into())
+        .spawn(move || {
+            for _ in 0..120 {
+                if windows_taskbar_present() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            if let Err(error) = scope.post(|| {
+                report_tray_unavailable(
+                    "Windows did not provide a taskbar. Jiffshot was opened so you can access it; try again after Explorer starts.".into(),
+                )
+            }) {
+                jiffshot_workflow::log(&format!("Could not report the missing Windows taskbar: {error}"));
+            }
+        })?;
+    Ok(())
+}
+
 /// The window's view model; every call is forwarded to [`app::App`].
 struct Model;
 
@@ -628,6 +721,18 @@ pub(crate) fn run() -> rustolonia::Result<()> {
     // into the tray and single-instance claim.
     let tray = std::env::var_os("JIFFSHOT_UITEST").is_none();
     #[cfg(windows)]
+    let background = if tray && args.is_empty() {
+        match jiffshot_workflow::is_windows_startup_activation() {
+            Ok(startup) => is_background_launch(&args, startup),
+            Err(error) => {
+                jiffshot_workflow::log(&format!("Could not determine Windows startup activation: {error}"));
+                true
+            }
+        }
+    } else {
+        is_background_launch(&args, false)
+    };
+    #[cfg(windows)]
     let test_capture_engine = !tray && std::env::var_os("JIFFSHOT_UITEST_GRAB_TEXT").is_some();
     #[cfg(target_os = "macos")]
     let test_capture_engine = !tray
@@ -699,11 +804,36 @@ pub(crate) fn run() -> rustolonia::Result<()> {
             std::process::exit(1);
         }
         #[cfg(windows)]
-        match files.first().and_then(|f| std::path::absolute(f).ok()) {
-            Some(file) => {
-                jiffshot_capture::ipc::send_to_editor(&file);
+        if background {
+            return Ok(());
+        }
+        #[cfg(windows)]
+        {
+            let wait = std::time::Duration::from_secs(10);
+            let result = match files.first() {
+                Some(file) => std::path::absolute(file)
+                    .map_err(|error| format!("Could not resolve {}: {error}", file.display()))
+                    .map(|file| {
+                        wait_for_running_instance(wait, || {
+                            jiffshot_capture::ipc::send_to_editor(&file)
+                        })
+                    }),
+                None => Ok(wait_for_running_instance(wait, || {
+                    jiffshot_workflow::forward_to_running(capture)
+                })),
+            };
+            let error = match result {
+                Ok(true) => None,
+                Ok(false) => Some(
+                    "Could not reach the running Jiffshot instance. It may still be starting or not responding; please try again."
+                        .to_owned(),
+                ),
+                Err(error) => Some(error),
+            };
+            if let Some(error) = error {
+                report_forward_failure(&error);
+                return Err(rustolonia::Error::Load(error));
             }
-            None => jiffshot_workflow::forward_to_running(capture),
         }
         #[cfg(target_os = "macos")]
         {
@@ -723,6 +853,21 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         }
         return Ok(());
     }
+    #[cfg(windows)]
+    let (defer_startup_ui, startup_error) = if tray {
+        match jiffshot_workflow::prepare_windows_startup() {
+            Ok(legacy) => (background || (legacy && args.is_empty()), None),
+            Err(error) => {
+                jiffshot_workflow::log(&format!("Could not initialize Windows startup: {error}"));
+                (background || args.is_empty(), Some(error))
+            }
+        }
+    } else {
+        (background, None)
+    };
+    #[cfg(windows)]
+    let show_editor = (!tray && !background) || !files.is_empty();
+    #[cfg(target_os = "macos")]
     let show_editor = !tray || !files.is_empty();
     #[cfg(target_os = "macos")]
     let show_editor = show_editor
@@ -755,6 +900,10 @@ pub(crate) fn run() -> rustolonia::Result<()> {
             .find_map(|item| item.local_path().map(|p| p.to_path_buf()));
         vm_support::install(scope);
         app::install(scope.clone(), opening);
+        #[cfg(windows)]
+        if defer_startup_ui {
+            app::with(|app| app.defer_startup_ui());
+        }
         #[cfg(target_os = "macos")]
         shutdown_ui_macos::install(scope)
             .map_err(|error| rustolonia::Error::Load(error.to_string()))?;
@@ -798,6 +947,10 @@ pub(crate) fn run() -> rustolonia::Result<()> {
             scope.set_shutdown_mode(rustolonia::ShutdownMode::OnExplicitShutdown)?;
         }
         ui::mount_main_window(scope, Model, show_editor)?;
+        #[cfg(windows)]
+        if let Some(error) = startup_error {
+            app::post(move |app| app.startup_notice("Windows startup unavailable", &error, true));
+        }
         #[cfg(target_os = "macos")]
         if let Some(error) = editor_ipc_error {
             eprintln!("could not start the editor instance listener: {error}");
@@ -863,6 +1016,11 @@ pub(crate) fn run() -> rustolonia::Result<()> {
                     app::post(move |app| app.toast(&title, &text, problem));
                 }),
                 #[cfg(windows)]
+                startup_notice: Box::new(|title, text, problem| {
+                    let (title, text) = (title.to_owned(), text.to_owned());
+                    app::post(move |app| app.startup_notice(&title, &text, problem));
+                }),
+                #[cfg(windows)]
                 state: Box::new(|state| {
                     app::post(move |app| {
                         app.set_widget(state.show_widget);
@@ -905,7 +1063,24 @@ pub(crate) fn run() -> rustolonia::Result<()> {
                 }
                 eprintln!("the capture side did not start: {error}");
             }
-            ui::mount_tray(scope, tray::TrayModel)?;
+            let tray_result = ui::mount_tray(scope, tray::TrayModel);
+            #[cfg(target_os = "macos")]
+            tray_result?;
+            #[cfg(windows)]
+            match tray_result {
+                Err(error) => report_tray_unavailable(format!(
+                    "Jiffshot could not create its notification-area icon: {error}. The editor was opened instead."
+                )),
+                Ok(()) if defer_startup_ui && !windows_taskbar_present() => {
+                    jiffshot_workflow::log("Waiting for the Windows taskbar to become available.");
+                    if let Err(error) = watch_windows_taskbar(scope.clone()) {
+                        report_tray_unavailable(format!(
+                            "Jiffshot could not watch for the Windows taskbar: {error}. The editor was opened instead."
+                        ));
+                    }
+                }
+                Ok(()) => {}
+            }
         }
         Ok(())
     });
@@ -976,6 +1151,56 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         std::process::exit(1);
     }
     result
+}
+
+#[cfg(test)]
+#[cfg(windows)]
+mod startup_tests {
+    use super::{is_background_launch, wait_for_running_instance};
+    use std::time::Duration;
+
+    #[test]
+    fn background_launches_do_not_include_normal_file_or_capture_requests() {
+        assert!(is_background_launch(&["--background".into()], false));
+        assert!(is_background_launch(&[], true));
+        assert!(!is_background_launch(&[], false));
+        assert!(!is_background_launch(&["--window".into()], true));
+        assert!(!is_background_launch(&["--capture".into()], true));
+        assert!(!is_background_launch(&["image.png".into()], true));
+    }
+
+    #[test]
+    fn startup_forwarding_retries_until_the_running_instance_is_ready() {
+        let mut attempts = 0;
+        let sent = wait_for_running_instance(Duration::from_secs(2), || {
+            attempts += 1;
+            attempts == 3
+        });
+        assert!(sent);
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn startup_forwarding_reports_a_timeout_without_retrying_past_the_deadline() {
+        let mut attempts = 0;
+        let sent = wait_for_running_instance(Duration::ZERO, || {
+            attempts += 1;
+            false
+        });
+        assert!(!sent);
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn startup_forwarding_sends_only_once_when_the_instance_is_ready() {
+        let mut attempts = 0;
+        let sent = wait_for_running_instance(Duration::from_secs(2), || {
+            attempts += 1;
+            true
+        });
+        assert!(sent);
+        assert_eq!(attempts, 1);
+    }
 }
 
 #[cfg(test)]

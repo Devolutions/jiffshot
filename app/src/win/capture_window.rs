@@ -33,6 +33,8 @@ struct State {
     /// (after Select region on screen…).
     #[cfg(windows)]
     reopen_panel: Option<&'static str>,
+    #[cfg(windows)]
+    startup_initial: Option<bool>,
     #[cfg(target_os = "macos")]
     scope: Option<AppScope>,
     #[cfg(target_os = "macos")]
@@ -83,6 +85,8 @@ thread_local! {
         serial: 0,
         #[cfg(windows)]
         reopen_panel: None,
+        #[cfg(windows)]
+        startup_initial: None,
         #[cfg(target_os = "macos")]
         scope: None,
         #[cfg(target_os = "macos")]
@@ -270,9 +274,21 @@ fn open_panel(id: &str) {
     let (tab, name) = context(id);
     let (mut settings, key) = with(|s| (s.settings.clone(), s.capture_key.clone()));
     settings.capture_window.tab = tab.unwrap_or(1);
-    match panel::panel(&settings, name, capture::runs_at_startup(), &key) {
+    let startup_status = capture::startup_status();
+    let startup = startup_status.requested;
+    #[cfg(windows)]
+    if name == "prefs" {
+        with(|s| s.startup_initial = Some(startup));
+    }
+    match panel::panel(&settings, name, startup, &key) {
         Some(mut p) => {
             p.id = id.to_owned();
+            #[cfg(windows)]
+            if name == "prefs" {
+                if let Some(detail) = startup_status.detail {
+                    p.rows.push(panel::note(detail));
+                }
+            }
             send(|k, v| k.set_panel(v), serde_json::to_string(&p).unwrap_or_default());
         }
         None => problem("Nothing to set here."),
@@ -351,8 +367,12 @@ fn applied(id: &str, values: &str) {
     #[cfg(windows)]
     {
         let values: Vec<serde_json::Value> = serde_json::from_str(values).unwrap_or_default();
-        let startup = capture::runs_at_startup();
         let (tab, name) = context(id);
+        let startup = if name == "prefs" {
+            with(|s| s.startup_initial.take()).unwrap_or_else(capture::runs_at_startup)
+        } else {
+            capture::runs_at_startup()
+        };
         let result = with(|s| {
             let previous = s.settings.capture_window.tab;
             s.settings.capture_window.tab = tab.unwrap_or(1);
