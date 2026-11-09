@@ -226,6 +226,15 @@ pub fn about(scope: &AppScope, owner: &Window) -> Result<()> {
     children.add(TextBlock::new()?.text("Jiffshot Editor")?.font_size(18.0)?.font_weight(FontWeight::DemiBold)?)?;
     children.add(TextBlock::new()?.text(format!("Version {}", env!("CARGO_PKG_VERSION")))?)?;
     children.add(TextBlock::new()?.text("Screen capture and image editing.")?.margin(Thickness::new(0.0, 6.0, 0.0, 0.0))?)?;
+    children.add(TextBlock::new()?.text("By Devolutions")?)?;
+    for (label, url) in [("Devolutions/jiffshot", "https://github.com/Devolutions/jiffshot"), ("devolutions.net", "https://devolutions.net")] {
+        let url = url.to_owned();
+        children.add(Button::new()?.content_text(label)?.on_click(scope, move |_| {
+            if let Err(error) = crate::winutil::open_url(&url) {
+                eprintln!("Could not open {url}: {error}");
+            }
+        })?)?;
+    }
     let dialog = frame(scope, "About Jiffshot", &body, None)?;
     ask(scope, owner, &dialog, |_| ())
 }
