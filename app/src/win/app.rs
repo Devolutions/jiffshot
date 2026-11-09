@@ -1958,45 +1958,97 @@ impl App {
     pub(crate) fn copy_image_with(
         &mut self,
         copy: impl FnOnce(&jiffshot_capture::Frame, isize) -> std::io::Result<()>,
-    ) {
+    ) -> bool {
         #[cfg(target_os = "macos")]
         let Some((flat, substitutions)) =
             with_editor(|e| (e.document().flatten(), e.document().font_substitutions()))
         else {
-            return;
+            return false;
         };
         #[cfg(not(target_os = "macos"))]
         let Some(flat) = with_editor(|e| e.document().flatten()) else {
-            return;
+            return false;
         };
         let frame = winutil::frame_from_pixmap(&flat);
         match copy(&frame, winutil::main_hwnd()) {
             #[cfg(target_os = "macos")]
-            Ok(()) => self.status_with_font_substitutions(
-                format!(
+            Ok(()) => {
+                self.object_clipboard = None;
+                self.status_with_font_substitutions(
+                    format!(
+                        "Copied the image ({} × {}) to the clipboard",
+                        flat.width(),
+                        flat.height()
+                    ),
+                    &substitutions,
+                );
+                true
+            }
+            #[cfg(not(target_os = "macos"))]
+            Ok(()) => {
+                self.object_clipboard = None;
+                self.set_status(format!(
                     "Copied the image ({} × {}) to the clipboard",
                     flat.width(),
                     flat.height()
-                ),
-                &substitutions,
-            ),
-            #[cfg(not(target_os = "macos"))]
-            Ok(()) => self.set_status(format!(
-                "Copied the image ({} × {}) to the clipboard",
-                flat.width(),
-                flat.height()
-            )),
-            Err(error) => self.set_status(format!("Copy failed: {error}")),
+                ));
+                true
+            }
+            Err(error) => {
+                self.set_status(format!("Copy failed: {error}"));
+                false
+            }
         }
     }
 
     pub fn copy(&mut self) {
+        self.copy_with(jiffshot_capture::clipboard::copy);
+    }
+
+    pub(crate) fn copy_with(
+        &mut self,
+        copy: impl FnOnce(&jiffshot_capture::Frame, isize) -> std::io::Result<()>,
+    ) -> bool {
         match with_editor(|e| e.selected().cloned()).flatten() {
             Some(o) => {
+                if let Kind::Image { rect, .. } = &o.kind {
+                    let area = if o.rotation.abs() > 0.01
+                        || o.style.shadow
+                        || o.style.outline_width > 0.0
+                    {
+                        o.bounds()
+                    } else {
+                        *rect
+                    }
+                    .to_irect();
+                    if area.is_empty() {
+                        self.set_status("Copy failed: the selected image has no pixels");
+                        return false;
+                    }
+                    let Some(mut image) = jiffshot_doc::Pixmap::new(area.w as u32, area.h as u32)
+                    else {
+                        self.set_status("Copy failed: could not allocate the selected image");
+                        return false;
+                    };
+                    o.draw(&mut image, (area.x, area.y));
+                    let frame = winutil::frame_from_pixmap(&image);
+                    if let Err(error) = copy(&frame, winutil::main_hwnd()) {
+                        self.set_status(format!("Copy failed: {error}"));
+                        return false;
+                    }
+                    self.set_status(format!(
+                        "Copied the selection ({} × {}) to the clipboard",
+                        image.width(),
+                        image.height()
+                    ));
+                    self.object_clipboard = None;
+                    return true;
+                }
                 self.set_status(format!("Copied the {}", o.kind_name().to_lowercase()));
                 self.object_clipboard = Some(o);
+                true
             }
-            None => self.copy_image(),
+            None => self.copy_image_with(copy),
         }
     }
 
@@ -2004,8 +2056,16 @@ impl App {
         if self.video.is_some() {
             return self.video_action("cut");
         }
-        self.copy();
-        with_editor(|e| e.delete_selected());
+        self.cut_with(jiffshot_capture::clipboard::copy);
+    }
+
+    pub(crate) fn cut_with(
+        &mut self,
+        copy: impl FnOnce(&jiffshot_capture::Frame, isize) -> std::io::Result<()>,
+    ) {
+        if self.copy_with(copy) {
+            with_editor(|e| e.delete_selected());
+        }
     }
 
     pub fn paste(&mut self) {

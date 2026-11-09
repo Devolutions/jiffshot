@@ -767,7 +767,31 @@ impl Editor {
         }
     }
 
+    /// Selects every annotation, or the whole image when there are no annotations.
     pub fn select_all(&mut self) {
+        if self.doc.objects.is_empty() {
+            let image = self.doc.background().clone();
+            let rect = self.doc.bounds().to_box();
+            let key = crate::object::fresh_key("selection");
+            let mut selected = None;
+            self.edit_document("Select image", |doc| {
+                doc.background_mut().fill(tiny_skia::Color::TRANSPARENT);
+                selected = Some(doc.add(
+                    Kind::Image {
+                        rect,
+                        image: ImageRef::new(key, image),
+                    },
+                    Style {
+                        width: 0.0,
+                        ..Style::default()
+                    },
+                ));
+                true
+            });
+            self.select(selected);
+            self.set_tool(Tool::Select);
+            return;
+        }
         let ids = self.doc.objects.iter().rev().map(|o| o.id).collect();
         self.set_selection(ids);
     }
@@ -2820,6 +2844,63 @@ mod tests {
         ctrl: false,
         alt: false,
     };
+
+    #[test]
+    fn select_all_lifts_the_whole_image_without_changing_pixels() {
+        let mut pixels = raster::solid(12, 8, Rgba::rgb(40, 80, 120)).unwrap();
+        raster::set_pixel(&mut pixels, 3, 2, Rgba::new(200, 100, 50, 128));
+        raster::set_pixel(&mut pixels, 4, 2, Rgba::TRANSPARENT);
+        let mut e = Editor::new(Document::new(pixels.clone()));
+        e.select_all();
+        assert_eq!(e.selection_box(), Some(Box2::new(0.0, 0.0, 12.0, 8.0)));
+        assert_eq!(e.selected_ids().len(), 1);
+        assert_eq!(e.document().flatten().data(), pixels.data());
+        assert_eq!(e.tool(), Tool::Select);
+        let selected = e.selection();
+        e.select_all();
+        assert_eq!(
+            e.selection(),
+            selected,
+            "selecting all twice must not lift twice"
+        );
+        assert_eq!(e.document().objects.len(), 1);
+        assert!(e.undo(), "lifting the background must be undoable");
+        assert!(e.document().objects.is_empty());
+        assert_eq!(e.document().background().data(), pixels.data());
+        assert!(e.redo(), "the lifted image must be restorable");
+        assert_eq!(e.document().objects.len(), 1);
+        assert_eq!(e.document().flatten().data(), pixels.data());
+    }
+
+    #[test]
+    fn select_all_keeps_existing_annotation_selection_behavior() {
+        let mut e = editor();
+        let a = e.add_object(
+            "First",
+            Kind::Shape {
+                rect: Box2::new(20.0, 20.0, 60.0, 60.0),
+                shape: ShapeKind::Rectangle,
+            },
+            Style::default(),
+        );
+        let b = e.add_object(
+            "Second",
+            Kind::Shape {
+                rect: Box2::new(80.0, 20.0, 120.0, 60.0),
+                shape: ShapeKind::Ellipse,
+            },
+            Style::default(),
+        );
+        let before = e.document().flatten();
+        e.select_all();
+        assert_eq!(e.selected_ids(), vec![b, a]);
+        assert_eq!(
+            e.document().objects.len(),
+            2,
+            "do not lift the background with annotations"
+        );
+        assert_eq!(e.document().flatten().data(), before.data());
+    }
 
     fn drag(e: &mut Editor, a: (f32, f32), b: (f32, f32)) {
         e.pointer_down(Pt::new(a.0, a.1), NONE, 4.0);

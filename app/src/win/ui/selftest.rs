@@ -8,6 +8,7 @@
 //! `JIFFSHOT_UITEST_CAPTURE_ONLY` checks the Capture window and chooser
 //! without running the editor and overlay walk.
 //! `JIFFSHOT_UITEST_CANVAS` checks canvas handles through view-coordinate input.
+//! `JIFFSHOT_UITEST_SELECTION` checks selecting, copying and cutting image pixels.
 //! `JIFFSHOT_UITEST_CAPTURE_MENUS` checks menu switching and DarkBlue popups.
 //! `JIFFSHOT_UITEST_WIDGET` checks the floating bar with an isolated tray model.
 //! `JIFFSHOT_UITEST_GRAB_TEXT` checks a live screen-text capture.
@@ -591,6 +592,9 @@ fn canvas_handle_script() -> Script {
 
 /// The whole walk, in order.
 fn script() -> Script {
+    if env("JIFFSHOT_UITEST_SELECTION").is_some() {
+        return selection_clipboard_script();
+    }
     let mut s = Script(VecDeque::new());
     if env("JIFFSHOT_UITEST_CANVAS").is_some() {
         return canvas_handle_script();
@@ -972,6 +976,105 @@ fn script() -> Script {
     if let Some(drop) = image {
         windows_steps(&mut s, drop);
     }
+    s
+}
+
+fn selection_clipboard_script() -> Script {
+    use jiffshot_doc::editor::{BackgroundFill, Tool};
+    use jiffshot_doc::{Document, Pt, Rgba};
+
+    let mut s = Script(VecDeque::new());
+    s.wait(800)
+        .step(|test| {
+            crate::app::act(|app| {
+                app.load(Document::blank(80, 60, Rgba::rgb(200, 40, 20)), None, None);
+            }).unwrap();
+            call(|m| m.select_all());
+            crate::canvas::with_editor(|e| {
+                assert_eq!(e.selection_box(), Some(jiffshot_doc::Box2::new(0.0, 0.0, 80.0, 60.0)));
+                assert_eq!(e.selected_ids().len(), 1);
+            }).unwrap();
+            test.line("selection: Select All selects a screenshot without annotations");
+            100
+        })
+        .step(|test| {
+            crate::app::act(|app| {
+                assert!(app.copy_with(|frame, _| {
+                    assert_eq!((frame.width, frame.height), (80, 60));
+                    assert_eq!(&frame.pixels[..4], &[20, 40, 200, 255]);
+                    Ok(())
+                }));
+                app.load(Document::blank(80, 60, Rgba::rgb(200, 40, 20)), None, None);
+            }).unwrap();
+            crate::canvas::with_editor(|e| {
+                e.set_tool(Tool::Selection);
+                e.background_fill = BackgroundFill::Transparent;
+                let mods = jiffshot_doc::editor::Modifiers::default();
+                e.pointer_down(Pt::new(10.0, 12.0), mods, 1.0);
+                e.pointer_move(Pt::new(30.0, 28.0), mods);
+                e.pointer_up(Pt::new(30.0, 28.0), mods);
+            }).unwrap();
+            test.line("selection: full-image Copy delivers only the selected pixels");
+            100
+        })
+        .step(|test| {
+            crate::app::act(|app| {
+                assert!(app.copy_with(|frame, _| {
+                    assert_eq!((frame.width, frame.height), (20, 16), "rectangle clipboard size");
+                    assert!(frame.pixels.as_chunks::<4>().0.iter().all(|p| *p == [20, 40, 200, 255]));
+                    Ok(())
+                }));
+                app.cut_with(|_, _| Err(std::io::Error::other("fixture clipboard busy")));
+            }).unwrap();
+            crate::canvas::with_editor(|e| {
+                assert_eq!(e.selected_ids().len(), 1, "failed copy must not delete pixels");
+                assert_eq!(e.document().flatten().pixel(15, 15).unwrap().alpha(), 255);
+            }).unwrap();
+            test.line("selection: rectangle Copy has exact dimensions; failed Cut preserves it");
+            100
+        })
+        .step(|test| {
+            assert!(sink().status.get_untracked().contains("Copy failed: fixture clipboard busy"));
+            crate::app::act(|app| {
+                app.cut_with(|frame, _| {
+                    assert_eq!((frame.width, frame.height), (20, 16));
+                    Ok(())
+                });
+            }).unwrap();
+            crate::canvas::with_editor(|e| {
+                assert!(e.selected_ids().is_empty());
+                assert_eq!(e.document().flatten().pixel(15, 15).unwrap().alpha(), 0, "cut rectangle");
+                assert_eq!(e.document().flatten().pixel(5, 5).unwrap().alpha(), 255, "outside rectangle");
+                assert!(e.undo(), "cut must be undoable");
+                assert_eq!(e.document().flatten().pixel(15, 15).unwrap().alpha(), 255);
+            }).unwrap();
+            test.line("selection: Cut removes just the rectangle and Undo restores it");
+            100
+        })
+        .step(|test| {
+            crate::canvas::with_editor(|e| {
+                assert!(e.redo(), "redo the cut before pasting");
+            }).unwrap();
+            crate::app::act(|app| {
+                app.paste_from_clipboard(Ok(Some(jiffshot_capture::clipboard::Pasted::Image {
+                    width: 20,
+                    height: 16,
+                    rgba: [200, 40, 20, 255].repeat(20 * 16),
+                })));
+            }).unwrap();
+            crate::canvas::with_editor(|e| {
+                let selected = e.selected().expect("pasted rectangle");
+                let jiffshot_doc::object::Kind::Image { rect, image } = &selected.kind else {
+                    panic!("paste did not create an image");
+                };
+                assert_eq!((rect.width(), rect.height()), (20.0, 16.0));
+                let pixels = image.pixmap.as_ref().expect("pasted pixels");
+                assert_eq!((pixels.width(), pixels.height()), (20, 16));
+                assert_eq!(pixels.pixel(0, 0).unwrap().red(), 200);
+            }).unwrap();
+            test.line("selection: Paste restores a clipboard image at the rectangle's size");
+            0
+        });
     s
 }
 
