@@ -559,7 +559,11 @@ pub(crate) fn run() -> Result<()> {
         view.on_changed(move |flags| {
             if flags & ui::canvas_view::FLAG_CHANGED != 0 {
                 editor_controls.synchronize();
-                changed_status.set_if_changed("Document changed".to_owned());
+                if let Some(error) = canvas::take_resize_error() {
+                    changed_status.set_if_changed(error);
+                } else {
+                    changed_status.set_if_changed("Document changed".to_owned());
+                }
             }
             if flags & canvas::FLAG_FOCUS_TEXT != 0 {
                 editor_controls.visible.set_if_changed(true);

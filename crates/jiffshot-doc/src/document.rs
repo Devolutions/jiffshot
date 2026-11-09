@@ -7,7 +7,44 @@ use crate::geom::{Box2, IRect, Pt};
 use crate::object::{Kind, Object, Style};
 use crate::raster;
 use std::sync::Arc;
-use tiny_skia::Pixmap;
+use tiny_skia::{IntSize, Pixmap};
+
+/// Why an interactive canvas resize could not be applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanvasResizeError {
+    /// The requested canvas geometry is not supported.
+    InvalidDimensions,
+    /// A bitmap needed for the resized canvas could not be allocated.
+    AllocationFailed,
+}
+
+impl std::fmt::Display for CanvasResizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidDimensions => "the requested size exceeds the canvas limits",
+            Self::AllocationFailed => "the resized image could not be allocated",
+        })
+    }
+}
+
+impl std::error::Error for CanvasResizeError {}
+
+pub(crate) fn allocate_canvas_pixmap(width: u32, height: u32) -> Result<Pixmap, CanvasResizeError> {
+    let size = IntSize::from_wh(width, height).ok_or(CanvasResizeError::InvalidDimensions)?;
+    let row_bytes = i32::try_from(width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or(CanvasResizeError::InvalidDimensions)? as usize;
+    let len = row_bytes
+        .checked_mul(height as usize)
+        .ok_or(CanvasResizeError::InvalidDimensions)?;
+    // Pixmap::new uses an infallible allocation, so reserve explicitly.
+    let mut data = Vec::new();
+    data.try_reserve_exact(len)
+        .map_err(|_| CanvasResizeError::AllocationFailed)?;
+    data.resize(len, 0);
+    Pixmap::from_vec(data, size).ok_or(CanvasResizeError::InvalidDimensions)
+}
 
 #[derive(Clone, Debug)]
 pub struct Document {
@@ -385,6 +422,22 @@ impl Document {
             tiny_skia::Transform::identity(),
             None,
         );
+        self.finish_canvas_resize(bg, dx, dy);
+    }
+
+    pub(crate) fn resize_canvas_preserving_pixels(
+        &mut self,
+        mut bg: Pixmap,
+        dx: i32,
+        dy: i32,
+        fill: Rgba,
+    ) {
+        bg.pixels_mut().fill(fill.premultiplied());
+        raster::copy_area(&self.background, self.bounds(), &mut bg, dx, dy);
+        self.finish_canvas_resize(bg, dx, dy);
+    }
+
+    fn finish_canvas_resize(&mut self, bg: Pixmap, dx: i32, dy: i32) {
         self.set_background(bg);
         self.translate_objects(dx as f32, dy as f32);
     }
@@ -803,6 +856,38 @@ mod tests {
         );
         d.rotate(false);
         assert_eq!(d.size(), (100, 50));
+    }
+
+    #[test]
+    fn resize_canvas_keeps_existing_compositing_for_other_callers() {
+        let mut d = Document::blank(2, 2, Rgba::TRANSPARENT);
+        raster::set_pixel(d.background_mut(), 0, 0, Rgba::new(30, 80, 160, 128));
+        d.resize_canvas(4, 4, 1, 1, Rgba::WHITE);
+        assert_eq!(raster::pixel(d.background(), 2, 1), Rgba::WHITE);
+        assert_eq!(raster::pixel(d.background(), 1, 1).a, 255);
+        assert_eq!(raster::pixel(d.background(), 0, 0), Rgba::WHITE);
+    }
+
+    #[test]
+    fn canvas_resize_bitmap_rejects_invalid_sizes() {
+        for (width, height) in [(0, 2), (2, 0), (i32::MAX as u32, 1)] {
+            assert_eq!(
+                allocate_canvas_pixmap(width, height).err(),
+                Some(CanvasResizeError::InvalidDimensions),
+                "size {width} x {height}"
+            );
+        }
+    }
+
+    #[test]
+    fn pixel_preserving_canvas_resize_copies_transparency_and_fills_new_space() {
+        let mut d = Document::blank(2, 2, Rgba::TRANSPARENT);
+        raster::set_pixel(d.background_mut(), 0, 0, Rgba::new(30, 80, 160, 128));
+        let original = d.background().data().to_vec();
+        let bg = allocate_canvas_pixmap(4, 3).unwrap();
+        d.resize_canvas_preserving_pixels(bg, 1, 1, Rgba::WHITE);
+        assert_eq!(&d.background().data()[20..28], &original[..8]);
+        assert_eq!(raster::pixel(d.background(), 0, 0), Rgba::WHITE);
     }
 
     #[test]

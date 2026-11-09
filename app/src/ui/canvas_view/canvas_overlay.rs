@@ -366,6 +366,33 @@ mod tests {
     }
 
     #[test]
+    fn canvas_handles_paint_on_every_edge_at_scaled_view_coordinates() {
+        let mut s = scene();
+        let mut editor =
+            jiffshot_doc::editor::Editor::new(jiffshot_doc::Document::blank(100, 50, Rgba::WHITE));
+        editor.set_tool(jiffshot_doc::Tool::Select);
+        s.overlay.canvas_handles = true;
+        s.overlay.handles = editor.canvas_handles();
+        let (w, h) = s.physical_size();
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        paint(&mut pixmap, &s).unwrap();
+        for (x, y) in [
+            (0.0, 0.0),
+            (50.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 25.0),
+            (100.0, 50.0),
+            (50.0, 50.0),
+            (0.0, 50.0),
+            (0.0, 25.0),
+        ] {
+            let (x, y) = s.to_view(x, y);
+            let pixel = pixmap.pixel((x * 1.5) as u32, (y * 1.5) as u32).unwrap();
+            assert!(pixel.alpha() > 0, "missing handle at ({x}, {y})");
+        }
+    }
+
+    #[test]
     fn crop_marquee_shades_outside_only() {
         let mut s = scene();
         s.scaling = 1.0;

@@ -7,6 +7,7 @@
 //! video to step through; `JIFFSHOT_UITEST_KEEP` leaves the test window open.
 //! `JIFFSHOT_UITEST_CAPTURE_ONLY` checks the Capture window and chooser
 //! without running the editor and overlay walk.
+//! `JIFFSHOT_UITEST_CANVAS` checks canvas handles through view-coordinate input.
 //! `JIFFSHOT_UITEST_CAPTURE_MENUS` checks menu switching and DarkBlue popups.
 //! `JIFFSHOT_UITEST_WIDGET` checks the floating bar with an isolated tray model.
 //! `JIFFSHOT_UITEST_GRAB_TEXT` checks a live screen-text capture.
@@ -455,9 +456,145 @@ fn editor_walk(s: &mut Script) {
     });
 }
 
+fn check_canvas_handle_cursors(view: &super::canvas_view::CanvasView) {
+    use jiffshot_doc::object::{H_B, H_BL, H_BR, H_L, H_R, H_T, H_TL, H_TR};
+    use rustolonia::pixel_surface::{Cursor, PointerKind};
+
+    let handles = crate::canvas::overlay().handles;
+    assert_eq!(handles.len(), 8, "all canvas handles must be visible");
+    for (handle, point) in handles {
+        let expected = match handle {
+            H_TL | H_BR => Cursor::TopLeftCorner,
+            H_TR | H_BL => Cursor::TopRightCorner,
+            H_T | H_B => Cursor::SizeNorthSouth,
+            H_L | H_R => Cursor::SizeWestEast,
+            _ => panic!("unexpected canvas handle {handle}"),
+        };
+        let (x, y) = view
+            .selftest_view_point(f64::from(point.x), f64::from(point.y))
+            .expect("the canvas view is busy");
+        view.selftest_view_pointer(PointerKind::Moved, x, y)
+            .expect("hover the canvas handle");
+        assert_eq!(
+            view.selftest_cursor(),
+            Some(expected),
+            "canvas handle {handle}"
+        );
+    }
+}
+
+fn drag_canvas_view(view: &super::canvas_view::CanvasView, start: (f64, f64), end: (f64, f64)) {
+    use rustolonia::pixel_surface::PointerKind;
+
+    let start = view
+        .selftest_view_point(start.0, start.1)
+        .expect("the canvas view is busy");
+    let end = view
+        .selftest_view_point(end.0, end.1)
+        .expect("the canvas view is busy");
+    assert!(view
+        .selftest_view_pointer(PointerKind::Pressed, start.0, start.1)
+        .expect("press the canvas handle"));
+    assert!(view
+        .selftest_view_pointer(PointerKind::Moved, end.0, end.1)
+        .expect("move the canvas handle"));
+    let overlay = crate::canvas::overlay();
+    assert!(overlay.marquee.is_some(), "the resize preview is missing");
+    assert!(!overlay.box_select, "the resize preview is a box selection");
+    assert!(view
+        .selftest_view_pointer(PointerKind::Released, end.0, end.1)
+        .expect("release the canvas handle"));
+}
+
+fn canvas_handle_script() -> Script {
+    use jiffshot_doc::{Document, Rgba};
+
+    let mut s = Script(VecDeque::new());
+    s.wait(800)
+        .step(|_| {
+            crate::canvas::with_editor(|editor| {
+                editor.load(Document::blank(400, 300, Rgba::TRANSPARENT));
+            })
+            .expect("the editor is unavailable");
+            run("tool:Select");
+            let view = super::canvas().expect("the canvas is unavailable");
+            view.refresh();
+            view.zoom_to("fit");
+            assert_eq!(view.document_size(), (400, 300));
+            250
+        })
+        .step(|test| {
+            let view = super::canvas().expect("the canvas is unavailable");
+            check_canvas_handle_cursors(&view);
+            assert!(main_window().is_some(), "the editor window is unavailable");
+            test.shot("canvas-handles-fit.png");
+            test.line("canvas handles: eight view-coordinate cursors at fit");
+            100
+        })
+        .step(|test| {
+            let view = super::canvas().expect("the canvas is unavailable");
+            drag_canvas_view(&view, (0.0, 150.0), (20.0, 150.0));
+            assert_eq!(view.document_size(), (380, 300), "left crop");
+            drag_canvas_view(&view, (190.0, 0.0), (190.0, 10.0));
+            assert_eq!(view.document_size(), (380, 290), "top crop");
+            view.set_zoom(view.zoom() * 1.25);
+            check_canvas_handle_cursors(&view);
+            test.line("canvas handles: left and top crop at fit; eight cursors at zoom");
+            100
+        })
+        .step(|test| {
+            let view = super::canvas().expect("the canvas is unavailable");
+            drag_canvas_view(&view, (0.0, 145.0), (-15.0, 145.0));
+            assert_eq!(view.document_size(), (395, 290), "left expansion");
+            view.set_zoom(view.zoom() * 1.25);
+            drag_canvas_view(&view, (197.5, 0.0), (197.5, -12.0));
+            assert_eq!(view.document_size(), (395, 302), "top expansion");
+            test.line("canvas handles: left and top expansion at zoom");
+            100
+        })
+        .step(|test| {
+            let view = super::canvas().expect("the canvas is unavailable");
+            drag_canvas_view(&view, (0.0, 151.0), (-1_000_000.0, 151.0));
+            assert_eq!(
+                view.document_size(),
+                (395, 302),
+                "invalid resize changed the document"
+            );
+            test.line("canvas handles: rejected resize leaves the document intact");
+            100
+        })
+        .step(|test| {
+            assert!(
+                sink()
+                    .status
+                    .get_untracked()
+                    .starts_with("Could not resize canvas:"),
+                "invalid resize was not reported in the status"
+            );
+            test.line("canvas handles: rejected resize reports the error");
+            let view = super::canvas().expect("the canvas is unavailable");
+            drag_canvas_view(&view, (0.0, 151.0), (20.0, 151.0));
+            assert_eq!(view.document_size(), (375, 302), "resize after an error");
+            100
+        })
+        .step(|test| {
+            assert_eq!(
+                sink().status.get_untracked(),
+                "Resized canvas to 375 × 302 px",
+                "a successful resize must replace the error status"
+            );
+            test.line("canvas handles: successful resize replaces the error status");
+            0
+        });
+    s
+}
+
 /// The whole walk, in order.
 fn script() -> Script {
     let mut s = Script(VecDeque::new());
+    if env("JIFFSHOT_UITEST_CANVAS").is_some() {
+        return canvas_handle_script();
+    }
     if env("JIFFSHOT_UITEST_GRAB_TEXT").is_some() {
         return grab_text_script();
     }
