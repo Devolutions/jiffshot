@@ -41,7 +41,7 @@ Prebuilt, Authenticode-signed packages for **Windows 10 and Windows 11** (`x64` 
 | Package | Architecture | Description |
 |---|---|---|
 | **`Devolutions.Jiffshot-windows-x64-<version>.msi`** | Windows x64 (Intel / AMD) | Standard Windows Installer. Installs to `C:\Program Files\Devolutions\Jiffshot`, adds a Start Menu shortcut, and associates `.jsd` Jiffshot Document files. |
-| **`Devolutions.Jiffshot-windows-arm64-<version>.msi`** | Windows ARM64 | Standard Windows Installer for Windows on ARM devices. |
+| **`Devolutions.Jiffshot-windows-arm64-<version>.msi`** | Windows ARM64 | Standard Windows Installer for Windows on ARM devices; the installer reports an error on unsupported platforms. |
 | **`Devolutions.Jiffshot-windows-x64-<version>.msix`** | Windows x64 (Intel / AMD) | Signed MSIX package. Install it to add Jiffshot to Windows; uninstall it from Installed apps. |
 | **`Devolutions.Jiffshot-windows-arm64-<version>.msix`** | Windows ARM64 | Signed MSIX package for Windows on ARM devices. |
 | **`Devolutions.Jiffshot-windows-x64-<version>.zip`** | Windows x64 (Intel / AMD) | Portable archive—unzip anywhere and run `jiffshot.exe`; startup is registered per user by default. |
@@ -678,7 +678,7 @@ dotnet build package -c Release
 package/bin/Release/net472/Jiffshot.Package.exe -bin target/release -platform x64
 ```
 
-The MSI lands in `package/out` as `Devolutions.Jiffshot-x64-0.4.0.msi` (with the selected architecture and version; `-out` picks another folder). Programs and Features lists it as **Devolutions Jiffshot** under publisher **Devolutions Inc.**. For ARM64, pass the ARM64 build's folder and `-platform arm64`. The version comes from `Cargo.toml` unless `-version` gives one. CI builds both MSIs from its builds (`jiffshot-win-x64-msi`, `jiffshot-win-arm64-msi`), and installs and uninstalls the x64 one.
+The MSI lands in `package/out` as `Devolutions.Jiffshot-x64-0.4.0.msi` (with the selected architecture and version; `-out` picks another folder). Programs and Features lists it as **Devolutions Jiffshot** under publisher **Devolutions Inc.**. Each MSI displays an architecture-specific error if run on the other platform: the x64 MSI directs Windows on ARM users to the ARM64 MSI, and the ARM64 MSI directs Intel/AMD PC users to the x64 MSI. The version comes from `Cargo.toml` unless `-version` gives one. CI builds both MSIs from its builds (`jiffshot-win-x64-msi`, `jiffshot-win-arm64-msi`), and installs and uninstalls the x64 one.
 
 ### Releases & Code Signing
 
