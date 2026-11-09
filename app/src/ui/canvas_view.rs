@@ -905,7 +905,7 @@ mod tests {
         st.zoom = 1.75;
         st.offset = (30.0, 45.0);
         let mut editor = Editor::new(Document::blank(400, 300, Rgba::WHITE));
-        editor.set_tool(Tool::Select);
+        editor.set_tool(Tool::Move);
         for (document, expected) in [
             ((0.0, 0.0), EditorCursor::ResizeNwse),
             ((200.0, 0.0), EditorCursor::ResizeNs),
@@ -934,6 +934,7 @@ mod tests {
         };
         let start = st.to_document(st.offset.0, st.offset.1 + 150.0 * st.zoom);
         let end = st.to_document(st.offset.0 + 25.0 * st.zoom, st.offset.1 + 150.0 * st.zoom);
+        editor.set_tool(Tool::Arrow);
         editor.pointer_down(
             Pt::new(start.0 as f32, start.1 as f32),
             modifiers,

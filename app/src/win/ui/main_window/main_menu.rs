@@ -102,6 +102,7 @@ fn file_menu(ctx: &Ctx) -> MenuEntry {
             cmd("Capture _window…", s.open_capture_window_enabled, |m| m.open_capture_window(), None),
             cmd("_Record video", s.record_video_enabled, |m| m.record_video(), None),
             cmd("_New image", s.new_image_enabled, |m| m.new_image(), Some("Ctrl+N")),
+            cmd("New from clip_board", s.new_from_clipboard_enabled, |m| m.new_from_clipboard(), Some("Ctrl+Shift+V")),
             cmd("_Open…", s.open_enabled, |m| m.open(), Some("Ctrl+O")),
             open_recent(s),
             cmd("Co_mbine images…", s.combine_images_enabled, |m| m.combine_images(), None),
@@ -109,7 +110,6 @@ fn file_menu(ctx: &Ctx) -> MenuEntry {
             cmd("_Save", s.save_enabled, |m| m.save(), Some("Ctrl+S")),
             cmd("Save _as…", s.save_as_enabled, |m| m.save_as(), Some("Ctrl+Shift+S")),
             cmd("_Export image…", s.export_enabled, |m| m.export(), Some("Ctrl+E")),
-            cmd("New from clip_board", s.new_from_clipboard_enabled, |m| m.new_from_clipboard(), Some("Ctrl+Shift+V")),
             cmd("Copy _all", s.copy_image_enabled, |m| m.copy_image(), Some("Ctrl+Shift+C")),
             cmd("_Print…", s.print_enabled, |m| m.print(), Some("Ctrl+P")),
             cmd("D_uplicate file", s.duplicate_file_enabled, |m| m.duplicate_file(), Some("Ctrl+Shift+D")),
@@ -248,8 +248,9 @@ fn share_items(shares: &[String]) -> Vec<MenuEntry> {
 /// Tools: every tool, the first nine on Ctrl+1 … Ctrl+9.
 fn tools_menu(ctx: &Ctx) -> MenuEntry {
     let s = ctx.sink;
-    let tools: [(&str, Signal<bool>, Call); 22] = [
-        ("_Select / move", s.tool_select_enabled, |m| m.tool_select()),
+    let tools: [(&str, Signal<bool>, Call); 23] = [
+        ("_Move", s.tool_move_enabled, |m| m.tool_move()),
+        ("Select _region", s.tool_select_enabled, |m| m.tool_select()),
         ("_Arrow", s.tool_arrow_enabled, |m| m.tool_arrow()),
         ("_Line", s.tool_line_enabled, |m| m.tool_line()),
         ("_Shape", s.tool_shape_enabled, |m| m.tool_shape()),

@@ -112,6 +112,7 @@ enum ClipboardShortcut {
 #[derive(Clone, Copy)]
 enum CopyAction {
     Copy,
+    CopyBackground,
     Cut,
 }
 
@@ -844,9 +845,9 @@ pub(crate) fn run() -> Result<()> {
             .child(action_button("Copy image", {
                 move |scope| copy_image(scope, status)
             }))
-            .child(action_button("Paste image", {
+            .child(action_button("New from clipboard", {
                 let canvas = canvas.clone();
-                move |scope| paste_image(scope, canvas.clone(), status)
+                move |scope| new_from_clipboard(scope, canvas.clone(), status)
             }))
             .child(action_button("Pause/resume video", {
                 move |_| toggle_video_pause(status)
@@ -1759,7 +1760,7 @@ fn wire_editor_shortcuts(
                         capture_screen(&callback_scope, canvas.clone(), status, captures, library)
                     }
                     Key::C => copy_image(&callback_scope, status),
-                    Key::V => paste_image(&callback_scope, canvas.clone(), status),
+                    Key::V => new_from_clipboard(&callback_scope, canvas.clone(), status),
                     Key::S => save_document(&callback_scope, status),
                     _ => return,
                 }
@@ -2289,6 +2290,10 @@ fn editor_properties_panel(
         .child(action_button("Copy selection", {
             let canvas = canvas.clone();
             move |scope| copy_selection(scope, canvas.clone(), status, CopyAction::Copy)
+        }))
+        .child(action_button("Copy background only", {
+            let canvas = canvas.clone();
+            move |scope| copy_selection(scope, canvas.clone(), status, CopyAction::CopyBackground)
         }))
         .child(action_button("Cut selection", {
             let canvas = canvas.clone();
@@ -4950,11 +4955,31 @@ fn copy_selection(
     status: Signal<String>,
     action: CopyAction,
 ) {
-    let image = match canvas::with_editor(|editor| editor::selection_image(editor)) {
+    if matches!(action, CopyAction::Cut)
+        && canvas::with_editor(|editor| {
+            editor
+                .selected_region()
+                .is_some_and(|_| editor.region_overlaps_annotations())
+        })
+        .unwrap_or(false)
+    {
+        status.set_if_changed(
+            "The selected region overlaps editable annotations; flatten them first to cut across it."
+                .to_owned(),
+        );
+        return;
+    }
+    let image = match canvas::with_editor(|editor| match action {
+        CopyAction::CopyBackground => editor::background_selection_image(editor),
+        CopyAction::Copy | CopyAction::Cut => editor::selection_image(editor),
+    }) {
         Some(Ok(Some(image))) => image,
         Some(Ok(None)) => {
             match action {
                 CopyAction::Copy => copy_image(scope, status),
+                CopyAction::CopyBackground => {
+                    status.set_if_changed("Select an image region to copy its background.".to_owned())
+                }
                 CopyAction::Cut => {
                     status.set_if_changed("Select an image region to cut.".to_owned())
                 }
@@ -4970,21 +4995,42 @@ fn copy_selection(
             return;
         }
     };
-    let editor::SelectionImage { pixels, snapshot } = image;
+    let editor::SelectionImage {
+        pixels,
+        objects,
+        snapshot,
+    } = image;
     let size = (pixels.width(), pixels.height());
-    status.set_if_changed("Copying the selected image...".to_owned());
+    let object_count = objects.as_ref().map(Vec::len);
+    status.set_if_changed(if object_count.is_some() {
+        "Copying selected annotations...".to_owned()
+    } else {
+        "Copying the selected image...".to_owned()
+    });
     let task_scope = scope.clone();
     let failed_status = status;
     if let Err(error) = scope.spawn(async move {
-        let result = clipboard::copy_pixmap(pixels);
+        let result = match objects {
+            Some(objects) => clipboard::copy_objects(pixels, objects),
+            None => clipboard::copy_pixmap(pixels),
+        };
         if let Err(error) = task_scope.post(move || match action {
-            CopyAction::Copy => status.set_if_changed(match result {
-                Ok(()) => format!("Copied the selection ({} × {}).", size.0, size.1),
+            CopyAction::Copy | CopyAction::CopyBackground => status.set_if_changed(match result {
+                Ok(()) => match object_count {
+                    Some(1) => "Copied one annotation.".to_owned(),
+                    Some(count) => format!("Copied {count} annotations."),
+                    None if matches!(action, CopyAction::CopyBackground) => {
+                        format!("Copied the selection background ({} × {}).", size.0, size.1)
+                    }
+                    None => format!("Copied the selection ({} × {}).", size.0, size.1),
+                },
                 Err(error) => format!("Copy failed: {error}"),
             }),
-            CopyAction::Cut => editor_action(&canvas, status, "Cut the selected image.", |editor| {
-                editor::cut_copied_selection(editor, &snapshot, result)
-            }),
+            CopyAction::Cut => {
+                editor_action(&canvas, status, "Cut the selected content.", |editor| {
+                    editor::cut_copied_selection(editor, &snapshot, result)
+                })
+            }
         }) {
             eprintln!("Could not report selection clipboard status: {error}");
         }
@@ -4998,7 +5044,8 @@ fn paste_selection(
     canvas: ui::UiOnly<ui::canvas_view::CanvasView>,
     status: Signal<String>,
 ) {
-    let Some(snapshot) = canvas::with_editor(|editor| editor::SelectionSnapshot::new(editor)) else {
+    let Some(snapshot) = canvas::with_editor(|editor| editor::SelectionSnapshot::new(editor))
+    else {
         status.set_if_changed("The editor is not available.".to_owned());
         return;
     };
@@ -5006,15 +5053,25 @@ fn paste_selection(
     let task_scope = scope.clone();
     let failed_status = status;
     if let Err(error) = scope.spawn(async move {
-        let result = clipboard::paste_document();
+        let result = clipboard::paste_contents();
         if let Err(error) = task_scope.post(move || match result {
-            Ok(document) => {
-                let background = document.background_arc();
-                drop(document);
-                let pixels = Arc::try_unwrap(background).unwrap_or_else(|image| (*image).clone());
-                editor_action(&canvas, status, "Pasted image into the editor.", |editor| {
-                    editor::paste_image_if_current(editor, &snapshot, pixels)
-                });
+            Ok(contents) => {
+                if let Some(objects) = contents.objects {
+                    editor_action(
+                        &canvas,
+                        status,
+                        "Pasted annotations into the editor.",
+                        |editor| editor::paste_objects_if_current(editor, &snapshot, objects),
+                    );
+                } else {
+                    let background = contents.document.background_arc();
+                    drop(contents.document);
+                    let pixels =
+                        Arc::try_unwrap(background).unwrap_or_else(|image| (*image).clone());
+                    editor_action(&canvas, status, "Pasted image into the editor.", |editor| {
+                        editor::paste_image_if_current(editor, &snapshot, pixels)
+                    });
+                }
             }
             Err(error) => status.set_if_changed(format!("Paste failed: {error}")),
         }) {
@@ -5047,27 +5104,61 @@ fn copy_image(scope: &AppScope, status: Signal<String>) {
     }
 }
 
-fn paste_image(
+fn new_from_clipboard(
     scope: &AppScope,
     canvas: ui::UiOnly<ui::canvas_view::CanvasView>,
     status: Signal<String>,
 ) {
+    let pending = match canvas::with_editor(|editor| {
+        editor::ensure_saved_for_clipboard(editor)
+            .map(|()| DOCUMENT_LOAD_REQUESTS.begin(editor.document().clone()))
+    }) {
+        Some(Ok(pending)) => pending,
+        Some(Err(error)) => {
+            status.set_if_changed(error.to_owned());
+            return;
+        }
+        None => {
+            status.set_if_changed("The editor is not available.".to_owned());
+            return;
+        }
+    };
+    status.set_if_changed("Reading image from the clipboard...".to_owned());
     let task_scope = scope.clone();
     let failed_status = status;
     if let Err(error) = scope.spawn(async move {
         let result = clipboard::paste_document();
-        if let Err(error) = task_scope.post(move || match result {
-            Ok(document) => {
-                canvas::with_editor(|editor| load_editor_document(editor, document, None));
-                canvas.get().refresh();
-                status.set_if_changed("Pasted image from the clipboard.".to_owned());
+        if let Err(error) = task_scope.post(move || {
+            let result = canvas::with_editor(|editor| {
+                match DOCUMENT_LOAD_REQUESTS.state(&pending, editor.document()) {
+                    editor::DocumentLoadState::Superseded => None,
+                    editor::DocumentLoadState::DocumentChanged => Some(Err(
+                        "The document changed before the clipboard image was ready.".to_owned(),
+                    )),
+                    editor::DocumentLoadState::Ready => Some(result.and_then(|document| {
+                        editor::ensure_saved_for_clipboard(editor).map_err(str::to_owned)?;
+                        load_editor_document(editor, document, None);
+                        editor.mark_unsaved();
+                        Ok(())
+                    })),
+                }
+            });
+            match result {
+                Some(Some(Ok(()))) => {
+                    canvas.get().refresh();
+                    status.set_if_changed("New image from the clipboard.".to_owned());
+                }
+                Some(Some(Err(error))) => {
+                    status.set_if_changed(format!("New from clipboard failed: {error}"));
+                }
+                Some(None) => {}
+                None => status.set_if_changed("The editor is not available.".to_owned()),
             }
-            Err(error) => status.set_if_changed(error),
         }) {
             eprintln!("Could not update editor from clipboard: {error}");
         }
     }) {
-        failed_status.set_if_changed(format!("Could not start clipboard paste: {error}"));
+        failed_status.set_if_changed(format!("Could not start clipboard import: {error}"));
     }
 }
 
@@ -6405,7 +6496,7 @@ fn save_to_picker(
                 if let Err(error) = task_scope.post(move || {
                     let result = canvas::with_editor(|editor| {
                         if document {
-                            jiffshot_doc::io::save_document(editor.document(), &path)
+                            editor::save_document(editor, &path)
                         } else {
                             jiffshot_doc::io::export(editor.document(), &path)
                         }

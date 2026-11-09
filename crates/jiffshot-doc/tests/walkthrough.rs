@@ -161,8 +161,8 @@ fn cut_out_explicit_band_variants_still_close_the_gap() {
 #[test]
 fn canvas_resize_by_dragging_and_expand_to_fit() {
     let mut e = Editor::new(Document::blank(400, 300, Rgba::WHITE));
-    e.set_tool(Tool::Select);
-    drag(&mut e, Tool::Select, (400.0, 300.0), (500.0, 340.0), 4);
+    e.set_tool(Tool::Move);
+    drag(&mut e, Tool::Move, (400.0, 300.0), (500.0, 340.0), 4);
     assert_eq!(e.document().size(), (500, 340));
     drag(&mut e, Tool::Shape, (450.0, 300.0), (620.0, 420.0), 4);
     e.select(None);
@@ -182,8 +182,8 @@ fn select_several_group_align() {
         ctrl: false,
         alt: false,
     };
-    // Shift-drag selects annotations instead of lifting image pixels.
-    e.set_tool(Tool::Select);
+    // Move mode selects annotations without lifting image pixels.
+    e.set_tool(Tool::Move);
     e.pointer_down(Pt::new(20.0, 20.0), shift, 6.0);
     e.pointer_move(Pt::new(420.0, 220.0), shift);
     assert!(e.marquee_is_box_selection());
@@ -208,7 +208,7 @@ fn select_several_group_align() {
     let g = e.group_selected().unwrap();
     assert_eq!(e.document().objects.len(), 1);
     // Moving the group moves all three.
-    drag(&mut e, Tool::Select, (50.0, 80.0), (150.0, 80.0), 4);
+    drag(&mut e, Tool::Move, (50.0, 80.0), (150.0, 80.0), 4);
     assert_eq!(e.document().get(g).unwrap().rect().unwrap().x0, 150.0);
     assert!(e.ungroup_selected());
     assert_eq!(e.document().objects.len(), 3);
@@ -338,7 +338,7 @@ fn template_drop_zones_fill_swap_fit_and_pan() {
     e.undo();
     assert_eq!(image_of(&e, a), Some((400, 200)));
     // Dragging inside a selected, filled zone pans its picture.
-    e.set_tool(Tool::Select);
+    e.set_tool(Tool::Move);
     e.select(Some(b));
     let c = rb.center();
     e.pointer_down(c, NONE, 6.0);

@@ -105,8 +105,8 @@ pub(super) fn library_tile_for_selftest(scope: &AppScope, key: u64) -> Result<Wi
     Ok(window)
 }
 
-/// The Editor and Library tabs, Capture, Create ▾, the tool palette, the
-/// Effects toggle, Copy All and Share ▾.
+/// The Editor and Library tabs, capture and creation actions, the tool palette,
+/// the Effects toggle, Copy All and Share ▾.
 fn top_bar(ctx: &Ctx) -> El<Border> {
     let (s, theme) = (ctx.sink, ctx.theme);
     let expanded = s.library_expanded;
@@ -153,7 +153,7 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
         .padding((8.0, 4.0))
         .border_brush(theme.brush(Tone::Border))
         .border_thickness((0.0, 0.0, 0.0, 1.0))
-        .child(DockPanel::el().child(left).child(right).child(tool_bar(ctx)))
+        .child(StackPanel::el().spacing(4.0).child(DockPanel::el().child(left).child(right).child(tool_bar(ctx))))
 }
 
 /// A button that opens `flyout` when clicked.

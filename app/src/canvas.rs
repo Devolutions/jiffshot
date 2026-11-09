@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn canvas_resize_preview_is_not_a_box_selection() {
         let mut editor = Editor::new(Document::blank(100, 60, Rgba::WHITE));
-        editor.set_tool(Tool::Select);
+        editor.set_tool(Tool::Arrow);
         editor.pointer_down(Pt::new(0.0, 30.0), NONE, 4.0);
         editor.pointer_move(Pt::new(10.0, 30.0), NONE);
         let overlay = overlay_of(&editor);
@@ -209,6 +209,7 @@ mod tests {
         assert_eq!(overlay.marquee, Some(Box2::new(10.0, 0.0, 100.0, 60.0)));
 
         editor.pointer_up(Pt::new(10.0, 30.0), NONE);
+        editor.set_tool(Tool::Move);
         let shift = Modifiers { shift: true, ..NONE };
         editor.pointer_down(Pt::new(30.0, 20.0), shift, 4.0);
         editor.pointer_move(Pt::new(50.0, 40.0), shift);
@@ -216,6 +217,7 @@ mod tests {
         assert!(overlay.box_select);
         assert_eq!(overlay.marquee, Some(Box2::new(30.0, 20.0, 50.0, 40.0)));
 
+        editor.set_tool(Tool::Select);
         editor.pointer_down(Pt::new(30.0, 20.0), NONE, 4.0);
         editor.pointer_move(Pt::new(50.0, 40.0), NONE);
         let overlay = overlay_of(&editor);

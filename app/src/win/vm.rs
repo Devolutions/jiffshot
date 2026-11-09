@@ -164,6 +164,7 @@ pub trait MainViewModel: Send + 'static {
     fn open_recent_file(&mut self, value: String) -> Result<()>;
     fn auto_trim(&mut self) -> Result<()>;
     fn tool_crop_menu(&mut self) -> Result<()>;
+    fn tool_move(&mut self) -> Result<()>;
     fn tool_select(&mut self) -> Result<()>;
     fn tool_arrow(&mut self) -> Result<()>;
     fn tool_line(&mut self) -> Result<()>;
@@ -441,6 +442,8 @@ pub struct MainViewModelSink {
     pub tool_crop_menu_enabled: Signal<bool>,
     /// Whether `tool_select` can run now.
     pub tool_select_enabled: Signal<bool>,
+    /// Whether `tool_move` can run now.
+    pub tool_move_enabled: Signal<bool>,
     /// Whether `tool_arrow` can run now.
     pub tool_arrow_enabled: Signal<bool>,
     /// Whether `tool_line` can run now.
@@ -660,6 +663,7 @@ impl MainViewModelSink {
             auto_trim_enabled: Signal::new(true),
             tool_crop_menu_enabled: Signal::new(true),
             tool_select_enabled: Signal::new(true),
+            tool_move_enabled: Signal::new(true),
             tool_arrow_enabled: Signal::new(true),
             tool_line_enabled: Signal::new(true),
             tool_shape_enabled: Signal::new(true),

@@ -494,13 +494,14 @@ pub fn recycle(files: &[PathBuf]) -> bool {
 pub fn frame_from_pixmap(pm: &Pixmap) -> Frame {
     let mut frame = Frame::new(pm.width(), pm.height());
     for (dst, src) in frame.pixels.as_chunks_mut::<4>().0.iter_mut().zip(pm.pixels()) {
+        let src = src.demultiply();
         *dst = [src.blue(), src.green(), src.red(), src.alpha()];
     }
     frame.alpha = true;
     frame
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::*;
 

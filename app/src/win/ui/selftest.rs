@@ -9,6 +9,7 @@
 //! without running the editor and overlay walk.
 //! `JIFFSHOT_UITEST_CANVAS` checks canvas handles through view-coordinate input.
 //! `JIFFSHOT_UITEST_SELECTION` checks selecting, copying and cutting image pixels.
+//! `JIFFSHOT_UITEST_NEW_FROM_CLIPBOARD` checks creating images without touching the system clipboard.
 //! `JIFFSHOT_UITEST_CAPTURE_MENUS` checks menu switching and DarkBlue popups.
 //! `JIFFSHOT_UITEST_WIDGET` checks the floating bar with an isolated tray model.
 //! `JIFFSHOT_UITEST_GRAB_TEXT` checks a live screen-text capture.
@@ -517,7 +518,7 @@ fn canvas_handle_script() -> Script {
                 editor.load(Document::blank(400, 300, Rgba::TRANSPARENT));
             })
             .expect("the editor is unavailable");
-            run("tool:Select");
+            run("tool:Move");
             let view = super::canvas().expect("the canvas is unavailable");
             view.refresh();
             view.zoom_to("fit");
@@ -594,6 +595,9 @@ fn canvas_handle_script() -> Script {
 fn script() -> Script {
     if env("JIFFSHOT_UITEST_SELECTION").is_some() {
         return selection_clipboard_script();
+    }
+    if env("JIFFSHOT_UITEST_NEW_FROM_CLIPBOARD").is_some() {
+        return new_from_clipboard_script();
     }
     let mut s = Script(VecDeque::new());
     if env("JIFFSHOT_UITEST_CANVAS").is_some() {
@@ -979,6 +983,183 @@ fn script() -> Script {
     s
 }
 
+fn new_from_clipboard_script() -> Script {
+    use jiffshot_capture::clipboard::Pasted;
+    use jiffshot_doc::{Document, Rgba};
+
+    fn image() -> Pasted {
+        Pasted::Image {
+            width: 2,
+            height: 1,
+            rgba: vec![255, 0, 0, 128, 0, 0, 255, 255],
+        }
+    }
+
+    fn assert_original() {
+        crate::canvas::with_editor(|editor| {
+            assert_eq!(editor.document().size(), (8, 4));
+            assert!(editor.is_modified(), "the original edits must remain unsaved");
+        }).expect("read the original editor document");
+    }
+
+    let mut script = Script(VecDeque::new());
+    script.wait(800)
+        .step(|test| {
+            empty_scratch_library(test);
+            crate::app::act(|app| {
+                app.load(Document::blank(7, 3, Rgba::WHITE), None, None);
+                app.resize_to(8, 4);
+                app.new_from_clipboard_data(Err(std::io::Error::other("fixture read failure")));
+            }).expect("create the original document");
+            150
+        })
+        .step(|test| {
+            assert!(sink().status.get_untracked().contains("New from clipboard failed: fixture read failure"));
+            assert_original();
+            crate::app::act(|app| app.new_from_clipboard_data(Ok(None))).unwrap();
+            test.line("new from clipboard: read failure preserves the current document");
+            150
+        })
+        .step(|test| {
+            assert!(sink().status.get_untracked().contains("The clipboard has no image"));
+            assert_original();
+            crate::app::act(|app| app.new_from_clipboard_data(Ok(Some(Pasted::Text("text".into()))))).unwrap();
+            test.line("new from clipboard: empty clipboard preserves the current document");
+            150
+        })
+        .step(|test| {
+            assert!(sink().status.get_untracked().contains("The clipboard has no image"));
+            assert_original();
+            crate::app::act(|app| app.new_from_clipboard_data(Ok(Some(Pasted::Image {
+                width: 2, height: 1, rgba: vec![0; 4],
+            })))).unwrap();
+            test.line("new from clipboard: non-image clipboard preserves the current document");
+            150
+        })
+        .step(|test| {
+            assert!(sink().status.get_untracked().contains("New from clipboard failed: the image has invalid"));
+            assert_original();
+            crate::app::act(|app| app.new_from_clipboard_data(Ok(Some(image())))).unwrap();
+            test.line("new from clipboard: invalid pixels preserve the current document");
+            150
+        })
+        .step(|test| {
+            assert!(sink().status.get_untracked().contains("Save the current document"));
+            assert_original();
+            crate::canvas::with_editor(|editor| editor.mark_saved()).unwrap();
+            crate::app::act(|app| {
+                app.library_view(|view| view.expanded = true);
+                app.new_from_clipboard_data(Ok(Some(image())));
+            }).unwrap();
+            test.line("new from clipboard: unsaved edits block replacement");
+            150
+        })
+        .step(|test| {
+            assert!(sink().status.get_untracked().starts_with("New image from the clipboard (2 × 1)"));
+            assert!(!sink().library_expanded.get_untracked(), "the imported image must open in the editor");
+            crate::canvas::with_editor(|editor| {
+                assert_eq!(editor.document().size(), (2, 1));
+                assert!(editor.document().objects.is_empty());
+                assert_eq!(
+                    jiffshot_doc::io::to_rgba_image(editor.document().background()).as_raw(),
+                    &[255, 0, 0, 128, 0, 0, 255, 255],
+                );
+                assert!(editor.is_modified(), "the new image has not been saved");
+                assert_eq!(editor.undo_label(), None, "import must not create a no-op undo step");
+            }).expect("read the imported image");
+            crate::app::act(|app| app.new_from_clipboard_data(Ok(Some(image())))).unwrap();
+            test.line("new from clipboard: image pixels and transparency are imported as a new document");
+            150
+        })
+        .step(|test| {
+            assert!(sink().status.get_untracked().contains("Save the current document"));
+            crate::canvas::with_editor(|editor| {
+                assert_eq!(editor.document().size(), (2, 1));
+                assert!(editor.is_modified(), "the imported image must remain unsaved");
+                editor.mark_saved();
+            }).unwrap();
+            let blocker = test.path("clipboard-autosave-blocker");
+            std::fs::write(&blocker, b"file").expect("block the autosave destination");
+            let missing = blocker.join("unsaved.jsd");
+            crate::app::act(|app| {
+                app.load(Document::blank(3, 2, Rgba::WHITE), Some(missing), None);
+                app.resize_to(4, 3);
+                app.new_from_clipboard_data(Ok(Some(image())));
+            }).unwrap();
+            test.line("new from clipboard: an unsaved imported image blocks replacement");
+            150
+        })
+        .step(|test| {
+            assert!(sink().status.get_untracked().contains("Could not save edits"));
+            crate::canvas::with_editor(|editor| {
+                assert_eq!(editor.document().size(), (4, 3));
+                assert!(editor.is_modified());
+                editor.mark_saved();
+            }).unwrap();
+            let saved = test.path("autosaved-before-clipboard.jsd");
+            crate::app::act(|app| {
+                app.load(Document::blank(3, 2, Rgba::WHITE), Some(saved), None);
+                app.resize_to(4, 3);
+                app.new_from_clipboard_data(Ok(Some(image())));
+            }).unwrap();
+            test.line("new from clipboard: a failed autosave preserves the current document");
+            150
+        })
+        .step(|test| {
+            let saved = jiffshot_doc::io::open(&test.path("autosaved-before-clipboard.jsd"))
+                .expect("open autosaved prior document");
+            assert_eq!(saved.size(), (4, 3));
+            assert_eq!(crate::canvas::with_editor(|editor| editor.document().size()), Some((2, 1)));
+            assert_eq!(crate::canvas::with_editor(|editor| editor.is_modified()), Some(true));
+            test.line("new from clipboard: autosaves a saved document before importing");
+            let path = test.path("clipboard-file.png");
+            jiffshot_doc::io::export(&Document::blank(5, 2, Rgba::RED), &path)
+                .expect("create an image-file clipboard fixture");
+            crate::app::act(|app| app.new_from_clipboard_data(Ok(Some(Pasted::Files(vec![path]))))).unwrap();
+            150
+        })
+        .step(|test| {
+            assert!(sink().status.get_untracked().contains("Save the current document"));
+            assert_eq!(crate::canvas::with_editor(|editor| editor.document().size()), Some((2, 1)));
+            crate::canvas::with_editor(|editor| editor.mark_saved()).unwrap();
+            crate::app::act(|app| app.new_from_clipboard_data(Ok(Some(Pasted::Files(Vec::new()))))).unwrap();
+            test.line("new from clipboard: image files do not replace an unsaved document");
+            150
+        })
+        .step(|test| {
+            assert!(sink().status.get_untracked().contains("The clipboard has no image"));
+            assert_eq!(crate::canvas::with_editor(|editor| editor.document().size()), Some((2, 1)));
+            let missing = test.path("clipboard-file-missing.png");
+            crate::app::act(|app| {
+                app.library_view(|view| view.expanded = true);
+                app.new_from_clipboard_data(Ok(Some(Pasted::Files(vec![missing]))));
+            }).unwrap();
+            test.line("new from clipboard: an empty file list preserves the current document");
+            150
+        })
+        .step(|test| {
+            assert!(sink().status.get_untracked().contains("Could not open"));
+            assert!(sink().library_expanded.get_untracked(), "an unreadable file must leave the library view open");
+            assert_eq!(crate::canvas::with_editor(|editor| editor.document().size()), Some((2, 1)));
+            let path = test.path("clipboard-file.png");
+            crate::app::act(|app| app.new_from_clipboard_data(Ok(Some(Pasted::Files(vec![path]))))).unwrap();
+            test.line("new from clipboard: an unreadable image file preserves the current document");
+            150
+        })
+        .step(|test| {
+            assert!(sink().status.get_untracked().starts_with("Opened "));
+            assert!(!sink().library_expanded.get_untracked(), "a clipboard image file must open in the editor");
+            crate::canvas::with_editor(|editor| {
+                assert_eq!(editor.document().size(), (5, 2));
+                assert_eq!(jiffshot_doc::raster::pixel(editor.document().background(), 0, 0), Rgba::RED);
+                assert!(!editor.is_modified(), "a clipboard image file already has a source");
+            }).unwrap();
+            test.line("new from clipboard: copied image files open in the editor");
+            0
+        });
+    script
+}
+
 fn selection_clipboard_script() -> Script {
     use jiffshot_doc::editor::{BackgroundFill, Tool};
     use jiffshot_doc::{Document, Pt, Rgba};
@@ -988,6 +1169,7 @@ fn selection_clipboard_script() -> Script {
         .step(|test| {
             crate::app::act(|app| {
                 app.load(Document::blank(80, 60, Rgba::rgb(200, 40, 20)), None, None);
+                crate::canvas::with_editor(|e| e.set_tool(Tool::Select)).unwrap();
             }).unwrap();
             call(|m| m.select_all());
             crate::canvas::with_editor(|e| {
@@ -1112,7 +1294,7 @@ fn selection_clipboard_script() -> Script {
                 assert!(!e.is_modified(), "selecting must not change the document");
             }).unwrap();
             assert_eq!(sink().selection.get_untracked(), "Image region");
-            assert_eq!(sink().panel.get_untracked(), "fill;backfill");
+            assert_eq!(sink().panel.get_untracked(), "region;fill;backfill");
             assert_eq!(sink().selection_count.get_untracked(), 1);
             test.line("selection: Select exposes a non-destructive image region and its fill controls");
             100
@@ -1121,23 +1303,47 @@ fn selection_clipboard_script() -> Script {
             crate::app::act(|app| {
                 assert!(app.copy_with(|frame, _| {
                     assert_eq!((frame.width, frame.height), (20, 16));
-                    assert!(frame.pixels.as_chunks::<4>().0.iter().all(|p| *p == [20, 40, 200, 255]),
-                        "the image region copies background pixels without flattening annotations");
+                    assert_eq!(
+                        &frame.pixels[(8 * 20 + 10) * 4..(8 * 20 + 10) * 4 + 4],
+                        &[200, 40, 20, 255],
+                        "the image region copy includes visible annotation pixels"
+                    );
                     Ok(())
                 }));
-                app.cut_with(|_, _| Err(std::io::Error::other("region clipboard busy")));
+                assert!(app.copy_background_with(|frame, _| {
+                    assert_eq!((frame.width, frame.height), (20, 16));
+                    assert_eq!(
+                        &frame.pixels[(8 * 20 + 10) * 4..(8 * 20 + 10) * 4 + 4],
+                        &[20, 40, 200, 255],
+                        "background-only copy excludes the visible annotation"
+                    );
+                    Ok(())
+                }));
+                app.cut_with(|_, _| panic!("overlapping-region cut must be rejected before copying"));
+                app.sync();
             }).unwrap();
             crate::canvas::with_editor(|e| {
-                assert!(e.selected_region().is_some(), "failed Cut retains the region");
-                assert!(!e.is_modified(), "failed Cut must not change the document");
+                assert_eq!(e.selected_region(), Some(jiffshot_doc::IRect::new(10, 12, 20, 16)));
+                assert!(!e.is_modified(), "blocked Cut must not change the document");
                 assert_eq!(e.document().objects.len(), 1);
+                assert_eq!(
+                    jiffshot_doc::raster::pixel(&e.document().flatten(), 20, 20),
+                    Rgba::rgb(20, 40, 200)
+                );
             }).unwrap();
-            test.line("selection: region Copy excludes editable annotations and failed Cut preserves it");
+            assert!(sink().status.get_untracked().contains("Cut blocked"));
+            test.line("selection: region Copy composites annotations, background-only Copy excludes them, and overlapping Cut is blocked");
             100
         })
         .step(|test| {
-            assert!(sink().status.get_untracked().contains("Copy failed: region clipboard busy"));
             crate::app::act(|app| {
+                crate::canvas::with_editor(|e| {
+                    e.set_tool(Tool::Select);
+                    let mods = jiffshot_doc::editor::Modifiers::default();
+                    e.pointer_down(Pt::new(40.0, 30.0), mods, 1.0);
+                    e.pointer_move(Pt::new(60.0, 46.0), mods);
+                    e.pointer_up(Pt::new(60.0, 46.0), mods);
+                }).unwrap();
                 app.cut_with(|frame, _| {
                     assert_eq!((frame.width, frame.height), (20, 16));
                     Ok(())
@@ -1145,13 +1351,41 @@ fn selection_clipboard_script() -> Script {
             }).unwrap();
             crate::canvas::with_editor(|e| {
                 assert_eq!(e.selected_region(), None);
-                assert_eq!(e.document().background().pixel(15, 15).unwrap().alpha(), 0);
+                assert_eq!(e.document().background().pixel(45, 35).unwrap().alpha(), 0);
                 assert_eq!(e.document().objects.len(), 1, "Cut keeps the annotation editable");
                 assert!(e.undo());
-                assert_eq!(e.document().background().pixel(15, 15).unwrap().alpha(), 255);
+                assert_eq!(e.document().background().pixel(45, 35).unwrap().alpha(), 255);
                 assert_eq!(e.document().objects.len(), 1);
             }).unwrap();
-            test.line("selection: Cut and Undo affect the background without flattening annotations");
+            test.line("selection: a non-overlapping region Cut and Undo preserve editable annotations");
+            100
+        })
+        .step(|test| {
+            use rustolonia::pixel_surface::PointerKind;
+
+            run("tool:Select");
+            crate::canvas::with_editor(|e| {
+                e.select(None);
+                e.mark_saved();
+            }).unwrap();
+            let view = super::canvas().expect("the editor canvas is unavailable");
+            view.refresh();
+            assert!(crate::canvas::overlay().handles.is_empty(), "Select Region must leave the image edges free");
+            let start = view.selftest_view_point(0.0, 30.0).expect("the canvas view is busy");
+            let end = view.selftest_view_point(20.0, 46.0).expect("the canvas view is busy");
+            for (kind, point) in [
+                (PointerKind::Pressed, start),
+                (PointerKind::Moved, end),
+                (PointerKind::Released, end),
+            ] {
+                assert!(view.selftest_view_pointer(kind, point.0, point.1).expect("select from the image edge"));
+            }
+            crate::canvas::with_editor(|e| {
+                assert_eq!(e.selected_region(), Some(jiffshot_doc::IRect::new(0, 30, 20, 16)));
+                assert_eq!(e.document().size(), (80, 60), "selection must not resize the canvas");
+                assert!(!e.is_modified(), "selection must not edit the document");
+            }).unwrap();
+            test.line("selection: image-edge drag selects a region without modifiers");
             100
         })
         .step(|test| {
@@ -1213,8 +1447,8 @@ fn selection_clipboard_script() -> Script {
             canvas_feed(POINTER_PRESSED, 42.5, 30.0);
             canvas_feed(POINTER_RELEASED, 42.5, 30.0);
             crate::canvas::with_editor(|e| {
-                assert!(matches!(e.selected().map(|o| &o.kind),
-                    Some(jiffshot_doc::object::Kind::Line { .. })));
+                assert!(e.selected_ids().is_empty(), "Select must not pick the existing arrow");
+                assert_eq!(e.selected_region(), None, "a click does not create an image region");
             }).unwrap();
             run("tool:Arrow");
             canvas_feed(POINTER_PRESSED, 42.5, 30.0);
@@ -1230,6 +1464,152 @@ fn selection_clipboard_script() -> Script {
                         if *a == Pt::new(20.0, 20.0) && *b == Pt::new(65.0, 40.0)));
             }).unwrap();
             test.line("selection: Select-to-Arrow switches draw over annotations and existing arrows");
+            0
+        })
+        .step(|test| {
+            use jiffshot_doc::object::{Kind, ShapeKind, Style};
+            use jiffshot_doc::Box2;
+            use jiffshot_capture::clipboard::Pasted;
+
+            crate::app::act(|app| {
+                app.load(Document::blank(80, 60, Rgba::WHITE), None, None);
+                let mut copied_image = None;
+                crate::canvas::with_editor(|e| {
+                    let first = e.add_object(
+                        "First",
+                        Kind::Shape {
+                            rect: Box2::new(10.0, 10.0, 20.0, 20.0),
+                            shape: ShapeKind::Rectangle,
+                        },
+                        Style {
+                            width: 0.0,
+                            fill: Rgba::RED,
+                            ..Style::default()
+                        },
+                    );
+                    let second = e.add_object(
+                        "Second",
+                        Kind::Shape {
+                            rect: Box2::new(30.0, 10.0, 40.0, 20.0),
+                            shape: ShapeKind::Ellipse,
+                        },
+                        Style {
+                            width: 0.0,
+                            fill: Rgba::rgb(20, 40, 200),
+                            ..Style::default()
+                        },
+                    );
+                    e.set_tool(Tool::Move);
+                    e.set_selection(vec![first, second]);
+                    assert_eq!(e.selected_ids(), vec![first, second]);
+                }).unwrap();
+                assert!(app.copy_with(|frame, _| {
+                    let rgba = frame
+                        .pixels
+                        .chunks_exact(4)
+                        .flat_map(|pixel| [
+                            pixel[2],
+                            pixel[1],
+                            pixel[0],
+                            if frame.alpha { pixel[3] } else { 255 },
+                        ])
+                        .collect();
+                    copied_image = Some((frame.width, frame.height, rgba));
+                    Ok(())
+                }));
+                let (width, height, rgba) = copied_image.expect("annotation clipboard image");
+                app.paste_from_clipboard(Ok(Some(Pasted::Image { width, height, rgba })));
+
+                crate::canvas::with_editor(|e| {
+                    assert_eq!(e.document().objects.len(), 4);
+                    let pasted_ids = e.selected_ids();
+                    assert_eq!(pasted_ids.len(), 2, "paste selects every copied annotation");
+                    assert_eq!(
+                        e.selected().and_then(|object| object.rect()),
+                        Some(Box2::new(26.0, 26.0, 36.0, 36.0))
+                    );
+                    let pasted = e.selected_objects();
+                    assert_eq!(pasted.len(), 2);
+                    assert_eq!(pasted[0].rect(), Some(Box2::new(26.0, 26.0, 36.0, 36.0)));
+                    assert_eq!(pasted[1].rect(), Some(Box2::new(46.0, 26.0, 56.0, 36.0)));
+                    assert!(matches!(&pasted[0].kind, Kind::Shape { shape: ShapeKind::Rectangle, .. }));
+                    assert!(matches!(&pasted[1].kind, Kind::Shape { shape: ShapeKind::Ellipse, .. }));
+                    assert_eq!(e.undo_label(), Some("Paste"));
+                    assert!(e.undo(), "one undo removes the complete pasted annotation group");
+                    assert_eq!(e.document().objects.len(), 2);
+                    assert!(pasted_ids.iter().all(|id| e.document().get(*id).is_none()));
+                }).unwrap();
+                app.sync();
+            }).unwrap();
+            assert!(sink().status.get_untracked().contains("Pasted 2 annotation"));
+            test.line("selection: all selected annotations paste ahead of matching system-image contents and undo together");
+            100
+        })
+        .step(|test| {
+            use jiffshot_capture::clipboard::Pasted;
+            use jiffshot_doc::object::Kind;
+
+            crate::app::act(|app| {
+                app.paste_from_clipboard(Ok(Some(Pasted::Image {
+                    width: 2,
+                    height: 1,
+                    rgba: vec![30, 200, 80, 255, 90, 40, 220, 255],
+                })));
+            }).unwrap();
+            crate::canvas::with_editor(|e| {
+                assert_eq!(e.document().objects.len(), 3);
+                assert!(matches!(e.selected().map(|object| &object.kind),
+                    Some(Kind::Image { image, .. })
+                        if image.pixmap.as_ref().is_some_and(|pixels| {
+                            pixels.width() == 2 && pixels.height() == 1
+                        })));
+            }).unwrap();
+            test.line("selection: a different system image takes precedence over stale copied annotations");
+            100
+        })
+        .step(|test| {
+            use jiffshot_capture::clipboard::Pasted;
+            use jiffshot_doc::object::Kind;
+
+            crate::app::act(|app| {
+                for empty_clipboard in [false, true] {
+                    let before = crate::canvas::with_editor(|e| {
+                        let ids = e.document().objects.iter().take(2).map(|object| object.id).collect();
+                        e.set_tool(Tool::Move);
+                        e.set_selection(ids);
+                        e.document().objects.len()
+                    }).unwrap();
+                    let mut copied_image = None;
+                    assert!(app.copy_with(|frame, _| {
+                        let rgba = frame.pixels.chunks_exact(4).flat_map(|pixel| [
+                            pixel[2], pixel[1], pixel[0],
+                            if frame.alpha { pixel[3] } else { 255 },
+                        ]).collect();
+                        copied_image = Some(Pasted::Image { width: frame.width, height: frame.height, rgba });
+                        Ok(())
+                    }));
+                    if empty_clipboard {
+                        app.paste_from_clipboard(Ok(None));
+                    } else {
+                        app.paste_from_clipboard(Err(std::io::Error::other("fixture read failure")));
+                    }
+                    app.sync();
+                    let status = sink().status.get_untracked();
+                    if empty_clipboard {
+                        assert_eq!(status, "Nothing to paste");
+                    } else {
+                        assert!(status.contains("Paste failed: fixture read failure"), "{status}");
+                    }
+                    assert_eq!(crate::canvas::with_editor(|e| e.document().objects.len()), Some(before));
+                    app.paste_from_clipboard(Ok(Some(copied_image.expect("copied annotation image"))));
+                    crate::canvas::with_editor(|e| {
+                        assert_eq!(e.document().objects.len(), before + 1);
+                        assert!(matches!(e.selected().map(|object| &object.kind), Some(Kind::Image { .. })),
+                            "a later image must not revive stale editable annotations");
+                    }).unwrap();
+                }
+            }).unwrap();
+            test.line("selection: empty and failed clipboard reads clear stale editable annotations");
             0
         });
     s
@@ -3163,7 +3543,7 @@ fn clipboard_script() -> Script {
             assert_eq!(jiffshot_doc::io::to_rgba_image(image.pixmap.as_ref().unwrap()).as_raw(), &[0, 255, 0, 128]);
         }).expect("editor");
         crate::app::act(|app| {
-            app.copy();
+            assert!(app.copy_with(|_, _| Ok(())));
             app.paste_from_clipboard(Err(std::io::Error::other("fixture read failure")));
         }).unwrap();
         test.line("editor pasted a transparent clipboard image as an editable object");
@@ -3177,16 +3557,17 @@ fn clipboard_script() -> Script {
         150
     });
     script.step(|test| {
-        assert_eq!(crate::canvas::with_editor(|e| e.document().objects.len()), Some(2));
+        assert_eq!(sink().status.get_untracked(), "Nothing to paste");
+        assert_eq!(crate::canvas::with_editor(|e| e.document().objects.len()), Some(1));
         crate::app::act(|app| {
             app.paste_from_clipboard(Ok(Some(Pasted::Image { width: 2, height: 1, rgba: vec![0; 4] })));
         }).unwrap();
-        test.line("internal object paste remained available after the failed read");
+        test.line("an empty clipboard did not paste a stale internal object");
         150
     });
     script.step(|test| {
         assert!(sink().status.get_untracked().contains("Paste failed: the clipboard image has invalid"));
-        assert_eq!(crate::canvas::with_editor(|e| e.document().objects.len()), Some(2));
+        assert_eq!(crate::canvas::with_editor(|e| e.document().objects.len()), Some(1));
         let path = test.path("clipboard-fixture.png");
         let mut frame = jiffshot_capture::Frame::new(1, 1);
         frame.pixels.copy_from_slice(&[0, 0, 255, 255]);
@@ -3201,7 +3582,7 @@ fn clipboard_script() -> Script {
     script.step(|test| {
         let status = sink().status.get_untracked();
         assert!(status.contains("Pasted 1 image file(s); could not open") && status.contains("missing-clipboard-fixture.png"), "{status}");
-        assert_eq!(crate::canvas::with_editor(|e| e.document().objects.len()), Some(3));
+        assert_eq!(crate::canvas::with_editor(|e| e.document().objects.len()), Some(2));
         std::fs::remove_file(test.path("clipboard-fixture.png")).unwrap();
         crate::app::act(|app| {
             app.new_from_clipboard_data(Err(std::io::Error::other("fixture read failure")));
@@ -3211,7 +3592,7 @@ fn clipboard_script() -> Script {
     });
     script.step(|test| {
         assert!(sink().status.get_untracked().contains("New from clipboard failed: fixture read failure"));
-        assert_eq!(crate::canvas::with_editor(|e| e.document().objects.len()), Some(3));
+        assert_eq!(crate::canvas::with_editor(|e| e.document().objects.len()), Some(2));
         crate::app::act(|app| {
             app.new_from_clipboard_data(Ok(Some(Pasted::Image { width: 2, height: 1, rgba: vec![0; 4] })));
         }).unwrap();
@@ -3220,7 +3601,8 @@ fn clipboard_script() -> Script {
     });
     script.step(|test| {
         assert!(sink().status.get_untracked().contains("New from clipboard failed: the image has invalid"));
-        assert_eq!(crate::canvas::with_editor(|e| e.document().objects.len()), Some(3));
+        assert_eq!(crate::canvas::with_editor(|e| e.document().objects.len()), Some(2));
+        crate::canvas::with_editor(|editor| editor.mark_saved()).expect("finish the preceding paste fixture");
         crate::app::act(|app| {
             app.new_from_clipboard_data(Ok(Some(Pasted::Image {
                 width: 2, height: 1, rgba: vec![255, 0, 0, 128, 0, 0, 255, 255],
