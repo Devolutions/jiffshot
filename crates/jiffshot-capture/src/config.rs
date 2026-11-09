@@ -99,6 +99,10 @@ fn try_replace_section(dir: &Path, name: &str, value: Value) -> io::Result<()> {
     })
 }
 
+fn try_read_section(dir: &Path, name: &str) -> io::Result<Option<Value>> {
+    Ok(read_checked(&dir.join(FILE))?.remove(name))
+}
+
 fn with_dir<R>(f: impl FnOnce(&Path) -> R) -> Option<R> {
     let dir = crate::paths::config_dir()?;
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -110,6 +114,14 @@ pub fn section(name: &str) -> Value {
     with_dir(|dir| read(dir).remove(name))
         .flatten()
         .unwrap_or(Value::Null)
+}
+
+/// Reads a section without treating an unreadable settings file as empty.
+pub fn try_section(name: &str) -> io::Result<Option<Value>> {
+    let dir = crate::paths::config_dir()
+        .ok_or_else(|| io::Error::other("the settings directory is unavailable"))?;
+    let _guard = LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    try_read_section(&dir, name)
 }
 
 /// Replaces one side's section, keeping everything else.
@@ -285,6 +297,24 @@ mod tests {
         std::fs::write(&blocked, b"keep").unwrap();
         assert!(try_replace_section(&blocked, "capture", Value::Null).is_err());
         assert_eq!(std::fs::read(&blocked).unwrap(), b"keep");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checked_section_reads_distinguish_missing_and_invalid_settings() {
+        let dir = temp("checked-section-read");
+        assert_eq!(try_read_section(&dir, "startup").unwrap(), None);
+        std::fs::write(dir.join(FILE), br#"{"startup":{"requested":false}}"#).unwrap();
+        assert_eq!(
+            try_read_section(&dir, "startup").unwrap(),
+            Some(serde_json::json!({"requested": false}))
+        );
+        std::fs::write(dir.join(FILE), b"{invalid").unwrap();
+        assert_eq!(
+            try_read_section(&dir, "startup").unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), b"{invalid");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

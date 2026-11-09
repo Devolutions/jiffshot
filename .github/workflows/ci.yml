@@ -85,6 +85,11 @@ jobs:
           JIFFSHOT_VERSION: ${{ inputs.version }}
         run: cargo test --release --locked --workspace --target ${{ matrix.target }}
 
+      - name: Test Windows startup harness
+        if: matrix.test
+        shell: pwsh
+        run: .\app\tests\windows_startup_e2e_tests.ps1
+
       - name: Agent CLI artifact workflow
         if: matrix.test
         shell: pwsh
@@ -1137,6 +1142,22 @@ jobs:
             }
             if (-not (Test-Path -LiteralPath (Join-Path $installed.InstallLocation 'jiffshot.exe'))) {
               throw 'The installed MSIX does not contain jiffshot.exe'
+            }
+            [xml]$installedManifest = Get-AppxPackageManifest -Package $installed.PackageFullName
+            $manifestNs = [System.Xml.XmlNamespaceManager]::new($installedManifest.NameTable)
+            $manifestNs.AddNamespace('appx', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+            $manifestNs.AddNamespace('desktop', 'http://schemas.microsoft.com/appx/manifest/desktop/windows10')
+            $extensions = $installedManifest.SelectNodes(
+              '/appx:Package/appx:Applications/appx:Application[@Id="Jiffshot"]/appx:Extensions/desktop:Extension[@Category="windows.startupTask"]',
+              $manifestNs)
+            if ($extensions.Count -ne 1 -or $extensions[0].Executable -ne 'jiffshot.exe' -or
+                $extensions[0].EntryPoint -ne 'Windows.FullTrustApplication' -or
+                $extensions[0].GetAttribute('Parameters', 'http://schemas.microsoft.com/appx/manifest/uap/windows10/10') -ne '--background') {
+              throw 'The installed MSIX does not contain the expected startup extension'
+            }
+            $tasks = $extensions[0].SelectNodes('desktop:StartupTask', $manifestNs)
+            if ($tasks.Count -ne 1 -or $tasks[0].TaskId -ne 'JiffshotStartup' -or $tasks[0].Enabled -ne 'false') {
+              throw 'The installed MSIX startup task does not match the first-launch opt-out policy'
             }
             $cli = Join-Path $installed.InstallLocation 'jiffshot-cli.exe'
             $alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\jiffshot-cli.exe'

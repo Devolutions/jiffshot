@@ -859,6 +859,8 @@ pub fn install(scope: AppScope, opening: Option<PathBuf>) {
             source: None,
             library,
             exiting: false,
+            #[cfg(windows)]
+            startup_ui: StartupUi::new(jiffshot_workflow::settings_snapshot().show_widget),
             #[cfg(target_os = "macos")]
             native_termination: None,
             #[cfg(target_os = "macos")]
@@ -899,6 +901,8 @@ pub struct App {
     scope: AppScope,
     /// Set once Exit started, so the capture side stopping does not start it again.
     exiting: bool,
+    #[cfg(windows)]
+    startup_ui: StartupUi,
     #[cfg(target_os = "macos")]
     native_termination: Option<i64>,
     #[cfg(target_os = "macos")]
@@ -932,6 +936,62 @@ pub struct App {
     pub video: Option<crate::video::Session>,
     pub narration: Option<crate::video::Narration>,
     pub(crate) narration_request: Option<u64>,
+}
+
+#[cfg(windows)]
+struct StartupUi {
+    requested: bool,
+    deferred: bool,
+    notices: Vec<DeferredStartupNotice>,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Eq, PartialEq)]
+struct DeferredStartupNotice {
+    title: String,
+    text: String,
+    problem: bool,
+}
+
+#[cfg(windows)]
+impl StartupUi {
+    fn new(requested: bool) -> Self {
+        Self {
+            requested,
+            deferred: false,
+            notices: Vec::new(),
+        }
+    }
+
+    fn update(&mut self, requested: bool) -> bool {
+        if self.requested != requested {
+            self.deferred = false;
+        }
+        self.requested = requested;
+        self.requested && !self.deferred
+    }
+
+    fn open(&mut self) -> bool {
+        self.deferred = false;
+        self.requested
+    }
+
+    fn defer_notice(&mut self, title: &str, text: &str, problem: bool) -> bool {
+        if !self.deferred {
+            return false;
+        }
+        let notice = DeferredStartupNotice {
+            title: title.to_owned(),
+            text: text.to_owned(),
+            problem,
+        };
+        if let Some(previous) = self.notices.iter_mut().find(|notice| notice.title == title) {
+            *previous = notice;
+        } else {
+            self.notices.push(notice);
+        }
+        true
+    }
 }
 
 fn opacity_percent(style: &Style) -> f64 {
@@ -2503,6 +2563,8 @@ impl App {
 
     #[cfg(any(windows, target_os = "macos"))]
     pub fn show_capture_window(&mut self) {
+        #[cfg(windows)]
+        self.restore_startup_ui();
         crate::capture_window::show(&self.scope);
     }
 
@@ -2515,6 +2577,8 @@ impl App {
 
     /// Shows Grab Text's result in its window (the `grab_text` signal).
     pub fn show_grab_text(&mut self, text: &str) {
+        #[cfg(windows)]
+        self.restore_startup_ui();
         self.toasts += 1;
         let value = format!("{}\u{1f}{text}", self.toasts);
         self.put_str("GrabText", &value, |k, v| k.set_grab_text(v));
@@ -2533,6 +2597,8 @@ impl App {
     /// Opens the Preferences dialog on `tab` (the `prefs` signal).
     #[cfg(any(windows, target_os = "macos"))]
     pub fn open_prefs(&mut self, tab: &str) {
+        #[cfg(windows)]
+        self.restore_startup_ui();
         self.toasts += 1;
         let value = format!("{}\u{1f}{}", self.toasts, crate::prefs::dialog(self, tab));
         self.put_str("Prefs", &value, |k, v| k.set_prefs(v));
@@ -2552,11 +2618,57 @@ impl App {
 
     /// The Capture Widget follows the capture side's setting.
     pub fn set_widget(&mut self, on: bool) {
+        #[cfg(windows)]
+        let was_deferred = self.startup_ui.deferred;
+        #[cfg(windows)]
+        let on = self.startup_ui.update(on);
         self.put_flag("Widget", on, |k, v| k.set_widget(v));
+        #[cfg(windows)]
+        if was_deferred && !self.startup_ui.deferred {
+            self.flush_startup_notices();
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn defer_startup_ui(&mut self) {
+        self.startup_ui.deferred = true;
+    }
+
+    #[cfg(windows)]
+    fn restore_startup_ui(&mut self) {
+        if self.startup_ui.deferred {
+            let on = self.startup_ui.open();
+            self.put_flag("Widget", on, |k, v| k.set_widget(v));
+            self.flush_startup_notices();
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn startup_notice(&mut self, title: &str, text: &str, problem: bool) {
+        if !self.startup_ui.defer_notice(title, text, problem) {
+            self.toast(title, text, problem);
+        }
+    }
+
+    #[cfg(windows)]
+    fn flush_startup_notices(&mut self) {
+        let notices = std::mem::take(&mut self.startup_ui.notices);
+        if notices.is_empty() {
+            return;
+        }
+        let problem = notices.iter().any(|notice| notice.problem);
+        let text = notices
+            .into_iter()
+            .map(|notice| format!("{}: {}", notice.title, notice.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.toast("Jiffshot startup", &text, problem);
     }
 
     /// Shows the editor window and brings it forward.
     pub fn show_editor(&mut self) {
+        #[cfg(windows)]
+        self.restore_startup_ui();
         if let Some(window) = self.scope.main_window() {
             let _ = window.show();
             #[cfg(windows)]
@@ -4794,6 +4906,55 @@ fn path_of_uri(uri: &str) -> std::result::Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_widget_stays_hidden_until_the_app_is_opened() {
+        let mut widget = StartupUi::new(true);
+        widget.deferred = true;
+        assert!(!widget.update(true));
+        assert!(!widget.update(true));
+        assert!(widget.open());
+        assert!(widget.update(true));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_widget_respects_changes_while_deferred() {
+        let mut widget = StartupUi::new(true);
+        widget.deferred = true;
+        assert!(!widget.update(false));
+        assert!(!widget.open());
+        assert!(widget.update(true));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn automatic_startup_notices_wait_for_opening_and_keep_the_latest_status() {
+        let mut widget = StartupUi::new(true);
+        widget.deferred = true;
+        assert!(widget.defer_notice("Hotkey", "taken", true));
+        assert!(widget.defer_notice("Hotkey", "available", false));
+        assert!(widget.defer_notice("Startup", "check settings", true));
+        assert_eq!(
+            widget.notices,
+            vec![
+                DeferredStartupNotice {
+                    title: "Hotkey".into(),
+                    text: "available".into(),
+                    problem: false,
+                },
+                DeferredStartupNotice {
+                    title: "Startup".into(),
+                    text: "check settings".into(),
+                    problem: true,
+                },
+            ]
+        );
+        assert!(widget.open());
+        assert!(!widget.defer_notice("Later", "show immediately", true));
+        assert_eq!(widget.notices.len(), 2);
+    }
 
     #[cfg(unix)]
     #[test]

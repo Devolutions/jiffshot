@@ -49,7 +49,13 @@ fn schedule_header(paused: bool) -> &'static str {
 
 fn startup_header(notice: StartupNotice) -> &'static str {
     if cfg!(windows) {
-        return "Run when Windows _starts";
+        return match notice {
+            StartupNotice::None => "Run when Windows _starts",
+            StartupNotice::NeedsApproval => "Run when Windows _starts — enable in Windows",
+            StartupNotice::Legacy => "Run when Windows _starts — review older entry",
+            StartupNotice::StatusUnknown => "Run when Windows _starts — status unknown",
+            StartupNotice::Unavailable => "Run when Windows _starts — unavailable",
+        };
     }
     match notice {
         StartupNotice::None => "Open at _login",

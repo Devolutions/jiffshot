@@ -45,7 +45,7 @@ const TIMER_DELAY: usize = 1;
 const TIMER_HOTKEY_RETRY: usize = 2;
 const TIMER_MENU: usize = 3;
 const TIMER_INITIAL: usize = 4;
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos"))]
 const TIMER_STARTUP_STATUS: usize = 9;
 /// Moves the on-screen countdown of a delayed capture on.
 const TIMER_COUNTDOWN: usize = 10;
@@ -161,7 +161,14 @@ pub(crate) fn runs_at_startup() -> bool {
 
 pub(crate) fn set_run_at_startup(on: bool) {
     #[cfg(windows)]
-    startup::set_run_at_startup(on);
+    if let Err(error) = startup::set_run_at_startup(on) {
+        notify(
+            std::ptr::null_mut(),
+            "Windows startup update failed",
+            &error,
+            true,
+        );
+    }
     #[cfg(target_os = "macos")]
     match startup::set_run_at_startup(on) {
         Ok(Some(message)) => notify(
@@ -180,72 +187,8 @@ pub(crate) fn set_run_at_startup(on: bool) {
     }
 }
 
-/// Starting with the session: the Run key on Windows.
 #[cfg(windows)]
-mod startup {
-    use jiffshot_capture::wide;
-    use windows_sys::Win32::System::Registry::HKEY_CURRENT_USER;
-
-    /// The Run key entry that starts the tray with Windows.
-    const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-
-    pub(crate) fn runs_at_startup() -> bool {
-        run_value_exists(jiffshot_capture::paths::NAME)
-    }
-
-    pub(crate) fn status() -> super::StartupStatus {
-        super::StartupStatus {
-            requested: runs_at_startup(),
-            ..Default::default()
-        }
-    }
-
-    fn run_value_exists(name: &str) -> bool {
-        let mut size = 0u32;
-        // SAFETY: a size query of one registry value.
-        unsafe {
-            windows_sys::Win32::System::Registry::RegGetValueW(
-                HKEY_CURRENT_USER,
-                wide(RUN_KEY).as_ptr(),
-                wide(name).as_ptr(),
-                windows_sys::Win32::System::Registry::RRF_RT_REG_SZ,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut size,
-            ) == 0
-        }
-    }
-
-    pub(crate) fn set_run_at_startup(on: bool) {
-        use windows_sys::Win32::System::Registry::{
-            RegCloseKey, RegCreateKeyW, RegDeleteValueW, RegSetValueExW, HKEY, REG_SZ,
-        };
-        let mut key: HKEY = std::ptr::null_mut();
-        // SAFETY: opens, writes or deletes one value under our own user's Run key.
-        unsafe {
-            if RegCreateKeyW(HKEY_CURRENT_USER, wide(RUN_KEY).as_ptr(), &mut key) != 0 {
-                return;
-            }
-            if on {
-                let exe = std::env::current_exe()
-                    .map(|p| format!("\"{}\"", p.display()))
-                    .unwrap_or_default();
-                let value = wide(&exe);
-                RegSetValueExW(
-                    key,
-                    wide(jiffshot_capture::paths::NAME).as_ptr(),
-                    0,
-                    REG_SZ,
-                    value.as_ptr() as *const u8,
-                    (value.len() * 2) as u32,
-                );
-            } else {
-                RegDeleteValueW(key, wide(jiffshot_capture::paths::NAME).as_ptr());
-            }
-            RegCloseKey(key);
-        }
-    }
-}
+use crate::startup_windows as startup;
 
 #[cfg(target_os = "macos")]
 #[path = "startup_macos.rs"]
@@ -376,7 +319,7 @@ struct App {
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
-    #[cfg(target_os = "macos")]
+    #[cfg(any(windows, target_os = "macos"))]
     static PUBLISHED_STARTUP: RefCell<Option<StartupStatus>> = const { RefCell::new(None) };
 }
 
@@ -393,6 +336,19 @@ fn notify(_hwnd: HWND, title: &str, text: &str, warning: bool) {
         Some(hooks) => (hooks.notify)(title, text, warning),
         None => log(&format!("{title}: {text}")),
     }
+}
+
+fn notify_startup(hwnd: HWND, title: &str, text: &str, warning: bool) {
+    #[cfg(windows)]
+    {
+        let _ = hwnd;
+        log(&format!("{title}: {text}"));
+        if let Some(hooks) = crate::hooks() {
+            (hooks.startup_notice)(title, text, warning);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    notify(hwnd, title, text, warning);
 }
 
 /// What the tray menu shows, as the capture side sees it now.
@@ -418,7 +374,7 @@ pub struct TrayState {
 pub(crate) fn publish_state() {
     let Some(hooks) = crate::hooks() else { return };
     let startup = startup_status();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(windows, target_os = "macos"))]
     remember_startup(&startup);
     let Some((state, settings)) = with_app(|app| {
         (
@@ -456,7 +412,7 @@ pub(crate) fn publish_state() {
     (hooks.state)(state);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos"))]
 fn remember_startup(status: &StartupStatus) -> bool {
     PUBLISHED_STARTUP.with(|published| {
         let mut published = published.borrow_mut();
@@ -467,6 +423,13 @@ fn remember_startup(status: &StartupStatus) -> bool {
             true
         }
     })
+}
+
+#[cfg(windows)]
+fn refresh_startup_status() {
+    if remember_startup(&startup_status()) {
+        publish_state();
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -706,7 +669,7 @@ fn retry_capture_key(hwnd: HWND) {
             primary.2
         ));
         publish_state();
-        notify(
+        notify_startup(
             hwnd,
             "Jiffshot hotkeys",
             &format!(
@@ -724,7 +687,7 @@ fn retry_capture_key(hwnd: HWND) {
             .find(|(_, _, name)| *name == key)
         {
             if !register_hotkey(hwnd, HOTKEY_CAPTURE, modifiers, vk) {
-                notify(
+                notify_startup(
                     hwnd,
                     "Jiffshot hotkeys",
                     &format!(
@@ -3530,7 +3493,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             retry_capture_key(hwnd);
             0
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(windows, target_os = "macos"))]
         WM_TIMER if wparam == TIMER_STARTUP_STATUS => {
             refresh_startup_status();
             0
@@ -3587,7 +3550,7 @@ pub fn run(
         log(problem);
     }
     if !problems.is_empty() {
-        notify(hwnd, "Jiffshot hotkeys", &problems.join(". "), true);
+        notify_startup(hwnd, "Jiffshot hotkeys", &problems.join(". "), true);
     }
     if capture_key != settings.capture_key() {
         // SAFETY: a timer on our own window.
@@ -3618,17 +3581,20 @@ pub fn run(
     let settings_now = with_app(|app| app.settings.clone()).unwrap_or_default();
     #[cfg(windows)]
     if let Err(error) = arm_schedule(hwnd, settings_now.schedule.as_deref()) {
-        notify(hwnd, "Scheduled capture failed", &error.to_string(), true);
+        notify_startup(hwnd, "Scheduled capture failed", &error.to_string(), true);
     }
     #[cfg(target_os = "macos")]
     if let Err(error) = synchronize_schedule(hwnd, &settings_now) {
         notify(hwnd, "Scheduled capture paused", &error.to_string(), true);
     }
     publish_state();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(windows, target_os = "macos"))]
     {
-        // SAFETY: a timer on our own capture window refreshes user-controlled login-item state.
+        // SAFETY: a timer on our own capture window refreshes user-controlled startup state.
         if unsafe { SetTimer(hwnd, TIMER_STARTUP_STATUS, 10_000, None) } == 0 {
+            #[cfg(windows)]
+            notify_startup(hwnd, "Startup status", "Could not refresh startup status automatically. Reopen Preferences to check it.", true);
+            #[cfg(target_os = "macos")]
             notify(hwnd, "Open at login status", "Could not refresh the login-item status automatically. Reopen Preferences to check it.", true);
         }
     }
@@ -4031,6 +3997,8 @@ mod tests {
                     assert!(warning);
                     notified.lock().unwrap().push("error");
                 }),
+                #[cfg(windows)]
+                startup_notice: Box::new(|_, _, _| panic!("capture must not report startup")),
                 state: Box::new(|_| {}),
                 recording: Box::new(|_| {}),
                 #[cfg(target_os = "macos")]
@@ -4134,7 +4102,7 @@ mod tests {
         assert_eq!(mode_named("video-fixed"), Some(MODE_VIDEO_FIXED));
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn startup_refresh_only_publishes_changes() {
         PUBLISHED_STARTUP.with(|published| *published.borrow_mut() = None);
