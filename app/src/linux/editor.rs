@@ -1,9 +1,9 @@
 //! Linux editor actions built on the shared, undoable document editor.
 
-use jiffshot_doc::editor::{Editor, Tool};
+use jiffshot_doc::editor::{BackgroundFill, Editor, Tool};
 use jiffshot_doc::object::{BlurMode, Kind, Object, Style};
 use jiffshot_doc::smart::{self, TextLine};
-use jiffshot_doc::{effects, raster, redact, Document, Rgba};
+use jiffshot_doc::{effects, raster, redact, Document, IRect, Pixmap, Rgba};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -83,11 +83,16 @@ pub(super) fn selection_action(
             })
         }
         SelectionAction::Deselect => {
-            if editor.selected_ids().is_empty() {
+            let region = editor.selected_region().is_some();
+            if editor.selected_ids().is_empty() && !region {
                 return Err("No annotations are selected.".to_owned());
             }
             editor.set_selection(Vec::new());
-            Ok("Annotations deselected.")
+            Ok(if region {
+                "Image region deselected."
+            } else {
+                "Annotations deselected."
+            })
         }
         SelectionAction::Invert => {
             if editor.document().objects.is_empty() {
@@ -96,14 +101,30 @@ pub(super) fn selection_action(
             editor.invert_selection();
             Ok("Selection inverted.")
         }
-        SelectionAction::Delete => editor
-            .delete_selected()
-            .then_some("Selected annotations deleted.")
-            .ok_or_else(|| "Select annotations to delete.".to_owned()),
-        SelectionAction::Duplicate => editor
-            .duplicate_selected()
-            .map(|_| "Selected annotations duplicated.")
-            .ok_or_else(|| "Select annotations to duplicate.".to_owned()),
+        SelectionAction::Delete => {
+            let region = editor.selected_region().is_some();
+            editor
+                .delete_selected()
+                .then_some(if region {
+                    "Selected image region deleted."
+                } else {
+                    "Selected annotations deleted."
+                })
+                .ok_or_else(|| "Select annotations or an image region to delete.".to_owned())
+        }
+        SelectionAction::Duplicate => {
+            let region = editor.selected_region().is_some();
+            editor
+                .duplicate_selected()
+                .map(|_| {
+                    if region {
+                        "Selected image region duplicated."
+                    } else {
+                        "Selected annotations duplicated."
+                    }
+                })
+                .ok_or_else(|| "Select annotations or an image region to duplicate.".to_owned())
+        }
         SelectionAction::Group => editor
             .group_selected()
             .map(|_| "Selected annotations grouped.")
@@ -154,6 +175,124 @@ pub(super) fn selection_action(
             }
         }
     }
+}
+
+pub(super) struct SelectionSnapshot {
+    document: Document,
+    objects: Vec<u64>,
+    region: Option<IRect>,
+    background_fill: BackgroundFill,
+    fill_color: Rgba,
+}
+
+impl SelectionSnapshot {
+    pub(super) fn new(editor: &Editor) -> Self {
+        Self {
+            document: editor.document().clone(),
+            objects: editor.selected_ids(),
+            region: editor.selected_region(),
+            background_fill: editor.background_fill,
+            fill_color: editor.tool_style(Tool::Select).fill,
+        }
+    }
+
+    fn matches(&self, editor: &Editor) -> bool {
+        self.objects == editor.selected_ids()
+            && self.region == editor.selected_region()
+            && same_document(&self.document, editor.document())
+    }
+}
+
+pub(super) struct SelectionImage {
+    pub(super) pixels: Pixmap,
+    pub(super) snapshot: SelectionSnapshot,
+}
+
+pub(super) fn selection_image(editor: &Editor) -> Result<Option<SelectionImage>, String> {
+    let pixels = if let Some(region) = editor.selected_region() {
+        raster::extract(editor.document().background(), region)
+            .ok_or_else(|| "Could not allocate the selected image.".to_owned())?
+    } else {
+        let ids = editor.selected_ids();
+        if ids.is_empty() {
+            return Ok(None);
+        }
+        if ids.len() != 1 {
+            return Err("Select one image region to copy.".to_owned());
+        }
+        let object = editor
+            .selected()
+            .ok_or_else(|| "The selected image is unavailable.".to_owned())?;
+        let Kind::Image { rect, .. } = &object.kind else {
+            return Err("The classic editor can copy only image regions.".to_owned());
+        };
+        let area = if object.rotation.abs() > 0.01
+            || object.style.shadow
+            || object.style.outline_width > 0.0
+        {
+            object.bounds()
+        } else {
+            *rect
+        }
+        .to_irect();
+        if area.is_empty() {
+            return Err("The selected image has no pixels.".to_owned());
+        }
+        let width = u32::try_from(area.w).map_err(|_| "Invalid selected image width.")?;
+        let height = u32::try_from(area.h).map_err(|_| "Invalid selected image height.")?;
+        let mut pixels = Pixmap::new(width, height)
+            .ok_or_else(|| "Could not allocate the selected image.".to_owned())?;
+        object.draw(&mut pixels, (area.x, area.y));
+        pixels
+    };
+    Ok(Some(SelectionImage {
+        pixels,
+        snapshot: SelectionSnapshot::new(editor),
+    }))
+}
+
+pub(super) fn cut_copied_selection(
+    editor: &mut Editor,
+    snapshot: &SelectionSnapshot,
+    result: Result<(), String>,
+) -> Result<(), String> {
+    result.map_err(|error| format!("Copy failed: {error}"))?;
+    let fill_changed = snapshot.region.is_some()
+        && (snapshot.background_fill != editor.background_fill
+            || (snapshot.background_fill == BackgroundFill::Color
+                && snapshot.fill_color != editor.tool_style(Tool::Select).fill));
+    if !snapshot.matches(editor) || fill_changed {
+        return Err(
+            "Selection changed or its background fill was updated before copying completed; nothing was cut."
+                .to_owned(),
+        );
+    }
+    if !editor.delete_selected() {
+        return Err("Could not cut the selected image.".to_owned());
+    }
+    Ok(())
+}
+
+pub(super) fn set_selection_background_fill(editor: &mut Editor, index: i32) -> Result<(), String> {
+    editor.background_fill = match index {
+        0 => BackgroundFill::Auto,
+        1 => BackgroundFill::Transparent,
+        2 => BackgroundFill::Color,
+        _ => return Err("Select a valid background fill.".to_owned()),
+    };
+    Ok(())
+}
+
+pub(super) fn paste_image_if_current(
+    editor: &mut Editor,
+    snapshot: &SelectionSnapshot,
+    pixels: Pixmap,
+) -> Result<(), String> {
+    if !snapshot.matches(editor) {
+        return Err("Document or selection changed before paste completed.".to_owned());
+    }
+    editor.paste_image(pixels);
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -592,6 +731,7 @@ pub(super) fn recognized_text(lines: &[TextLine]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jiffshot_doc::editor::Modifiers;
     use jiffshot_doc::object::{ImageRef, Kind, ShapeKind, Style};
     use jiffshot_doc::{Box2, Document, IRect, Pt};
 
@@ -607,6 +747,17 @@ mod tests {
                 Style::default(),
             );
         }
+        editor
+    }
+
+    fn region_editor() -> Editor {
+        let mut editor = Editor::new(Document::blank(80, 60, Rgba::rgb(200, 40, 20)));
+        editor.set_tool(Tool::Select);
+        editor.background_fill = BackgroundFill::Transparent;
+        let modifiers = Modifiers::default();
+        editor.pointer_down(Pt::new(10.0, 12.0), modifiers, 1.0);
+        editor.pointer_move(Pt::new(30.0, 28.0), modifiers);
+        editor.pointer_up(Pt::new(30.0, 28.0), modifiers);
         editor
     }
 
@@ -680,6 +831,182 @@ mod tests {
         assert!(editor.document().objects.is_empty());
         assert!(editor.undo(), "deletion should be undoable");
         assert_eq!(editor.document().objects.len(), 2);
+    }
+
+    #[test]
+    fn selection_actions_handle_background_regions() {
+        let mut editor = Editor::new(Document::blank(80, 60, Rgba::WHITE));
+        selection_action(&mut editor, SelectionAction::SelectAll).unwrap();
+        assert_eq!(editor.selected_region(), Some(IRect::new(0, 0, 80, 60)));
+        selection_action(&mut editor, SelectionAction::Deselect).unwrap();
+        assert_eq!(editor.selected_region(), None);
+
+        selection_action(&mut editor, SelectionAction::SelectAll).unwrap();
+        selection_action(&mut editor, SelectionAction::Duplicate).unwrap();
+        assert_eq!(editor.document().objects.len(), 1);
+        assert!(editor.undo());
+        assert!(editor.document().objects.is_empty());
+
+        editor.background_fill = jiffshot_doc::editor::BackgroundFill::Transparent;
+        selection_action(&mut editor, SelectionAction::SelectAll).unwrap();
+        selection_action(&mut editor, SelectionAction::Delete).unwrap();
+        assert_eq!(raster::pixel(editor.document().background(), 10, 10), Rgba::TRANSPARENT);
+        assert!(editor.undo());
+        assert_eq!(raster::pixel(editor.document().background(), 10, 10), Rgba::WHITE);
+    }
+
+    #[test]
+    fn region_clipboard_cut_waits_for_copy_and_is_undoable() {
+        let mut editor = region_editor();
+        let image = selection_image(&editor).unwrap().unwrap();
+        assert_eq!((image.pixels.width(), image.pixels.height()), (20, 16));
+        assert_eq!(raster::pixel(&image.pixels, 5, 5), Rgba::rgb(200, 40, 20));
+        assert!(cut_copied_selection(
+            &mut editor,
+            &image.snapshot,
+            Err("clipboard busy".to_owned())
+        )
+        .unwrap_err()
+        .contains("clipboard busy"));
+        assert_eq!(editor.selected_region(), Some(IRect::new(10, 12, 20, 16)));
+        assert_eq!(raster::pixel(editor.document().background(), 15, 15), Rgba::rgb(200, 40, 20));
+
+        cut_copied_selection(&mut editor, &image.snapshot, Ok(())).unwrap();
+        assert_eq!(raster::pixel(editor.document().background(), 15, 15), Rgba::TRANSPARENT);
+        assert!(editor.undo());
+        assert_eq!(raster::pixel(editor.document().background(), 15, 15), Rgba::rgb(200, 40, 20));
+    }
+
+    #[test]
+    fn region_clipboard_keeps_overlapping_annotations_editable() {
+        let mut editor = annotation_editor();
+        let annotation = editor.selection().unwrap();
+        let blue = Rgba::rgb(20, 40, 200);
+        editor.edit(annotation, "Fill shape", None, |object| {
+            object.style.width = 0.0;
+            object.style.fill = blue;
+        });
+        editor.set_tool(Tool::Select);
+        editor.background_fill = BackgroundFill::Transparent;
+        let alt = Modifiers { alt: true, ..Modifiers::default() };
+        editor.pointer_down(Pt::new(40.0, 15.0), alt, 1.0);
+        editor.pointer_up(Pt::new(70.0, 40.0), alt);
+
+        assert_eq!(raster::pixel(&editor.document().flatten(), 40, 15), blue);
+        let image = selection_image(&editor).unwrap().unwrap();
+        assert_eq!(raster::pixel(&image.pixels, 0, 0), Rgba::WHITE);
+        cut_copied_selection(&mut editor, &image.snapshot, Ok(())).unwrap();
+        assert!(editor.document().get(annotation).is_some());
+        assert_eq!(raster::pixel(&editor.document().flatten(), 40, 15), blue);
+        assert!(editor.undo());
+    }
+
+    #[test]
+    fn clipboard_cut_rejects_a_changed_selection_or_document() {
+        let mut editor = region_editor();
+        let image = selection_image(&editor).unwrap().unwrap();
+        editor.select(None);
+        assert!(cut_copied_selection(&mut editor, &image.snapshot, Ok(()))
+            .unwrap_err()
+            .contains("Selection changed"));
+        assert_eq!(raster::pixel(editor.document().background(), 15, 15), Rgba::rgb(200, 40, 20));
+
+        let mut editor = annotation_editor();
+        let annotation = editor.selected_ids()[0];
+        editor.set_tool(Tool::Select);
+        let modifiers = Modifiers::default();
+        editor.pointer_down(Pt::new(3.0, 35.0), modifiers, 1.0);
+        editor.pointer_up(Pt::new(50.0, 55.0), modifiers);
+        let image = selection_image(&editor).unwrap().unwrap();
+        editor.edit(annotation, "Change annotation", None, |object| {
+            object.style.stroke = Rgba::BLACK;
+        });
+        assert!(editor.selected_region().is_some());
+        assert!(cut_copied_selection(&mut editor, &image.snapshot, Ok(())).is_err());
+        assert_eq!(raster::pixel(editor.document().background(), 10, 40), Rgba::WHITE);
+    }
+
+    #[test]
+    fn clipboard_cut_rejects_changed_region_fill_settings() {
+        let mut editor = region_editor();
+        let image = selection_image(&editor).unwrap().unwrap();
+        editor.background_fill = BackgroundFill::Color;
+        assert!(cut_copied_selection(&mut editor, &image.snapshot, Ok(()))
+            .unwrap_err()
+            .contains("background fill"));
+        assert_eq!(editor.selected_region(), Some(IRect::new(10, 12, 20, 16)));
+
+        let image = selection_image(&editor).unwrap().unwrap();
+        editor.update_style("fill", |style| style.fill = Rgba::BLACK);
+        assert!(cut_copied_selection(&mut editor, &image.snapshot, Ok(()))
+            .unwrap_err()
+            .contains("background fill"));
+        assert_eq!(raster::pixel(editor.document().background(), 15, 15), Rgba::rgb(200, 40, 20));
+    }
+
+    #[test]
+    fn selection_background_fill_choices_apply_only_when_region_moves() {
+        for (index, fill, expected) in [
+            (0, BackgroundFill::Auto, Rgba::rgb(200, 40, 20)),
+            (1, BackgroundFill::Transparent, Rgba::TRANSPARENT),
+            (2, BackgroundFill::Color, Rgba::BLACK),
+        ] {
+            let mut editor = region_editor();
+            editor.update_style("fill", |style| style.fill = Rgba::BLACK);
+            set_selection_background_fill(&mut editor, index).unwrap();
+            assert_eq!(editor.background_fill, fill);
+            assert_eq!(fill.name(), BackgroundFill::NAMES[index as usize]);
+            assert!(!editor.is_modified());
+            assert_eq!(editor.undo_label(), None);
+            editor.nudge(25.0, 0.0);
+            assert_eq!(raster::pixel(editor.document().background(), 15, 15), expected);
+        }
+        let mut editor = region_editor();
+        assert!(set_selection_background_fill(&mut editor, -1).is_err());
+        assert_eq!(editor.background_fill, BackgroundFill::Transparent);
+    }
+
+    #[test]
+    fn clipboard_copies_and_cuts_a_moved_region_image() {
+        let mut editor = region_editor();
+        editor.nudge(15.0, 10.0);
+        let id = editor.selection().unwrap();
+        let image = selection_image(&editor).unwrap().unwrap();
+        assert_eq!((image.pixels.width(), image.pixels.height()), (20, 16));
+        assert_eq!(raster::pixel(&image.pixels, 5, 5), Rgba::rgb(200, 40, 20));
+        cut_copied_selection(&mut editor, &image.snapshot, Ok(())).unwrap();
+        assert!(editor.document().get(id).is_none());
+        assert!(editor.undo());
+        assert!(editor.document().get(id).is_some());
+    }
+
+    #[test]
+    fn clipboard_paste_inserts_an_image_and_rejects_stale_targets() {
+        let mut editor = region_editor();
+        let snapshot = SelectionSnapshot::new(&editor);
+        let pixels = raster::solid(4, 3, Rgba::RED).unwrap();
+        paste_image_if_current(&mut editor, &snapshot, pixels).unwrap();
+        assert!(matches!(editor.selected().map(|object| &object.kind), Some(Kind::Image { .. })));
+        assert!(editor.undo());
+        assert!(editor.document().objects.is_empty());
+
+        let snapshot = SelectionSnapshot::new(&editor);
+        editor.select_all();
+        let pixels = raster::solid(4, 3, Rgba::RED).unwrap();
+        assert!(paste_image_if_current(&mut editor, &snapshot, pixels)
+            .unwrap_err()
+            .contains("changed"));
+        assert!(editor.document().objects.is_empty());
+    }
+
+    #[test]
+    fn clipboard_selection_rejects_nonimage_and_multiple_objects() {
+        let mut editor = annotation_editor();
+        assert!(matches!(selection_image(&editor), Err(error) if error.contains("only image")));
+        editor.select_all();
+        assert!(matches!(selection_image(&editor), Err(error) if error.contains("one image")));
+        editor.select(None);
+        assert!(selection_image(&editor).unwrap().is_none());
     }
 
     #[test]

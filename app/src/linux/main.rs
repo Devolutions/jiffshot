@@ -5,7 +5,7 @@ use super::{
 use crate::{canvas, ui};
 use file_dialog::PickerOutcome;
 use jiffshot_doc::combine::Arrangement;
-use jiffshot_doc::editor::{Editor, Tool, TOOLS};
+use jiffshot_doc::editor::{BackgroundFill, Editor, Tool, TOOLS};
 use jiffshot_doc::{effects, Document, Rgba};
 use rustolonia::storage::{
     DragDropEffects, FileDropEvent, FileTypeFilter, FolderPickerOptions, OpenFilePickerOptions, SaveFilePickerOptions,
@@ -100,6 +100,19 @@ enum DocumentOcrAction {
     CopyText,
     SmartRedact,
     Simplify,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClipboardShortcut {
+    Copy,
+    Cut,
+    Paste,
+}
+
+#[derive(Clone, Copy)]
+enum CopyAction {
+    Copy,
+    Cut,
 }
 
 enum DocumentOcrResult {
@@ -1723,8 +1736,22 @@ fn wire_editor_shortcuts(
                 args.handled = true;
                 return;
             }
-            const SHIFT: i32 = 1;
-            const CONTROL: i32 = 2;
+            if let Some(action) = clipboard_shortcut(key, args.key_modifiers) {
+                match action {
+                    ClipboardShortcut::Copy => {
+                        copy_selection(&callback_scope, canvas.clone(), status, CopyAction::Copy)
+                    }
+                    ClipboardShortcut::Cut => {
+                        copy_selection(&callback_scope, canvas.clone(), status, CopyAction::Cut)
+                    }
+                    ClipboardShortcut::Paste => {
+                        paste_selection(&callback_scope, canvas.clone(), status)
+                    }
+                }
+                args.handled = true;
+                return;
+            }
+            use rustolonia::key_modifiers::{CONTROL, SHIFT};
             let modifiers = args.key_modifiers;
             if modifiers == (CONTROL | SHIFT) {
                 match key {
@@ -1774,10 +1801,19 @@ fn wire_editor_shortcuts(
         .map(|_| ())
 }
 
+fn clipboard_shortcut(key: Key, modifiers: i32) -> Option<ClipboardShortcut> {
+    use rustolonia::key_modifiers::CONTROL;
+    match (key, modifiers) {
+        (Key::C, CONTROL) => Some(ClipboardShortcut::Copy),
+        (Key::X, CONTROL) => Some(ClipboardShortcut::Cut),
+        (Key::V, CONTROL) => Some(ClipboardShortcut::Paste),
+        _ => None,
+    }
+}
+
 fn selection_shortcut(key: Key, modifiers: i32) -> Option<editor::SelectionAction> {
     use editor::SelectionAction as Action;
-    const SHIFT: i32 = 1;
-    const CONTROL: i32 = 2;
+    use rustolonia::key_modifiers::{CONTROL, SHIFT};
     const CONTROL_SHIFT: i32 = CONTROL | SHIFT;
     match (key, modifiers) {
         (Key::Delete, 0) => Some(Action::Delete),
@@ -2199,7 +2235,38 @@ fn editor_properties_panel(
             })
             .tool_tip_tip("Flattens annotations and replaces recognized text with editable bars."),
         );
-    let mut selection_actions = WrapPanel::el().orientation(Orientation::Horizontal);
+    let background_fill = ComboBox::el()
+        .width(145.0)
+        .items_iter(
+            BackgroundFill::NAMES
+                .iter()
+                .map(|name| ComboBoxItem::el().content(*name)),
+        )
+        .selected_index(canvas::with_editor(|editor| editor.background_fill as i32).unwrap_or(0))
+        .tool_tip_tip("Color uses the Fill value above after applying the style.")
+        .with_op({
+            let canvas = canvas.clone();
+            move |scope, combo| {
+                let reader = combo.clone();
+                combo.clone().on_selection_changed(scope, move |_| {
+                    match reader.get_selected_index() {
+                        Ok(index) => editor_action(
+                            &canvas,
+                            status,
+                            "Selection background fill updated.",
+                            |editor| editor::set_selection_background_fill(editor, index),
+                        ),
+                        Err(error) => status
+                            .set_if_changed(format!("Could not read the background fill: {error}")),
+                    }
+                })?;
+                Ok(())
+            }
+        });
+    let mut selection_actions = WrapPanel::el()
+        .orientation(Orientation::Horizontal)
+        .child(TextBlock::el().text("Selection background:"))
+        .child(background_fill);
     for (label, action) in [
         ("Select all", editor::SelectionAction::SelectAll),
         ("Deselect", editor::SelectionAction::Deselect),
@@ -2218,6 +2285,19 @@ fn editor_properties_panel(
             apply_selection_action(&canvas, status, action)
         }));
     }
+    selection_actions = selection_actions
+        .child(action_button("Copy selection", {
+            let canvas = canvas.clone();
+            move |scope| copy_selection(scope, canvas.clone(), status, CopyAction::Copy)
+        }))
+        .child(action_button("Cut selection", {
+            let canvas = canvas.clone();
+            move |scope| copy_selection(scope, canvas.clone(), status, CopyAction::Cut)
+        }))
+        .child(action_button("Paste selection", {
+            let canvas = canvas.clone();
+            move |scope| paste_selection(scope, canvas.clone(), status)
+        }));
     StackPanel::el()
         .visible(controls.visible)
         .child(text_and_effects)
@@ -4864,6 +4944,87 @@ fn choose_capture_folder(
     }
 }
 
+fn copy_selection(
+    scope: &AppScope,
+    canvas: ui::UiOnly<ui::canvas_view::CanvasView>,
+    status: Signal<String>,
+    action: CopyAction,
+) {
+    let image = match canvas::with_editor(|editor| editor::selection_image(editor)) {
+        Some(Ok(Some(image))) => image,
+        Some(Ok(None)) => {
+            match action {
+                CopyAction::Copy => copy_image(scope, status),
+                CopyAction::Cut => {
+                    status.set_if_changed("Select an image region to cut.".to_owned())
+                }
+            }
+            return;
+        }
+        Some(Err(error)) => {
+            status.set_if_changed(format!("Copy failed: {error}"));
+            return;
+        }
+        None => {
+            status.set_if_changed("The editor is not available.".to_owned());
+            return;
+        }
+    };
+    let editor::SelectionImage { pixels, snapshot } = image;
+    let size = (pixels.width(), pixels.height());
+    status.set_if_changed("Copying the selected image...".to_owned());
+    let task_scope = scope.clone();
+    let failed_status = status;
+    if let Err(error) = scope.spawn(async move {
+        let result = clipboard::copy_pixmap(pixels);
+        if let Err(error) = task_scope.post(move || match action {
+            CopyAction::Copy => status.set_if_changed(match result {
+                Ok(()) => format!("Copied the selection ({} × {}).", size.0, size.1),
+                Err(error) => format!("Copy failed: {error}"),
+            }),
+            CopyAction::Cut => editor_action(&canvas, status, "Cut the selected image.", |editor| {
+                editor::cut_copied_selection(editor, &snapshot, result)
+            }),
+        }) {
+            eprintln!("Could not report selection clipboard status: {error}");
+        }
+    }) {
+        failed_status.set_if_changed(format!("Could not start clipboard copy: {error}"));
+    }
+}
+
+fn paste_selection(
+    scope: &AppScope,
+    canvas: ui::UiOnly<ui::canvas_view::CanvasView>,
+    status: Signal<String>,
+) {
+    let Some(snapshot) = canvas::with_editor(|editor| editor::SelectionSnapshot::new(editor)) else {
+        status.set_if_changed("The editor is not available.".to_owned());
+        return;
+    };
+    status.set_if_changed("Reading image from the clipboard...".to_owned());
+    let task_scope = scope.clone();
+    let failed_status = status;
+    if let Err(error) = scope.spawn(async move {
+        let result = clipboard::paste_document();
+        if let Err(error) = task_scope.post(move || match result {
+            Ok(document) => {
+                let background = document.background_arc();
+                drop(document);
+                let pixels = Arc::try_unwrap(background).unwrap_or_else(|image| (*image).clone());
+                editor_action(&canvas, status, "Pasted image into the editor.", |editor| {
+                    editor::paste_image_if_current(editor, &snapshot, pixels)
+                });
+            }
+            Err(error) => status.set_if_changed(format!("Paste failed: {error}")),
+        }) {
+            eprintln!("Could not report selection paste status: {error}");
+        }
+    }) {
+        failed_status.set_if_changed(format!("Could not start clipboard paste: {error}"));
+    }
+}
+
 fn copy_image(scope: &AppScope, status: Signal<String>) {
     let Some(pixmap) = canvas::with_editor(|editor| editor.document().flatten()) else {
         status.set_if_changed("There is no image to copy.".to_owned());
@@ -6327,24 +6488,41 @@ mod tests {
     #[test]
     fn selection_shortcuts_require_their_exact_modifiers() {
         use editor::SelectionAction as Action;
+        use rustolonia::key_modifiers::{ALT, CONTROL, SHIFT};
         for (key, modifiers, action) in [
             (Key::Delete, 0, Action::Delete),
-            (Key::A, 2, Action::SelectAll),
-            (Key::D, 2, Action::Deselect),
-            (Key::T, 2, Action::FlattenSelected),
-            (Key::I, 3, Action::Invert),
-            (Key::G, 3, Action::Group),
-            (Key::U, 3, Action::Ungroup),
-            (Key::F, 3, Action::BringForward),
-            (Key::B, 3, Action::SendBackward),
-            (Key::T, 3, Action::FlattenAll),
+            (Key::A, CONTROL, Action::SelectAll),
+            (Key::D, CONTROL, Action::Deselect),
+            (Key::T, CONTROL, Action::FlattenSelected),
+            (Key::I, CONTROL | SHIFT, Action::Invert),
+            (Key::G, CONTROL | SHIFT, Action::Group),
+            (Key::U, CONTROL | SHIFT, Action::Ungroup),
+            (Key::F, CONTROL | SHIFT, Action::BringForward),
+            (Key::B, CONTROL | SHIFT, Action::SendBackward),
+            (Key::T, CONTROL | SHIFT, Action::FlattenAll),
         ] {
             assert_eq!(selection_shortcut(key, modifiers), Some(action));
         }
-        assert_eq!(selection_shortcut(Key::G, 2), None);
-        assert_eq!(selection_shortcut(Key::G, 1), None);
-        assert_eq!(selection_shortcut(Key::A, 6), None);
-        assert_eq!(selection_shortcut(Key::Delete, 2), None);
+        assert_eq!(selection_shortcut(Key::G, CONTROL), None);
+        assert_eq!(selection_shortcut(Key::G, SHIFT), None);
+        assert_eq!(selection_shortcut(Key::G, CONTROL | ALT), None);
+        assert_eq!(selection_shortcut(Key::A, CONTROL | SHIFT), None);
+        assert_eq!(selection_shortcut(Key::Delete, CONTROL), None);
+    }
+
+    #[test]
+    fn clipboard_shortcuts_require_control_without_other_modifiers() {
+        use rustolonia::key_modifiers::{ALT, CONTROL, SHIFT};
+        for (key, action) in [
+            (Key::C, ClipboardShortcut::Copy),
+            (Key::X, ClipboardShortcut::Cut),
+            (Key::V, ClipboardShortcut::Paste),
+        ] {
+            assert_eq!(clipboard_shortcut(key, CONTROL), Some(action));
+            assert_eq!(clipboard_shortcut(key, 0), None);
+            assert_eq!(clipboard_shortcut(key, CONTROL | ALT), None);
+            assert_eq!(clipboard_shortcut(key, CONTROL | SHIFT), None);
+        }
     }
 
     #[test]

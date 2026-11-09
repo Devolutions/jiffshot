@@ -177,14 +177,23 @@ fn select_several_group_align() {
     for (x, y) in [(50.0, 50.0), (300.0, 120.0), (500.0, 300.0)] {
         drag(&mut e, Tool::Shape, (x, y), (x + 80.0, y + 60.0), 4);
     }
-    // Box select the first two with the Select tool.
-    drag(&mut e, Tool::Select, (20.0, 20.0), (420.0, 220.0), 4);
-    assert_eq!(e.selected_ids().len(), 2);
     let shift = Modifiers {
         shift: true,
         ctrl: false,
         alt: false,
     };
+    // Shift-drag selects annotations instead of lifting image pixels.
+    e.set_tool(Tool::Select);
+    e.pointer_down(Pt::new(20.0, 20.0), shift, 6.0);
+    e.pointer_move(Pt::new(420.0, 220.0), shift);
+    assert!(e.marquee_is_box_selection());
+    e.pointer_up(Pt::new(420.0, 220.0), shift);
+    assert_eq!(e.selected_ids().len(), 2);
+    assert_eq!(
+        e.document().objects.len(),
+        3,
+        "object selection does not lift pixels"
+    );
     e.pointer_down(Pt::new(500.0, 330.0), shift, 6.0);
     e.pointer_up(Pt::new(500.0, 330.0), shift);
     assert_eq!(e.selected_ids().len(), 3, "Shift-click adds");

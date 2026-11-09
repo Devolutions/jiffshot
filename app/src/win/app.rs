@@ -1035,6 +1035,7 @@ fn panel_for(kind: &str) -> &'static str {
         "Image" => "stroke;width;shadow;opacity;rotation",
         "Drop zone" => "zone;stroke;width;shadow",
         "Fill" => "fill;amount",
+        "Select" | "Image region" => "fill;backfill",
         "Cut Out" => "variant;backfill",
         "Selection" => "variant;backfill",
         "Magic Wand" => "amount;backfill",
@@ -1235,13 +1236,17 @@ impl App {
         let e = guard.as_mut()?;
         let selected = e.selected().cloned();
         let tool = e.tool();
-        let kind = selected.as_ref().map(|o| {
-            if o.zone.is_some() {
-                "Drop zone".to_owned()
-            } else {
-                o.kind_name().to_owned()
-            }
-        });
+        let kind = if e.selected_region().is_some() {
+            Some("Image region".to_owned())
+        } else {
+            selected.as_ref().map(|o| {
+                if o.zone.is_some() {
+                    "Drop zone".to_owned()
+                } else {
+                    o.kind_name().to_owned()
+                }
+            })
+        };
         let variant_tool = selected.as_ref().map(ed::tool_for).unwrap_or(tool);
         let variant = selected
             .as_ref()
@@ -1266,7 +1271,7 @@ impl App {
             modified: e.is_modified(),
             damage: e.has_damage(),
             picked: e.picked_color(),
-            selected_count: e.selected_ids().len(),
+            selected_count: e.selected_ids().len() + usize::from(e.selected_region().is_some()),
             background_fill: e.background_fill.name(),
         })
     }
@@ -1393,6 +1398,14 @@ impl App {
         ] {
             let enabled = if matches!(name, "DeleteEnabled" | "CutEnabled") {
                 self.video.as_ref().map_or(has_sel, |v| v.can_cut())
+            } else if matches!(
+                name,
+                "BringToFrontEnabled"
+                    | "BringForwardEnabled"
+                    | "SendBackwardEnabled"
+                    | "SendToBackEnabled"
+            ) {
+                has_sel && s.kind.as_deref() != Some("Image region")
             } else {
                 has_sel
             };
@@ -2009,6 +2022,29 @@ impl App {
         &mut self,
         copy: impl FnOnce(&jiffshot_capture::Frame, isize) -> std::io::Result<()>,
     ) -> bool {
+        let region = with_editor(|e| {
+            e.selected_region()
+                .map(|area| jiffshot_doc::raster::extract(e.document().background(), area))
+        })
+        .flatten();
+        if let Some(image) = region {
+            let Some(image) = image else {
+                self.set_status("Copy failed: could not allocate the selected image");
+                return false;
+            };
+            let frame = winutil::frame_from_pixmap(&image);
+            if let Err(error) = copy(&frame, winutil::main_hwnd()) {
+                self.set_status(format!("Copy failed: {error}"));
+                return false;
+            }
+            self.set_status(format!(
+                "Copied the selection ({} × {}) to the clipboard",
+                image.width(),
+                image.height()
+            ));
+            self.object_clipboard = None;
+            return true;
+        }
         match with_editor(|e| e.selected().cloned()).flatten() {
             Some(o) => {
                 if let Kind::Image { rect, .. } = &o.kind {
@@ -3045,6 +3081,9 @@ impl App {
             e.set_tool(tool);
         });
         let hint = match tool {
+            Tool::Select if cfg!(target_os = "macos") => "Drag on the image to select a region, or click an annotation to move it. Option-drag starts a region over an annotation; Shift-drag selects multiple annotations.",
+            Tool::Select => "Drag on the image to select a region, or click an annotation to move it. Alt-drag starts a region over an annotation; Shift-drag selects multiple annotations.",
+            Tool::Arrow => "Drag to draw an arrow. Use Select to move other annotations or image regions.",
             Tool::Crop => "Drag to crop the image.",
             Tool::CutOut => "Drag a rectangle to lift it, then move it or use Cut. Horizontal and Vertical remove a band and close the gap.",
             Tool::Selection => "Drag to select part of the image, then move it.",

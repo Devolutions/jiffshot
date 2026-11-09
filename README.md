@@ -299,10 +299,22 @@ On macOS, use `Cmd` in place of `Ctrl` in the following editor shortcuts.
 | `Ctrl+,` | Open Preferences |
 | `F1` | Show Keyboard Shortcuts dialog |
 
-Use the **Selection** tool's Rectangle variant to lift an image region, then
-`Ctrl+C` or `Ctrl+X` to copy its pixels to the system clipboard. Cut removes the
-region only after copying succeeds; Undo restores it. With nothing selected,
-the canvas has resize handles at every edge and corner, including the top and left.
+With **Select**, drag on the image to select a rectangular region, click an
+annotation to select or move it, or **Shift-drag** to select multiple annotations.
+Use **Alt-drag** (Option-drag on macOS) to start a region over an annotation.
+Pan with the middle or right mouse button; Alt-drag pans with other tools.
+The region remains unchanged until it is moved or deleted; choose its background
+fill in the properties panel. The **Selection** tool also offers ellipse and
+freehand regions. `Ctrl+C` or `Ctrl+X` copies the selected background pixels to
+the system clipboard. Annotations remain separate and editable; flatten them first
+to include them in a region. Cut removes the region only after copying succeeds;
+Undo restores it. With nothing selected, the canvas has resize handles at every
+edge and corner, including the top and left.
+Drawing tools adjust only their currently selected annotations of the same type;
+use **Select** to pick another object. Switching to **Arrow** starts a new arrow,
+even over an existing arrow, another annotation, or an image region.
+In the classic Linux editor, enable **Editor properties and effects** to choose
+the selection background. For **Color**, enter a Fill value and apply the style.
 
 ---
 
@@ -728,7 +740,8 @@ creates only one.
 
 The editor drives its own UI when `JIFFSHOT_UITEST=DIR` is set (with `JIFFSHOT_UITEST_IMAGE`, `JIFFSHOT_UITEST_VIDEO`, an isolated `JIFFSHOT_LIBRARY` and, to leave your settings alone, scratch `APPDATA` and `LOCALAPPDATA`), writing screenshots of every window and `ui-log.txt` to `DIR`. Set `JIFFSHOT_UITEST_CAPTURE_ONLY=1` to check just the Capture window and chooser, or `JIFFSHOT_UITEST_HUD_ONLY=1` to check the recording toolbar, including restoring hidden controls. Set `JIFFSHOT_UITEST_KEEP=1` to leave the Capture window open for inspection. To exercise library edits, set `JIFFSHOT_LIBRARY` to an existing folder inside `DIR`; otherwise those steps are skipped to protect the normal library. `cargo run -p jiffshot-doc --example synthetic -- OUT.png` writes the test image its coordinates assume.
 Set `JIFFSHOT_UITEST_CANVAS=1` to check all canvas handle cursors and view-coordinate crop and expansion at fit and zoom, without moving the system pointer.
-Set `JIFFSHOT_UITEST_SELECTION=1` to check full-image selection, rectangular Copy/Cut, clipboard failure reporting and undo without changing the system clipboard.
+Set `JIFFSHOT_UITEST_SELECTION=1` to check full-image and Select-region selection, Alt-drag routing, background-fill controls, rectangular Copy/Cut, clipboard failure reporting and undo without changing the system clipboard.
+On Linux, `dbus-run-session -- pwsh -File app/tests/linux_selection_e2e.ps1 -Binary target/release/jiffshot -RuntimeDir target/release` checks selection, clipboard shortcuts and Select-to-Arrow transitions in the classic editor. It requires Xvfb, xclip, xwininfo and libXtst, and uses a private X11 display and clipboard.
 On Windows, `JIFFSHOT_UITEST_CAPTURE_MENUS=1` checks Capture menu hover switching, click-to-dismiss, dismissal cleanup, and DarkBlue popup backgrounds and borders without changing the system pointer. It also checks that changing to Light closes the old popup and preserves the light palette. Use the same isolated settings and library paths.
 Set `JIFFSHOT_UITEST_VIDEO_EDIT=1` with a short `JIFFSHOT_UITEST_VIDEO` fixture and an empty scratch library inside `DIR` for the focused multi-cut, undo/redo, playback, automatic-save and subsequent-save checks.
 On macOS, set `JIFFSHOT_UITEST_APP_NAME=1` to check the native application name and menu across editor and Capture windows. Set `JIFFSHOT_UITEST_OVERLAY=1` to run a focused synthetic selection-window lifecycle test without screen captures. Use scratch `JIFFSHOT_CONFIG_DIR` and `JIFFSHOT_LOCAL_DIR` for both.

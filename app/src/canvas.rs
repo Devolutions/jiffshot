@@ -209,10 +209,23 @@ mod tests {
         assert_eq!(overlay.marquee, Some(Box2::new(10.0, 0.0, 100.0, 60.0)));
 
         editor.pointer_up(Pt::new(10.0, 30.0), NONE);
-        editor.pointer_down(Pt::new(30.0, 20.0), NONE, 4.0);
-        editor.pointer_move(Pt::new(50.0, 40.0), NONE);
+        let shift = Modifiers { shift: true, ..NONE };
+        editor.pointer_down(Pt::new(30.0, 20.0), shift, 4.0);
+        editor.pointer_move(Pt::new(50.0, 40.0), shift);
         let overlay = overlay_of(&editor);
         assert!(overlay.box_select);
         assert_eq!(overlay.marquee, Some(Box2::new(30.0, 20.0, 50.0, 40.0)));
+
+        editor.pointer_down(Pt::new(30.0, 20.0), NONE, 4.0);
+        editor.pointer_move(Pt::new(50.0, 40.0), NONE);
+        let overlay = overlay_of(&editor);
+        assert!(!overlay.box_select, "plain Select previews an image region");
+        assert_eq!(overlay.marquee, Some(Box2::new(30.0, 20.0, 50.0, 40.0)));
+        editor.pointer_up(Pt::new(50.0, 40.0), NONE);
+        let overlay = overlay_of(&editor);
+        assert_eq!(overlay.selection, Some(Box2::new(30.0, 20.0, 50.0, 40.0)));
+        assert_eq!(overlay.handles.len(), 8);
+        assert!(!overlay.canvas_handles);
+        assert!(overlay.marquee.is_none());
     }
 }

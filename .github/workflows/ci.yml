@@ -270,6 +270,11 @@ jobs:
       - name: Build Linux app
         run: cargo build --release --locked -p jiffshot
 
+      - name: Test Linux editor selection
+        run: |
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_selection_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
+
       - name: Package Ubuntu tar.gz and DEB
         run: pwsh -NoProfile -File package/linux/build.ps1 -Arch "${{ matrix.arch }}" -Format tar.gz,deb
 

@@ -992,7 +992,8 @@ fn selection_clipboard_script() -> Script {
             call(|m| m.select_all());
             crate::canvas::with_editor(|e| {
                 assert_eq!(e.selection_box(), Some(jiffshot_doc::Box2::new(0.0, 0.0, 80.0, 60.0)));
-                assert_eq!(e.selected_ids().len(), 1);
+                assert_eq!(e.selected_region(), Some(jiffshot_doc::IRect::new(0, 0, 80, 60)));
+                assert!(!e.is_modified());
             }).unwrap();
             test.line("selection: Select All selects a screenshot without annotations");
             100
@@ -1074,6 +1075,161 @@ fn selection_clipboard_script() -> Script {
                 assert_eq!(pixels.pixel(0, 0).unwrap().red(), 200);
             }).unwrap();
             test.line("selection: Paste restores a clipboard image at the rectangle's size");
+            100
+        })
+        .step(|test| {
+            use jiffshot_doc::object::{Kind, ShapeKind, Style};
+            use jiffshot_doc::Box2;
+
+            crate::app::act(|app| {
+                app.load(Document::blank(80, 60, Rgba::rgb(200, 40, 20)), None, None);
+            }).unwrap();
+            crate::canvas::with_editor(|e| {
+                e.add_object(
+                    "Annotation",
+                    Kind::Shape {
+                        rect: Box2::new(16.0, 16.0, 24.0, 24.0),
+                        shape: ShapeKind::Rectangle,
+                    },
+                    Style {
+                        width: 0.0,
+                        fill: Rgba::rgb(20, 40, 200),
+                        ..Style::default()
+                    },
+                );
+                e.set_tool(Tool::Select);
+                e.background_fill = BackgroundFill::Transparent;
+                e.mark_saved();
+            }).unwrap();
+            crate::canvas::pointer(POINTER_PRESSED, 10.0, 12.0, 0, 1.0);
+            crate::canvas::pointer(POINTER_MOVED, 30.0, 28.0, 0, 1.0);
+            crate::canvas::pointer(POINTER_RELEASED, 30.0, 28.0, 0, 1.0);
+            crate::app::act(|app| app.sync()).unwrap();
+            crate::canvas::with_editor(|e| {
+                assert_eq!(e.selected_region(), Some(jiffshot_doc::IRect::new(10, 12, 20, 16)));
+                assert_eq!(e.document().objects.len(), 1);
+                assert_eq!(jiffshot_doc::raster::pixel(&e.document().flatten(), 20, 20), Rgba::rgb(20, 40, 200));
+                assert!(!e.is_modified(), "selecting must not change the document");
+            }).unwrap();
+            assert_eq!(sink().selection.get_untracked(), "Image region");
+            assert_eq!(sink().panel.get_untracked(), "fill;backfill");
+            assert_eq!(sink().selection_count.get_untracked(), 1);
+            test.line("selection: Select exposes a non-destructive image region and its fill controls");
+            100
+        })
+        .step(|test| {
+            crate::app::act(|app| {
+                assert!(app.copy_with(|frame, _| {
+                    assert_eq!((frame.width, frame.height), (20, 16));
+                    assert!(frame.pixels.as_chunks::<4>().0.iter().all(|p| *p == [20, 40, 200, 255]),
+                        "the image region copies background pixels without flattening annotations");
+                    Ok(())
+                }));
+                app.cut_with(|_, _| Err(std::io::Error::other("region clipboard busy")));
+            }).unwrap();
+            crate::canvas::with_editor(|e| {
+                assert!(e.selected_region().is_some(), "failed Cut retains the region");
+                assert!(!e.is_modified(), "failed Cut must not change the document");
+                assert_eq!(e.document().objects.len(), 1);
+            }).unwrap();
+            test.line("selection: region Copy excludes editable annotations and failed Cut preserves it");
+            100
+        })
+        .step(|test| {
+            assert!(sink().status.get_untracked().contains("Copy failed: region clipboard busy"));
+            crate::app::act(|app| {
+                app.cut_with(|frame, _| {
+                    assert_eq!((frame.width, frame.height), (20, 16));
+                    Ok(())
+                });
+            }).unwrap();
+            crate::canvas::with_editor(|e| {
+                assert_eq!(e.selected_region(), None);
+                assert_eq!(e.document().background().pixel(15, 15).unwrap().alpha(), 0);
+                assert_eq!(e.document().objects.len(), 1, "Cut keeps the annotation editable");
+                assert!(e.undo());
+                assert_eq!(e.document().background().pixel(15, 15).unwrap().alpha(), 255);
+                assert_eq!(e.document().objects.len(), 1);
+            }).unwrap();
+            test.line("selection: Cut and Undo affect the background without flattening annotations");
+            100
+        })
+        .step(|test| {
+            use rustolonia::pixel_surface::{Modifiers, PointerKind};
+
+            run("tool:Select");
+            let view = super::canvas().expect("the editor canvas is unavailable");
+            let origin = view.selftest_view_point(0.0, 0.0).expect("the canvas view is busy");
+            let start = view
+                .selftest_view_point(20.0, 20.0)
+                .expect("the canvas view is busy");
+            let end = view
+                .selftest_view_point(55.0, 45.0)
+                .expect("the canvas view is busy");
+            let alt = Modifiers(rustolonia::key_modifiers::ALT);
+            for (kind, point) in [
+                (PointerKind::Pressed, start),
+                (PointerKind::Moved, end),
+                (PointerKind::Released, end),
+            ] {
+                assert!(view
+                    .selftest_view_pointer_with_modifiers(kind, point.0, point.1, alt)
+                    .expect("Alt-drag the canvas"));
+            }
+            assert_eq!(
+                view.selftest_view_point(0.0, 0.0),
+                Some(origin),
+                "Alt-Select must not pan"
+            );
+            crate::canvas::with_editor(|e| {
+                assert_eq!(e.selected_region(), Some(jiffshot_doc::IRect::new(20, 20, 35, 25)));
+                assert_eq!(e.document().objects.len(), 1);
+            }).unwrap();
+            test.line("selection: Alt-drag over an annotation selects a region without panning");
+            100
+        })
+        .step(|test| {
+            run("tool:Select");
+            canvas_feed(POINTER_PRESSED, 10.0, 12.0);
+            canvas_feed(POINTER_MOVED, 30.0, 28.0);
+            canvas_feed(POINTER_RELEASED, 30.0, 28.0);
+            crate::canvas::with_editor(|e| {
+                assert_eq!(e.selected_region(), Some(jiffshot_doc::IRect::new(10, 12, 20, 16)));
+            }).unwrap();
+
+            run("tool:Arrow");
+            canvas_feed(POINTER_PRESSED, 20.0, 20.0);
+            canvas_feed(POINTER_MOVED, 65.0, 40.0);
+            canvas_feed(POINTER_RELEASED, 65.0, 40.0);
+            crate::canvas::with_editor(|e| {
+                assert_eq!(e.selected_region(), None);
+                assert_eq!(e.document().objects.len(), 2);
+                assert!(matches!(e.selected().map(|o| &o.kind),
+                    Some(jiffshot_doc::object::Kind::Line { a, b, .. })
+                        if *a == Pt::new(20.0, 20.0) && *b == Pt::new(65.0, 40.0)));
+            }).unwrap();
+
+            run("tool:Select");
+            canvas_feed(POINTER_PRESSED, 42.5, 30.0);
+            canvas_feed(POINTER_RELEASED, 42.5, 30.0);
+            crate::canvas::with_editor(|e| {
+                assert!(matches!(e.selected().map(|o| &o.kind),
+                    Some(jiffshot_doc::object::Kind::Line { .. })));
+            }).unwrap();
+            run("tool:Arrow");
+            canvas_feed(POINTER_PRESSED, 42.5, 30.0);
+            canvas_feed(POINTER_MOVED, 60.0, 52.0);
+            canvas_feed(POINTER_RELEASED, 60.0, 52.0);
+            crate::canvas::with_editor(|e| {
+                assert_eq!(e.document().objects.len(), 3);
+                assert!(matches!(e.selected().map(|o| &o.kind),
+                    Some(jiffshot_doc::object::Kind::Line { a, b, .. })
+                        if *a == Pt::new(42.5, 30.0) && *b == Pt::new(60.0, 52.0)));
+                assert!(matches!(&e.document().objects[1].kind,
+                    jiffshot_doc::object::Kind::Line { a, b, .. }
+                        if *a == Pt::new(20.0, 20.0) && *b == Pt::new(65.0, 40.0)));
+            }).unwrap();
+            test.line("selection: Select-to-Arrow switches draw over annotations and existing arrows");
             0
         });
     s
