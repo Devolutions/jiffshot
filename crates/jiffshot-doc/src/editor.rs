@@ -6,7 +6,7 @@
 //! re-renders just that area into [`Editor::display`].
 
 use crate::color::Rgba;
-use crate::document::Document;
+use crate::document::{allocate_canvas_pixmap, CanvasResizeError, Document};
 use crate::geom::{Box2, IRect, Pt};
 use crate::object::*;
 use crate::raster;
@@ -263,6 +263,8 @@ pub const EVENT_FOCUS_TEXT: u32 = 4;
 pub const EVENT_RESIZED: u32 = 8;
 pub const EVENT_TOOL: u32 = 16;
 pub const EVENT_COLOR_PICKED: u32 = 32;
+pub const EVENT_CANVAS_RESIZE_ERROR: u32 = 64;
+pub const EVENT_CANVAS_RESIZED: u32 = 128;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Modifiers {
@@ -322,9 +324,10 @@ enum Drag {
     Erase {
         last: Pt,
     },
-    /// Dragging the canvas's right, bottom or corner edge.
+    /// Dragging a canvas edge or corner.
     Canvas {
         handle: Handle,
+        start: Pt,
     },
     /// Moving the image inside a selected drop zone.
     Pan {
@@ -403,6 +406,7 @@ pub struct Editor {
     events: u32,
     modified: bool,
     picked: Option<Rgba>,
+    canvas_resize_error: Option<CanvasResizeError>,
     pub analyzer: Option<Box<dyn Analyzer>>,
     pub background_fill: BackgroundFill,
     /// Color of canvas areas added by resizing or expanding the canvas.
@@ -413,6 +417,26 @@ pub struct Editor {
 
 const HISTORY_LIMIT: usize = 100;
 const MIN_DRAG: f32 = 4.0;
+const MIN_CANVAS_SIZE: f32 = 8.0;
+
+#[derive(Clone, Copy)]
+struct CanvasBounds {
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+}
+
+impl CanvasBounds {
+    fn to_box(self) -> Option<Box2> {
+        let [x0, y0, x1, y1] =
+            [self.x0, self.y0, self.x1, self.y1].map(|value| value.round() as f32);
+        [x0, y0, x1, y1]
+            .iter()
+            .all(|value| value.is_finite())
+            .then(|| Box2::new(x0, y0, x1, y1))
+    }
+}
 
 fn valid_canvas_size(width: u32, height: u32) -> bool {
     width > 0
@@ -420,6 +444,80 @@ fn valid_canvas_size(width: u32, height: u32) -> bool {
         && width <= i32::MAX as u32
         && height <= i32::MAX as u32
         && u64::from(width) * u64::from(height) <= crate::io::MAX_DOCUMENT_PIXELS
+}
+
+fn canvas_drag_bounds(
+    width: u32,
+    height: u32,
+    handle: Handle,
+    start: Pt,
+    point: Pt,
+) -> Result<CanvasBounds, CanvasResizeError> {
+    let (w, h) = (f64::from(width), f64::from(height));
+    let (dx, dy) = (
+        f64::from(point.x) - f64::from(start.x),
+        f64::from(point.y) - f64::from(start.y),
+    );
+    if !dx.is_finite() || !dy.is_finite() || handle > H_L {
+        return Err(CanvasResizeError::InvalidDimensions);
+    }
+    let min_size = f64::from(MIN_CANVAS_SIZE);
+    let (min_w, min_h) = (w.min(min_size), h.min(min_size));
+    let x0 = if matches!(handle, H_TL | H_L | H_BL) {
+        dx.min(w - min_w)
+    } else {
+        0.0
+    };
+    let x1 = if matches!(handle, H_TR | H_R | H_BR) {
+        (w + dx).max(min_w)
+    } else {
+        w
+    };
+    let y0 = if matches!(handle, H_TL | H_T | H_TR) {
+        dy.min(h - min_h)
+    } else {
+        0.0
+    };
+    let y1 = if matches!(handle, H_BL | H_B | H_BR) {
+        (h + dy).max(min_h)
+    } else {
+        h
+    };
+    if [x0, y0, x1, y1].iter().any(|value| !value.is_finite()) {
+        return Err(CanvasResizeError::InvalidDimensions);
+    }
+    Ok(CanvasBounds { x0, y0, x1, y1 })
+}
+
+fn canvas_resize_geometry(bounds: CanvasBounds) -> Result<(u32, u32, i32, i32), CanvasResizeError> {
+    let rounded = |value: f64| {
+        let value = value.round();
+        if value.is_finite() && (i32::MIN as f64..=i32::MAX as f64).contains(&value) {
+            Ok(value as i32)
+        } else {
+            Err(CanvasResizeError::InvalidDimensions)
+        }
+    };
+    let (x0, y0, x1, y1) = (
+        rounded(bounds.x0)?,
+        rounded(bounds.y0)?,
+        rounded(bounds.x1)?,
+        rounded(bounds.y1)?,
+    );
+    let width = u32::try_from(i64::from(x1) - i64::from(x0))
+        .map_err(|_| CanvasResizeError::InvalidDimensions)?;
+    let height = u32::try_from(i64::from(y1) - i64::from(y0))
+        .map_err(|_| CanvasResizeError::InvalidDimensions)?;
+    let dx = x0
+        .checked_neg()
+        .ok_or(CanvasResizeError::InvalidDimensions)?;
+    let dy = y0
+        .checked_neg()
+        .ok_or(CanvasResizeError::InvalidDimensions)?;
+    if !valid_canvas_size(width, height) {
+        return Err(CanvasResizeError::InvalidDimensions);
+    }
+    Ok((width, height, dx, dy))
 }
 
 impl Editor {
@@ -443,6 +541,7 @@ impl Editor {
             events: 0,
             modified: false,
             picked: None,
+            canvas_resize_error: None,
             analyzer: None,
             background_fill: BackgroundFill::Auto,
             custom_stamps: Vec::new(),
@@ -476,6 +575,7 @@ impl Editor {
         self.selection = None;
         self.drag = None;
         self.marquee = None;
+        self.canvas_resize_error = None;
         self.modified = false;
         self.refresh_all();
         self.events |= EVENT_SELECTION | EVENT_DOCUMENT;
@@ -871,6 +971,10 @@ impl Editor {
         self.marquee
     }
 
+    pub fn marquee_is_box_selection(&self) -> bool {
+        matches!(self.drag, Some(Drag::Select { .. }))
+    }
+
     fn set_marquee(&mut self, m: Option<Box2>) {
         if self.marquee != m {
             self.marquee = m;
@@ -880,6 +984,15 @@ impl Editor {
 
     pub fn picked_color(&mut self) -> Option<Rgba> {
         self.picked.take()
+    }
+
+    pub fn take_canvas_resize_error(&mut self) -> Option<CanvasResizeError> {
+        self.canvas_resize_error.take()
+    }
+
+    fn report_canvas_resize_error(&mut self, error: CanvasResizeError) {
+        self.canvas_resize_error = Some(error);
+        self.events |= EVENT_CANVAS_RESIZE_ERROR;
     }
 
     // ---- history -------------------------------------------------------
@@ -1006,6 +1119,15 @@ impl Editor {
         label: &str,
         change: impl FnOnce(&mut Document) -> bool,
     ) -> bool {
+        self.edit_document_with_display(label, None, change)
+    }
+
+    fn edit_document_with_display(
+        &mut self,
+        label: &str,
+        display: Option<Pixmap>,
+        change: impl FnOnce(&mut Document) -> bool,
+    ) -> bool {
         let saved = self.doc.clone();
         if !change(&mut self.doc) {
             self.doc = saved;
@@ -1023,8 +1145,42 @@ impl Editor {
         self.modified = true;
         self.prune_selection();
         self.events |= EVENT_DOCUMENT | EVENT_SELECTION;
+        if let Some(display) = display {
+            // The replacement display bypasses refresh_all's size-change detection.
+            if (self.display.width(), self.display.height()) != self.doc.size() {
+                self.events |= EVENT_RESIZED;
+            }
+            self.display = display;
+        }
         self.refresh_all();
         true
+    }
+
+    fn resize_canvas_from_drag(
+        &mut self,
+        width: u32,
+        height: u32,
+        dx: i32,
+        dy: i32,
+        mut allocate: impl FnMut(u32, u32) -> Result<Pixmap, CanvasResizeError>,
+    ) {
+        if (width, height) == self.doc.size() && dx == 0 && dy == 0 {
+            return;
+        }
+        let buffers = allocate(width, height)
+            .and_then(|display| allocate(width, height).map(|background| (display, background)));
+        match buffers {
+            Ok((display, background)) => {
+                let color = self.canvas_color;
+                self.edit_document_with_display("Resize canvas", Some(display), |doc| {
+                    doc.resize_canvas_preserving_pixels(background, dx, dy, color);
+                    true
+                });
+                self.canvas_resize_error = None;
+                self.events |= EVENT_CANVAS_RESIZED;
+            }
+            Err(error) => self.report_canvas_resize_error(error),
+        }
     }
 
     // ---- object commands -------------------------------------------------
@@ -1492,8 +1648,7 @@ impl Editor {
 
     // ---- pointer -----------------------------------------------------------
 
-    /// Handles at the canvas's right, bottom and bottom-right edges, shown
-    /// when nothing is selected.
+    /// Handles at the canvas's edges and corners, shown when nothing is selected.
     pub fn canvas_handles(&self) -> Vec<(Handle, Pt)> {
         if self.selection.is_some()
             || !matches!(
@@ -1505,10 +1660,26 @@ impl Editor {
         }
         let (w, h) = (self.doc.width() as f32, self.doc.height() as f32);
         vec![
+            (H_TL, Pt::new(0.0, 0.0)),
+            (H_T, Pt::new(w / 2.0, 0.0)),
+            (H_TR, Pt::new(w, 0.0)),
             (H_R, Pt::new(w, h / 2.0)),
-            (H_B, Pt::new(w / 2.0, h)),
             (H_BR, Pt::new(w, h)),
+            (H_B, Pt::new(w / 2.0, h)),
+            (H_BL, Pt::new(0.0, h)),
+            (H_L, Pt::new(0.0, h / 2.0)),
         ]
+    }
+
+    fn canvas_handle_at(&self, p: Pt, tolerance: f32) -> Option<Handle> {
+        self.canvas_handles()
+            .into_iter()
+            .filter_map(|(handle, point)| {
+                let distance = point.dist(p);
+                (distance <= tolerance * 1.5).then_some((handle, distance))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(handle, _)| handle)
     }
 
     /// Grows the canvas to include every object (in the canvas color).
@@ -1551,10 +1722,8 @@ impl Editor {
     }
 
     pub fn hover(&self, p: Pt, tolerance: f32) -> Cursor {
-        for (h, q) in self.canvas_handles() {
-            if q.dist(p) <= tolerance * 1.5 {
-                return handle_cursor(h);
-            }
+        if let Some(handle) = self.canvas_handle_at(p, tolerance) {
+            return handle_cursor(handle);
         }
         if self.tool.uses_marquee()
             || matches!(
@@ -1593,13 +1762,11 @@ impl Editor {
 
     fn pointer_down_impl(&mut self, p: Pt, m: Modifiers, tolerance: f32, pick_existing: bool) {
         self.drag = None;
-        if let Some((h, _)) = self
-            .canvas_handles()
-            .into_iter()
-            .find(|(_, q)| pick_existing && q.dist(p) <= tolerance * 1.5)
-        {
-            self.drag = Some(Drag::Canvas { handle: h });
-            return;
+        if pick_existing {
+            if let Some(handle) = self.canvas_handle_at(p, tolerance) {
+                self.drag = Some(Drag::Canvas { handle, start: p });
+                return;
+            }
         }
         if let Some(id) = self.building {
             let first = match self.doc.get(id).map(|o| &o.kind) {
@@ -1898,14 +2065,10 @@ impl Editor {
                 self.erase_segment(last, p);
                 self.drag = Some(Drag::Erase { last: p });
             }
-            Drag::Canvas { handle } => {
-                let (w, h) = (self.doc.width() as f32, self.doc.height() as f32);
-                let (nw, nh) = match handle {
-                    H_R => (p.x, h),
-                    H_B => (w, p.y),
-                    _ => (p.x, p.y),
-                };
-                self.set_marquee(Some(Box2::new(0.0, 0.0, nw.max(8.0), nh.max(8.0))));
+            Drag::Canvas { handle, start } => {
+                let bounds =
+                    canvas_drag_bounds(self.doc.width(), self.doc.height(), handle, start, p);
+                self.set_marquee(bounds.ok().and_then(CanvasBounds::to_box));
             }
             Drag::MoveMany { last, moved } => {
                 if !moved && last.dist(p) < 1.0 {
@@ -1995,18 +2158,16 @@ impl Editor {
                 }
             }
             Drag::Erase { .. } => {}
-            Drag::Canvas { .. } => {
-                if let Some(m) = self.marquee {
-                    self.set_marquee(None);
-                    let (nw, nh) = (m.x1.round() as u32, m.y1.round() as u32);
-                    let (nw, nh) = (nw.max(8), nh.max(8));
-                    let color = self.canvas_color;
-                    if (nw, nh) != self.doc.size() && valid_canvas_size(nw, nh) {
-                        self.edit_document("Resize canvas", |d| {
-                            d.resize_canvas(nw, nh, 0, 0, color);
-                            true
-                        });
+            Drag::Canvas { handle, start } => {
+                self.set_marquee(None);
+                let geometry =
+                    canvas_drag_bounds(self.doc.width(), self.doc.height(), handle, start, p)
+                        .and_then(canvas_resize_geometry);
+                match geometry {
+                    Ok((width, height, dx, dy)) => {
+                        self.resize_canvas_from_drag(width, height, dx, dy, allocate_canvas_pixmap);
                     }
+                    Err(error) => self.report_canvas_resize_error(error),
                 }
             }
             Drag::Select { start, add } => {
@@ -2717,6 +2878,480 @@ mod tests {
         e.pointer_down(Pt::new(400.0, 300.0), NONE, 4.0);
         e.pointer_up(Pt::new(8_000.0, 5_000.0), NONE);
         assert_eq!(e.document().size(), (400, 300));
+    }
+
+    fn patterned_canvas() -> (Editor, u64) {
+        let mut background = Pixmap::new(80, 60).unwrap();
+        for y in 0..60 {
+            for x in 0..80 {
+                let color = match (x + y) % 3 {
+                    0 => Rgba::TRANSPARENT,
+                    1 => Rgba::new(x as u8, y as u8, 160, 128),
+                    _ => Rgba::rgb(x as u8, y as u8, 160),
+                };
+                raster::set_pixel(&mut background, x, y, color);
+            }
+        }
+        let mut doc = Document::new(background);
+        let id = doc.add(
+            Kind::Shape {
+                rect: Box2::new(25.0, 20.0, 45.0, 40.0),
+                shape: ShapeKind::Rectangle,
+            },
+            Style::default(),
+        );
+        let mut e = Editor::new(doc);
+        e.set_tool(Tool::Select);
+        e.canvas_color = Rgba::new(20, 40, 60, 192);
+        e.take_events();
+        e.take_damage();
+        (e, id)
+    }
+
+    #[test]
+    fn canvas_handles_cover_each_edge_and_corner() {
+        let mut e = editor();
+        e.set_tool(Tool::Select);
+        let expected = [
+            (H_TL, Pt::new(0.0, 0.0), Cursor::ResizeNwse),
+            (H_T, Pt::new(200.0, 0.0), Cursor::ResizeNs),
+            (H_TR, Pt::new(400.0, 0.0), Cursor::ResizeNesw),
+            (H_R, Pt::new(400.0, 150.0), Cursor::ResizeEw),
+            (H_BR, Pt::new(400.0, 300.0), Cursor::ResizeNwse),
+            (H_B, Pt::new(200.0, 300.0), Cursor::ResizeNs),
+            (H_BL, Pt::new(0.0, 300.0), Cursor::ResizeNesw),
+            (H_L, Pt::new(0.0, 150.0), Cursor::ResizeEw),
+        ];
+        assert_eq!(
+            e.canvas_handles(),
+            expected
+                .iter()
+                .map(|(h, p, _)| (*h, *p))
+                .collect::<Vec<_>>()
+        );
+        for (handle, point, cursor) in expected {
+            assert_eq!(e.hover(point, 4.0), cursor, "handle {handle}");
+        }
+
+        for tool in [Tool::Select, Tool::Arrow, Tool::Shape, Tool::Line] {
+            e.set_tool(tool);
+            assert_eq!(e.canvas_handles().len(), 8, "tool {tool:?}");
+        }
+        for tool in [Tool::Crop, Tool::Text, Tool::Pen] {
+            e.set_tool(tool);
+            assert!(e.canvas_handles().is_empty(), "tool {tool:?}");
+        }
+        e.set_tool(Tool::Select);
+        let id = e.doc.add(
+            Kind::Shape {
+                rect: Box2::new(20.0, 20.0, 60.0, 60.0),
+                shape: ShapeKind::Rectangle,
+            },
+            Style::default(),
+        );
+        e.select(Some(id));
+        assert!(e.canvas_handles().is_empty(), "selection owns the handles");
+    }
+
+    #[test]
+    fn canvas_handles_crop_and_expand_without_compositing_pixels() {
+        let cases = [
+            (
+                "top_left_in",
+                (0.0, 0.0),
+                (10.0, 8.0),
+                (10.0, 8.0, 80.0, 60.0),
+                (-10, -8),
+            ),
+            (
+                "top_in",
+                (40.0, 0.0),
+                (40.0, 8.0),
+                (0.0, 8.0, 80.0, 60.0),
+                (0, -8),
+            ),
+            (
+                "top_right_in",
+                (80.0, 0.0),
+                (70.0, 8.0),
+                (0.0, 8.0, 70.0, 60.0),
+                (0, -8),
+            ),
+            (
+                "right_in",
+                (80.0, 30.0),
+                (70.0, 30.0),
+                (0.0, 0.0, 70.0, 60.0),
+                (0, 0),
+            ),
+            (
+                "bottom_right_in",
+                (80.0, 60.0),
+                (70.0, 52.0),
+                (0.0, 0.0, 70.0, 52.0),
+                (0, 0),
+            ),
+            (
+                "bottom_in",
+                (40.0, 60.0),
+                (40.0, 52.0),
+                (0.0, 0.0, 80.0, 52.0),
+                (0, 0),
+            ),
+            (
+                "bottom_left_in",
+                (0.0, 60.0),
+                (10.0, 52.0),
+                (10.0, 0.0, 80.0, 52.0),
+                (-10, 0),
+            ),
+            (
+                "left_in",
+                (0.0, 30.0),
+                (10.0, 30.0),
+                (10.0, 0.0, 80.0, 60.0),
+                (-10, 0),
+            ),
+            (
+                "top_left_out",
+                (0.0, 0.0),
+                (-10.0, -8.0),
+                (-10.0, -8.0, 80.0, 60.0),
+                (10, 8),
+            ),
+            (
+                "top_out",
+                (40.0, 0.0),
+                (40.0, -8.0),
+                (0.0, -8.0, 80.0, 60.0),
+                (0, 8),
+            ),
+            (
+                "top_right_out",
+                (80.0, 0.0),
+                (90.0, -8.0),
+                (0.0, -8.0, 90.0, 60.0),
+                (0, 8),
+            ),
+            (
+                "right_out",
+                (80.0, 30.0),
+                (90.0, 30.0),
+                (0.0, 0.0, 90.0, 60.0),
+                (0, 0),
+            ),
+            (
+                "bottom_right_out",
+                (80.0, 60.0),
+                (90.0, 68.0),
+                (0.0, 0.0, 90.0, 68.0),
+                (0, 0),
+            ),
+            (
+                "bottom_out",
+                (40.0, 60.0),
+                (40.0, 68.0),
+                (0.0, 0.0, 80.0, 68.0),
+                (0, 0),
+            ),
+            (
+                "bottom_left_out",
+                (0.0, 60.0),
+                (-10.0, 68.0),
+                (-10.0, 0.0, 80.0, 68.0),
+                (10, 0),
+            ),
+            (
+                "left_out",
+                (0.0, 30.0),
+                (-10.0, 30.0),
+                (-10.0, 0.0, 80.0, 60.0),
+                (10, 0),
+            ),
+            (
+                "top_right_mixed",
+                (80.0, 0.0),
+                (90.0, 8.0),
+                (0.0, 8.0, 90.0, 60.0),
+                (0, -8),
+            ),
+            (
+                "bottom_left_mixed",
+                (0.0, 60.0),
+                (-10.0, 52.0),
+                (-10.0, 0.0, 80.0, 52.0),
+                (10, 0),
+            ),
+        ];
+        for (name, start, end, bounds, (dx, dy)) in cases {
+            let (mut e, id) = patterned_canvas();
+            let original = e.document().background().clone();
+            let original_rect = e.document().get(id).unwrap().rect().unwrap();
+            let expected = Box2::new(bounds.0, bounds.1, bounds.2, bounds.3);
+            e.pointer_down(Pt::new(start.0, start.1), NONE, 4.0);
+            e.pointer_move(Pt::new(end.0, end.1), NONE);
+            assert_eq!(e.marquee(), Some(expected), "preview for {name}");
+            e.pointer_up(Pt::new(end.0, end.1), NONE);
+            let (width, height) = (expected.width() as u32, expected.height() as u32);
+            assert_eq!(e.document().size(), (width, height), "size for {name}");
+            assert_eq!(
+                e.document().get(id).unwrap().rect(),
+                Some(original_rect.offset(dx as f32, dy as f32)),
+                "annotation for {name}"
+            );
+            for y in 0..height {
+                for x in 0..width {
+                    let (sx, sy) = (x as i32 - dx, y as i32 - dy);
+                    let expected_pixel = if (0..80).contains(&sx) && (0..60).contains(&sy) {
+                        original.pixel(sx as u32, sy as u32).unwrap()
+                    } else {
+                        e.canvas_color.premultiplied()
+                    };
+                    assert_eq!(
+                        e.document().background().pixel(x, y),
+                        Some(expected_pixel),
+                        "pixel ({x}, {y}) for {name}"
+                    );
+                }
+            }
+            let resized = e.document().background().data().to_vec();
+            assert_eq!(e.undo_label(), Some("Resize canvas"), "history for {name}");
+            assert!(e.undo(), "undo for {name}");
+            assert_eq!(e.document().size(), (80, 60), "undo size for {name}");
+            assert_eq!(
+                e.document().background().data(),
+                original.data(),
+                "undo pixels for {name}"
+            );
+            assert_eq!(
+                e.document().get(id).unwrap().rect(),
+                Some(original_rect),
+                "undo object for {name}"
+            );
+            assert!(e.redo(), "redo for {name}");
+            assert_eq!(e.document().size(), (width, height), "redo size for {name}");
+            assert_eq!(
+                e.document().background().data(),
+                resized,
+                "redo pixels for {name}"
+            );
+            assert_eq!(
+                e.document().get(id).unwrap().rect(),
+                Some(original_rect.offset(dx as f32, dy as f32)),
+                "redo object for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn canvas_handles_choose_the_nearest_overlapping_hit() {
+        let mut e = Editor::new(Document::blank(8, 8, Rgba::WHITE));
+        e.set_tool(Tool::Select);
+        for (point, cursor) in [
+            (Pt::new(0.0, 0.0), Cursor::ResizeNwse),
+            (Pt::new(4.0, 0.0), Cursor::ResizeNs),
+            (Pt::new(8.0, 0.0), Cursor::ResizeNesw),
+            (Pt::new(8.0, 4.0), Cursor::ResizeEw),
+            (Pt::new(8.0, 8.0), Cursor::ResizeNwse),
+            (Pt::new(4.0, 8.0), Cursor::ResizeNs),
+            (Pt::new(0.0, 8.0), Cursor::ResizeNesw),
+            (Pt::new(0.0, 4.0), Cursor::ResizeEw),
+        ] {
+            assert_eq!(e.hover(point, 4.0), cursor, "handle at {point:?}");
+        }
+        for (start, end, expected) in [
+            ((4.0, 0.0), (4.0, -4.0), (8, 12)),
+            ((0.0, 4.0), (-4.0, 4.0), (12, 8)),
+        ] {
+            let mut e = Editor::new(Document::blank(8, 8, Rgba::WHITE));
+            e.set_tool(Tool::Select);
+            drag(&mut e, start, end);
+            assert_eq!(e.document().size(), expected, "handle at {start:?}");
+        }
+    }
+
+    #[test]
+    fn canvas_handles_preserve_pointer_offset_and_ignore_clicks() {
+        for (start, end, expected) in [
+            ((2.0, 30.0), (12.0, 30.0), (70, 60)),
+            ((78.0, 30.0), (68.0, 30.0), (70, 60)),
+            ((40.0, 2.0), (40.0, 10.0), (80, 52)),
+            ((40.0, 58.0), (40.0, 50.0), (80, 52)),
+        ] {
+            let (mut e, _) = patterned_canvas();
+            e.pointer_down(Pt::new(start.0, start.1), NONE, 4.0);
+            e.pointer_up(Pt::new(start.0, start.1), NONE);
+            assert_eq!(e.document().size(), (80, 60), "click at {start:?}");
+            assert_eq!(e.undo_label(), None, "click at {start:?}");
+            assert!(!e.is_modified(), "click at {start:?}");
+            drag(&mut e, start, end);
+            assert_eq!(e.document().size(), expected, "drag from {start:?}");
+        }
+    }
+
+    #[test]
+    fn canvas_handles_clamp_when_crossing_the_opposite_edge() {
+        for (start, end, expected) in [
+            ((0.0, 30.0), (100.0, 30.0), (8, 60)),
+            ((40.0, 0.0), (40.0, 80.0), (80, 8)),
+            ((80.0, 30.0), (-20.0, 30.0), (8, 60)),
+            ((40.0, 60.0), (40.0, -20.0), (80, 8)),
+            ((0.0, 0.0), (100.0, 80.0), (8, 8)),
+        ] {
+            let (mut e, _) = patterned_canvas();
+            drag(&mut e, start, end);
+            assert_eq!(e.document().size(), expected, "drag from {start:?}");
+        }
+    }
+
+    #[test]
+    fn canvas_handles_round_fractional_drags_without_spurious_history() {
+        let (mut e, _) = patterned_canvas();
+        drag(&mut e, (0.0, 30.0), (0.49, 30.0));
+        assert_eq!(e.document().size(), (80, 60));
+        assert_eq!(e.undo_label(), None);
+        assert!(!e.is_modified());
+        drag(&mut e, (0.0, 30.0), (0.51, 30.0));
+        assert_eq!(e.document().size(), (79, 60));
+        assert_eq!(e.undo_label(), Some("Resize canvas"));
+    }
+
+    #[test]
+    fn canvas_resize_preview_matches_rounded_crop_and_expansion() {
+        for (start, end, preview, size) in [
+            ((0.0, 30.0), (0.5, 30.0), (1.0, 0.0, 80.0, 60.0), (79, 60)),
+            ((0.0, 30.0), (-0.5, 30.0), (-1.0, 0.0, 80.0, 60.0), (81, 60)),
+            ((80.0, 30.0), (79.5, 30.0), (0.0, 0.0, 80.0, 60.0), (80, 60)),
+            ((0.0, 0.0), (0.5, -0.5), (1.0, -1.0, 80.0, 60.0), (79, 61)),
+        ] {
+            let (mut e, _) = patterned_canvas();
+            e.pointer_down(Pt::new(start.0, start.1), NONE, 4.0);
+            e.pointer_move(Pt::new(end.0, end.1), NONE);
+            assert_eq!(
+                e.marquee(),
+                Some(Box2::new(preview.0, preview.1, preview.2, preview.3))
+            );
+            e.pointer_up(Pt::new(end.0, end.1), NONE);
+            assert_eq!(e.document().size(), size);
+        }
+    }
+
+    #[test]
+    fn canvas_handle_geometry_preserves_large_odd_dimensions_on_click() {
+        let width = 16_777_217;
+        let point = Pt::new(0.0, 0.5);
+        let bounds = canvas_drag_bounds(width, 1, H_L, point, point).unwrap();
+        assert_eq!(canvas_resize_geometry(bounds), Ok((width, 1, 0, 0)));
+    }
+
+    #[test]
+    fn canvas_handles_keep_existing_tiny_images_unchanged_on_click() {
+        let mut e = Editor::new(Document::blank(1, 1, Rgba::WHITE));
+        e.set_tool(Tool::Select);
+        e.pointer_down(Pt::new(0.5, 0.0), NONE, 4.0);
+        e.pointer_up(Pt::new(0.5, 0.0), NONE);
+        assert_eq!(e.document().size(), (1, 1));
+        assert_eq!(e.undo_label(), None);
+        drag(&mut e, (0.5, 0.0), (0.5, -2.0));
+        assert_eq!(e.document().size(), (1, 3));
+    }
+
+    #[test]
+    fn canvas_handles_report_invalid_sizes_without_losing_redo() {
+        for end in [-1_000_000.0, f32::NEG_INFINITY, f32::NAN] {
+            let (mut e, _) = patterned_canvas();
+            drag(&mut e, (80.0, 30.0), (70.0, 30.0));
+            assert!(e.undo());
+            assert_eq!(e.redo_label(), Some("Resize canvas"));
+            e.take_events();
+            e.pointer_down(Pt::new(0.0, 30.0), NONE, 4.0);
+            e.pointer_up(Pt::new(end, 30.0), NONE);
+            assert_eq!(e.document().size(), (80, 60), "invalid end {end}");
+            assert_eq!(e.undo_label(), None, "invalid end {end}");
+            assert_eq!(e.redo_label(), Some("Resize canvas"), "invalid end {end}");
+            assert_eq!(e.marquee(), None, "invalid end {end}");
+            assert_eq!(
+                e.take_canvas_resize_error(),
+                Some(CanvasResizeError::InvalidDimensions),
+                "invalid end {end}"
+            );
+            assert_ne!(
+                e.take_events() & EVENT_CANVAS_RESIZE_ERROR,
+                0,
+                "invalid end {end}"
+            );
+            assert!(e.redo(), "invalid end {end}");
+            assert_eq!(e.document().size(), (70, 60), "invalid end {end}");
+        }
+    }
+
+    #[test]
+    fn successful_canvas_resize_supersedes_a_pending_failure() {
+        let (mut e, _) = patterned_canvas();
+        drag(&mut e, (0.0, 30.0), (-1_000_000.0, 30.0));
+        drag(&mut e, (0.0, 30.0), (10.0, 30.0));
+        assert_eq!(e.document().size(), (70, 60));
+        assert_eq!((e.display().width(), e.display().height()), (70, 60));
+        assert_eq!(e.take_canvas_resize_error(), None);
+        let events = e.take_events();
+        assert_ne!(events & EVENT_CANVAS_RESIZED, 0);
+        assert_ne!(events & EVENT_RESIZED, 0);
+    }
+
+    #[test]
+    fn canvas_resize_allocation_failures_preserve_document_and_history() {
+        for (fail_at, with_redo) in [(0, false), (1, false), (0, true), (1, true)] {
+            let (mut e, id) = patterned_canvas();
+            if with_redo {
+                drag(&mut e, (80.0, 30.0), (70.0, 30.0));
+                assert!(e.undo());
+            }
+            e.take_damage();
+            e.take_events();
+            let pixels = e.document().background().data().to_vec();
+            let display = e.display().data().to_vec();
+            let annotation = e.document().get(id).unwrap().rect();
+            let modified = e.is_modified();
+            let mut attempts = 0;
+            e.resize_canvas_from_drag(70, 60, -10, 0, |width, height| {
+                let attempt = attempts;
+                attempts += 1;
+                if attempt == fail_at {
+                    Err(CanvasResizeError::AllocationFailed)
+                } else {
+                    allocate_canvas_pixmap(width, height)
+                }
+            });
+            assert_eq!(attempts, fail_at + 1);
+            assert_eq!(
+                e.document().size(),
+                (80, 60),
+                "failure at allocation {fail_at}"
+            );
+            assert_eq!(
+                e.document().background().data(),
+                pixels,
+                "failure at allocation {fail_at}"
+            );
+            assert_eq!(
+                e.display().data(),
+                display,
+                "failure at allocation {fail_at}"
+            );
+            assert_eq!(e.document().get(id).unwrap().rect(), annotation);
+            assert_eq!(e.is_modified(), modified);
+            assert_eq!(e.undo_label(), None);
+            assert_eq!(e.redo_label(), with_redo.then_some("Resize canvas"));
+            assert!(e.take_damage().is_none());
+            assert_eq!(
+                e.take_canvas_resize_error(),
+                Some(CanvasResizeError::AllocationFailed)
+            );
+            assert_ne!(e.take_events() & EVENT_CANVAS_RESIZE_ERROR, 0);
+            if with_redo {
+                assert!(e.redo());
+            }
+        }
     }
 
     #[test]

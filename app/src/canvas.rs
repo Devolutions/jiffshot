@@ -145,9 +145,12 @@ pub fn with_display<R>(f: impl FnOnce(&Pixmap) -> R) -> Option<R> {
 /// The selection overlay as it is now.
 pub fn overlay() -> Overlay {
     let _t = crate::trace::span("overlay");
-    let mut o = Overlay::default();
     let guard = EDITOR.lock();
-    let Some(editor) = guard.as_ref() else { return o };
+    guard.as_ref().map(overlay_of).unwrap_or_default()
+}
+
+fn overlay_of(editor: &Editor) -> Overlay {
+    let mut o = Overlay::default();
     if let Some(b) = editor.selection_box() {
         o.selection = Some(b);
         o.rotation = editor.selected().map_or(0.0, |s| if s.rotatable() { s.rotation } else { 0.0 });
@@ -155,8 +158,7 @@ pub fn overlay() -> Overlay {
     }
     if let Some(m) = editor.marquee() {
         o.marquee = Some(m);
-        // Box selection, not an area of the image: no shade or size.
-        o.box_select = editor.tool() == jiffshot_doc::Tool::Select;
+        o.box_select = editor.marquee_is_box_selection();
     }
     if o.selection.is_none() {
         let canvas = editor.canvas_handles();
@@ -169,7 +171,48 @@ pub fn overlay() -> Overlay {
     o
 }
 
+/// Takes a pending canvas-resize error for display in the editor status.
+pub fn take_resize_error() -> Option<String> {
+    EDITOR
+        .lock()
+        .as_mut()?
+        .take_canvas_resize_error()
+        .map(|error| format!("Could not resize canvas: {error}"))
+}
+
 /// Runs `f` on the editor (if started) without holding the lock afterwards.
 pub fn with_editor<R>(f: impl FnOnce(&mut Editor) -> R) -> Option<R> {
     EDITOR.lock().as_mut().map(f)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jiffshot_doc::editor::{Modifiers, Tool};
+    use jiffshot_doc::{Document, Rgba};
+
+    const NONE: Modifiers = Modifiers {
+        shift: false,
+        ctrl: false,
+        alt: false,
+    };
+
+    #[test]
+    fn canvas_resize_preview_is_not_a_box_selection() {
+        let mut editor = Editor::new(Document::blank(100, 60, Rgba::WHITE));
+        editor.set_tool(Tool::Select);
+        editor.pointer_down(Pt::new(0.0, 30.0), NONE, 4.0);
+        editor.pointer_move(Pt::new(10.0, 30.0), NONE);
+        let overlay = overlay_of(&editor);
+        assert!(overlay.canvas_handles);
+        assert!(!overlay.box_select);
+        assert_eq!(overlay.marquee, Some(Box2::new(10.0, 0.0, 100.0, 60.0)));
+
+        editor.pointer_up(Pt::new(10.0, 30.0), NONE);
+        editor.pointer_down(Pt::new(30.0, 20.0), NONE, 4.0);
+        editor.pointer_move(Pt::new(50.0, 40.0), NONE);
+        let overlay = overlay_of(&editor);
+        assert!(overlay.box_select);
+        assert_eq!(overlay.marquee, Some(Box2::new(30.0, 20.0, 50.0, 40.0)));
+    }
 }

@@ -1217,6 +1217,11 @@ impl App {
         let events = PENDING_EVENTS.swap(0, Ordering::Relaxed)
             | with_editor(|e| e.take_events()).unwrap_or(0);
         let Some(s) = self.snapshot() else { return };
+        if let Some(error) = crate::canvas::take_resize_error() {
+            self.set_status(error);
+        } else if events & ed::EVENT_CANVAS_RESIZED != 0 {
+            self.set_status(format!("Resized canvas to {} × {} px", s.size.0, s.size.1));
+        }
         if let Some(color) = s.picked {
             let hex = color.to_hex();
             self.set_status(format!("Picked {hex} — it is now the stroke color."));

@@ -96,6 +96,31 @@ enum Gesture {
     },
 }
 
+#[derive(Clone, Copy)]
+struct PointerEvent {
+    kind: PointerKind,
+    x: f64,
+    y: f64,
+    button: MouseButton,
+    modifiers: Modifiers,
+    click_count: i32,
+    delta_y: f64,
+}
+
+impl From<&PointerInput> for PointerEvent {
+    fn from(p: &PointerInput) -> Self {
+        Self {
+            kind: p.kind,
+            x: p.x,
+            y: p.y,
+            button: p.button,
+            modifiers: p.modifiers,
+            click_count: p.click_count,
+            delta_y: p.delta_y,
+        }
+    }
+}
+
 /// What to tell the handlers once the state is released.
 #[derive(Clone, Copy, Debug, Default)]
 #[must_use]
@@ -363,6 +388,34 @@ impl CanvasView {
         self.inner.notify(notice);
     }
 
+    #[cfg(any(windows, target_os = "macos"))]
+    pub(crate) fn selftest_view_point(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let st = self.inner.state.try_borrow().ok()?;
+        Some((x * st.zoom + st.offset.0, y * st.zoom + st.offset.1))
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    pub(crate) fn selftest_cursor(&self) -> Option<Cursor> {
+        self.inner.state.try_borrow().ok().map(|st| st.cursor)
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    pub(crate) fn selftest_view_pointer(&self, kind: PointerKind, x: f64, y: f64) -> Result<bool> {
+        self.inner.handle_pointer(PointerEvent {
+            kind,
+            x,
+            y,
+            button: if kind == PointerKind::Moved {
+                MouseButton::None
+            } else {
+                MouseButton::Left
+            },
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            delta_y: 0.0,
+        })
+    }
+
     /// Follows the editor's color theme ("Dark", "Light" or "System") for the
     /// backdrop around the document. Dark until called.
     pub fn follow_theme(&self, theme: Signal<String>) -> Result<()> {
@@ -612,6 +665,10 @@ impl Inner {
     }
 
     fn on_pointer(self: &Rc<Self>, p: &PointerInput) -> Result<bool> {
+        self.handle_pointer(PointerEvent::from(p))
+    }
+
+    fn handle_pointer(self: &Rc<Self>, p: PointerEvent) -> Result<bool> {
         let Some(mut st) = self.state() else {
             return Ok(false);
         };
@@ -796,6 +853,53 @@ mod tests {
         st.zoom_around((0.0, 0.0), 0.0);
         assert_eq!(MIN_ZOOM, st.zoom);
         assert!(!st.fit_pending);
+    }
+
+    #[test]
+    fn canvas_handles_hit_at_zoomed_and_panned_view_coordinates() {
+        use jiffshot_doc::editor::{Cursor as EditorCursor, Editor, Modifiers, Tool};
+        use jiffshot_doc::{Document, Pt, Rgba};
+
+        let mut st = state((800.0, 600.0), (400, 300));
+        st.zoom = 1.75;
+        st.offset = (30.0, 45.0);
+        let mut editor = Editor::new(Document::blank(400, 300, Rgba::WHITE));
+        editor.set_tool(Tool::Select);
+        for (document, expected) in [
+            ((0.0, 0.0), EditorCursor::ResizeNwse),
+            ((200.0, 0.0), EditorCursor::ResizeNs),
+            ((0.0, 150.0), EditorCursor::ResizeEw),
+            ((400.0, 0.0), EditorCursor::ResizeNesw),
+            ((0.0, 300.0), EditorCursor::ResizeNesw),
+        ] {
+            let view = (
+                document.0 * st.zoom + st.offset.0,
+                document.1 * st.zoom + st.offset.1,
+            );
+            let point = st.to_document(view.0, view.1);
+            assert_eq!(
+                editor.hover(
+                    Pt::new(point.0 as f32, point.1 as f32),
+                    st.tolerance() as f32
+                ),
+                expected,
+                "view position {view:?}"
+            );
+        }
+        let modifiers = Modifiers {
+            shift: false,
+            ctrl: false,
+            alt: false,
+        };
+        let start = st.to_document(st.offset.0, st.offset.1 + 150.0 * st.zoom);
+        let end = st.to_document(st.offset.0 + 25.0 * st.zoom, st.offset.1 + 150.0 * st.zoom);
+        editor.pointer_down(
+            Pt::new(start.0 as f32, start.1 as f32),
+            modifiers,
+            st.tolerance() as f32,
+        );
+        editor.pointer_up(Pt::new(end.0 as f32, end.1 as f32), modifiers);
+        assert_eq!(editor.document().size(), (375, 300));
     }
 
     #[test]
