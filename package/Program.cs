@@ -14,6 +14,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 using WixSharp;
 using File = WixSharp.File;
 
@@ -28,6 +29,10 @@ internal static class Program
     private const string ExecutableName = "jiffshot.exe";
     private const string CliName = "jiffshot-cli.exe";
     private const string DocumentProgId = "jiffshot.Document";
+    private const string X64ConditionMessage =
+        "This installer requires Windows x64. Download the ARM64 MSI for a Windows on ARM device.";
+    private const string Arm64ConditionMessage =
+        "This installer requires Windows on ARM64. Download the x64 MSI for an Intel or AMD PC.";
 
     /// <summary>Identifies Jiffshot across versions: never change it.</summary>
     private static readonly Guid UpgradeCode = new("68498651-3ba2-495a-9a99-a008177cf534");
@@ -120,6 +125,13 @@ internal static class Program
         {
             foreach (var component in doc.Descendants().Where(e => e.Name.LocalName == "Component"))
                 component.SetAttributeValue("Bitness", "always64");
+
+            var package = doc.Descendants().Single(e => e.Name.LocalName == "Package");
+            var isArm64 = o.Platform == Platform.arm64;
+            package.Add(new XElement(
+                package.Name.Namespace + "Launch",
+                new XAttribute("Condition", isArm64 ? "Arm64" : "NOT Arm64"),
+                new XAttribute("Message", isArm64 ? Arm64ConditionMessage : X64ConditionMessage)));
         };
 
         // Light leaves an MSI behind even when validation fails, and BuildMsi

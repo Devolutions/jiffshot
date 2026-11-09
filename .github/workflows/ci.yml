@@ -889,6 +889,23 @@ jobs:
           }
           & $pkgExe -bin bin -platform ${{ matrix.platform }} -version $expectedVersion -out msi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $msi = (Get-ChildItem -LiteralPath msi -Filter '*.msi' | Select-Object -First 1).FullName
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          $database = $installer.OpenDatabase($msi, 0)
+          if ('${{ matrix.platform }}' -eq 'arm64') {
+            $expectedCondition = 'Arm64'
+            $expectedMessage = 'This installer requires Windows on ARM64. Download the x64 MSI for an Intel or AMD PC.'
+          } else {
+            $expectedCondition = 'NOT Arm64'
+            $expectedMessage = 'This installer requires Windows x64. Download the ARM64 MSI for a Windows on ARM device.'
+          }
+          $query = "SELECT ``Description`` FROM ``LaunchCondition`` WHERE ``Condition`` = '$expectedCondition'"
+          $view = $database.OpenView($query)
+          $view.Execute()
+          $launchCondition = $view.Fetch()
+          if ($null -eq $launchCondition -or $launchCondition.StringData(1) -cne $expectedMessage) {
+            throw "The ${{ matrix.platform }} MSI is missing its platform launch-condition error message."
+          }
           Get-ChildItem msi | Format-Table Name, Length
 
       - name: Sign MSI
