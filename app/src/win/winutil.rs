@@ -216,6 +216,49 @@ pub fn open_folder(path: &Path) {
     }
 }
 
+#[cfg(windows)]
+pub fn open_url(url: &str) -> Result<(), String> {
+    let verb = wide("open");
+    let url = wide(url);
+    // SAFETY: NUL-terminated strings outlive the call.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            url.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result as isize > 32 {
+        Ok(())
+    } else {
+        Err(format!("Windows shell returned {}", result as isize))
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn open_url(url: &str) -> Result<(), String> {
+    use objc2_foundation::{NSString, NSURL};
+
+    let url = NSURL::URLWithString(&NSString::from_str(url)).ok_or_else(|| "The URL is invalid.".to_owned())?;
+    if objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url) {
+        Ok(())
+    } else {
+        Err("The system could not open the URL.".to_owned())
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn open_url(url: &str) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not start xdg-open: {error}"))
+}
+
 /// Opens the system print dialog for a file.
 #[cfg(windows)]
 pub fn print_file(path: &Path) -> bool {
