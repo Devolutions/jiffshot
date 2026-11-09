@@ -74,11 +74,13 @@ pub(super) fn selection_action(
 ) -> Result<&'static str, String> {
     match action {
         SelectionAction::SelectAll => {
-            if editor.document().objects.is_empty() {
-                return Err("There are no annotations to select.".to_owned());
-            }
+            let image = editor.document().objects.is_empty();
             editor.select_all();
-            Ok("All annotations selected.")
+            Ok(if image {
+                "Image selected."
+            } else {
+                "All annotations selected."
+            })
         }
         SelectionAction::Deselect => {
             if editor.selected_ids().is_empty() {
@@ -710,7 +712,6 @@ mod tests {
     fn selection_actions_report_unavailable_operations() {
         let mut editor = Editor::new(Document::blank(8, 8, Rgba::WHITE));
         for action in [
-            SelectionAction::SelectAll,
             SelectionAction::Deselect,
             SelectionAction::Invert,
             SelectionAction::Delete,

@@ -180,7 +180,7 @@ The detailed feature list below describes the Windows application. The Linux bui
 - **Smart Move:** Drag around a button, card, or UI element to lift it off its background (automatically filling the hole left behind) so you can reposition it anywhere.
 - **Smart Redact:** Scan the screenshot with one click to automatically detect and cover sensitive patterns such as email addresses and phone numbers with removable redaction boxes.
 - **Simplify UI:** Convert dense UI text across a screenshot into clean, color-matched placeholder bars for simplified documentation graphics.
-- **Cut Out & Auto-Trim:** Drag horizontally or vertically across a section to slice it out and join the remaining halves (with a straight seam or torn edge), or auto-trim solid-colored margins in one click.
+- **Cut Out & Auto-Trim:** Cut Out defaults to a rectangular image selection: drag to lift a region, then move it or use Copy/Cut. Choose Horizontal or Vertical to remove a full-width or full-height band and join the remaining halves (with a straight seam or torn edge). Auto-trim removes solid-colored margins in one click.
 - **Canvas Handles:** With nothing selected and the Select, Arrow, Shape, or Line tool active, drag any edge or corner inward to crop or outward to add canvas in the selected color. Existing image transparency and annotation positions are preserved.
 
 ### Effects, Templates & Image Combining
@@ -287,8 +287,8 @@ On macOS, use `Cmd` in place of `Ctrl` in the following editor shortcuts.
 | `Ctrl+Shift+C` | Copy flattened image to clipboard |
 | `Ctrl+P` / `Ctrl+W` | Print / Close current capture |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / Redo |
-| `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / Cut / Paste selected annotation objects |
-| `Ctrl+A` / `Ctrl+D` / `Ctrl+Shift+I` | Select all / Deselect / Invert selection |
+| `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / Cut / Paste selected objects or image regions |
+| `Ctrl+A` / `Ctrl+D` / `Ctrl+Shift+I` | Select all annotations (or the whole image when there are none) / Deselect / Invert selection |
 | `Ctrl+Shift+G` / `Ctrl+Shift+U` | Group / Ungroup selected objects |
 | `Ctrl+Shift+F` / `Ctrl+Shift+B` | Bring forward / Send backward |
 | `Ctrl+T` / `Ctrl+Shift+T` | Flatten selected objects / Flatten all objects into background |
@@ -298,6 +298,11 @@ On macOS, use `Cmd` in place of `Ctrl` in the following editor shortcuts.
 | `Ctrl+L` | Toggle full Library view |
 | `Ctrl+,` | Open Preferences |
 | `F1` | Show Keyboard Shortcuts dialog |
+
+Use the **Selection** tool's Rectangle variant to lift an image region, then
+`Ctrl+C` or `Ctrl+X` to copy its pixels to the system clipboard. Cut removes the
+region only after copying succeeds; Undo restores it. With nothing selected,
+the canvas has resize handles at every edge and corner, including the top and left.
 
 ---
 
@@ -723,6 +728,7 @@ creates only one.
 
 The editor drives its own UI when `JIFFSHOT_UITEST=DIR` is set (with `JIFFSHOT_UITEST_IMAGE`, `JIFFSHOT_UITEST_VIDEO`, an isolated `JIFFSHOT_LIBRARY` and, to leave your settings alone, scratch `APPDATA` and `LOCALAPPDATA`), writing screenshots of every window and `ui-log.txt` to `DIR`. Set `JIFFSHOT_UITEST_CAPTURE_ONLY=1` to check just the Capture window and chooser, or `JIFFSHOT_UITEST_HUD_ONLY=1` to check the recording toolbar, including restoring hidden controls. Set `JIFFSHOT_UITEST_KEEP=1` to leave the Capture window open for inspection. To exercise library edits, set `JIFFSHOT_LIBRARY` to an existing folder inside `DIR`; otherwise those steps are skipped to protect the normal library. `cargo run -p jiffshot-doc --example synthetic -- OUT.png` writes the test image its coordinates assume.
 Set `JIFFSHOT_UITEST_CANVAS=1` to check all canvas handle cursors and view-coordinate crop and expansion at fit and zoom, without moving the system pointer.
+Set `JIFFSHOT_UITEST_SELECTION=1` to check full-image selection, rectangular Copy/Cut, clipboard failure reporting and undo without changing the system clipboard.
 On Windows, `JIFFSHOT_UITEST_CAPTURE_MENUS=1` checks Capture menu hover switching, click-to-dismiss, dismissal cleanup, and DarkBlue popup backgrounds and borders without changing the system pointer. It also checks that changing to Light closes the old popup and preserves the light palette. Use the same isolated settings and library paths.
 Set `JIFFSHOT_UITEST_VIDEO_EDIT=1` with a short `JIFFSHOT_UITEST_VIDEO` fixture and an empty scratch library inside `DIR` for the focused multi-cut, undo/redo, playback, automatic-save and subsequent-save checks.
 On macOS, set `JIFFSHOT_UITEST_APP_NAME=1` to check the native application name and menu across editor and Capture windows. Set `JIFFSHOT_UITEST_OVERLAY=1` to run a focused synthetic selection-window lifecycle test without screen captures. Use scratch `JIFFSHOT_CONFIG_DIR` and `JIFFSHOT_LOCAL_DIR` for both.
