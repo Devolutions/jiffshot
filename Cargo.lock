@@ -1390,6 +1390,7 @@ dependencies = [
  "jiffshot-capture",
  "jiffshot-control",
  "jiffshot-doc",
+ "jiffshot-video",
  "jiffshot-workflow",
  "ksni",
  "leptess",
@@ -1419,6 +1420,7 @@ dependencies = [
  "arboard",
  "block2",
  "dispatch2",
+ "gif",
  "gstreamer",
  "gstreamer-app",
  "gstreamer-pbutils",
@@ -1440,6 +1442,7 @@ dependencies = [
  "png 0.17.16",
  "serde",
  "serde_json",
+ "tempfile",
  "tiny-skia",
  "windows",
  "windows-sys 0.59.0",
@@ -1479,6 +1482,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "jiffshot-video"
+version = "0.6.0"
+dependencies = [
+ "jiffshot-capture",
+ "jiffshot-control",
+ "jiffshot-doc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "jiffshot-workflow"
 version = "0.6.0"
 dependencies = [
@@ -1487,6 +1502,7 @@ dependencies = [
  "jiffshot-capture",
  "jiffshot-control",
  "jiffshot-doc",
+ "jiffshot-video",
  "libc",
  "objc2",
  "objc2-app-kit",

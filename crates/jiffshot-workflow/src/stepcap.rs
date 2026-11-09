@@ -6,11 +6,10 @@
 use crate::geometry::CaptureLayout;
 use crate::hud;
 use jiffshot_capture::{CaptureMapping, Frame, Rect};
-use jiffshot_doc::object::{Kind, ShapeKind, Style};
-use jiffshot_doc::stamps::Stamp;
-use jiffshot_doc::text::Align;
-use jiffshot_doc::{Box2, Document, Pt, Rgba};
+use jiffshot_doc::Document;
 use std::sync::Mutex;
+
+pub(crate) use jiffshot_video::guide::frame_to_pixmap;
 
 /// One recorded click.
 pub struct Step {
@@ -571,14 +570,6 @@ pub fn record() -> std::io::Result<Option<Vec<Step>>> {
     result
 }
 
-pub(crate) fn frame_to_pixmap(f: &Frame) -> Option<tiny_skia::Pixmap> {
-    let mut rgba = Vec::with_capacity(f.pixels.len());
-    for p in f.pixels.chunks_exact(4) {
-        rgba.extend_from_slice(&[p[2], p[1], p[0], 255]);
-    }
-    tiny_skia::Pixmap::from_vec(rgba, tiny_skia::IntSize::from_wh(f.width, f.height)?)
-}
-
 /// Lays the steps out as an editable guide: a title, then for each step a
 /// number, its caption and the screen zoomed around the click, with the
 /// click circled and a pointer stamp on it.
@@ -587,150 +578,29 @@ pub fn guide(steps: &[Step]) -> std::io::Result<Document> {
 }
 
 pub fn guide_titled(steps: &[Step], title: &str) -> std::io::Result<Document> {
-    const W: f32 = 1400.0;
-    const SHOT: (f32, f32) = (1000.0, 560.0);
-    for (index, step) in steps.iter().enumerate() {
-        step.frame.validate().map_err(|error| {
-            std::io::Error::new(error.kind(), format!("invalid screenshot for step {}: {error}", index + 1))
-        })?;
-    }
-    let pad = 40.0;
-    let row = SHOT.1 + pad * 1.5;
-    let h = 140.0 + steps.len() as f32 * row + pad;
-    let mut doc = Document::blank(W as u32, h as u32, Rgba::WHITE);
-    let ink = Rgba::rgb(0x22, 0x26, 0x2E);
-    let accent = Rgba::rgb(0x1E, 0x6F, 0xD9);
-    let text = |size: f32, bold: bool, color: Rgba| Style {
-        font_size: size,
-        bold,
-        text_color: color,
-        width: 0.0,
-        fill: Rgba::TRANSPARENT,
-        align: Align::Left,
-        ..Style::default()
-    };
-    doc.add(
-        Kind::Text {
-            rect: Box2::from_xywh(pad, 30.0, W - 2.0 * pad, 60.0),
-            text: title.into(),
-        },
-        text(40.0, true, ink),
-    );
-    doc.add(
-        Kind::Text {
-            rect: Box2::from_xywh(pad, 88.0, W - 2.0 * pad, 30.0),
-            text: format!("{} steps", steps.len()),
-        },
-        text(18.0, false, Rgba::rgb(0x6B, 0x72, 0x80)),
-    );
-    for (i, step) in steps.iter().enumerate() {
-        let y = 140.0 + i as f32 * row;
-        // The part of the screen around the click, at most SHOT in size.
-        let (fw, fh) = (step.frame.width as f32, step.frame.height as f32);
-        let mapping = match step.mapping {
-            Some(mapping)
-                if mapping.rect() == step.area
-                    && mapping.size() == (step.frame.width, step.frame.height) =>
-            {
-                Some(mapping)
-            }
-            Some(_) => None,
-            None => CaptureMapping::new(step.area, step.frame.width, step.frame.height),
-        }
-        .ok_or_else(|| {
-            std::io::Error::other("a Step Capture image has invalid screen dimensions")
-        })?;
-        #[cfg(target_os = "macos")]
-        let (cx, cy) = match step.click_precise {
-            Some((x, y)) => mapping.image_point_precise(x, y).ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "a Step Capture click position is invalid",
-                )
-            })?,
-            None => mapping.image_point(step.click.0, step.click.1),
-        };
-        #[cfg(windows)]
-        let (cx, cy) = mapping.image_point(step.click.0, step.click.1);
-        let (cx, cy) = (cx as f32, cy as f32);
-        let (vw, vh) = (SHOT.0.min(fw), SHOT.1.min(fh));
-        let vx = (cx - vw / 2.0).clamp(0.0, fw - vw);
-        let vy = (cy - vh / 2.0).clamp(0.0, fh - vh);
-        let crop = step
-            .frame
-            .crop(Rect::new(vx as i32, vy as i32, vw as i32, vh as i32));
-        let x0 = pad + 70.0;
-        if let Some(pm) = crop.as_ref().and_then(frame_to_pixmap) {
-            let rect = Box2::from_xywh(x0, y, pm.width() as f32, pm.height() as f32);
-            let style = Style {
-                width: 1.5,
-                stroke: Rgba::rgb(0xD0, 0xD4, 0xDA),
-                shadow: true,
-                ..Style::default()
-            };
-            doc.add(
-                Kind::Image {
-                    rect,
-                    image: jiffshot_doc::object::ImageRef::new(format!("step-{}", i + 1), pm),
-                },
-                style,
-            );
-            let (px, py) = (x0 + cx - vx, y + cy - vy);
-            let ring = Style {
-                stroke: if step.right {
-                    Rgba::rgb(0xF5, 0x9E, 0x0B)
-                } else {
-                    Rgba::RED
-                },
-                width: 4.0,
-                fill: Rgba::TRANSPARENT,
-                ..Style::default()
-            };
-            doc.add(
-                Kind::Shape {
-                    rect: Box2::around(Pt::new(px, py), 22.0, 22.0),
-                    shape: ShapeKind::Ellipse,
-                },
-                ring,
-            );
-            doc.add(
-                Kind::Stamp {
-                    rect: Box2::from_xywh(px - 6.0, py - 4.0, 34.0, 40.0),
-                    stamp: Stamp::Pointer,
-                },
-                Style::default(),
-            );
-        }
-        let badge = Style {
-            fill: accent,
-            text_color: Rgba::WHITE,
-            width: 0.0,
-            font_size: 24.0,
-            ..Style::default()
-        };
-        doc.add(
-            Kind::Step {
-                center: Pt::new(pad + 26.0, y + 26.0),
-                radius: 24.0,
-                label: (i + 1).to_string(),
-                shape: ShapeKind::Ellipse,
-            },
-            badge,
-        );
-        doc.add(
-            Kind::Text {
-                rect: Box2::from_xywh(x0 + SHOT.0 + 24.0, y, W - x0 - SHOT.0 - 24.0 - pad, 120.0),
-                text: step.description.clone(),
-            },
-            text(22.0, false, ink),
-        );
-    }
-    Ok(doc)
+    let shared_steps: Vec<_> = steps
+        .iter()
+        .map(|step| jiffshot_video::guide::Step {
+            frame: &step.frame,
+            area: step.area,
+            mapping: step.mapping,
+            click: step.click,
+            #[cfg(target_os = "macos")]
+            click_precise: step.click_precise,
+            #[cfg(not(target_os = "macos"))]
+            click_precise: None,
+            right: step.right,
+            description: &step.description,
+        })
+        .collect();
+    jiffshot_video::guide::render(&shared_steps, title)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jiffshot_doc::object::{Kind, ShapeKind};
+    use jiffshot_doc::Pt;
 
     static RECORD_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1115,7 +985,10 @@ mod tests {
             right: false,
             description: String::new(),
         };
-        assert_eq!(guide(&[step]).unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            guide(&[step]).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
     }
 
     #[test]

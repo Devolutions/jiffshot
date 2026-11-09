@@ -1,70 +1,9 @@
 //! Gapless presentation edits for AAC wrappers' unreported priming.
 
+use jiffshot_capture::media::mp4::{atoms, child, number, version, Atom, MAX_MOOV_BYTES};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-
-const MAX_MOOV_BYTES: u64 = 64 * 1024 * 1024;
-
-#[derive(Clone, Copy)]
-struct Atom {
-    start: usize,
-    end: usize,
-    kind: [u8; 4],
-}
-
-fn atoms(bytes: &[u8], start: usize, end: usize) -> Result<Vec<Atom>, String> {
-    let mut cursor = start;
-    let mut result = Vec::new();
-    while cursor < end {
-        let header = bytes.get(cursor..cursor + 8).ok_or("truncated MP4 atom")?;
-        let size =
-            u32::from_be_bytes(header[..4].try_into().map_err(|_| "invalid MP4 size")?) as usize;
-        if size < 8 || size > end - cursor {
-            return Err("invalid MP4 atom bounds".to_owned());
-        }
-        result.push(Atom {
-            start: cursor,
-            end: cursor + size,
-            kind: header[4..8].try_into().map_err(|_| "invalid MP4 type")?,
-        });
-        cursor += size;
-    }
-    Ok(result)
-}
-
-fn child(bytes: &[u8], parent: Atom, kind: &[u8; 4]) -> Result<Atom, String> {
-    let mut matches = atoms(bytes, parent.start + 8, parent.end)?
-        .into_iter()
-        .filter(|atom| &atom.kind == kind);
-    let result = matches
-        .next()
-        .ok_or_else(|| format!("MP4 is missing {}", String::from_utf8_lossy(kind)))?;
-    if matches.next().is_some() {
-        return Err("duplicate MP4 timing atom".to_owned());
-    }
-    Ok(result)
-}
-
-fn number(bytes: &[u8], atom: Atom, offset: usize, width: usize) -> Result<u64, String> {
-    let start = atom.start + 8 + offset;
-    let end = start.checked_add(width).ok_or("MP4 field overflow")?;
-    if end > atom.end {
-        return Err("truncated MP4 timing field".to_owned());
-    }
-    let field = bytes.get(start..end).ok_or("truncated MP4 timing field")?;
-    Ok(field
-        .iter()
-        .fold(0u64, |value, byte| (value << 8) | u64::from(*byte)))
-}
-
-fn version(bytes: &[u8], atom: Atom) -> Result<usize, String> {
-    match number(bytes, atom, 0, 1)? {
-        0 => Ok(0),
-        1 => Ok(1),
-        _ => Err("unsupported MP4 timing version".to_owned()),
-    }
-}
 
 fn duration_field(bytes: &[u8], atom: Atom, track: bool) -> Result<(usize, usize), String> {
     let version = version(bytes, atom)?;

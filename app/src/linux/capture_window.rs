@@ -329,7 +329,9 @@ fn pick(id: &str) {
             let _ = std::process::Command::new("xdg-open").arg("https://github.com/Devolutions/jiffshot").spawn();
         }
         "pause" => {
-            let _ = super::control::record_pause();
+            if let Err(error) = super::control::record_pause() {
+                super::shared::report(format!("Could not change recording pause state: {error}"));
+            }
         }
         "preset-save" => {
             let (delay, cursor) = with(|s| (s.delay, s.cursor));

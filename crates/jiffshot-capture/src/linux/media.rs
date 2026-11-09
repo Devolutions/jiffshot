@@ -6,6 +6,7 @@ use super::{AudioBlock, AudioSpec, Result, VideoFrame, VideoSpec, HNS_PER_SECOND
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
+use gstreamer_pbutils::prelude::DiscovererStreamInfoExt;
 use gstreamer_video as gst_video;
 use gstreamer_video::prelude::*;
 use std::path::Path;
@@ -15,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const AAC_ENCODERS: [&str; 3] = ["voaacenc", "avenc_aac", "fdkaacenc"];
-const PULL_TIMEOUT: gst::ClockTime = gst::ClockTime::from_seconds(10);
+const PULL_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn e(error: impl std::fmt::Display) -> String {
     error.to_string()
@@ -81,6 +82,31 @@ fn settle(pipeline: &gst::Pipeline) -> Result<()> {
             gst::MessageView::Error(error) => Err(error.error().to_string()),
             _ => Ok(()),
         };
+    }
+}
+
+fn pull_sample(
+    pipeline: &gst::Pipeline,
+    sink: &gst_app::AppSink,
+    kind: &str,
+) -> Result<Option<gst::Sample>> {
+    let bus = pipeline.bus().ok_or("the pipeline has no bus")?;
+    let deadline = Instant::now() + PULL_TIMEOUT;
+    loop {
+        if let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(100)) {
+            return Ok(Some(sample));
+        }
+        if let Some(message) = bus.pop_filtered(&[gst::MessageType::Error]) {
+            if let gst::MessageView::Error(error) = message.view() {
+                return Err(format!("{kind} decoding failed: {}", error.error()));
+            }
+        }
+        if sink.is_eos() {
+            return Ok(None);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("{kind} decoding timed out before end-of-stream"));
+        }
     }
 }
 
@@ -220,6 +246,7 @@ pub struct Reader {
     pub height: u32,
     pub duration: i64,
     pub fps: f64,
+    pub codec: Option<String>,
     pub audio: Option<AudioSpec>,
     audio_error: Option<String>,
 }
@@ -233,9 +260,10 @@ impl Reader {
         let uri = file_uri(path)?;
         let pipeline = launch(&format!("uridecodebin uri={uri:?} ! {BGRA_SINK}"))?;
         let mut reader = Self::start(pipeline, Some(uri.clone()))?;
-        let (audio, audio_error) = probe_audio(&uri);
+        let (audio, audio_error, codec) = probe_media(&uri);
         reader.audio = audio;
         reader.audio_error = audio_error;
+        reader.codec = codec;
         Ok(reader)
     }
 
@@ -279,6 +307,7 @@ impl Reader {
             height: info.height(),
             duration,
             fps,
+            codec: None,
             audio: None,
             audio_error: None,
         })
@@ -336,7 +365,7 @@ impl Reader {
         if !self.video_on {
             return Ok(None);
         }
-        let Some(sample) = self.video_sink.try_pull_sample(PULL_TIMEOUT) else {
+        let Some(sample) = pull_sample(&self.video, &self.video_sink, "video")? else {
             return Ok(None);
         };
         let buffer = sample.buffer().ok_or("a frame had no data")?;
@@ -364,10 +393,10 @@ impl Reader {
         if !self.audio_on {
             return Ok(None);
         }
-        let Some((_, sink)) = &self.audio_pipeline else {
+        let Some((pipeline, sink)) = &self.audio_pipeline else {
             return Ok(None);
         };
-        let Some(sample) = sink.try_pull_sample(PULL_TIMEOUT) else {
+        let Some(sample) = pull_sample(pipeline, sink, "audio")? else {
             return Ok(None);
         };
         let buffer = sample.buffer().ok_or("audio had no data")?;
@@ -404,20 +433,29 @@ impl Drop for Reader {
     }
 }
 
-/// The audio format of the file's first audio stream, if it has one.
-fn probe_audio(uri: &str) -> (Option<AudioSpec>, Option<String>) {
-    let probe = || -> Result<Option<AudioSpec>> {
+/// The first audio format and encoded video caps, when discoverer can inspect them.
+fn probe_media(uri: &str) -> (Option<AudioSpec>, Option<String>, Option<String>) {
+    let probe = || -> Result<(Option<AudioSpec>, Option<String>)> {
         let discoverer =
             gstreamer_pbutils::Discoverer::new(gst::ClockTime::from_seconds(10)).map_err(e)?;
         let info = discoverer.discover_uri(uri).map_err(e)?;
-        Ok(info.audio_streams().first().map(|stream| AudioSpec {
+        let audio = info.audio_streams().first().map(|stream| AudioSpec {
             sample_rate: stream.sample_rate(),
             channels: 2,
-        }))
+        });
+        let codec = info
+            .video_streams()
+            .first()
+            .and_then(|stream| stream.caps())
+            .and_then(|caps| {
+                caps.structure(0)
+                    .map(|structure| structure.name().to_string())
+            });
+        Ok((audio, codec))
     };
     match probe() {
-        Ok(audio) => (audio, None),
-        Err(error) => (None, Some(error)),
+        Ok((audio, codec)) => (audio, None, codec),
+        Err(error) => (None, Some(error), None),
     }
 }
 
@@ -540,4 +578,51 @@ pub fn capture_audio_cancellable(
         thread: Some(thread),
         failure,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn video_reader_reports_pipeline_error_instead_of_eof() {
+        startup().expect("initialize GStreamer");
+        let pipeline = launch(&format!(
+            "videotestsrc num-buffers=3 ! identity error-after=2 ! {BGRA_SINK}"
+        ))
+        .expect("create failing video pipeline");
+        let mut reader = Reader::start(pipeline, None).expect("start video pipeline");
+
+        assert!(reader.next_video().expect("first frame").is_some());
+        assert!(
+            reader.next_video().is_err(),
+            "a decoder error must not be reported as end-of-stream"
+        );
+    }
+
+    #[test]
+    fn audio_reader_reports_pipeline_error_instead_of_eof() {
+        startup().expect("initialize GStreamer");
+        let video = launch(&format!("videotestsrc num-buffers=1 ! {BGRA_SINK}"))
+            .expect("create video pipeline");
+        let mut reader = Reader::start(video, None).expect("start video pipeline");
+        let audio = launch(
+            "audiotestsrc num-buffers=3 ! identity error-after=2 ! audioconvert \
+             ! audio/x-raw,format=S16LE,channels=2,layout=interleaved \
+             ! appsink name=sink max-buffers=4 sync=false",
+        )
+        .expect("create failing audio pipeline");
+        let sink = app_sink(&audio, "sink").expect("audio sink");
+        audio.set_state(gst::State::Paused).expect("pause audio");
+        settle(&audio).expect("preroll audio");
+        audio.set_state(gst::State::Playing).expect("play audio");
+        reader.audio_pipeline = Some((audio, sink));
+        reader.audio_on = true;
+
+        assert!(reader.next_audio().expect("first audio block").is_some());
+        assert!(
+            reader.next_audio().is_err(),
+            "a decoder error must not be reported as end-of-stream"
+        );
+    }
 }

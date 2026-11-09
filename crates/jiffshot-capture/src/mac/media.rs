@@ -14,30 +14,36 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
 use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
 use objc2_av_foundation::{
-    AVAssetReader, AVAssetReaderStatus, AVAssetReaderTrackOutput, AVAssetTrack, AVAssetWriter, AVAssetWriterInput,
-    AVAssetWriterInputPixelBufferAdaptor, AVAssetWriterStatus, AVAuthorizationStatus, AVCaptureAudioDataOutput,
-    AVCaptureAudioDataOutputSampleBufferDelegate, AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceInput,
-    AVCaptureDeviceWasDisconnectedNotification, AVCaptureOutput, AVCaptureSession, AVCaptureSessionDidStopRunningNotification,
-    AVCaptureSessionErrorKey, AVCaptureSessionRuntimeErrorNotification, AVCaptureSessionWasInterruptedNotification,
-    AVCaptureVideoDataOutput, AVCaptureVideoDataOutputSampleBufferDelegate, AVFileTypeMPEG4, AVMediaType,
-    AVMediaTypeAudio, AVMediaTypeVideo, AVURLAsset, AVVideoAllowFrameReorderingKey, AVVideoAverageBitRateKey,
-    AVVideoCodecKey, AVVideoCodecTypeH264, AVVideoCompressionPropertiesKey, AVVideoExpectedSourceFrameRateKey,
-    AVVideoColorPrimariesKey, AVVideoColorPrimaries_ITU_R_709_2, AVVideoColorPropertiesKey, AVVideoHeightKey,
-    AVVideoMaxKeyFrameIntervalKey, AVVideoTransferFunctionKey, AVVideoTransferFunction_ITU_R_709_2, AVVideoWidthKey,
+    AVAssetReader, AVAssetReaderStatus, AVAssetReaderTrackOutput, AVAssetTrack, AVAssetWriter,
+    AVAssetWriterInput, AVAssetWriterInputPixelBufferAdaptor, AVAssetWriterStatus,
+    AVAuthorizationStatus, AVCaptureAudioDataOutput, AVCaptureAudioDataOutputSampleBufferDelegate,
+    AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceInput,
+    AVCaptureDeviceWasDisconnectedNotification, AVCaptureOutput, AVCaptureSession,
+    AVCaptureSessionDidStopRunningNotification, AVCaptureSessionErrorKey,
+    AVCaptureSessionRuntimeErrorNotification, AVCaptureSessionWasInterruptedNotification,
+    AVCaptureVideoDataOutput, AVCaptureVideoDataOutputSampleBufferDelegate, AVFileTypeMPEG4,
+    AVMediaType, AVMediaTypeAudio, AVMediaTypeVideo, AVURLAsset, AVVideoAllowFrameReorderingKey,
+    AVVideoAverageBitRateKey, AVVideoCodecKey, AVVideoCodecTypeH264, AVVideoColorPrimariesKey,
+    AVVideoColorPrimaries_ITU_R_709_2, AVVideoColorPropertiesKey, AVVideoCompressionPropertiesKey,
+    AVVideoExpectedSourceFrameRateKey, AVVideoHeightKey, AVVideoMaxKeyFrameIntervalKey,
+    AVVideoTransferFunctionKey, AVVideoTransferFunction_ITU_R_709_2, AVVideoWidthKey,
     AVVideoYCbCrMatrixKey, AVVideoYCbCrMatrix_ITU_R_709_2,
 };
 use objc2_core_foundation::{CFRetained, CFString};
 use objc2_core_media::{
-    kCMBlockBufferAssureMemoryNowFlag, kCMTimePositiveInfinity, CMAudioSampleBufferCreateReadyWithPacketDescriptions,
-    CMBlockBuffer, CMClock, CMFormatDescription, CMSampleBuffer, CMSyncConvertTime, CMTime, CMTimeFlags, CMTimeRange,
+    kCMBlockBufferAssureMemoryNowFlag, kCMTimePositiveInfinity,
+    CMAudioSampleBufferCreateReadyWithPacketDescriptions, CMBlockBuffer, CMClock,
+    CMFormatDescription, CMSampleBuffer, CMSyncConvertTime, CMTime, CMTimeFlags, CMTimeRange,
 };
 use objc2_core_video::{
-    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_32BGRA, CVPixelBuffer, CVPixelBufferCreate,
-    CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight, CVPixelBufferGetWidth,
-    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferPool, CVPixelBufferUnlockBaseAddress,
+    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_32BGRA, CVPixelBuffer,
+    CVPixelBufferCreate, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
+    CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+    CVPixelBufferLockFlags, CVPixelBufferPool, CVPixelBufferUnlockBaseAddress,
 };
 use objc2_foundation::{
-    ns_string, NSDictionary, NSError, NSNotification, NSNotificationCenter, NSNumber, NSObject, NSObjectProtocol, NSString,
+    ns_string, NSDictionary, NSError, NSNotification, NSNotificationCenter, NSNumber, NSObject,
+    NSObjectProtocol, NSString,
 };
 use objc2_screen_capture_kit::SCStreamOutputType;
 use std::collections::VecDeque;
@@ -100,7 +106,9 @@ extern "C" {
         extensions: *const c_void,
         out: *mut *const CMFormatDescription,
     ) -> i32;
-    fn CMAudioFormatDescriptionGetStreamBasicDescription(desc: &CMFormatDescription) -> *const Asbd;
+    fn CMAudioFormatDescriptionGetStreamBasicDescription(desc: &CMFormatDescription)
+        -> *const Asbd;
+    fn CMFormatDescriptionGetMediaSubType(desc: &CMFormatDescription) -> u32;
     fn CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
         sample: &CMSampleBuffer,
         size_needed: *mut usize,
@@ -149,11 +157,19 @@ fn num(n: i64) -> Retained<NSNumber> {
 }
 
 fn cm_time(hns: i64) -> CMTime {
-    CMTime { value: hns, timescale: HNS_PER_SECOND as i32, flags: CMTimeFlags::Valid, epoch: 0 }
+    CMTime {
+        value: hns,
+        timescale: HNS_PER_SECOND as i32,
+        flags: CMTimeFlags::Valid,
+        epoch: 0,
+    }
 }
 
 fn hns(t: CMTime) -> Option<i64> {
-    if !t.flags.contains(CMTimeFlags::Valid) || t.flags.intersects(CMTimeFlags::ImpliedValueFlagsMask) || t.timescale <= 0 {
+    if !t.flags.contains(CMTimeFlags::Valid)
+        || t.flags.intersects(CMTimeFlags::ImpliedValueFlagsMask)
+        || t.timescale <= 0
+    {
         return None;
     }
     Some((t.value as i128 * HNS_PER_SECOND as i128 / t.timescale as i128) as i64)
@@ -163,14 +179,19 @@ fn audio_frame_position(time: i64, rate: u32) -> Result<i64> {
     if time < 0 || rate == 0 || rate > i32::MAX as u32 {
         return Err("invalid audio presentation time or sample rate".into());
     }
-    let frames = (i128::from(time) * i128::from(rate) + i128::from(HNS_PER_SECOND) / 2) / i128::from(HNS_PER_SECOND);
+    let frames = (i128::from(time) * i128::from(rate) + i128::from(HNS_PER_SECOND) / 2)
+        / i128::from(HNS_PER_SECOND);
     i64::try_from(frames).map_err(|_| "audio presentation time is out of range".into())
 }
 
 fn stream_description(desc: &CMFormatDescription) -> Option<Asbd> {
     // SAFETY: returns null for non-audio descriptions, else a pointer valid
     // while `desc` lives; copied out at once.
-    unsafe { CMAudioFormatDescriptionGetStreamBasicDescription(desc).as_ref().copied() }
+    unsafe {
+        CMAudioFormatDescriptionGetStreamBasicDescription(desc)
+            .as_ref()
+            .copied()
+    }
 }
 
 pub fn startup() -> Result<()> {
@@ -224,7 +245,8 @@ unsafe impl Send for Writer {}
 impl Writer {
     pub fn create(path: &Path, spec: VideoSpec, audio: Option<AudioSpec>) -> Result<Writer> {
         objc2::rc::autoreleasepool(|_| {
-            let url = crate::macos::picker::file_url(path, false).map_err(|error| error.to_string())?;
+            let url =
+                crate::macos::picker::file_url(path, false).map_err(|error| error.to_string())?;
             // AVAssetWriter refuses to replace a file; Media Foundation does.
             match std::fs::remove_file(path) {
                 Ok(()) => {}
@@ -235,36 +257,109 @@ impl Writer {
             // hold the documented key and value types.
             unsafe {
                 let file_type = key(AVFileTypeMPEG4, ns_string!("public.mpeg-4"));
-                let writer = AVAssetWriter::assetWriterWithURL_fileType_error(&url, file_type).map_err(|e| ns_err(&e))?;
+                let writer = AVAssetWriter::assetWriterWithURL_fileType_error(&url, file_type)
+                    .map_err(|e| ns_err(&e))?;
 
                 let fps = spec.fps.max(1) as i64;
                 let compression = dict(&[
-                    (key(AVVideoAverageBitRateKey, ns_string!("AverageBitRate")), &num(spec.bitrate as i64)),
+                    (
+                        key(AVVideoAverageBitRateKey, ns_string!("AverageBitRate")),
+                        &num(spec.bitrate as i64),
+                    ),
                     // A keyframe every two seconds, so the editor can seek quickly.
-                    (key(AVVideoMaxKeyFrameIntervalKey, ns_string!("MaxKeyFrameInterval")), &num(fps * 2)),
-                    (key(AVVideoExpectedSourceFrameRateKey, ns_string!("ExpectedFrameRate")), &num(fps)),
+                    (
+                        key(
+                            AVVideoMaxKeyFrameIntervalKey,
+                            ns_string!("MaxKeyFrameInterval"),
+                        ),
+                        &num(fps * 2),
+                    ),
+                    (
+                        key(
+                            AVVideoExpectedSourceFrameRateKey,
+                            ns_string!("ExpectedFrameRate"),
+                        ),
+                        &num(fps),
+                    ),
                     // Presentation order equals decode order: simpler seeking.
-                    (key(AVVideoAllowFrameReorderingKey, ns_string!("AllowFrameReordering")), &NSNumber::new_bool(false)),
+                    (
+                        key(
+                            AVVideoAllowFrameReorderingKey,
+                            ns_string!("AllowFrameReordering"),
+                        ),
+                        &NSNumber::new_bool(false),
+                    ),
                 ]);
                 // Explicit metadata prevents SD frames from being decoded with a different YCbCr matrix.
                 let colors = dict(&[
-                    (key(AVVideoColorPrimariesKey, ns_string!("AVVideoColorPrimariesKey")), key(AVVideoColorPrimaries_ITU_R_709_2, ns_string!("ITU_R_709_2"))),
-                    (key(AVVideoTransferFunctionKey, ns_string!("AVVideoTransferFunctionKey")), key(AVVideoTransferFunction_ITU_R_709_2, ns_string!("ITU_R_709_2"))),
-                    (key(AVVideoYCbCrMatrixKey, ns_string!("AVVideoYCbCrMatrixKey")), key(AVVideoYCbCrMatrix_ITU_R_709_2, ns_string!("ITU_R_709_2"))),
+                    (
+                        key(
+                            AVVideoColorPrimariesKey,
+                            ns_string!("AVVideoColorPrimariesKey"),
+                        ),
+                        key(AVVideoColorPrimaries_ITU_R_709_2, ns_string!("ITU_R_709_2")),
+                    ),
+                    (
+                        key(
+                            AVVideoTransferFunctionKey,
+                            ns_string!("AVVideoTransferFunctionKey"),
+                        ),
+                        key(
+                            AVVideoTransferFunction_ITU_R_709_2,
+                            ns_string!("ITU_R_709_2"),
+                        ),
+                    ),
+                    (
+                        key(AVVideoYCbCrMatrixKey, ns_string!("AVVideoYCbCrMatrixKey")),
+                        key(AVVideoYCbCrMatrix_ITU_R_709_2, ns_string!("ITU_R_709_2")),
+                    ),
                 ]);
                 let settings = dict(&[
-                    (key(AVVideoCodecKey, ns_string!("AVVideoCodecKey")), key(AVVideoCodecTypeH264, ns_string!("avc1"))),
-                    (key(AVVideoWidthKey, ns_string!("AVVideoWidthKey")), &num(spec.width as i64)),
-                    (key(AVVideoHeightKey, ns_string!("AVVideoHeightKey")), &num(spec.height as i64)),
-                    (key(AVVideoCompressionPropertiesKey, ns_string!("AVVideoCompressionPropertiesKey")), &compression),
-                    (key(AVVideoColorPropertiesKey, ns_string!("AVVideoColorPropertiesKey")), &colors),
+                    (
+                        key(AVVideoCodecKey, ns_string!("AVVideoCodecKey")),
+                        key(AVVideoCodecTypeH264, ns_string!("avc1")),
+                    ),
+                    (
+                        key(AVVideoWidthKey, ns_string!("AVVideoWidthKey")),
+                        &num(spec.width as i64),
+                    ),
+                    (
+                        key(AVVideoHeightKey, ns_string!("AVVideoHeightKey")),
+                        &num(spec.height as i64),
+                    ),
+                    (
+                        key(
+                            AVVideoCompressionPropertiesKey,
+                            ns_string!("AVVideoCompressionPropertiesKey"),
+                        ),
+                        &compression,
+                    ),
+                    (
+                        key(
+                            AVVideoColorPropertiesKey,
+                            ns_string!("AVVideoColorPropertiesKey"),
+                        ),
+                        &colors,
+                    ),
                 ]);
-                let video = AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(video_type(), Some(&settings));
+                let video = AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(
+                    video_type(),
+                    Some(&settings),
+                );
                 video.setExpectsMediaDataInRealTime(false);
                 let attributes = dict(&[
-                    (cf_key(kCVPixelBufferPixelFormatTypeKey), &num(kCVPixelFormatType_32BGRA as i64)),
-                    (cf_key(objc2_core_video::kCVPixelBufferWidthKey), &num(spec.width as i64)),
-                    (cf_key(objc2_core_video::kCVPixelBufferHeightKey), &num(spec.height as i64)),
+                    (
+                        cf_key(kCVPixelBufferPixelFormatTypeKey),
+                        &num(kCVPixelFormatType_32BGRA as i64),
+                    ),
+                    (
+                        cf_key(objc2_core_video::kCVPixelBufferWidthKey),
+                        &num(spec.width as i64),
+                    ),
+                    (
+                        cf_key(objc2_core_video::kCVPixelBufferHeightKey),
+                        &num(spec.height as i64),
+                    ),
                 ]);
                 let adaptor = AVAssetWriterInputPixelBufferAdaptor::assetWriterInputPixelBufferAdaptorWithAssetWriterInput_sourcePixelBufferAttributes(
                     &video,
@@ -281,9 +376,16 @@ impl Writer {
                             (ns_string!("AVFormatIDKey"), &num(FORMAT_AAC as i64)),
                             (ns_string!("AVSampleRateKey"), &num(a.sample_rate as i64)),
                             (ns_string!("AVNumberOfChannelsKey"), &num(a.channels as i64)),
-                            (ns_string!("AVEncoderBitRateKey"), &num(96_000 * a.channels.min(2) as i64)),
+                            (
+                                ns_string!("AVEncoderBitRateKey"),
+                                &num(96_000 * a.channels.min(2) as i64),
+                            ),
                         ]);
-                        let input = AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(audio_type(), Some(&settings));
+                        let input =
+                            AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(
+                                audio_type(),
+                                Some(&settings),
+                            );
                         input.setExpectsMediaDataInRealTime(false);
                         if !writer.canAddInput(&input) {
                             return Err("cannot add an AAC track".into());
@@ -314,7 +416,11 @@ impl Writer {
                         let format = NonNull::new(format as *mut CMFormatDescription)
                             .filter(|_| status == 0)
                             .ok_or_else(|| format!("unsupported audio format (error {status})"))?;
-                        Some(AudioInput { input, format: CFRetained::from_raw(format), spec: a })
+                        Some(AudioInput {
+                            input,
+                            format: CFRetained::from_raw(format),
+                            spec: a,
+                        })
                     }
                     None => None,
                 };
@@ -348,8 +454,17 @@ impl Writer {
         // SAFETY: `out` receives a +1 pixel buffer on success.
         let status = unsafe {
             match self.adaptor.pixelBufferPool() {
-                Some(pool) => CVPixelBufferPool::create_pixel_buffer(None, &pool, NonNull::from(&mut out)),
-                None => CVPixelBufferCreate(None, w, h, kCVPixelFormatType_32BGRA, None, NonNull::from(&mut out)),
+                Some(pool) => {
+                    CVPixelBufferPool::create_pixel_buffer(None, &pool, NonNull::from(&mut out))
+                }
+                None => CVPixelBufferCreate(
+                    None,
+                    w,
+                    h,
+                    kCVPixelFormatType_32BGRA,
+                    None,
+                    NonNull::from(&mut out),
+                ),
             }
         };
         match NonNull::new(out) {
@@ -379,7 +494,11 @@ impl Writer {
                 let row = (CVPixelBufferGetWidth(&buffer).min(w) * 4).min(stride);
                 if !base.is_null() {
                     for y in 0..rows {
-                        ptr::copy_nonoverlapping(bgra.as_ptr().add(y * w * 4), base.add(y * stride), row);
+                        ptr::copy_nonoverlapping(
+                            bgra.as_ptr().add(y * w * 4),
+                            base.add(y * stride),
+                            row,
+                        );
                     }
                 }
                 CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags::empty());
@@ -393,7 +512,9 @@ impl Writer {
     /// Writes interleaved 16-bit samples.
     pub fn write_audio(&mut self, pcm: &[i16], time: i64, duration: i64) -> Result<()> {
         objc2::rc::autoreleasepool(|_| {
-            let Some(audio) = &self.audio else { return Ok(()) };
+            let Some(audio) = &self.audio else {
+                return Ok(());
+            };
             let channels = audio.spec.channels.max(1) as usize;
             let frames = pcm.len() / channels;
             if frames == 0 {
@@ -426,7 +547,12 @@ impl Writer {
                     Some(b) if status == 0 => CFRetained::from_raw(b),
                     _ => return Err(format!("could not allocate audio (error {status})")),
                 };
-                let status = CMBlockBuffer::replace_data_bytes(NonNull::new_unchecked(pcm.as_ptr() as *mut c_void), &block, 0, bytes);
+                let status = CMBlockBuffer::replace_data_bytes(
+                    NonNull::new_unchecked(pcm.as_ptr() as *mut c_void),
+                    &block,
+                    0,
+                    bytes,
+                );
                 if status != 0 {
                     return Err(format!("could not copy audio (error {status})"));
                 }
@@ -504,7 +630,8 @@ impl Writer {
             let done = if all {
                 self.pending_video.is_empty() && self.pending_audio.is_empty()
             } else {
-                self.pending_video.len() <= MAX_PENDING_VIDEO && self.pending_audio.len() <= MAX_PENDING_AUDIO
+                self.pending_video.len() <= MAX_PENDING_VIDEO
+                    && self.pending_audio.len() <= MAX_PENDING_AUDIO
             };
             if done {
                 return Ok(());
@@ -517,7 +644,11 @@ impl Writer {
                         self.video.markAsFinished();
                         (video_done, appended) = (true, true);
                     }
-                    if let Some(audio) = self.audio.as_ref().filter(|_| !audio_done && self.pending_audio.is_empty()) {
+                    if let Some(audio) = self
+                        .audio
+                        .as_ref()
+                        .filter(|_| !audio_done && self.pending_audio.is_empty())
+                    {
                         audio.input.markAsFinished();
                         (audio_done, appended) = (true, true);
                     }
@@ -557,7 +688,8 @@ impl Writer {
                 }
                 self.writer.finishWritingWithCompletionHandler(&done);
             }
-            rx.recv_timeout(Duration::from_secs(120)).map_err(|_| "finishing the video timed out".to_owned())?;
+            rx.recv_timeout(Duration::from_secs(120))
+                .map_err(|_| "finishing the video timed out".to_owned())?;
             // SAFETY: plain property read.
             if unsafe { self.writer.status() } != AVAssetWriterStatus::Completed {
                 return Err(writer_error(&self.writer));
@@ -566,8 +698,9 @@ impl Writer {
             drop(self);
             Ok(path)
         })?;
-        let metadata = std::fs::metadata(&path)
-            .map_err(|error| format!("could not verify written video {}: {error}", path.display()))?;
+        let metadata = std::fs::metadata(&path).map_err(|error| {
+            format!("could not verify written video {}: {error}", path.display())
+        })?;
         if !metadata.is_file() || metadata.len() == 0 {
             return Err("the video encoder produced an empty file".into());
         }
@@ -591,19 +724,31 @@ struct TrackReader {
 }
 
 impl TrackReader {
-    fn new(asset: &AVURLAsset, track: &AVAssetTrack, settings: &NSDictionary<NSString, AnyObject>, start: i64) -> Result<TrackReader> {
+    fn new(
+        asset: &AVURLAsset,
+        track: &AVAssetTrack,
+        settings: &NSDictionary<NSString, AnyObject>,
+        start: i64,
+    ) -> Result<TrackReader> {
         // SAFETY: AVFoundation calls with valid arguments; the settings hold
         // the documented keys.
         unsafe {
-            let reader = AVAssetReader::assetReaderWithAsset_error(asset).map_err(|e| ns_err(&e))?;
-            let output = AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(track, Some(settings));
+            let reader =
+                AVAssetReader::assetReaderWithAsset_error(asset).map_err(|e| ns_err(&e))?;
+            let output = AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(
+                track,
+                Some(settings),
+            );
             output.setAlwaysCopiesSampleData(false);
             if !reader.canAddOutput(&output) {
                 return Err("cannot decode this track".into());
             }
             reader.addOutput(&output);
             if start > 0 {
-                let range = CMTimeRange { start: cm_time(start), duration: kCMTimePositiveInfinity };
+                let range = CMTimeRange {
+                    start: cm_time(start),
+                    duration: kCMTimePositiveInfinity,
+                };
                 let () = msg_send![&*reader, setTimeRange: range];
             }
             if !reader.startReading() {
@@ -620,7 +765,9 @@ impl TrackReader {
             let sample: *mut CMSampleBuffer = msg_send![&*self.output, copyNextSampleBuffer];
             match NonNull::new(sample) {
                 Some(s) => Ok(Some(CFRetained::from_raw(s))),
-                None if self.reader.status() == AVAssetReaderStatus::Failed => Err(reader_error(&self.reader)),
+                None if self.reader.status() == AVAssetReaderStatus::Failed => {
+                    Err(reader_error(&self.reader))
+                }
                 None => Ok(None),
             }
         }
@@ -672,6 +819,7 @@ pub struct Reader {
     pub height: u32,
     pub duration: i64,
     pub fps: f64,
+    pub codec: Option<String>,
     pub audio: Option<AudioSpec>,
     audio_error: Option<String>,
 }
@@ -684,7 +832,10 @@ unsafe impl Send for Reader {}
 /// turns and flips), else identity.
 fn quarter_turn(a: f64, b: f64, c: f64, d: f64) -> [i32; 4] {
     let m = [a, b, c, d].map(|v| v.round() as i32);
-    let unit = [a, b, c, d].iter().zip(m).all(|(v, r)| (v - r as f64).abs() < 1e-3 && r.abs() <= 1);
+    let unit = [a, b, c, d]
+        .iter()
+        .zip(m)
+        .all(|(v, r)| (v - r as f64).abs() < 1e-3 && r.abs() <= 1);
     let [a, b, c, d] = m;
     if unit && ((b == 0 && c == 0 && a != 0 && d != 0) || (a == 0 && d == 0 && b != 0 && c != 0)) {
         m
@@ -721,13 +872,30 @@ fn video_settings() -> Retained<NSDictionary<NSString, AnyObject>> {
     dict(&[(format_key, &num(kCVPixelFormatType_32BGRA as i64))])
 }
 
+fn fourcc_name(code: u32) -> Option<String> {
+    let bytes = code.to_be_bytes();
+    bytes
+        .iter()
+        .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+        .then(|| String::from_utf8_lossy(&bytes).into_owned())
+}
+
 fn pcm_settings() -> Retained<NSDictionary<NSString, AnyObject>> {
     dict(&[
         (ns_string!("AVFormatIDKey"), &num(FORMAT_LPCM as i64)),
         (ns_string!("AVLinearPCMBitDepthKey"), &num(16)),
-        (ns_string!("AVLinearPCMIsFloatKey"), &NSNumber::new_bool(false)),
-        (ns_string!("AVLinearPCMIsBigEndianKey"), &NSNumber::new_bool(false)),
-        (ns_string!("AVLinearPCMIsNonInterleaved"), &NSNumber::new_bool(false)),
+        (
+            ns_string!("AVLinearPCMIsFloatKey"),
+            &NSNumber::new_bool(false),
+        ),
+        (
+            ns_string!("AVLinearPCMIsBigEndianKey"),
+            &NSNumber::new_bool(false),
+        ),
+        (
+            ns_string!("AVLinearPCMIsNonInterleaved"),
+            &NSNumber::new_bool(false),
+        ),
     ])
 }
 
@@ -741,29 +909,51 @@ impl Reader {
             let asset = AVURLAsset::URLAssetWithURL_options(&url, None);
             let tracks = asset.tracks();
             let of_type = |kind: &AVMediaType| tracks.iter().find(|t| &*t.mediaType() == kind);
-            let video_track = of_type(video_type()).ok_or_else(|| format!("{} has no video", path.display()))?;
+            let video_track =
+                of_type(video_type()).ok_or_else(|| format!("{} has no video", path.display()))?;
             let audio_track = of_type(audio_type());
             let size = video_track.naturalSize();
-            let coded = (size.width.round().max(0.0) as usize, size.height.round().max(0.0) as usize);
+            let coded = (
+                size.width.round().max(0.0) as usize,
+                size.height.round().max(0.0) as usize,
+            );
             let t = video_track.preferredTransform();
             let turn = quarter_turn(t.a, t.b, t.c, t.d);
-            let (width, height) = if turn[0] == 0 { (coded.1, coded.0) } else { coded };
+            let (width, height) = if turn[0] == 0 {
+                (coded.1, coded.0)
+            } else {
+                coded
+            };
             let fps = match video_track.nominalFrameRate() as f64 {
                 f if f > 0.0 => f,
                 _ => 30.0,
             };
             let duration: CMTime = msg_send![&*asset, duration];
             let duration = hns(duration).unwrap_or(0).max(0);
+            let codec = video_track
+                .formatDescriptions()
+                .firstObject()
+                .and_then(|first| {
+                    let desc = &*(Retained::as_ptr(&first) as *const CMFormatDescription);
+                    fourcc_name(CMFormatDescriptionGetMediaSubType(desc))
+                });
             let audio = audio_track.as_ref().and_then(|track| {
                 let first = track.formatDescriptions().firstObject()?;
                 let desc = &*(Retained::as_ptr(&first) as *const CMFormatDescription);
                 let asbd = stream_description(desc)?;
-                if !asbd.sample_rate.is_finite() || !(1.0..=u32::MAX as f64).contains(&asbd.sample_rate) || asbd.channels_per_frame == 0 {
+                if !asbd.sample_rate.is_finite()
+                    || !(1.0..=u32::MAX as f64).contains(&asbd.sample_rate)
+                    || asbd.channels_per_frame == 0
+                {
                     return None;
                 }
-                Some(AudioSpec { sample_rate: asbd.sample_rate.round() as u32, channels: asbd.channels_per_frame })
+                Some(AudioSpec {
+                    sample_rate: asbd.sample_rate.round() as u32,
+                    channels: asbd.channels_per_frame,
+                })
             });
-            let audio_error = (audio_track.is_some() && audio.is_none()).then(|| "the audio track has no usable format description".to_owned());
+            let audio_error = (audio_track.is_some() && audio.is_none())
+                .then(|| "the audio track has no usable format description".to_owned());
             let file = File {
                 asset,
                 video_track,
@@ -776,7 +966,16 @@ impl Reader {
                 want_audio: false,
                 position: 0,
             };
-            Ok(Reader { source: Source::File(Box::new(file)), width: width as u32, height: height as u32, duration, fps, audio, audio_error })
+            Ok(Reader {
+                source: Source::File(Box::new(file)),
+                width: width as u32,
+                height: height as u32,
+                duration,
+                fps,
+                codec,
+                audio,
+                audio_error,
+            })
         }
     }
 
@@ -797,11 +996,18 @@ impl Reader {
         let origin = Mutex::new(None::<i64>);
         let delegate = CaptureDelegate::new(Box::new(move |sample| {
             let mut bgra = Vec::new();
-            let Some((w, h)) = sck::sample_bgra(sample, &mut bgra) else { return };
+            let Some((w, h)) = sck::sample_bgra(sample, &mut bgra) else {
+                return;
+            };
             // SAFETY: a plain property read.
             let pts = hns(unsafe { sample.presentation_time_stamp() }).unwrap_or(0);
             let origin = *origin.lock().unwrap().get_or_insert(pts);
-            let frame = VideoFrame { time: pts - origin, width: w as u32, height: h as u32, bgra };
+            let frame = VideoFrame {
+                time: pts - origin,
+                width: w as u32,
+                height: h as u32,
+                bgra,
+            };
             // Late frames are dropped rather than queued.
             let _ = tx.try_send(frame);
         }));
@@ -812,17 +1018,37 @@ impl Reader {
             output.setAlwaysDiscardsLateVideoFrames(true);
             output
         };
-        let session = Session::start(video_type(), Permission::Camera, &output, |_| delegate, cancel.as_deref(), |d, q| {
-            // SAFETY: a serial queue, as required; the delegate outlives the session.
-            unsafe { output.setSampleBufferDelegate_queue(Some(ProtocolObject::from_ref(d)), Some(q)) }
-        })?;
-        let first = webcam_frame(&rx, &session, cancel.as_deref(), "the webcam sent no picture")?;
+        let session = Session::start(
+            video_type(),
+            Permission::Camera,
+            &output,
+            |_| delegate,
+            cancel.as_deref(),
+            |d, q| {
+                // SAFETY: a serial queue, as required; the delegate outlives the session.
+                unsafe {
+                    output.setSampleBufferDelegate_queue(Some(ProtocolObject::from_ref(d)), Some(q))
+                }
+            },
+        )?;
+        let first = webcam_frame(
+            &rx,
+            &session,
+            cancel.as_deref(),
+            "the webcam sent no picture",
+        )?;
         Ok(Reader {
             width: first.width,
             height: first.height,
-            source: Source::Camera(Camera { session, frames: rx, first: Some(first), cancel }),
+            source: Source::Camera(Camera {
+                session,
+                frames: rx,
+                first: Some(first),
+                cancel,
+            }),
             duration: 0,
             fps: 30.0,
+            codec: None,
             audio: None,
             audio_error: None,
         })
@@ -879,7 +1105,13 @@ impl Reader {
                 if let Some(first) = c.first.take() {
                     return Ok(Some(first));
                 }
-                return webcam_frame(&c.frames, &c.session, c.cancel.as_deref(), "the webcam stopped sending pictures").map(Some);
+                return webcam_frame(
+                    &c.frames,
+                    &c.session,
+                    c.cancel.as_deref(),
+                    "the webcam stopped sending pictures",
+                )
+                .map(Some);
             }
             Source::File(f) => f,
         };
@@ -887,13 +1119,22 @@ impl Reader {
             return Err("video is not selected".into());
         }
         if f.video.is_none() {
-            f.video = Some(TrackReader::new(&f.asset, &f.video_track, &video_settings(), f.position)?);
+            f.video = Some(TrackReader::new(
+                &f.asset,
+                &f.video_track,
+                &video_settings(),
+                f.position,
+            )?);
         }
         let reader = f.video.as_ref().unwrap();
         loop {
-            let Some(sample) = reader.next()? else { return Ok(None) };
+            let Some(sample) = reader.next()? else {
+                return Ok(None);
+            };
             let mut raw = Vec::new();
-            let Some((bw, bh)) = sck::sample_bgra(&sample, &mut raw) else { continue };
+            let Some((bw, bh)) = sck::sample_bgra(&sample, &mut raw) else {
+                continue;
+            };
             // SAFETY: a plain property read.
             let time = hns(unsafe { sample.presentation_time_stamp() }).unwrap_or(f.position);
             f.position = time;
@@ -902,32 +1143,57 @@ impl Reader {
             let mut bgra = vec![0u8; w * h * 4];
             let row = w.min(bw) * 4;
             for y in 0..h.min(bh) {
-                bgra[y * w * 4..y * w * 4 + row].copy_from_slice(&raw[y * bw * 4..y * bw * 4 + row]);
+                bgra[y * w * 4..y * w * 4 + row]
+                    .copy_from_slice(&raw[y * bw * 4..y * bw * 4 + row]);
             }
             let (bgra, w, h) = apply_turn(bgra, w, h, f.turn);
-            return Ok(Some(VideoFrame { time, width: w as u32, height: h as u32, bgra }));
+            return Ok(Some(VideoFrame {
+                time,
+                width: w as u32,
+                height: h as u32,
+                bgra,
+            }));
         }
     }
 
     /// The next block of interleaved 16-bit audio.
     pub fn next_audio(&mut self) -> Result<Option<(i64, Vec<i16>)>> {
-        let Source::File(f) = &mut self.source else { return Ok(None) };
-        let Some(track) = &f.audio_track else { return Ok(None) };
+        let Source::File(f) = &mut self.source else {
+            return Ok(None);
+        };
+        let Some(track) = &f.audio_track else {
+            return Ok(None);
+        };
         if !f.want_audio {
             return Err("audio is not selected".into());
         }
         if f.audio.is_none() {
-            f.audio = Some(TrackReader::new(&f.asset, track, &pcm_settings(), f.position)?);
+            f.audio = Some(TrackReader::new(
+                &f.asset,
+                track,
+                &pcm_settings(),
+                f.position,
+            )?);
         }
         let reader = f.audio.as_ref().unwrap();
         loop {
-            let Some(sample) = reader.next()? else { return Ok(None) };
+            let Some(sample) = reader.next()? else {
+                return Ok(None);
+            };
             // SAFETY: copies the sample's bytes into a buffer of their length.
             let pcm = unsafe {
-                let Some(block) = sample.data_buffer() else { continue };
+                let Some(block) = sample.data_buffer() else {
+                    continue;
+                };
                 let len = block.data_length();
                 let mut pcm = vec![0i16; len / 2];
-                if len < 2 || block.copy_data_bytes(0, pcm.len() * 2, NonNull::new_unchecked(pcm.as_mut_ptr() as *mut c_void)) != 0 {
+                if len < 2
+                    || block.copy_data_bytes(
+                        0,
+                        pcm.len() * 2,
+                        NonNull::new_unchecked(pcm.as_mut_ptr() as *mut c_void),
+                    ) != 0
+                {
                     continue;
                 }
                 pcm
@@ -973,7 +1239,12 @@ define_class!(
     // The audio protocol has the same callback selector.
     unsafe impl AVCaptureVideoDataOutputSampleBufferDelegate for CaptureDelegate {
         #[unsafe(method(captureOutput:didOutputSampleBuffer:fromConnection:))]
-        fn did_output(&self, _output: &AVCaptureOutput, sample: &CMSampleBuffer, _connection: &AVCaptureConnection) {
+        fn did_output(
+            &self,
+            _output: &AVCaptureOutput,
+            sample: &CMSampleBuffer,
+            _connection: &AVCaptureConnection,
+        ) {
             (self.ivars().handler)(sample);
         }
     }
@@ -1050,16 +1321,22 @@ fn webcam_frame(
     cancel: Option<&AtomicBool>,
     timeout_message: &str,
 ) -> Result<VideoFrame> {
-    wait_for(frames, Duration::from_secs(5), cancel, || session.failure()).map_err(|error| match error {
-        WaitError::Cancelled => "webcam capture was cancelled".into(),
-        WaitError::TimedOut => timeout_message.into(),
-        WaitError::Disconnected => "the webcam frame stream closed".into(),
-        WaitError::Failed(error) => error,
+    wait_for(frames, Duration::from_secs(5), cancel, || session.failure()).map_err(|error| {
+        match error {
+            WaitError::Cancelled => "webcam capture was cancelled".into(),
+            WaitError::TimedOut => timeout_message.into(),
+            WaitError::Disconnected => "the webcam frame stream closed".into(),
+            WaitError::Failed(error) => error,
+        }
     })
 }
 
 /// Asks for camera or microphone access, waiting for the user's answer the first time.
-fn authorize(media_type: &AVMediaType, permission: Permission, cancel: Option<&AtomicBool>) -> Result<()> {
+fn authorize(
+    media_type: &AVMediaType,
+    permission: Permission,
+    cancel: Option<&AtomicBool>,
+) -> Result<()> {
     check_cancel(cancel)?;
     let what = permission.name();
     let denied = || permission.denied().to_string();
@@ -1077,8 +1354,12 @@ fn authorize(media_type: &AVMediaType, permission: Permission, cancel: Option<&A
                     Ok(true) => Ok(()),
                     Ok(false) => Err(denied()),
                     Err(WaitError::Cancelled) => Err("capture was cancelled".into()),
-                    Err(WaitError::TimedOut) => Err(format!("the {what} permission request timed out")),
-                    Err(WaitError::Disconnected) => Err(format!("the {what} permission request ended unexpectedly")),
+                    Err(WaitError::TimedOut) => {
+                        Err(format!("the {what} permission request timed out"))
+                    }
+                    Err(WaitError::Disconnected) => {
+                        Err(format!("the {what} permission request ended unexpectedly"))
+                    }
                     Err(WaitError::Failed(error)) => Err(error),
                 }
             }
@@ -1114,10 +1395,26 @@ impl SessionEvents {
         // SAFETY: these are framework constants available on supported macOS versions.
         let notifications = unsafe {
             [
-                (AVCaptureSessionRuntimeErrorNotification, session as &AnyObject, SessionEvent::RuntimeError),
-                (AVCaptureSessionWasInterruptedNotification, session as &AnyObject, SessionEvent::Interrupted),
-                (AVCaptureSessionDidStopRunningNotification, session as &AnyObject, SessionEvent::Stopped),
-                (AVCaptureDeviceWasDisconnectedNotification, device, SessionEvent::DeviceDisconnected),
+                (
+                    AVCaptureSessionRuntimeErrorNotification,
+                    session as &AnyObject,
+                    SessionEvent::RuntimeError,
+                ),
+                (
+                    AVCaptureSessionWasInterruptedNotification,
+                    session as &AnyObject,
+                    SessionEvent::Interrupted,
+                ),
+                (
+                    AVCaptureSessionDidStopRunningNotification,
+                    session as &AnyObject,
+                    SessionEvent::Stopped,
+                ),
+                (
+                    AVCaptureDeviceWasDisconnectedNotification,
+                    device,
+                    SessionEvent::DeviceDisconnected,
+                ),
             ]
         };
         let mut observers = Vec::with_capacity(notifications.len());
@@ -1132,7 +1429,10 @@ impl SessionEvents {
                         let detail = info
                             .and_then(|info| info.objectForKey(unsafe { AVCaptureSessionErrorKey }))
                             .and_then(|error| error.downcast_ref::<NSError>().map(ns_err));
-                        detail.map_or_else(|| "capture session failed".into(), |detail| format!("capture session failed: {detail}"))
+                        detail.map_or_else(
+                            || "capture session failed".into(),
+                            |detail| format!("capture session failed: {detail}"),
+                        )
                     }
                     SessionEvent::Interrupted => "capture session was interrupted".into(),
                     SessionEvent::Stopped => "capture session stopped unexpectedly".into(),
@@ -1143,7 +1443,12 @@ impl SessionEvents {
             // SAFETY: the block captures only thread-safe state; the center
             // retains the observer and delivers matching notifications.
             let observer = unsafe {
-                center.addObserverForName_object_queue_usingBlock(Some(name), Some(object), None, &callback)
+                center.addObserverForName_object_queue_usingBlock(
+                    Some(name),
+                    Some(object),
+                    None,
+                    &callback,
+                )
             };
             observers.push(observer);
         }
@@ -1151,7 +1456,10 @@ impl SessionEvents {
     }
 
     fn failure(&self) -> Option<String> {
-        self.failure.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     fn remove(&mut self) {
@@ -1215,8 +1523,10 @@ impl Session {
         // SAFETY: AVFoundation calls with valid arguments; the session is
         // configured before it starts.
         unsafe {
-            let device = AVCaptureDevice::defaultDeviceWithMediaType(media_type).ok_or_else(|| format!("no {} found", what.to_lowercase()))?;
-            let input = AVCaptureDeviceInput::deviceInputWithDevice_error(&device).map_err(|e| ns_err(&e))?;
+            let device = AVCaptureDevice::defaultDeviceWithMediaType(media_type)
+                .ok_or_else(|| format!("no {} found", what.to_lowercase()))?;
+            let input = AVCaptureDeviceInput::deviceInputWithDevice_error(&device)
+                .map_err(|e| ns_err(&e))?;
             let session = AVCaptureSession::new();
             session.beginConfiguration();
             let ok = session.canAddInput(&input) && session.canAddOutput(output);
@@ -1233,7 +1543,12 @@ impl Session {
             let events = SessionEvents::observe(&session, &device);
             check_cancel(cancel)?;
             session.startRunning();
-            let running = Session { session, queue, _delegate: delegate, events };
+            let running = Session {
+                session,
+                queue,
+                _delegate: delegate,
+                events,
+            };
             check_cancel(cancel)?;
             if let Some(error) = running.failure() {
                 return Err(error);
@@ -1272,14 +1587,24 @@ struct Resampler {
 
 impl Resampler {
     fn new(from: f64, to: f64) -> Resampler {
-        Resampler { step: from / to, pos: 1.0, prev: [0.0; 2] }
+        Resampler {
+            step: from / to,
+            pos: 1.0,
+            prev: [0.0; 2],
+        }
     }
 
     fn process(&mut self, input: &[f32]) -> (Vec<f32>, f64) {
         let n = input.len() / 2;
         let first = self.pos - 1.0;
         let prev = self.prev;
-        let frame = |i: usize| if i == 0 { prev } else { [input[(i - 1) * 2], input[(i - 1) * 2 + 1]] };
+        let frame = |i: usize| {
+            if i == 0 {
+                prev
+            } else {
+                [input[(i - 1) * 2], input[(i - 1) * 2 + 1]]
+            }
+        };
         let mut out = Vec::with_capacity(((n as f64 / self.step) as usize + 1) * 2);
         while self.pos <= n as f64 {
             let i = self.pos.floor() as usize;
@@ -1310,7 +1635,11 @@ fn valid_sample_rate(rate: f64) -> Option<u32> {
 
 impl Converter {
     fn new(rate: u32) -> Converter {
-        Converter { rate, resampler: None, expected_input: None }
+        Converter {
+            rate,
+            resampler: None,
+            expected_input: None,
+        }
     }
 
     fn convert(&mut self, sample: &CMSampleBuffer, captured_at: Instant) -> Option<AudioBlock> {
@@ -1319,13 +1648,22 @@ impl Converter {
         let asbd = stream_description(&desc)?;
         let from = valid_sample_rate(asbd.sample_rate)?;
         let stereo = read_stereo(sample, &asbd)?;
-        if self.expected_input.is_some_and(|(previous_rate, expected)| {
-            previous_rate != from
-                || if captured_at >= expected { captured_at - expected } else { expected - captured_at } > Duration::from_millis(2)
-        }) {
+        if self
+            .expected_input
+            .is_some_and(|(previous_rate, expected)| {
+                previous_rate != from
+                    || if captured_at >= expected {
+                        captured_at - expected
+                    } else {
+                        expected - captured_at
+                    } > Duration::from_millis(2)
+            })
+        {
             self.resampler = None;
         }
-        let input_nanos = (stereo.len() as u128 / 2).checked_mul(1_000_000_000)?.checked_div(from as u128)?;
+        let input_nanos = (stereo.len() as u128 / 2)
+            .checked_mul(1_000_000_000)?
+            .checked_div(from as u128)?;
         let input_duration = Duration::from_nanos(u64::try_from(input_nanos).ok()?);
         self.expected_input = Some((from, captured_at.checked_add(input_duration)?));
         let (stereo, offset) = if from == self.rate {
@@ -1339,9 +1677,16 @@ impl Converter {
         };
         let offset = offset / from as f64;
         let delta = Duration::from_secs_f64(offset.abs());
-        let captured_at = if offset < 0.0 { captured_at.checked_sub(delta)? } else { captured_at.checked_add(delta)? };
+        let captured_at = if offset < 0.0 {
+            captured_at.checked_sub(delta)?
+        } else {
+            captured_at.checked_add(delta)?
+        };
         Some(AudioBlock {
-            samples: stereo.iter().map(|v| (v.clamp(-1.0, 1.0) * 32767.0) as i16).collect(),
+            samples: stereo
+                .iter()
+                .map(|v| (v.clamp(-1.0, 1.0) * 32767.0) as i16)
+                .collect(),
             captured_at: Some(captured_at),
         })
     }
@@ -1353,7 +1698,11 @@ fn read_stereo(sample: &CMSampleBuffer, asbd: &Asbd) -> Option<Vec<f32>> {
     let channels = asbd.channels_per_frame as usize;
     let bytes = (asbd.bits_per_channel / 8) as usize;
     let float = asbd.format_flags & FLAG_FLOAT != 0;
-    if asbd.format_id != FORMAT_LPCM || channels == 0 || asbd.format_flags & FLAG_BIG_ENDIAN != 0 || !matches!((float, bytes), (true, 4) | (false, 2) | (false, 4)) {
+    if asbd.format_id != FORMAT_LPCM
+        || channels == 0
+        || asbd.format_flags & FLAG_BIG_ENDIAN != 0
+        || !matches!((float, bytes), (true, 4) | (false, 2) | (false, 4))
+    {
         return None;
     }
     let planar = asbd.format_flags & FLAG_NON_INTERLEAVED != 0;
@@ -1362,7 +1711,16 @@ fn read_stereo(sample: &CMSampleBuffer, asbd: &Asbd) -> Option<Vec<f32>> {
     // read is within a buffer's byte size.
     unsafe {
         let mut needed = 0usize;
-        CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(sample, &mut needed, ptr::null_mut(), 0, ptr::null(), ptr::null(), 0, ptr::null_mut());
+        CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sample,
+            &mut needed,
+            ptr::null_mut(),
+            0,
+            ptr::null(),
+            ptr::null(),
+            0,
+            ptr::null_mut(),
+        );
         let mut list = vec![0u64; needed.max(24).div_ceil(8)];
         let mut block: *mut CMBlockBuffer = ptr::null_mut();
         let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
@@ -1380,7 +1738,10 @@ fn read_stereo(sample: &CMSampleBuffer, asbd: &Asbd) -> Option<Vec<f32>> {
             return None;
         }
         let count = *(list.as_ptr() as *const u32) as usize;
-        let buffers = std::slice::from_raw_parts((list.as_ptr() as *const u8).add(8) as *const AudioBuffer, count);
+        let buffers = std::slice::from_raw_parts(
+            (list.as_ptr() as *const u8).add(8) as *const AudioBuffer,
+            count,
+        );
         let read = |buffer: &AudioBuffer, index: usize| -> f32 {
             match (float, bytes) {
                 (true, _) => *(buffer.data as *const f32).add(index),
@@ -1393,7 +1754,11 @@ fn read_stereo(sample: &CMSampleBuffer, asbd: &Asbd) -> Option<Vec<f32>> {
             if buffers.len() < channels || !buffers.iter().take(channels).all(|b| valid(&b)) {
                 return None;
             }
-            buffers.iter().take(channels).map(|b| b.size as usize / bytes).min()?
+            buffers
+                .iter()
+                .take(channels)
+                .map(|b| b.size as usize / bytes)
+                .min()?
         } else {
             let b = buffers.first().filter(valid)?;
             b.size as usize / (bytes * channels)
@@ -1402,7 +1767,11 @@ fn read_stereo(sample: &CMSampleBuffer, asbd: &Asbd) -> Option<Vec<f32>> {
         for i in 0..frames {
             for c in 0..2 {
                 let c = c.min(channels - 1);
-                out.push(if planar { read(&buffers[c], i) } else { read(&buffers[0], i * channels + c) });
+                out.push(if planar {
+                    read(&buffers[c], i)
+                } else {
+                    read(&buffers[0], i * channels + c)
+                });
             }
         }
         Some(out)
@@ -1432,7 +1801,8 @@ fn instant_for_clock_time(time: CMTime, clock: &CMClock) -> Result<Instant> {
     let after = Instant::now();
     let midpoint = before + (after - before) / 2;
     let offset = clock_nanos(timestamp)? - clock_nanos(host_now)?;
-    let magnitude = u64::try_from(offset.unsigned_abs()).map_err(|_| "audio capture timestamp is out of range")?;
+    let magnitude = u64::try_from(offset.unsigned_abs())
+        .map_err(|_| "audio capture timestamp is out of range")?;
     let delta = Duration::from_nanos(magnitude);
     if offset < 0 {
         midpoint.checked_sub(delta)
@@ -1453,7 +1823,8 @@ fn deliver_audio(
     let result = (|| {
         let clock = clock.ok_or("audio synchronization clock is unavailable")?;
         // SAFETY: the sample is alive for this property read.
-        let captured_at = instant_for_clock_time(unsafe { sample.presentation_time_stamp() }, clock)?;
+        let captured_at =
+            instant_for_clock_time(unsafe { sample.presentation_time_stamp() }, clock)?;
         converter
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1479,7 +1850,9 @@ pub struct AudioCapture {
 
 impl AudioCapture {
     pub fn failure(&self) -> Option<String> {
-        self.failures.iter().find_map(|failure| failure.lock().unwrap_or_else(|e| e.into_inner()).clone())
+        self.failures
+            .iter()
+            .find_map(|failure| failure.lock().unwrap_or_else(|e| e.into_inner()).clone())
     }
 }
 
@@ -1491,13 +1864,22 @@ pub fn capture_audio(microphone: bool) -> Result<AudioCapture> {
 
 /// Starts an audio source unless `cancel` is set, including while microphone
 /// permission is pending.
-pub fn capture_audio_cancellable(microphone: bool, cancel: Arc<AtomicBool>) -> Result<AudioCapture> {
+pub fn capture_audio_cancellable(
+    microphone: bool,
+    cancel: Arc<AtomicBool>,
+) -> Result<AudioCapture> {
     capture_audio_with_cancel(microphone, Some(&cancel))
 }
 
-fn capture_audio_with_cancel(microphone: bool, cancel: Option<&AtomicBool>) -> Result<AudioCapture> {
+fn capture_audio_with_cancel(
+    microphone: bool,
+    cancel: Option<&AtomicBool>,
+) -> Result<AudioCapture> {
     check_cancel(cancel)?;
-    let spec = AudioSpec { sample_rate: CAPTURE_RATE, channels: 2 };
+    let spec = AudioSpec {
+        sample_rate: CAPTURE_RATE,
+        channels: 2,
+    };
     let (tx, rx) = mpsc::channel();
     let converter = Mutex::new(Converter::new(CAPTURE_RATE));
     let conversion_failure = Arc::new(Mutex::new(None));
@@ -1506,16 +1888,32 @@ fn capture_audio_with_cancel(microphone: bool, cancel: Option<&AtomicBool>) -> R
         // SAFETY: a fresh output; it delivers the device's own PCM format,
         // which the converter reads.
         let output = unsafe { AVCaptureAudioDataOutput::new() };
-        let session = Session::start(audio_type(), Permission::Microphone, &output, |session| {
-            let session = WeakCaptureSession(Weak::new(session));
-            CaptureDelegate::new(Box::new(move |sample| {
-                let clock = session.clock();
-                deliver_audio(sample, clock.as_deref(), &converter, &tx, &conversion_failure, "microphone");
-            }))
-        }, cancel, |d, q| {
-            // SAFETY: a serial queue, as required; the delegate outlives the session.
-            unsafe { output.setSampleBufferDelegate_queue(Some(ProtocolObject::from_ref(d)), Some(q)) }
-        })?;
+        let session = Session::start(
+            audio_type(),
+            Permission::Microphone,
+            &output,
+            |session| {
+                let session = WeakCaptureSession(Weak::new(session));
+                CaptureDelegate::new(Box::new(move |sample| {
+                    let clock = session.clock();
+                    deliver_audio(
+                        sample,
+                        clock.as_deref(),
+                        &converter,
+                        &tx,
+                        &conversion_failure,
+                        "microphone",
+                    );
+                }))
+            },
+            cancel,
+            |d, q| {
+                // SAFETY: a serial queue, as required; the delegate outlives the session.
+                unsafe {
+                    output.setSampleBufferDelegate_queue(Some(ProtocolObject::from_ref(d)), Some(q))
+                }
+            },
+        )?;
         failures.push(session.events.failure.clone());
         Box::new(session)
     } else {
@@ -1523,7 +1921,10 @@ fn capture_audio_with_cancel(microphone: bool, cancel: Option<&AtomicBool>) -> R
         check_cancel(cancel)?;
         // SAFETY: plain property reads and setters on a fresh configuration.
         let (filter, config) = unsafe {
-            let display = content.displays().firstObject().ok_or("no display to capture audio from")?;
+            let display = content
+                .displays()
+                .firstObject()
+                .ok_or("no display to capture audio from")?;
             let filter = sck::display_filter(&content, &display, &[]);
             // The stream needs a picture too; a tiny, rare one.
             let config = sck::config(rect(0.0, 0.0, 2.0, 2.0), 2, 2, false);
@@ -1541,7 +1942,14 @@ fn capture_audio_with_cancel(microphone: bool, cancel: Option<&AtomicBool>) -> R
             if kind == SCStreamOutputType::Audio {
                 // SAFETY: the live stream owns this read-only clock.
                 let clock = unsafe { stream.synchronizationClock() };
-                deliver_audio(sample, clock.as_deref(), &converter, &tx, &conversion_failure, "system audio");
+                deliver_audio(
+                    sample,
+                    clock.as_deref(),
+                    &converter,
+                    &tx,
+                    &conversion_failure,
+                    "system audio",
+                );
             }
         })
         .map_err(|e| e.to_string())?;
@@ -1549,7 +1957,12 @@ fn capture_audio_with_cancel(microphone: bool, cancel: Option<&AtomicBool>) -> R
         Box::new(SendBox(stream))
     };
     check_cancel(cancel)?;
-    Ok(AudioCapture { spec, samples: rx, _source: source, failures })
+    Ok(AudioCapture {
+        spec,
+        samples: rx,
+        _source: source,
+        failures,
+    })
 }
 
 #[cfg(test)]
@@ -1560,9 +1973,14 @@ mod tests {
     fn media_paths_with_nul_bytes_are_rejected() {
         use std::os::unix::ffi::OsStringExt;
 
-        let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(b"invalid\0recording.mp4".to_vec()));
+        let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(
+            b"invalid\0recording.mp4".to_vec(),
+        ));
         let spec = VideoSpec::for_size(64, 64, 15);
-        assert!(Writer::create(&path, spec, None).err().unwrap().contains("NUL byte"));
+        assert!(Writer::create(&path, spec, None)
+            .err()
+            .unwrap()
+            .contains("NUL byte"));
         assert!(Reader::open(&path).err().unwrap().contains("NUL byte"));
     }
 
@@ -1583,8 +2001,21 @@ mod tests {
         // owns them, and all byte counts match the source PCM.
         unsafe {
             let mut format = ptr::null();
-            assert_eq!(CMAudioFormatDescriptionCreate(ptr::null(), &asbd, 0, ptr::null(), 0, ptr::null(), ptr::null(), &mut format), 0);
-            let format = CFRetained::from_raw(NonNull::new(format as *mut CMFormatDescription).unwrap());
+            assert_eq!(
+                CMAudioFormatDescriptionCreate(
+                    ptr::null(),
+                    &asbd,
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    ptr::null(),
+                    &mut format
+                ),
+                0
+            );
+            let format =
+                CFRetained::from_raw(NonNull::new(format as *mut CMFormatDescription).unwrap());
             let bytes = pcm.len() * 2;
             let mut block: *mut CMBlockBuffer = ptr::null_mut();
             assert_eq!(
@@ -1602,7 +2033,15 @@ mod tests {
                 0
             );
             let block = CFRetained::from_raw(NonNull::new(block).unwrap());
-            assert_eq!(CMBlockBuffer::replace_data_bytes(NonNull::new(pcm.as_ptr() as *mut c_void).unwrap(), &block, 0, bytes), 0);
+            assert_eq!(
+                CMBlockBuffer::replace_data_bytes(
+                    NonNull::new(pcm.as_ptr() as *mut c_void).unwrap(),
+                    &block,
+                    0,
+                    bytes
+                ),
+                0
+            );
             let mut sample: *mut CMSampleBuffer = ptr::null_mut();
             assert_eq!(
                 CMAudioSampleBufferCreateReadyWithPacketDescriptions(
@@ -1625,16 +2064,30 @@ mod tests {
         let cancel = AtomicBool::new(true);
         let (tx, rx) = mpsc::channel();
         tx.send(7).unwrap();
-        assert_eq!(wait_for(&rx, Duration::from_secs(1), Some(&cancel), || None), Err(WaitError::Cancelled));
-        cancel.store(false, Ordering::Release);
-        assert_eq!(wait_for(&rx, Duration::from_secs(1), Some(&cancel), || None), Ok(7));
         assert_eq!(
-            wait_for(&rx, Duration::from_secs(1), None, || Some("device lost".into())),
+            wait_for(&rx, Duration::from_secs(1), Some(&cancel), || None),
+            Err(WaitError::Cancelled)
+        );
+        cancel.store(false, Ordering::Release);
+        assert_eq!(
+            wait_for(&rx, Duration::from_secs(1), Some(&cancel), || None),
+            Ok(7)
+        );
+        assert_eq!(
+            wait_for(&rx, Duration::from_secs(1), None, || Some(
+                "device lost".into()
+            )),
             Err(WaitError::Failed("device lost".into()))
         );
-        assert_eq!(wait_for(&rx, Duration::from_millis(10), None, || None), Err(WaitError::TimedOut));
+        assert_eq!(
+            wait_for(&rx, Duration::from_millis(10), None, || None),
+            Err(WaitError::TimedOut)
+        );
         drop(tx);
-        assert_eq!(wait_for(&rx, Duration::from_secs(1), None, || None), Err(WaitError::Disconnected));
+        assert_eq!(
+            wait_for(&rx, Duration::from_secs(1), None, || None),
+            Err(WaitError::Disconnected)
+        );
     }
 
     #[test]
@@ -1642,7 +2095,9 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
         let worker_cancel = cancel.clone();
-        let worker = std::thread::spawn(move || wait_for(&rx, Duration::from_secs(5), Some(&worker_cancel), || None));
+        let worker = std::thread::spawn(move || {
+            wait_for(&rx, Duration::from_secs(5), Some(&worker_cancel), || None)
+        });
         cancel.store(true, Ordering::Release);
         assert_eq!(worker.join().unwrap(), Err(WaitError::Cancelled));
         assert!(tx.send(true).is_err());
@@ -1659,13 +2114,20 @@ mod tests {
         let mut events = SessionEvents::observe(&session, &device);
         // SAFETY: observers only compare the synthetic object identities.
         unsafe {
-            center.postNotificationName_object(AVCaptureSessionWasInterruptedNotification, Some(&other_session));
-            center.postNotificationName_object(AVCaptureDeviceWasDisconnectedNotification, Some(&other_device));
+            center.postNotificationName_object(
+                AVCaptureSessionWasInterruptedNotification,
+                Some(&other_session),
+            );
+            center.postNotificationName_object(
+                AVCaptureDeviceWasDisconnectedNotification,
+                Some(&other_device),
+            );
         }
         assert_eq!(events.failure(), None);
 
         // SAFETY: the dictionary has the documented error key and NSError value.
-        let error = unsafe { NSError::errorWithDomain_code_userInfo(ns_string!("JiffshotTest"), 42, None) };
+        let error =
+            unsafe { NSError::errorWithDomain_code_userInfo(ns_string!("JiffshotTest"), 42, None) };
         let description = ns_err(&error);
         let info = dict(&[(unsafe { AVCaptureSessionErrorKey }, &error)]);
         unsafe {
@@ -1675,13 +2137,24 @@ mod tests {
                 object: &*session,
                 userInfo: &*info
             ];
-            center.postNotificationName_object(AVCaptureDeviceWasDisconnectedNotification, Some(&device));
+            center.postNotificationName_object(
+                AVCaptureDeviceWasDisconnectedNotification,
+                Some(&device),
+            );
         }
-        assert_eq!(events.failure(), Some(format!("capture session failed: {description}")));
+        assert_eq!(
+            events.failure(),
+            Some(format!("capture session failed: {description}"))
+        );
 
         events.remove();
         *events.failure.lock().unwrap() = None;
-        unsafe { center.postNotificationName_object(AVCaptureSessionWasInterruptedNotification, Some(&session)) };
+        unsafe {
+            center.postNotificationName_object(
+                AVCaptureSessionWasInterruptedNotification,
+                Some(&session),
+            )
+        };
         assert_eq!(events.failure(), None);
     }
 
@@ -1695,9 +2168,21 @@ mod tests {
         // objects are scoped to this test and open no capture device.
         let cases = unsafe {
             [
-                (AVCaptureSessionWasInterruptedNotification, &*session as &AnyObject, "capture session was interrupted"),
-                (AVCaptureSessionDidStopRunningNotification, &*session as &AnyObject, "capture session stopped unexpectedly"),
-                (AVCaptureDeviceWasDisconnectedNotification, &*device as &AnyObject, "capture device disconnected"),
+                (
+                    AVCaptureSessionWasInterruptedNotification,
+                    &*session as &AnyObject,
+                    "capture session was interrupted",
+                ),
+                (
+                    AVCaptureSessionDidStopRunningNotification,
+                    &*session as &AnyObject,
+                    "capture session stopped unexpectedly",
+                ),
+                (
+                    AVCaptureDeviceWasDisconnectedNotification,
+                    &*device as &AnyObject,
+                    "capture device disconnected",
+                ),
             ]
         };
         for (name, object, expected) in cases {
@@ -1713,7 +2198,10 @@ mod tests {
         let stream = Arc::new(Mutex::new(None));
         let (_tx, samples) = mpsc::channel();
         let capture = AudioCapture {
-            spec: AudioSpec { sample_rate: CAPTURE_RATE, channels: 2 },
+            spec: AudioSpec {
+                sample_rate: CAPTURE_RATE,
+                channels: 2,
+            },
             samples,
             _source: Box::new(()),
             failures: vec![conversion.clone(), stream.clone()],
@@ -1730,9 +2218,15 @@ mod tests {
         let mut r = Resampler::new(44_100.0, 48_000.0);
         let block: Vec<f32> = (0..441 * 2).map(|i| (i / 2) as f32 / 441.0).collect();
         let total: usize = (0..100).map(|_| r.process(&block).0.len() / 2).sum();
-        assert!((total as i64 - 48_000).abs() <= 1, "{total} frames for a second");
+        assert!(
+            (total as i64 - 48_000).abs() <= 1,
+            "{total} frames for a second"
+        );
         let mut same = Resampler::new(48_000.0, 48_000.0);
-        assert_eq!(same.process(&[0.5, -0.5, 0.25, -0.25]).0, vec![0.5, -0.5, 0.25, -0.25]);
+        assert_eq!(
+            same.process(&[0.5, -0.5, 0.25, -0.25]).0,
+            vec![0.5, -0.5, 0.25, -0.25]
+        );
     }
 
     #[test]
@@ -1755,7 +2249,10 @@ mod tests {
         let next_input = start + Duration::from_nanos(4 * 1_000_000_000 / 44_100);
         let second = converter.convert(&sample, next_input).unwrap();
         let second_at = second.captured_at.unwrap().duration_since(start);
-        assert!(second_at.abs_diff(Duration::from_nanos(4 * 1_000_000_000 / 48_000)) <= Duration::from_nanos(2));
+        assert!(
+            second_at.abs_diff(Duration::from_nanos(4 * 1_000_000_000 / 48_000))
+                <= Duration::from_nanos(2)
+        );
 
         let after_gap = start + Duration::from_secs(1);
         let third = converter.convert(&sample, after_gap).unwrap();
@@ -1769,10 +2266,15 @@ mod tests {
         let mut converter = Converter::new(48_000);
         let mut total = 0usize;
         for i in 0..100 {
-            let block = converter.convert(&sample, start + Duration::from_millis(i * 10)).unwrap();
+            let block = converter
+                .convert(&sample, start + Duration::from_millis(i * 10))
+                .unwrap();
             let expected = Duration::from_secs_f64(total as f64 / 48_000.0);
             let actual = block.captured_at.unwrap().duration_since(start);
-            assert!(actual.abs_diff(expected) <= Duration::from_nanos(100), "block {i}: {actual:?} vs {expected:?}");
+            assert!(
+                actual.abs_diff(expected) <= Duration::from_nanos(100),
+                "block {i}: {actual:?} vs {expected:?}"
+            );
             total += block.samples.len() / 2;
         }
         assert!((total as i64 - 48_000).abs() <= 1);
@@ -1787,7 +2289,10 @@ mod tests {
         let now = Instant::now();
         let mapped = instant_for_clock_time(time, &host).unwrap();
         let elapsed = now.duration_since(mapped);
-        assert!((Duration::from_millis(990)..Duration::from_millis(1010)).contains(&elapsed), "{elapsed:?}");
+        assert!(
+            (Duration::from_millis(990)..Duration::from_millis(1010)).contains(&elapsed),
+            "{elapsed:?}"
+        );
 
         time.flags = CMTimeFlags::empty();
         assert!(instant_for_clock_time(time, &host).is_err());
@@ -1861,19 +2366,38 @@ mod tests {
 
     fn capture_a_second(microphone: bool) {
         let c = capture_audio(microphone).expect("audio capture must start");
-        assert_eq!(c.spec, AudioSpec { sample_rate: 48_000, channels: 2 });
+        assert_eq!(
+            c.spec,
+            AudioSpec {
+                sample_rate: 48_000,
+                channels: 2
+            }
+        );
         let start = Instant::now();
         let mut frames = 0;
         let mut peak = 0i32;
         while start.elapsed() < Duration::from_secs(1) {
             if let Ok(block) = c.samples.recv_timeout(Duration::from_millis(200)) {
-                assert!(block.captured_at.is_some(), "audio block has no capture timestamp");
+                assert!(
+                    block.captured_at.is_some(),
+                    "audio block has no capture timestamp"
+                );
                 assert_eq!(block.samples.len() % 2, 0);
                 frames += block.samples.len() / 2;
-                peak = peak.max(block.samples.iter().map(|&sample| (sample as i32).abs()).max().unwrap_or(0));
+                peak = peak.max(
+                    block
+                        .samples
+                        .iter()
+                        .map(|&sample| (sample as i32).abs())
+                        .max()
+                        .unwrap_or(0),
+                );
             }
         }
-        assert!(frames > 0, "no audio samples arrived; check permissions and provide an active audio source");
+        assert!(
+            frames > 0,
+            "no audio samples arrived; check permissions and provide an active audio source"
+        );
         if std::env::var_os("JIFFSHOT_TEST_REQUIRE_AUDIO_SIGNAL").is_some() {
             assert!(peak > 0, "audio samples were all silent");
         }

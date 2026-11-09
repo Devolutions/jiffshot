@@ -26,6 +26,13 @@ fn e(error: windows::core::Error) -> String {
     format!("{} (0x{:08X})", error.message(), error.code().0 as u32)
 }
 
+fn stream_ended(flags: u32) -> Result<bool> {
+    if flags & MF_SOURCE_READERF_ERROR.0 as u32 != 0 {
+        return Err("the media decoder reported a stream error".into());
+    }
+    Ok(flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0)
+}
+
 /// `CODECAPI_AVEncMPVGOPSize`: frames between keyframes.
 const CODECAPI_AVENC_MPV_GOP_SIZE: GUID = GUID::from_u128(0x95f31b26_95a4_41aa_9303_246a7fc6eef1);
 
@@ -256,6 +263,7 @@ pub struct Reader {
     stride: i32,
     pub duration: i64,
     pub fps: f64,
+    pub codec: Option<String>,
     pub audio: Option<AudioSpec>,
     audio_error: Option<String>,
 }
@@ -324,6 +332,11 @@ impl Reader {
     fn with_reader(reader: IMFSourceReader) -> Result<Reader> {
         // SAFETY: Media Foundation calls on a live source reader.
         unsafe {
+            let codec = reader
+                .GetNativeMediaType(VIDEO, 0)
+                .ok()
+                .and_then(|native| native.GetGUID(&MF_MT_SUBTYPE).ok())
+                .and_then(|subtype| (subtype == MFVideoFormat_H264).then(|| "H.264".to_owned()));
             let want = media_type()?;
             want.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
                 .map_err(e)?;
@@ -372,6 +385,7 @@ impl Reader {
                 stride,
                 duration,
                 fps,
+                codec,
                 audio,
                 audio_error,
             };
@@ -428,7 +442,7 @@ impl Reader {
                     )
                     .map_err(e)?
             };
-            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+            if stream_ended(flags)? {
                 return Ok(None);
             }
             if stream == VIDEO && flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32 != 0 {
@@ -678,4 +692,20 @@ pub fn capture_audio_cancellable(
         thread: Some(thread),
         failure,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_reader_errors_are_not_reported_as_end_of_stream() {
+        let error = MF_SOURCE_READERF_ERROR.0 as u32;
+        let end = MF_SOURCE_READERF_ENDOFSTREAM.0 as u32;
+
+        assert!(!stream_ended(0).expect("no error"));
+        assert!(stream_ended(end).expect("normal end-of-stream"));
+        assert!(stream_ended(error).is_err());
+        assert!(stream_ended(error | end).is_err());
+    }
 }

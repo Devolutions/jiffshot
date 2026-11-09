@@ -6,6 +6,9 @@ edition.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[features]
+test-control = ["jiffshot-control/test-util"]
+
 [[bin]]
 name = "jiffshot-cli"
 path = "src/main.rs"

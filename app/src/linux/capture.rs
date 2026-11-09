@@ -5,14 +5,15 @@ use ashpd::desktop::{PersistMode, Response, Session};
 use futures_util::StreamExt;
 use gst::prelude::*;
 use gstreamer as gst;
+use jiffshot_video::recording_marks::{self, Activity, Marker, RecordedCaption, RecordingMarks};
 use std::collections::HashMap;
 use std::future::Future;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Maximum number of saved images and recordings shown in the recent-captures row.
 const RECENT_CAPTURE_LIMIT: usize = 8;
@@ -437,13 +438,46 @@ impl Default for WebcamConfiguration {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug)]
+pub struct RecordingAnnotation {
+    pub(super) kind: jiffshot_doc::object::Kind,
+    pub(super) style: jiffshot_doc::object::Style,
+    pub(super) duration_ms: u64,
+}
+
+#[derive(Debug)]
 pub enum RecordingCommand {
     TogglePause,
+    RequestPause {
+        request: PauseRequest,
+        result: Sender<Result<RecordingState, String>>,
+    },
     Stop,
     Restart,
     Cancel,
     ToggleWebcam,
+    Mark {
+        label: Option<String>,
+        discard: bool,
+        result: Sender<Result<u64, String>>,
+    },
+    Annotate {
+        annotation: Box<RecordingAnnotation>,
+        result: Sender<Result<(u64, u64), String>>,
+    },
+    ClearAnnotations {
+        result: Sender<Result<u64, String>>,
+    },
+    GuideCaption {
+        text: String,
+        result: Sender<Result<u64, String>>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PauseRequest {
+    Toggle,
+    Resume,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -456,11 +490,36 @@ pub enum RecordingState {
     Cancelling,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 enum RecordingRun {
-    Finished,
+    Finished(RecordingMetadata),
     Restart,
     Cancelled,
+}
+
+#[derive(Debug, Default)]
+struct RecordingMetadata {
+    markers: Vec<Marker>,
+    captions: Vec<RecordedCaption>,
+    activities: Vec<Activity>,
+    activities_complete: bool,
+}
+
+impl RecordingMetadata {
+    fn note_activity(&mut self, at_ms: u64) {
+        if self
+            .activities
+            .last()
+            .is_some_and(|last| at_ms.saturating_sub(last.at_ms) < 100)
+        {
+            return;
+        }
+        if self.activities.len() < recording_marks::MAX_RECORDED_ACTIVITIES {
+            self.activities.push(Activity { at_ms });
+        } else {
+            self.activities_complete = false;
+        }
+    }
 }
 
 enum SetupNext<T> {
@@ -485,11 +544,27 @@ async fn wait_for_recording_setup<T>(
                 state_changed(RecordingState::Cancelling);
                 return None;
             }
-            SetupNext::Command(Ok(RecordingCommand::TogglePause
+            SetupNext::Command(Ok(
+                RecordingCommand::TogglePause
                 | RecordingCommand::Restart
                 | RecordingCommand::ToggleWebcam,
             )) => {
                 state_changed(RecordingState::Starting);
+            }
+            SetupNext::Command(Ok(RecordingCommand::Mark { result, .. })) => {
+                let _ = result.send(Err("the recording has not started yet".into()));
+            }
+            SetupNext::Command(Ok(RecordingCommand::RequestPause { result, .. })) => {
+                let _ = result.send(Err("the recording has not started yet".into()));
+            }
+            SetupNext::Command(Ok(RecordingCommand::Annotate { result, .. })) => {
+                let _ = result.send(Err("the recording has not started yet".into()));
+            }
+            SetupNext::Command(Ok(RecordingCommand::ClearAnnotations { result })) => {
+                let _ = result.send(Err("the recording has not started yet".into()));
+            }
+            SetupNext::Command(Ok(RecordingCommand::GuideCaption { result, .. })) => {
+                let _ = result.send(Err("the recording has not started yet".into()));
             }
         }
     }
@@ -856,6 +931,18 @@ impl RecordingTimeline {
         }
         Some(gst::ClockTime::from_nseconds(adjusted))
     }
+
+    fn position(&self, timestamp: gst::ClockTime) -> Option<gst::ClockTime> {
+        let mut adjusted = timestamp.nseconds();
+        for &(start, end) in &self.pauses {
+            if timestamp < start {
+                break;
+            }
+            let stop = end.unwrap_or(timestamp).min(timestamp);
+            adjusted = adjusted.checked_sub(stop.nseconds() - start.nseconds())?;
+        }
+        Some(gst::ClockTime::from_nseconds(adjusted))
+    }
 }
 
 fn recording_audio_sources(audio: RecordingAudio) -> Result<Vec<gst::Element>, String> {
@@ -899,10 +986,16 @@ pub(super) async fn record_monitor_with_audio(
     let _hidden = jiffshot_capture::visibility::hide().map_err(|error| error.to_string())?;
     gst::init().map_err(|error| format!("could not initialize GStreamer: {error}"))?;
     // Fail before the desktop asks what to share, not after.
-    let missing: Vec<&str> = ["pipewiresrc", "videoconvert", "x264enc", "h264parse", "mp4mux"]
-        .into_iter()
-        .filter(|name| gst::ElementFactory::find(name).is_none())
-        .collect();
+    let missing: Vec<&str> = [
+        "pipewiresrc",
+        "videoconvert",
+        "x264enc",
+        "h264parse",
+        "mp4mux",
+    ]
+    .into_iter()
+    .filter(|name| gst::ElementFactory::find(name).is_none())
+    .collect();
     if !missing.is_empty() {
         return Err(format!(
             "recording needs the GStreamer plugins {} (install gstreamer1.0-pipewire and gstreamer1.0-plugins-ugly, or your distribution's equivalents)",
@@ -993,7 +1086,7 @@ async fn record_opened_portal(
         let result = run_recording(&pipeline, commands.clone(), &mut *state_changed)?;
         drop(pipeline);
         match result {
-            RecordingRun::Finished => {
+            RecordingRun::Finished(metadata) => {
                 if !staged_path.is_file() {
                     return Err(format!(
                         "recording did not create {}",
@@ -1003,6 +1096,7 @@ async fn record_opened_portal(
                 let path = recording_path(&directory)?;
                 std::fs::rename(&staged_path, &path)
                     .map_err(|error| format!("could not save {}: {error}", path.display()))?;
+                write_recording_metadata(&path, metadata)?;
                 return Ok(Some(path));
             }
             RecordingRun::Cancelled => return Ok(None),
@@ -1041,6 +1135,21 @@ fn run_recording(
         .bus()
         .ok_or_else(|| "recording pipeline has no event bus".to_owned())?;
     let timeline = recording_timeline(pipeline)?;
+    let annotations = super::live_annotations::attach(pipeline)?;
+    let mut metadata = RecordingMetadata::default();
+    let mut input = match super::x11::ActivityTracker::connect().and_then(|mut tracker| {
+        tracker.sample(Instant::now())?;
+        Ok(tracker)
+    }) {
+        Ok(input) => {
+            metadata.activities_complete = true;
+            Some(input)
+        }
+        Err(error) => {
+            eprintln!("jiffshot: physical input tracking unavailable: {error}");
+            None
+        }
+    };
     if let Err(error) = pipeline.set_state(gst::State::Playing) {
         let detail = bus
             .timed_pop_filtered(
@@ -1060,6 +1169,26 @@ fn run_recording(
     state_changed(RecordingState::Recording);
     let mut paused = false;
     loop {
+        if !paused {
+            if let Some(tracker) = input.as_mut() {
+                match tracker.sample(Instant::now()) {
+                    Ok(true) => match recording_position(pipeline, &timeline) {
+                        Ok(at_ms) => metadata.note_activity(at_ms),
+                        Err(error) => {
+                            eprintln!("jiffshot: physical input tracking unavailable: {error}");
+                            metadata.activities_complete = false;
+                            input = None;
+                        }
+                    },
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!("jiffshot: physical input tracking unavailable: {error}");
+                        metadata.activities_complete = false;
+                        input = None;
+                    }
+                }
+            }
+        }
         match commands.try_recv() {
             Ok(RecordingCommand::Stop) | Err(async_channel::TryRecvError::Closed) => {
                 state_changed(RecordingState::Stopping);
@@ -1071,13 +1200,17 @@ fn run_recording(
                     ));
                 }
                 finish_recording(pipeline)?;
-                return Ok(RecordingRun::Finished);
+                return Ok(RecordingRun::Finished(metadata));
             }
             Ok(command @ (RecordingCommand::Cancel | RecordingCommand::Restart)) => {
-                let (result, state) = if command == RecordingCommand::Cancel {
-                    (RecordingRun::Cancelled, RecordingState::Cancelling)
-                } else {
-                    (RecordingRun::Restart, RecordingState::Restarting)
+                let (result, state) = match command {
+                    RecordingCommand::Cancel => {
+                        (RecordingRun::Cancelled, RecordingState::Cancelling)
+                    }
+                    RecordingCommand::Restart => {
+                        (RecordingRun::Restart, RecordingState::Restarting)
+                    }
+                    _ => unreachable!("the command was matched above"),
                 };
                 state_changed(state);
                 pipeline
@@ -1085,34 +1218,125 @@ fn run_recording(
                     .map_err(|error| format!("could not stop recording pipeline: {error}"))?;
                 return Ok(result);
             }
-            Ok(RecordingCommand::TogglePause) => {
-                let Some(at) = pipeline.current_running_time() else {
-                    state_changed(RecordingState::Starting);
-                    continue;
+            Ok(
+                command @ (RecordingCommand::TogglePause | RecordingCommand::RequestPause { .. }),
+            ) => {
+                let (request, response) = match command {
+                    RecordingCommand::TogglePause => (PauseRequest::Toggle, None),
+                    RecordingCommand::RequestPause { request, result } => (request, Some(result)),
+                    _ => unreachable!("the command was matched above"),
                 };
-                // Keep PipeWire running while omitting paused samples from the output timeline.
-                let result = if paused {
-                    timeline.lock().resume(at)
+                let next_paused = match request {
+                    PauseRequest::Toggle => !paused,
+                    PauseRequest::Resume => false,
+                };
+                if next_paused == paused {
+                    if let Some(response) = response {
+                        let _ = response.send(Ok(RecordingState::Recording));
+                    }
                 } else {
-                    timeline.lock().pause(at)
-                };
-                if let Err(error) = result {
-                    return Err(stop_failed_recording(pipeline, error));
+                    if paused {
+                        if let Some(tracker) = input.as_mut() {
+                            tracker.resume(Instant::now());
+                        }
+                    }
+                    let Some(at) = pipeline.current_running_time() else {
+                        state_changed(RecordingState::Starting);
+                        if let Some(response) = response {
+                            let _ =
+                                response.send(Err("the recording clock is not available".into()));
+                        }
+                        continue;
+                    };
+                    // Keep PipeWire running while omitting paused samples from the output timeline.
+                    let result = if paused {
+                        timeline.lock().resume(at)
+                    } else {
+                        timeline.lock().pause(at)
+                    };
+                    if let Err(error) = result {
+                        if let Some(response) = response {
+                            let _ = response.send(Err(error.clone()));
+                        }
+                        return Err(stop_failed_recording(pipeline, error));
+                    }
+                    paused = next_paused;
+                    let state = if paused {
+                        RecordingState::Paused
+                    } else {
+                        RecordingState::Recording
+                    };
+                    state_changed(state);
+                    if let Some(response) = response {
+                        let _ = response.send(Ok(state));
+                    }
                 }
-                paused = !paused;
-                state_changed(if paused {
-                    RecordingState::Paused
-                } else {
-                    RecordingState::Recording
-                });
             }
             Ok(RecordingCommand::ToggleWebcam) => {
                 toggle_webcam_visibility(pipeline);
             }
+            Ok(RecordingCommand::Mark {
+                label,
+                discard,
+                result,
+            }) => {
+                let marker = if label.is_some() == discard {
+                    Err("provide exactly one of label or discard=true".into())
+                } else if label
+                    .as_ref()
+                    .is_some_and(|label| label.trim().is_empty() || label.chars().count() > 128)
+                {
+                    Err("marker label must contain 1..128 characters".into())
+                } else if metadata.markers.len() >= 256 {
+                    Err("at most 256 recording markers are supported".into())
+                } else {
+                    recording_position(pipeline, &timeline).inspect(|&at_ms| {
+                        metadata.markers.push(match label {
+                            Some(label) => Marker::Label { at_ms, label },
+                            None if discard => Marker::Discard { at_ms },
+                            None => unreachable!("the control server validates markers"),
+                        });
+                    })
+                };
+                let _ = result.send(marker);
+            }
+            Ok(RecordingCommand::Annotate { annotation, result }) => {
+                let RecordingAnnotation {
+                    kind,
+                    style,
+                    duration_ms,
+                } = *annotation;
+                let added = recording_position(pipeline, &timeline).and_then(|at_ms| {
+                    annotations
+                        .lock()
+                        .add(kind, style, at_ms, duration_ms, &mut metadata.captions)
+                        .map(|id| (id, at_ms))
+                });
+                let _ = result.send(added);
+            }
+            Ok(RecordingCommand::ClearAnnotations { result }) => {
+                let cleared = recording_position(pipeline, &timeline).inspect(|&at_ms| {
+                    annotations.lock().clear(at_ms, &mut metadata.captions);
+                });
+                let _ = result.send(cleared);
+            }
+            Ok(RecordingCommand::GuideCaption { text, result }) => {
+                let added = if metadata.captions.len() >= 256 {
+                    Err("at most 256 recorded text captions are supported".into())
+                } else {
+                    recording_position(pipeline, &timeline).and_then(|at_ms| {
+                        let height = annotations.lock().frame_height();
+                        let caption = recording_marks::guide_caption(at_ms, height, text)?;
+                        metadata.captions.push(caption);
+                        Ok(at_ms)
+                    })
+                };
+                let _ = result.send(added);
+            }
             Err(async_channel::TryRecvError::Empty) => {}
         }
         let Some(message) = bus.timed_pop_filtered(
-            gst::ClockTime::from_mseconds(250),
+            gst::ClockTime::from_mseconds(100),
             &[gst::MessageType::Eos, gst::MessageType::Error],
         ) else {
             continue;
@@ -1121,11 +1345,72 @@ fn run_recording(
             gst::MessageView::Error(error) => {
                 format!("recording pipeline failed: {}", error.error())
             }
+
             gst::MessageView::Eos(_) => "screen capture stream ended unexpectedly".to_owned(),
             _ => "recording pipeline ended unexpectedly".to_owned(),
         };
         return Err(stop_failed_recording(pipeline, error));
     }
+}
+
+fn recording_position(
+    pipeline: &gst::Pipeline,
+    timeline: &parking_lot::Mutex<RecordingTimeline>,
+) -> Result<u64, String> {
+    let now = pipeline
+        .current_running_time()
+        .ok_or("the recording clock is unavailable")?;
+    let position = timeline
+        .lock()
+        .position(now)
+        .ok_or("the recording clock is inconsistent")?;
+    Ok(position.mseconds())
+}
+
+fn write_recording_metadata(path: &Path, mut metadata: RecordingMetadata) -> Result<(), String> {
+    let info = jiffshot_capture::media::post::inspect(path).map_err(|error| {
+        format!(
+            "recording saved at {} but metadata could not be read: {error}",
+            path.display()
+        )
+    })?;
+    if !info.duration.is_finite() || info.duration < 0.0 || !info.fps.is_finite() || info.fps <= 0.0
+    {
+        return Err(format!(
+            "recording saved at {} but its timing metadata is invalid",
+            path.display()
+        ));
+    }
+    let duration_ms = (info.duration * 1000.0).round() as u64;
+    for marker in &mut metadata.markers {
+        match marker {
+            Marker::Label { at_ms, .. } | Marker::Discard { at_ms } => {
+                *at_ms = (*at_ms).min(duration_ms);
+            }
+        }
+    }
+    for activity in &mut metadata.activities {
+        activity.at_ms = activity.at_ms.min(duration_ms);
+    }
+    for caption in &mut metadata.captions {
+        caption.at_ms = caption.at_ms.min(duration_ms);
+    }
+    let marks = RecordingMarks::new(
+        duration_ms,
+        info.fps.round().max(1.0) as u32,
+        info.width,
+        info.height,
+        metadata.markers,
+    )
+    .with_captions(metadata.captions)
+    .with_activities(metadata.activities)
+    .with_activity_tracking_complete(metadata.activities_complete);
+    recording_marks::write(path, &marks).map_err(|error| {
+        format!(
+            "recording saved at {} but marker metadata could not be written: {error}",
+            path.display()
+        )
+    })
 }
 
 /// Shows or hides the webcam overlay of a recording that started with the webcam enabled.
@@ -2102,10 +2387,17 @@ mod tests {
 
     #[test]
     fn pending_recording_setup_ignores_pause_and_restart_until_cancelled() {
-        let (commands, receiver) = async_channel::bounded(3);
+        let (commands, receiver) = async_channel::bounded(4);
+        let (pause_result, pause_response) = std::sync::mpsc::channel();
         commands
             .send_blocking(RecordingCommand::TogglePause)
             .expect("pause should be queued");
+        commands
+            .send_blocking(RecordingCommand::RequestPause {
+                request: PauseRequest::Resume,
+                result: pause_result,
+            })
+            .expect("resume should be queued");
         commands
             .send_blocking(RecordingCommand::Restart)
             .expect("restart should be queued");
@@ -2119,6 +2411,13 @@ mod tests {
             &mut |state| states.push(state),
         ));
         assert_eq!(result, None, "cancellation must end pending setup");
+        assert!(
+            pause_response
+                .recv_timeout(Duration::from_secs(1))
+                .expect("pending resume should receive a response")
+                .is_err(),
+            "pending setup must reject an acknowledged resume"
+        );
         assert_eq!(
             states,
             [
@@ -2893,6 +3192,531 @@ mod tests {
             timeline.resume(ms(800)).is_err(),
             "a completed pause cannot end twice"
         );
+    }
+
+    #[test]
+    fn recording_marker_positions_freeze_during_each_pause() {
+        let ms = gst::ClockTime::from_mseconds;
+        let mut timeline = RecordingTimeline::default();
+        assert_eq!(timeline.position(ms(75)), Some(ms(75)));
+        timeline.pause(ms(100)).unwrap();
+        assert_eq!(timeline.position(ms(100)), Some(ms(100)));
+        assert_eq!(timeline.position(ms(250)), Some(ms(100)));
+        timeline.resume(ms(300)).unwrap();
+        assert_eq!(timeline.position(ms(300)), Some(ms(100)));
+        assert_eq!(timeline.position(ms(400)), Some(ms(200)));
+        timeline.pause(ms(500)).unwrap();
+        timeline.resume(ms(750)).unwrap();
+        assert_eq!(timeline.position(ms(600)), Some(ms(300)));
+        assert_eq!(timeline.position(ms(750)), Some(ms(300)));
+        assert_eq!(timeline.position(ms(900)), Some(ms(450)));
+    }
+
+    #[test]
+    fn recording_activity_coalesces_samples_and_reports_overflow() {
+        let mut metadata = RecordingMetadata {
+            activities_complete: true,
+            ..RecordingMetadata::default()
+        };
+        metadata.note_activity(100);
+        metadata.note_activity(199);
+        metadata.note_activity(200);
+        assert_eq!(
+            metadata.activities,
+            vec![Activity { at_ms: 100 }, Activity { at_ms: 200 }]
+        );
+        metadata.activities.resize(
+            recording_marks::MAX_RECORDED_ACTIVITIES,
+            Activity { at_ms: 200 },
+        );
+        metadata.note_activity(299);
+        assert!(metadata.activities_complete);
+        metadata.note_activity(300);
+        assert_eq!(
+            metadata.activities.len(),
+            recording_marks::MAX_RECORDED_ACTIVITIES
+        );
+        assert!(!metadata.activities_complete);
+    }
+
+    #[test]
+    #[ignore = "requires a private X11 server with XTest and GStreamer MP4 plugins"]
+    fn native_x11_activity_is_captured_before_pause_and_stop() {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xtest::ConnectionExt as _;
+
+        gst::init().expect("GStreamer should initialize");
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("recording.mp4");
+        let source = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .build()
+            .expect("test source");
+        let pipeline = recording_pipeline(source, &path).expect("recording pipeline");
+        let (commands, receiver) = async_channel::bounded(8);
+        let (states, observed) = std::sync::mpsc::channel();
+        let controller = std::thread::spawn(move || {
+            let (injector, screen) = x11rb::connect(None).expect("connect to private X11");
+            let root = injector.setup().roots[screen].root;
+            let wait_state = |expected| {
+                assert_eq!(
+                    observed.recv_timeout(Duration::from_secs(5)).unwrap(),
+                    expected
+                );
+            };
+            let tap = || {
+                for event in [2, 3] {
+                    injector
+                        .xtest_fake_input(event, 38, 0, root, 0, 0, 0)
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                }
+            };
+            wait_state(RecordingState::Recording);
+            std::thread::sleep(Duration::from_millis(350));
+            tap();
+            commands
+                .send_blocking(RecordingCommand::TogglePause)
+                .unwrap();
+            wait_state(RecordingState::Paused);
+            std::thread::sleep(Duration::from_millis(250));
+            commands
+                .send_blocking(RecordingCommand::TogglePause)
+                .unwrap();
+            wait_state(RecordingState::Recording);
+            std::thread::sleep(Duration::from_millis(350));
+            tap();
+            commands.send_blocking(RecordingCommand::Stop).unwrap();
+        });
+        let result = run_recording(&pipeline, receiver, |state| {
+            let _ = states.send(state);
+        })
+        .expect("recording should finish");
+        controller.join().expect("controller should finish");
+        let RecordingRun::Finished(metadata) = result else {
+            panic!("recording should have been saved");
+        };
+        assert!(metadata.activities_complete);
+        assert!(
+            metadata.activities.len() >= 2,
+            "both boundary events must be saved: {:?}",
+            metadata.activities
+        );
+        assert!(
+            metadata.activities.last().unwrap().at_ms
+                >= metadata.activities.first().unwrap().at_ms + 200,
+            "activity timestamps must distinguish the two events"
+        );
+    }
+
+    #[test]
+    fn live_annotations_render_and_captions_follow_pause_and_clear() {
+        gst::init().expect("GStreamer should initialize");
+        let missing: Vec<_> = ["x264enc", "h264parse", "mp4mux"]
+            .into_iter()
+            .filter(|plugin| gst::ElementFactory::find(plugin).is_none())
+            .collect();
+        if !missing.is_empty() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must install GStreamer MP4 plugins: {}",
+                missing.join(", ")
+            );
+            eprintln!("Skipping recording test because plugins are missing: {missing:?}");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("annotated.mp4");
+        let source = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .property_from_str("pattern", "black")
+            .build()
+            .expect("test source");
+        let pipeline = recording_pipeline(source, &path).expect("recording pipeline");
+        let (commands, receiver) = async_channel::bounded(8);
+        let (states, observed) = std::sync::mpsc::channel();
+        let controller = std::thread::spawn(move || {
+            assert_eq!(
+                observed.recv_timeout(Duration::from_secs(5)).unwrap(),
+                RecordingState::Recording
+            );
+            std::thread::sleep(Duration::from_millis(350));
+            let (result, response) = std::sync::mpsc::channel();
+            commands
+                .send_blocking(RecordingCommand::Annotate {
+                    annotation: Box::new(RecordingAnnotation {
+                        kind: jiffshot_doc::object::Kind::Text {
+                            rect: jiffshot_doc::Box2::new(40.0, 40.0, 160.0, 120.0),
+                            text: "Open settings".to_owned(),
+                        },
+                        style: jiffshot_doc::object::Style {
+                            fill: jiffshot_doc::Rgba::new(220, 0, 0, 255),
+                            stroke: jiffshot_doc::Rgba::TRANSPARENT,
+                            font_size: 20.0,
+                            ..jiffshot_doc::object::Style::default()
+                        },
+                        duration_ms: 0,
+                    }),
+                    result,
+                })
+                .unwrap();
+            let (id, start) = response
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .expect("add annotation");
+            assert_eq!(id, 1);
+            std::thread::sleep(Duration::from_millis(350));
+            commands
+                .send_blocking(RecordingCommand::TogglePause)
+                .unwrap();
+            assert_eq!(
+                observed.recv_timeout(Duration::from_secs(5)).unwrap(),
+                RecordingState::Paused
+            );
+            std::thread::sleep(Duration::from_millis(250));
+            let (result, response) = std::sync::mpsc::channel();
+            commands
+                .send_blocking(RecordingCommand::ClearAnnotations { result })
+                .unwrap();
+            let end = response
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .expect("clear annotations");
+            commands
+                .send_blocking(RecordingCommand::TogglePause)
+                .unwrap();
+            assert_eq!(
+                observed.recv_timeout(Duration::from_secs(5)).unwrap(),
+                RecordingState::Recording
+            );
+            std::thread::sleep(Duration::from_millis(350));
+            commands.send_blocking(RecordingCommand::Stop).unwrap();
+            (start, end)
+        });
+        let result = run_recording(&pipeline, receiver, |state| {
+            let _ = states.send(state);
+        })
+        .expect("recording should finish");
+        let (start, end) = controller.join().expect("controller should finish");
+        assert!(end > start + 200, "annotation interval: {start}..{end}");
+        let RecordingRun::Finished(metadata) = result else {
+            panic!("recording should have been saved");
+        };
+        assert_eq!(metadata.captions.len(), 1);
+        assert_eq!(metadata.captions[0].text, "Open settings");
+        assert_eq!(metadata.captions[0].at_ms, start);
+        assert_eq!(metadata.captions[0].duration_ms, Some(end - start));
+        assert!(metadata.captions[0].burned_in);
+        write_recording_metadata(&path, metadata).expect("write sidecar");
+        let saved = recording_marks::read(&path).unwrap().unwrap();
+        assert_eq!(saved.captions()[0].duration_ms, Some(end - start));
+        assert!(saved.captions()[0].burned_in);
+
+        let color = |at_ms: u64| {
+            let (image, _) = jiffshot_capture::media::post::frame(&path, at_ms as f64 / 1000.0)
+                .expect("decode recorded frame");
+            let offset = (100 * image.width() as usize + 140) * 4;
+            image.data()[offset..offset + 3].to_vec()
+        };
+        let before = color(start.saturating_sub(150));
+        let during = color(start + (end - start) / 2);
+        let after = color(end + 150);
+        assert!(before.iter().all(|channel| *channel < 50), "{before:?}");
+        assert!(
+            during[0] > 150 && during[1] < 70 && during[2] < 70,
+            "{during:?}"
+        );
+        assert!(after.iter().all(|channel| *channel < 50), "{after:?}");
+    }
+
+    #[test]
+    fn recording_markers_survive_pause_and_sidecar_publication() {
+        gst::init().expect("GStreamer should initialize");
+        let missing: Vec<_> = ["x264enc", "h264parse", "mp4mux"]
+            .into_iter()
+            .filter(|plugin| gst::ElementFactory::find(plugin).is_none())
+            .collect();
+        if !missing.is_empty() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must install GStreamer MP4 plugins: {}",
+                missing.join(", ")
+            );
+            eprintln!("Skipping recording test because plugins are missing: {missing:?}");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("recording.mp4");
+        let source = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .build()
+            .expect("test source");
+        let pipeline = recording_pipeline(source, &path).expect("recording pipeline");
+        let (commands, receiver) = async_channel::bounded(8);
+        let (states, observed) = std::sync::mpsc::channel();
+        let controller = std::thread::spawn(move || {
+            let wait_state = |expected| {
+                assert_eq!(
+                    observed.recv_timeout(Duration::from_secs(5)).unwrap(),
+                    expected
+                );
+            };
+            let mark = |label: Option<&str>, discard| {
+                let (result, response) = std::sync::mpsc::channel();
+                commands
+                    .send_blocking(RecordingCommand::Mark {
+                        label: label.map(str::to_owned),
+                        discard,
+                        result,
+                    })
+                    .unwrap();
+                response
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap()
+                    .expect("marker should succeed")
+            };
+            wait_state(RecordingState::Recording);
+            std::thread::sleep(Duration::from_millis(350));
+            let start = mark(Some("segment"), false);
+            commands
+                .send_blocking(RecordingCommand::TogglePause)
+                .unwrap();
+            wait_state(RecordingState::Paused);
+            let paused_start = mark(None, true);
+            std::thread::sleep(Duration::from_millis(250));
+            let paused_end = mark(None, true);
+            commands
+                .send_blocking(RecordingCommand::TogglePause)
+                .unwrap();
+            wait_state(RecordingState::Recording);
+            std::thread::sleep(Duration::from_millis(250));
+            let end = mark(Some("segment"), false);
+            commands.send_blocking(RecordingCommand::Stop).unwrap();
+            (start, paused_start, paused_end, end)
+        });
+        let result = run_recording(&pipeline, receiver, |state| {
+            let _ = states.send(state);
+        })
+        .expect("recording should finish");
+        let (start, paused_start, paused_end, end) = controller.join().expect("controller");
+        assert!(start <= paused_start);
+        assert_eq!(paused_start, paused_end, "paused markers must not advance");
+        assert!(end > paused_end);
+        let RecordingRun::Finished(metadata) = result else {
+            panic!("recording should have been saved");
+        };
+        let expected = metadata.markers.clone();
+        write_recording_metadata(&path, metadata).expect("write sidecar");
+        let saved = recording_marks::read(&path)
+            .expect("read sidecar")
+            .expect("sidecar exists");
+        assert_eq!(saved.markers(), expected);
+        let sidecar = recording_marks::sidecar_path(&path);
+        let original = std::fs::read(&sidecar).expect("saved sidecar");
+        let error = write_recording_metadata(&path, RecordingMetadata::default())
+            .expect_err("existing sidecar must not be overwritten");
+        assert!(error.contains("recording saved at"), "{error}");
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert!(path.is_file(), "a metadata failure must preserve the MP4");
+        assert_eq!(std::fs::read(sidecar).unwrap(), original);
+    }
+
+    #[test]
+    fn guide_captions_follow_pause_and_are_rendered_on_export() {
+        gst::init().expect("GStreamer should initialize");
+        let missing: Vec<_> = ["x264enc", "h264parse", "mp4mux"]
+            .into_iter()
+            .filter(|plugin| gst::ElementFactory::find(plugin).is_none())
+            .collect();
+        if !missing.is_empty() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must install GStreamer MP4 plugins: {}",
+                missing.join(", ")
+            );
+            eprintln!("Skipping recording test because plugins are missing: {missing:?}");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("guide-recording.mp4");
+        let source = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .property_from_str("pattern", "red")
+            .build()
+            .expect("test source");
+        let pipeline = recording_pipeline(source, &path).expect("recording pipeline");
+        let (commands, receiver) = async_channel::bounded(8);
+        let (states, observed) = std::sync::mpsc::channel();
+        let controller = std::thread::spawn(move || {
+            let wait_state = |expected| {
+                assert_eq!(
+                    observed.recv_timeout(Duration::from_secs(5)).unwrap(),
+                    expected
+                );
+            };
+            let caption = |text: &str| {
+                let (result, response) = std::sync::mpsc::channel();
+                commands
+                    .send_blocking(RecordingCommand::GuideCaption {
+                        text: text.to_owned(),
+                        result,
+                    })
+                    .unwrap();
+                response
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap()
+                    .expect("guide caption should succeed")
+            };
+            wait_state(RecordingState::Recording);
+            std::thread::sleep(Duration::from_millis(350));
+            let first = caption("First guide step");
+            std::thread::sleep(Duration::from_millis(250));
+            commands
+                .send_blocking(RecordingCommand::TogglePause)
+                .unwrap();
+            wait_state(RecordingState::Paused);
+            let paused_first = caption("Earlier paused step");
+            std::thread::sleep(Duration::from_millis(250));
+            let paused_last = caption("Latest paused step");
+            commands
+                .send_blocking(RecordingCommand::TogglePause)
+                .unwrap();
+            wait_state(RecordingState::Recording);
+            std::thread::sleep(Duration::from_millis(350));
+            let resumed = caption("Resumed step");
+            std::thread::sleep(Duration::from_millis(250));
+            commands.send_blocking(RecordingCommand::Stop).unwrap();
+            (first, paused_first, paused_last, resumed)
+        });
+        let result = run_recording(&pipeline, receiver, |state| {
+            let _ = states.send(state);
+        })
+        .expect("recording should finish");
+        let (first, paused_first, paused_last, resumed) =
+            controller.join().expect("controller should finish");
+        assert!(paused_first > first);
+        assert_eq!(
+            paused_first, paused_last,
+            "paused captions must not advance"
+        );
+        assert!(resumed > paused_last);
+        let RecordingRun::Finished(metadata) = result else {
+            panic!("recording should have been saved");
+        };
+        assert_eq!(
+            metadata
+                .captions
+                .iter()
+                .map(|caption| (caption.text.as_str(), caption.at_ms, caption.burned_in))
+                .collect::<Vec<_>>(),
+            [
+                ("First guide step", first, false),
+                ("Earlier paused step", paused_first, false),
+                ("Latest paused step", paused_last, false),
+                ("Resumed step", resumed, false),
+            ]
+        );
+        write_recording_metadata(&path, metadata).expect("write sidecar");
+        let saved = recording_marks::read(&path).unwrap().unwrap();
+        assert_eq!(saved.captions()[2].at_ms, paused_last);
+        assert!(!saved.captions()[2].burned_in);
+
+        let output = directory.path().join("guide-export.mp4");
+        jiffshot_video::dispatch(
+            "video.export",
+            serde_json::json!({
+                "path": path,
+                "out": output,
+                "fps": 30,
+                "captions_from_recording": true,
+            }),
+            &|| false,
+        )
+        .expect("export recording with guide captions");
+        let pixel = |at_ms: u64| {
+            let (image, _) = jiffshot_capture::media::post::frame(&output, at_ms as f64 / 1000.0)
+                .expect("decode exported frame");
+            image.pixels()[153 * image.width() as usize + 25]
+        };
+        let before = pixel(first.saturating_sub(150));
+        let during = pixel(first + (paused_first - first) / 2);
+        assert!(before.red() > 150, "unmodified frame: {before:?}");
+        assert!(during.red() < 130, "caption background: {during:?}");
+    }
+
+    #[test]
+    fn queued_pause_and_resume_are_applied_in_order() {
+        gst::init().expect("GStreamer should initialize");
+        let missing: Vec<_> = ["x264enc", "h264parse", "mp4mux"]
+            .into_iter()
+            .filter(|plugin| gst::ElementFactory::find(plugin).is_none())
+            .collect();
+        if !missing.is_empty() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must install GStreamer MP4 plugins: {}",
+                missing.join(", ")
+            );
+            eprintln!("Skipping recording test because plugins are missing: {missing:?}");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("recording.mp4");
+        let source = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .build()
+            .expect("test source");
+        let pipeline = recording_pipeline(source, &path).expect("recording pipeline");
+        let (commands, receiver) = async_channel::bounded(8);
+        let (states, observed) = std::sync::mpsc::channel();
+        let controller = std::thread::spawn(move || {
+            let wait_state = |expected| {
+                assert_eq!(
+                    observed.recv_timeout(Duration::from_secs(5)).unwrap(),
+                    expected
+                );
+            };
+            let request = |request| {
+                let (result, response) = std::sync::mpsc::channel();
+                commands
+                    .send_blocking(RecordingCommand::RequestPause { request, result })
+                    .unwrap();
+                response
+            };
+            let response = |receiver: std::sync::mpsc::Receiver<Result<RecordingState, String>>| {
+                receiver
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("pause response should arrive")
+                    .expect("pause request should succeed")
+            };
+            wait_state(RecordingState::Recording);
+            std::thread::sleep(Duration::from_millis(250));
+            let pause = request(PauseRequest::Toggle);
+            let resume = request(PauseRequest::Resume);
+            assert_eq!(response(pause), RecordingState::Paused);
+            wait_state(RecordingState::Paused);
+            assert_eq!(response(resume), RecordingState::Recording);
+            wait_state(RecordingState::Recording);
+            assert_eq!(
+                response(request(PauseRequest::Resume)),
+                RecordingState::Recording
+            );
+            assert!(observed.try_recv().is_err(), "resume must be idempotent");
+            drop(request(PauseRequest::Toggle));
+            let recovery = request(PauseRequest::Resume);
+            wait_state(RecordingState::Paused);
+            assert_eq!(response(recovery), RecordingState::Recording);
+            wait_state(RecordingState::Recording);
+            std::thread::sleep(Duration::from_millis(250));
+            commands.send_blocking(RecordingCommand::Stop).unwrap();
+        });
+        let result = run_recording(&pipeline, receiver, |state| {
+            let _ = states.send(state);
+        })
+        .expect("recording should finish");
+        controller.join().expect("controller should finish");
+        assert!(matches!(result, RecordingRun::Finished(_)));
     }
 
     #[test]

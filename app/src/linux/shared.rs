@@ -156,7 +156,9 @@ pub fn start_shortcuts() {
                         None => report("The recording start shortcut is disabled.".into()),
                     },
                     ShortcutAction::PauseRecording => {
-                        let _ = control::record_pause();
+                        if let Err(error) = control::record_pause() {
+                            report(format!("Could not change recording pause state: {error}"));
+                        }
                     }
                     ShortcutAction::StopRecording => {
                         if control::recording_active() {
@@ -257,7 +259,7 @@ pub(crate) fn finish_active(cancel: bool) {
 static LAST_AREA: std::sync::Mutex<Option<jiffshot_capture::Rect>> = std::sync::Mutex::new(None);
 
 #[allow(clippy::chunks_exact_to_as_chunks)]
-fn frame_from_pixmap(pixmap: &tiny_skia::Pixmap) -> jiffshot_capture::Frame {
+pub(super) fn frame_from_pixmap(pixmap: &tiny_skia::Pixmap) -> jiffshot_capture::Frame {
     let mut frame = jiffshot_capture::Frame::new(pixmap.width(), pixmap.height());
     for (dst, src) in frame.pixels.chunks_exact_mut(4).zip(pixmap.pixels()) {
         let inv = 255 - src.alpha() as u32;

@@ -11,6 +11,7 @@
 use crate::audio_timeline::{TimedMixer, Track};
 use crate::geometry::CaptureLayout;
 use crate::hud::{self, Border};
+use crate::recording_marks::RecordedCaption;
 use crate::settings::Settings;
 use crate::sys::{self, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, VK_F10, VK_F9};
 #[cfg(windows)]
@@ -28,7 +29,7 @@ use jiffshot_doc::{Document, Pixmap, Rgba};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 /// A recording key: modifiers, virtual key and how it is written.
@@ -153,6 +154,261 @@ pub struct Control {
     pub microphone_silent: AtomicBool,
     pub(crate) max_duration: Option<Duration>,
     annotations: Mutex<Annotations>,
+    pub(crate) markers: Mutex<Vec<crate::recording_marks::Marker>>,
+    pub(crate) captions: Mutex<Vec<RecordedCaption>>,
+    pub(crate) activities: Mutex<Vec<crate::recording_marks::Activity>>,
+    pub(crate) activity_tracking_overflowed: AtomicBool,
+    pub(crate) activity_tracking_unavailable: AtomicBool,
+}
+
+pub(crate) fn note_activity(control: &Control) -> Result<(), String> {
+    const ACTIVITY_SAMPLE_INTERVAL_MS: u64 = 100;
+    let mut activities = control
+        .activities
+        .lock()
+        .map_err(|_| "recording activity markers are unavailable")?;
+    let at_ms = control.millis.load(Ordering::Acquire);
+    if activities
+        .last()
+        .is_some_and(|last| at_ms.saturating_sub(last.at_ms) < ACTIVITY_SAMPLE_INTERVAL_MS)
+    {
+        return Ok(());
+    }
+    if activities.len() < crate::recording_marks::MAX_RECORDED_ACTIVITIES {
+        activities.push(crate::recording_marks::Activity { at_ms });
+    } else {
+        control
+            .activity_tracking_overflowed
+            .store(true, Ordering::Release);
+    }
+    Ok(())
+}
+
+struct PhysicalActivityState {
+    keys: [bool; 256],
+    cursor: Option<(i32, i32)>,
+}
+
+impl Default for PhysicalActivityState {
+    fn default() -> Self {
+        Self {
+            keys: [false; 256],
+            cursor: None,
+        }
+    }
+}
+
+impl PhysicalActivityState {
+    fn observe(&mut self, keys: [bool; 256], cursor: (i32, i32), seen_input: bool) -> bool {
+        let initialized = self.cursor.is_some();
+        let held = keys.iter().any(|key| *key);
+        let changed = initialized && self.keys != keys;
+        let moved = self.cursor.is_some_and(|previous| previous != cursor);
+        self.keys = keys;
+        self.cursor = Some(cursor);
+        held || changed || moved || seen_input
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[derive(Default)]
+struct PhysicalInputTracker {
+    state: PhysicalActivityState,
+    previous_sample: Option<Instant>,
+    #[cfg(windows)]
+    last_input_tick: Option<u32>,
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+impl PhysicalInputTracker {
+    fn sample(&mut self, now: Instant) -> Result<bool, String> {
+        let elapsed = self.previous_sample.replace(now).map(|previous| {
+            now.checked_duration_since(previous)
+                .expect("recording samples use a monotonic clock")
+        });
+
+        #[cfg(windows)]
+        let (keys, cursor, seen_input) = {
+            use windows_sys::Win32::System::SystemInformation::GetTickCount;
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+                GetLastInputInfo, LASTINPUTINFO,
+            };
+
+            let mut last_input = LASTINPUTINFO {
+                cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+                dwTime: 0,
+            };
+            // SAFETY: the initialized structure is valid for this query.
+            if unsafe { GetLastInputInfo(&mut last_input) } == 0 {
+                return Err(format!(
+                    "could not query the last input time: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            // SAFETY: GetTickCount takes no arguments and shares the input tick clock.
+            let age_ms = unsafe { GetTickCount() }.wrapping_sub(last_input.dwTime);
+            let changed = self
+                .last_input_tick
+                .replace(last_input.dwTime)
+                .is_some_and(|previous| previous != last_input.dwTime);
+            let seen_input = changed || recent_input_in_interval(age_ms as f64 / 1000.0, elapsed)?;
+            let keys = std::array::from_fn(|key| crate::sys::key_down(key as u16));
+            let mut point = crate::sys::POINT { x: 0, y: 0 };
+            // SAFETY: point is a valid out-parameter.
+            if unsafe { crate::sys::GetCursorPos(&mut point) } == 0 {
+                return Err(format!(
+                    "could not query the cursor position: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            (keys, (point.x, point.y), seen_input)
+        };
+
+        #[cfg(target_os = "macos")]
+        let (keys, cursor, seen_input) = {
+            use jiffshot_capture::macos::ffi::{
+                kCGAnyInputEventType, kCGEventSourceStateCombinedSessionState,
+                CGEventSourceButtonState, CGEventSourceKeyState,
+                CGEventSourceSecondsSinceLastEventType, CGPreflightListenEventAccess,
+            };
+
+            // SAFETY: these are read-only queries of the current event source.
+            if !unsafe { CGPreflightListenEventAccess() } {
+                return Err("macOS Input Monitoring permission is unavailable".into());
+            }
+            let source = kCGEventSourceStateCombinedSessionState;
+            let age =
+                unsafe { CGEventSourceSecondsSinceLastEventType(source, kCGAnyInputEventType) };
+            let seen_input = recent_input_in_interval(age, elapsed)?;
+            let keys =
+                std::array::from_fn(|key| unsafe { CGEventSourceKeyState(source, key as u16) });
+            let button_held =
+                (0..32).any(|button| unsafe { CGEventSourceButtonState(source, button) });
+            let cursor = jiffshot_capture::screen::try_cursor_pos()
+                .map_err(|error| format!("could not query the cursor position: {error}"))?;
+            (keys, cursor, seen_input || button_held)
+        };
+
+        let active = self.state.observe(keys, cursor, seen_input);
+        validate_activity_sample(active, elapsed)
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn validate_activity_sample(active: bool, elapsed: Option<Duration>) -> Result<bool, String> {
+    // The idle detector allows a 250 ms activity grace period. A longer
+    // sampling gap cannot safely locate every event within that period.
+    const MAX_ACTIVITY_SAMPLE_GAP: Duration = Duration::from_millis(200);
+    if active && elapsed.is_some_and(|gap| gap > MAX_ACTIVITY_SAMPLE_GAP) {
+        return Err("physical input sampling was delayed too long".into());
+    }
+    Ok(active)
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn recent_input_in_interval(age_seconds: f64, elapsed: Option<Duration>) -> Result<bool, String> {
+    const INPUT_CLOCK_MARGIN_SECONDS: f64 = 0.025;
+    if !age_seconds.is_finite() || age_seconds < 0.0 {
+        return Err("the last input time is invalid".into());
+    }
+    Ok(elapsed.is_some_and(|gap| age_seconds <= gap.as_secs_f64() + INPUT_CLOCK_MARGIN_SECONDS))
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn sample_physical_activity(
+    control: &Control,
+    input: &mut PhysicalInputTracker,
+    now: Instant,
+) -> bool {
+    if control
+        .activity_tracking_unavailable
+        .load(Ordering::Acquire)
+    {
+        return false;
+    }
+    record_physical_sample(control, input.sample(now))
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn record_physical_sample(control: &Control, sample: Result<bool, String>) -> bool {
+    match sample {
+        Ok(active) => active,
+        Err(error) => {
+            control
+                .activity_tracking_unavailable
+                .store(true, Ordering::Release);
+            log(&format!("physical input tracking unavailable: {error}"));
+            false
+        }
+    }
+}
+
+pub(crate) fn add_marker(
+    control: &Control,
+    label: Option<&str>,
+    discard: bool,
+) -> Result<u64, String> {
+    if label.is_some() == discard {
+        return Err("provide either a label or --discard".into());
+    }
+    if let Some(label) = label {
+        if label.trim().is_empty() || label.chars().count() > 128 {
+            return Err("marker label must contain 1..128 characters".into());
+        }
+    }
+    let at_ms = control.millis.load(Ordering::Acquire);
+    let mut markers = control
+        .markers
+        .lock()
+        .map_err(|_| "recording markers are unavailable")?;
+    if markers.len() >= 256 {
+        return Err("at most 256 recording markers are supported".into());
+    }
+    let marker = match label {
+        Some(label) => crate::recording_marks::Marker::Label {
+            at_ms,
+            label: label.to_owned(),
+        },
+        None => crate::recording_marks::Marker::Discard { at_ms },
+    };
+    markers.push(marker);
+    Ok(at_ms)
+}
+
+pub(crate) fn add_step_caption(control: &Control, text: &str) -> Result<(), String> {
+    let height = {
+        let annotations = control
+            .annotations
+            .lock()
+            .map_err(|_| "recording annotations are unavailable")?;
+        annotations.size.map(|(_, height)| height)
+    };
+    let caption = crate::recording_marks::guide_caption(0, height, text.to_owned())?;
+    add_recorded_caption(control, caption)
+}
+
+fn caption_history<'a>(
+    control: &'a Control,
+    text: &str,
+) -> Result<MutexGuard<'a, Vec<RecordedCaption>>, String> {
+    if text.trim().is_empty() || text.chars().count() > 4096 {
+        return Err("recorded caption text must contain 1..4096 characters".into());
+    }
+    let captions = control
+        .captions
+        .lock()
+        .map_err(|_| "recording captions are unavailable")?;
+    if captions.len() >= 256 {
+        return Err("at most 256 recorded text captions are supported".into());
+    }
+    Ok(captions)
+}
+
+fn add_recorded_caption(control: &Control, mut caption: RecordedCaption) -> Result<(), String> {
+    let mut captions = caption_history(control, &caption.text)?;
+    caption.at_ms = control.millis.load(Ordering::Acquire);
+    captions.push(caption);
+    Ok(())
 }
 
 #[derive(Default)]
@@ -160,24 +416,31 @@ struct Annotations {
     size: Option<(u32, u32)>,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     next_id: u64,
-    marks: Vec<(u64, Kind, Style, Option<u64>)>,
+    marks: Vec<Annotation>,
     image: Option<Pixmap>,
     document: Option<Document>,
     dirty: bool,
+}
+
+struct Annotation {
+    kind: Kind,
+    style: Style,
+    end: Option<u64>,
+    caption: Option<usize>,
 }
 
 impl Annotations {
     fn blend(&mut self, frame: &mut Frame, now: u64) -> Result<(), String> {
         let before = self.marks.len();
         self.marks
-            .retain(|(_, _, _, end)| end.is_none_or(|end| now < end));
+            .retain(|mark| mark.end.is_none_or(|end| now < end));
         if self.dirty || self.marks.len() != before {
             self.image = None;
             self.document = None;
             if !self.marks.is_empty() {
                 let mut doc = Document::blank(frame.width, frame.height, Rgba::TRANSPARENT);
-                for (_, kind, style, _) in &self.marks {
-                    doc.add(kind.clone(), style.clone());
+                for mark in &self.marks {
+                    doc.add(mark.kind.clone(), mark.style.clone());
                 }
                 if doc.objects.iter().any(|object| object.reads().is_some()) {
                     self.document = Some(doc);
@@ -206,6 +469,24 @@ pub(crate) fn add_annotation(
     style: Style,
     duration: Duration,
 ) -> Result<u64, String> {
+    let duration_ms =
+        (!duration.is_zero()).then_some(duration.as_millis().min(u128::from(u64::MAX)) as u64);
+    let caption = match &kind {
+        Kind::Text { rect, text } | Kind::Callout { rect, text, .. } => Some(RecordedCaption {
+            at_ms: 0,
+            duration_ms: Some(duration_ms.unwrap_or(u64::MAX)),
+            burned_in: true,
+            text: text.clone(),
+            x: rect.x0.round() as i32,
+            y: rect.y0.round() as i32,
+            font: style.font.clone(),
+            size: style.font_size,
+            color: style.text_color,
+            background: style.fill,
+            padding: style.padding.max(0.0).round().min(1024.0) as u32,
+        }),
+        _ => None,
+    };
     let mut overlay = control
         .annotations
         .lock()
@@ -216,19 +497,29 @@ pub(crate) fn add_annotation(
     if overlay.marks.len() >= 256 {
         return Err("at most 256 live annotations; use record.clear".into());
     }
-    overlay.next_id = overlay
+    let id = overlay
         .next_id
         .checked_add(1)
         .ok_or("too many recording annotations")?;
-    let id = overlay.next_id;
-    let end = (!duration.is_zero()).then(|| {
-        control
-            .millis
-            .load(Ordering::Relaxed)
-            .saturating_add(duration.as_millis() as u64)
+    let mut captions = caption
+        .as_ref()
+        .map(|caption| caption_history(control, &caption.text))
+        .transpose()?;
+    let at_ms = control.millis.load(Ordering::Acquire);
+    let end = duration_ms.map(|duration| at_ms.saturating_add(duration));
+    overlay.next_id = id;
+    let caption_index = captions.as_ref().map(|captions| captions.len());
+    overlay.marks.push(Annotation {
+        kind,
+        style,
+        end,
+        caption: caption_index,
     });
-    overlay.marks.push((id, kind, style, end));
     overlay.dirty = true;
+    if let (Some(mut caption), Some(captions)) = (caption, captions.as_mut()) {
+        caption.at_ms = at_ms;
+        captions.push(caption);
+    }
     Ok(id)
 }
 
@@ -238,6 +529,17 @@ pub(crate) fn clear_annotations(control: &Control) -> Result<(), String> {
         .annotations
         .lock()
         .map_err(|_| "recording annotations are unavailable")?;
+    let mut captions = control
+        .captions
+        .lock()
+        .map_err(|_| "recording captions are unavailable")?;
+    let at_ms = control.millis.load(Ordering::Acquire);
+    for mark in &overlay.marks {
+        if let Some(caption) = mark.caption.and_then(|index| captions.get_mut(index)) {
+            let elapsed = at_ms.saturating_sub(caption.at_ms);
+            caption.duration_ms = Some(caption.duration_ms.unwrap_or(u64::MAX).min(elapsed));
+        }
+    }
     overlay.marks.clear();
     overlay.dirty = true;
     Ok(())
@@ -1138,7 +1440,9 @@ fn update_capture_frame(
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             frame.pixels.fill(0);
             if !control.capture_unavailable.swap(true, Ordering::AcqRel) {
-                log("recording protected desktop interruption: black video until Windows returns; audio continues");
+                log(
+                    "recording protected desktop interruption: black video until Windows returns; audio continues",
+                );
             }
             Ok(false)
         }
@@ -1331,6 +1635,10 @@ fn record_inner(
     #[cfg(windows)]
     let mut mixer: Option<Mixer> = None;
     let mut clicks = Clicks::default();
+    #[cfg(any(windows, target_os = "macos"))]
+    let mut physical_input = PhysicalInputTracker::default();
+    #[cfg(any(windows, target_os = "macos"))]
+    sample_physical_activity(control, &mut physical_input, Instant::now());
     let started = Instant::now();
     if system.capture.is_some() {
         system.silence.start(started);
@@ -1359,6 +1667,10 @@ fn record_inner(
     let fine_timer = sys::FineTimer::start();
     let mut checked_layout = Instant::now();
     let mut limit_started: Option<Instant> = None;
+    #[cfg(not(any(windows, target_os = "macos")))]
+    control
+        .activity_tracking_unavailable
+        .store(true, Ordering::Release);
     while !control.stop.load(Ordering::Acquire) {
         #[cfg(target_os = "macos")]
         if crate::shutdown_macos::requested() {
@@ -1379,6 +1691,12 @@ fn record_inner(
         }
         let now = Instant::now();
         let paused = control.paused.load(Ordering::Acquire);
+        #[cfg(any(windows, target_os = "macos"))]
+        let physical_activity = sample_physical_activity(control, &mut physical_input, now);
+        #[cfg(any(windows, target_os = "macos"))]
+        if paused && paused_at.is_none() && physical_activity {
+            note_activity(control)?;
+        }
         #[cfg(target_os = "macos")]
         {
             if paused {
@@ -1477,6 +1795,16 @@ fn record_inner(
         }
         let t = ((now - started - paused_for).as_nanos() / 100) as i64;
         control.millis.store((t / 10_000) as u64, Ordering::Relaxed);
+        #[cfg(any(windows, target_os = "macos"))]
+        if physical_activity {
+            note_activity(control)?;
+        }
+        #[cfg(windows)]
+        if control.capture_unavailable.load(Ordering::Acquire) {
+            control
+                .activity_tracking_unavailable
+                .store(true, Ordering::Release);
+        }
         // Audio first: it arrives continuously, and silence is filled in so
         // the soundtrack keeps pace with the frames.
         #[cfg(windows)]
@@ -1645,6 +1973,11 @@ fn record_inner(
         if limit_started.is_none() {
             limit_started = Some(Instant::now());
         }
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    if sample_physical_activity(control, &mut physical_input, Instant::now()) && paused_at.is_none()
+    {
+        note_activity(control)?;
     }
     #[cfg(target_os = "macos")]
     {
@@ -1852,8 +2185,12 @@ pub(crate) fn record_in_layout(
             (stop, STOP_KEYS[0].2, "stops"),
         ] {
             match key {
-                Some((.., name)) if name != best => log(&format!("{best} is held by another app; {name} {what} the recording")),
-                None => log(&format!("{best} and its alternatives are held by other apps; only the toolbar {what} the recording")),
+                Some((.., name)) if name != best => log(&format!(
+                    "{best} is held by another app; {name} {what} the recording"
+                )),
+                None => log(&format!(
+                    "{best} and its alternatives are held by other apps; only the toolbar {what} the recording"
+                )),
                 _ => {}
             }
         }
@@ -1924,6 +2261,114 @@ pub(crate) fn record_in_layout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_markers_validate_labels_and_capture_pause_free_time() {
+        let control = Control::default();
+        control.millis.store(1250, Ordering::Release);
+
+        assert_eq!(
+            add_marker(&control, Some("intro"), false).expect("labeled marker"),
+            1250
+        );
+        assert_eq!(
+            add_marker(&control, None, true).expect("discard marker"),
+            1250
+        );
+        assert!(add_marker(&control, None, false).is_err());
+        assert!(add_marker(&control, Some("  "), false).is_err());
+        assert!(add_marker(&control, Some(&"x".repeat(129)), false).is_err());
+        assert_eq!(control.markers.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn activity_history_overflow_is_recorded() {
+        let control = Control::default();
+        control.activities.lock().unwrap().resize(
+            crate::recording_marks::MAX_RECORDED_ACTIVITIES,
+            crate::recording_marks::Activity { at_ms: 0 },
+        );
+        control.millis.store(99, Ordering::Release);
+        note_activity(&control).expect("coalesce activity at capacity");
+        assert!(!control.activity_tracking_overflowed.load(Ordering::Acquire));
+
+        control.millis.store(100, Ordering::Release);
+
+        note_activity(&control).expect("record activity");
+
+        assert_eq!(
+            control.activities.lock().unwrap().len(),
+            crate::recording_marks::MAX_RECORDED_ACTIVITIES
+        );
+        assert!(control.activity_tracking_overflowed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn activity_history_coalesces_nearby_samples_without_overflow() {
+        let control = Control::default();
+        note_activity(&control).expect("record initial activity");
+        control.millis.store(99, Ordering::Release);
+        note_activity(&control).expect("coalesce nearby activity");
+        assert_eq!(control.activities.lock().unwrap().len(), 1);
+
+        control.millis.store(100, Ordering::Release);
+        note_activity(&control).expect("record later activity");
+        let activities = control.activities.lock().unwrap();
+        assert_eq!(
+            activities
+                .iter()
+                .map(|activity| activity.at_ms)
+                .collect::<Vec<_>>(),
+            [0, 100]
+        );
+    }
+
+    #[test]
+    fn physical_activity_records_held_keys_and_cursor_motion() {
+        let mut state = PhysicalActivityState::default();
+        let released = [false; 256];
+
+        assert!(!state.observe(released, (10, 20), false));
+        assert!(!state.observe(released, (10, 20), false));
+
+        let mut pressed = released;
+        pressed[65] = true;
+        assert!(state.observe(pressed, (10, 20), false));
+        assert!(state.observe(pressed, (10, 20), false));
+        assert!(state.observe(released, (10, 20), false));
+        assert!(state.observe(released, (11, 20), false));
+        assert!(!state.observe(released, (11, 20), false));
+        assert!(state.observe(released, (11, 20), true));
+
+        let mut held_at_start = PhysicalActivityState::default();
+        assert!(held_at_start.observe(pressed, (10, 20), false));
+    }
+
+    #[test]
+    fn recent_system_activity_detects_events_between_samples() {
+        let elapsed = Some(Duration::from_millis(50));
+        assert!(recent_input_in_interval(0.030, elapsed).unwrap());
+        assert!(recent_input_in_interval(0.074, elapsed).unwrap());
+        assert!(!recent_input_in_interval(0.076, elapsed).unwrap());
+        assert!(!recent_input_in_interval(0.0, None).unwrap());
+        for invalid in [f64::NAN, f64::INFINITY, -0.001] {
+            assert!(recent_input_in_interval(invalid, elapsed).is_err());
+        }
+    }
+
+    #[test]
+    fn delayed_active_sampling_disables_complete_history() {
+        let control = Control::default();
+        let limit = Some(Duration::from_millis(200));
+        assert!(validate_activity_sample(true, limit).unwrap());
+        assert!(!validate_activity_sample(false, Some(Duration::from_secs(1))).unwrap());
+
+        let result = validate_activity_sample(true, Some(Duration::from_millis(201)));
+        assert!(!record_physical_sample(&control, result));
+        assert!(control
+            .activity_tracking_unavailable
+            .load(Ordering::Acquire));
+    }
 
     #[test]
     fn recording_pointer_effects_retain_fractional_coordinates() {
@@ -2083,6 +2528,95 @@ mod tests {
             .blend(&mut cleared, 100_000)
             .unwrap();
         assert_eq!(cleared.rgb(15, 15), Some((0, 0, 0)));
+    }
+
+    #[test]
+    fn clearing_live_annotations_closes_only_their_recorded_captions() {
+        let control = Control::default();
+        control
+            .set_annotation_size(80, 60)
+            .expect("initialize annotation canvas");
+        let text = |value: &str| Kind::Text {
+            rect: jiffshot_doc::Box2::from_xywh(10.0, 10.0, 30.0, 20.0),
+            text: value.to_owned(),
+        };
+        control.millis.store(100, Ordering::Release);
+        add_annotation(&control, text("first"), Style::default(), Duration::ZERO).unwrap();
+        control.millis.store(200, Ordering::Release);
+        add_annotation(
+            &control,
+            text("second"),
+            Style::default(),
+            Duration::from_millis(50),
+        )
+        .unwrap();
+        add_step_caption(&control, "guide step").unwrap();
+        control.millis.store(300, Ordering::Release);
+        clear_annotations(&control).unwrap();
+
+        let captions = control.captions.lock().expect("captions");
+        assert_eq!(captions[0].duration_ms, Some(200));
+        assert_eq!(captions[1].duration_ms, Some(50));
+        assert_eq!(captions[2].duration_ms, None);
+        assert!(captions[0].burned_in);
+        assert!(captions[1].burned_in);
+        assert!(!captions[2].burned_in);
+    }
+
+    #[test]
+    fn rejected_text_annotation_does_not_change_live_or_recorded_state() {
+        let control = Control::default();
+        control
+            .set_annotation_size(80, 60)
+            .expect("initialize annotation canvas");
+        let kind = Kind::Text {
+            rect: jiffshot_doc::Box2::from_xywh(10.0, 10.0, 30.0, 20.0),
+            text: " ".into(),
+        };
+
+        assert!(add_annotation(&control, kind, Style::default(), Duration::ZERO).is_err());
+
+        let overlay = control.annotations.lock().expect("annotations");
+        assert!(overlay.marks.is_empty());
+        assert_eq!(overlay.next_id, 0);
+        assert!(control.captions.lock().expect("captions").is_empty());
+    }
+
+    #[test]
+    fn full_caption_history_rejects_text_without_adding_a_live_annotation() {
+        let control = Control::default();
+        control
+            .set_annotation_size(80, 60)
+            .expect("initialize annotation canvas");
+        let caption = RecordedCaption {
+            at_ms: 0,
+            duration_ms: None,
+            burned_in: false,
+            text: "existing".into(),
+            x: 0,
+            y: 0,
+            font: "Arial".into(),
+            size: 12.0,
+            color: Rgba::WHITE,
+            background: Rgba::TRANSPARENT,
+            padding: 0,
+        };
+        control
+            .captions
+            .lock()
+            .expect("captions")
+            .resize(256, caption);
+        let kind = Kind::Text {
+            rect: jiffshot_doc::Box2::from_xywh(10.0, 10.0, 30.0, 20.0),
+            text: "new caption".into(),
+        };
+
+        assert!(add_annotation(&control, kind, Style::default(), Duration::ZERO).is_err());
+
+        let overlay = control.annotations.lock().expect("annotations");
+        assert!(overlay.marks.is_empty());
+        assert_eq!(overlay.next_id, 0);
+        assert_eq!(control.captions.lock().expect("captions").len(), 256);
     }
 
     #[test]
@@ -2376,7 +2910,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn delayed_grabs_repeat_the_previous_video_frame() {
+    fn pause_resume_excludes_paused_time_and_writes_the_live_resumed_frame() {
         struct Scratch(PathBuf);
         impl Drop for Scratch {
             fn drop(&mut self) {
@@ -2436,7 +2970,19 @@ mod tests {
             Duration::from_millis(600),
         )
         .unwrap();
-        assert_eq!(written, 7);
+        for pixel in current.pixels.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[0, 240, 0, 255]);
+        }
+        write_video_through_due(
+            &mut writer,
+            &previous,
+            &current,
+            &mut written,
+            7,
+            frame_time,
+        )
+        .unwrap();
+        assert_eq!(written, 8);
         writer.finish().unwrap();
 
         let mut reader = Reader::open(&path).unwrap();
@@ -2445,17 +2991,22 @@ mod tests {
             let center = ((frame.height / 2 * frame.width + frame.width / 2) * 4) as usize;
             colors.push((frame.bgra[center + 2], frame.bgra[center]));
         }
-        assert_eq!(colors.len(), 7);
+        assert_eq!(colors.len(), 8);
         for (index, (red, blue)) in colors.into_iter().enumerate() {
             if index < 5 {
                 assert!(
                     red > 180 && blue < 60,
                     "frame {index} should remain red, got ({red}, {blue})"
                 );
-            } else {
+            } else if index < 7 {
                 assert!(
                     blue > 180 && red < 60,
                     "frame {index} should be blue, got ({red}, {blue})"
+                );
+            } else {
+                assert!(
+                    red < 60 && blue < 60,
+                    "resumed frame {index} should be green, got ({red}, {blue})"
                 );
             }
         }
@@ -2640,7 +3191,9 @@ mod tests {
         source.report_late_audio(1, 48_000, &control);
         assert_eq!(
             control.audio.lock().unwrap().as_deref(),
-            Some("microphone: some audio arrived too late to include in the recording webcam stopped")
+            Some(
+                "microphone: some audio arrived too late to include in the recording webcam stopped"
+            )
         );
         source.report_late_audio(10_000, 48_000, &control);
         assert!(source.late_reported);

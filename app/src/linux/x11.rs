@@ -5,7 +5,9 @@
 //! when the session itself is X11.
 
 use jiffshot_capture::Rect;
+use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
+use x11rb::protocol::screensaver::ConnectionExt as _;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ConnectionExt, GetPropertyReply, KeyButMask, Window,
 };
@@ -41,6 +43,93 @@ pub(crate) fn pointer() -> Option<((i32, i32), bool)> {
     ))
 }
 
+/// Samples native X11 activity without recording key contents.
+pub(crate) struct ActivityTracker {
+    connection: RustConnection,
+    root: Window,
+    previous_pointer: Option<(i16, i16)>,
+    previous_sample: Option<Instant>,
+}
+
+impl ActivityTracker {
+    pub(crate) fn connect() -> Result<Self, String> {
+        if !is_x11_session() {
+            return Err("physical input tracking requires a native X11 session".into());
+        }
+        let (connection, screen) = RustConnection::connect(None)
+            .map_err(|error| format!("could not connect to X11 for input tracking: {error}"))?;
+        let root = connection
+            .setup()
+            .roots
+            .get(screen)
+            .ok_or("the X11 display has no screen for input tracking")?
+            .root;
+        connection
+            .screensaver_query_version(1, 1)
+            .map_err(|error| format!("could not query X11 input tracking: {error}"))?
+            .reply()
+            .map_err(|error| format!("X11 input tracking is unavailable: {error}"))?;
+        Ok(Self {
+            connection,
+            root,
+            previous_pointer: None,
+            previous_sample: None,
+        })
+    }
+
+    pub(crate) fn resume(&mut self, now: Instant) {
+        self.previous_pointer = None;
+        self.previous_sample = Some(now);
+    }
+
+    pub(crate) fn sample(&mut self, now: Instant) -> Result<bool, String> {
+        let elapsed = self.previous_sample.replace(now).map(|previous| {
+            now.checked_duration_since(previous)
+                .expect("X11 input samples use a monotonic clock")
+        });
+        let idle_ms = self
+            .connection
+            .screensaver_query_info(self.root)
+            .map_err(|error| format!("could not query X11 input activity: {error}"))?
+            .reply()
+            .map_err(|error| format!("could not read X11 input activity: {error}"))?
+            .ms_since_user_input;
+        let keys = self
+            .connection
+            .query_keymap()
+            .map_err(|error| format!("could not query X11 keyboard state: {error}"))?
+            .reply()
+            .map_err(|error| format!("could not read X11 keyboard state: {error}"))?;
+        let pointer = self
+            .connection
+            .query_pointer(self.root)
+            .map_err(|error| format!("could not query X11 pointer state: {error}"))?
+            .reply()
+            .map_err(|error| format!("could not read X11 pointer state: {error}"))?;
+        let position = (pointer.root_x, pointer.root_y);
+        let moved = self
+            .previous_pointer
+            .replace(position)
+            .is_some_and(|previous| previous != position);
+        let buttons = KeyButMask::BUTTON1
+            | KeyButMask::BUTTON2
+            | KeyButMask::BUTTON3
+            | KeyButMask::BUTTON4
+            | KeyButMask::BUTTON5;
+        let recent = elapsed.is_some_and(|elapsed| {
+            Duration::from_millis(u64::from(idle_ms)) <= elapsed + Duration::from_millis(5)
+        });
+        let active = recent
+            || moved
+            || pointer.mask.intersects(buttons)
+            || keys.keys.iter().any(|key| *key != 0);
+        if active && elapsed.is_some_and(|gap| gap > Duration::from_millis(200)) {
+            return Err("physical input sampling was delayed too long".into());
+        }
+        Ok(active)
+    }
+}
+
 /// Visible top-level windows with their titles, bottom to top.
 pub(crate) fn windows() -> Vec<(Rect, String)> {
     if !is_x11_session() {
@@ -53,20 +142,28 @@ fn list_windows() -> Option<Vec<(Rect, String)>> {
     let (connection, screen) = RustConnection::connect(None).ok()?;
     let root = connection.setup().roots.get(screen)?.root;
     let atom = |name: &str| -> Option<Atom> {
-        Some(connection.intern_atom(false, name.as_bytes()).ok()?.reply().ok()?.atom)
+        Some(
+            connection
+                .intern_atom(false, name.as_bytes())
+                .ok()?
+                .reply()
+                .ok()?
+                .atom,
+        )
     };
     let stacking = atom("_NET_CLIENT_LIST_STACKING")?;
     let name = atom("_NET_WM_NAME")?;
     let utf8 = atom("UTF8_STRING")?;
     let state = atom("_NET_WM_STATE")?;
     let hidden = atom("_NET_WM_STATE_HIDDEN")?;
-    let property = |window: Window, property: Atom, kind: Atom, length: u32| -> Option<GetPropertyReply> {
-        connection
-            .get_property(false, window, property, kind, 0, length)
-            .ok()?
-            .reply()
-            .ok()
-    };
+    let property =
+        |window: Window, property: Atom, kind: Atom, length: u32| -> Option<GetPropertyReply> {
+            connection
+                .get_property(false, window, property, kind, 0, length)
+                .ok()?
+                .reply()
+                .ok()
+        };
     let list = property(root, stacking, AtomEnum::WINDOW.into(), 4096)?;
     let mut result = Vec::new();
     for window in list.value32()? {
@@ -104,7 +201,11 @@ fn list_windows() -> Option<Vec<(Rect, String)>> {
 
 #[cfg(test)]
 mod tests {
-    use super::session_is_x11;
+    use super::*;
+    use x11rb::protocol::xproto::{
+        BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
+    };
+    use x11rb::protocol::xtest::ConnectionExt as _;
 
     #[test]
     fn only_native_x11_sessions_are_detected() {
@@ -113,5 +214,75 @@ mod tests {
         assert!(!session_is_x11(Some("wayland"), false, true));
         assert!(!session_is_x11(Some("x11"), true, true));
         assert!(!session_is_x11(Some("x11"), false, false));
+    }
+
+    #[test]
+    #[ignore = "requires a private native X11 display"]
+    fn native_x11_activity_tracking_detects_input_and_sampling_gaps() {
+        let mut tracker = ActivityTracker::connect().expect("connect to private X11 display");
+        let (injector, screen) = RustConnection::connect(None).expect("connect X11 input injector");
+        let root = injector.setup().roots[screen].root;
+        let now = Instant::now();
+        assert!(!tracker.sample(now).expect("baseline sample"));
+
+        let key = 38;
+        injector
+            .xtest_fake_input(KEY_PRESS_EVENT, key, 0, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(
+            tracker.sample(now + Duration::from_millis(50)).unwrap(),
+            "a held key must count as activity"
+        );
+        injector
+            .xtest_fake_input(KEY_RELEASE_EVENT, key, 0, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        tracker.resume(now + Duration::from_millis(60));
+        injector
+            .xtest_fake_input(KEY_PRESS_EVENT, key, 0, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        injector
+            .xtest_fake_input(KEY_RELEASE_EVENT, key, 0, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(
+            tracker.sample(now + Duration::from_millis(80)).unwrap(),
+            "a short input event immediately after resume must be recorded"
+        );
+
+        injector
+            .warp_pointer(0u32, root, 0, 0, 0, 0, 20, 20)
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(
+            tracker.sample(now + Duration::from_millis(120)).unwrap(),
+            "pointer motion must count as activity"
+        );
+        injector
+            .xtest_fake_input(BUTTON_PRESS_EVENT, 1, 0, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+        tracker.resume(now + Duration::from_millis(400));
+        assert!(
+            tracker.sample(now + Duration::from_millis(400)).unwrap(),
+            "a button held across resume must count as activity"
+        );
+        let error = tracker
+            .sample(now + Duration::from_millis(601))
+            .expect_err("a long sampling gap with activity makes the history incomplete");
+        assert!(error.contains("delayed too long"), "{error}");
+        injector
+            .xtest_fake_input(BUTTON_RELEASE_EVENT, 1, 0, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
     }
 }

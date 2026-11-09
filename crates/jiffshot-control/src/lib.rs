@@ -407,13 +407,55 @@ mod windows {
         session
     }
 
-    /// The control pipe for this user and session.
-    pub fn pipe_name() -> io::Result<String> {
+    fn default_pipe_name() -> io::Result<String> {
         Ok(format!(
             r"\\.\pipe\Jiffshot.Control.{}.{}",
             user_sid()?,
             session_id()
         ))
+    }
+
+    /// Environment variable selecting a private control-pipe suffix in test builds.
+    #[cfg(feature = "test-util")]
+    pub const TEST_PIPE_SUFFIX_ENV: &str = "JIFFSHOT_TEST_CONTROL_PIPE_SUFFIX";
+
+    #[cfg(feature = "test-util")]
+    pub(super) fn test_pipe_name(name: &str, suffix: &str) -> io::Result<String> {
+        if suffix.is_empty()
+            || suffix.len() > 64
+            || !suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "test pipe suffix must contain 1..64 ASCII letters, digits, hyphens or underscores",
+            ));
+        }
+        let name = format!("{name}.Test.{suffix}");
+        if name.encode_utf16().count() > 256 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "test pipe name is too long",
+            ));
+        }
+        Ok(name)
+    }
+
+    /// The control pipe for this user and session.
+    pub fn pipe_name() -> io::Result<String> {
+        let name = default_pipe_name()?;
+        #[cfg(feature = "test-util")]
+        if let Some(suffix) = std::env::var_os(TEST_PIPE_SUFFIX_ENV) {
+            let suffix = suffix.to_str().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "test pipe suffix is not Unicode",
+                )
+            })?;
+            return test_pipe_name(&name, suffix);
+        }
+        Ok(name)
     }
 
     /// A security descriptor granting the current user, and nobody else, full
@@ -505,7 +547,23 @@ mod windows {
     /// connection on a thread of its own. Fails when another process already
     /// owns the pipe.
     pub fn serve(handler: impl Fn(Request) -> Response + Send + Sync + 'static) -> io::Result<()> {
-        let name = wide(&pipe_name()?);
+        serve_named(&pipe_name()?, handler)
+    }
+
+    /// Serves a private test pipe without changing the process-wide environment.
+    #[cfg(feature = "test-util")]
+    pub fn serve_with_test_suffix(
+        suffix: &str,
+        handler: impl Fn(Request) -> Response + Send + Sync + 'static,
+    ) -> io::Result<()> {
+        serve_named(&test_pipe_name(&default_pipe_name()?, suffix)?, handler)
+    }
+
+    fn serve_named(
+        name: &str,
+        handler: impl Fn(Request) -> Response + Send + Sync + 'static,
+    ) -> io::Result<()> {
+        let name = wide(name);
         let security = OwnerOnly::new()?;
         // The first instance claims the name, so a second Jiffshot (or anything
         // else) cannot serve it.
@@ -653,6 +711,9 @@ mod windows {
 #[cfg(windows)]
 pub use windows::{call, connect, pipe_name, send, serve, session_id, user_sid, Pipe};
 
+#[cfg(all(windows, feature = "test-util"))]
+pub use windows::{serve_with_test_suffix, TEST_PIPE_SUFFIX_ENV};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,6 +794,29 @@ mod tests {
             "{name}"
         );
         assert!(name.ends_with(&format!(".{}", session_id())));
+    }
+
+    #[test]
+    #[cfg(all(windows, feature = "test-util"))]
+    fn test_pipe_suffix_is_validated_and_preserves_the_base_name() {
+        let base = r"\\.\pipe\Jiffshot.Control.S-1-5-21.1";
+        assert_eq!(
+            windows::test_pipe_name(base, "cli-123_test").unwrap(),
+            format!("{base}.Test.cli-123_test")
+        );
+        for suffix in ["", "a.b", r"a\b", "a/b", "é", &"a".repeat(65)] {
+            assert_eq!(
+                windows::test_pipe_name(base, suffix).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "suffix {suffix:?}"
+            );
+        }
+        assert_eq!(
+            windows::test_pipe_name(&"x".repeat(250), "test")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 
     #[test]
