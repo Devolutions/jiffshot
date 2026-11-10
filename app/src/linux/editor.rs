@@ -91,10 +91,8 @@ pub(super) fn selection_action(
             editor.select_all();
             if editor.selected_region().is_some() {
                 Ok("Image selected.")
-            } else if editor.selected_ids().is_empty() {
-                Err("There are no annotations to select.".to_owned())
             } else {
-                Ok("All annotations selected.")
+                Err("The image could not be selected.".to_owned())
             }
         }
         SelectionAction::Deselect => {
@@ -917,7 +915,8 @@ mod tests {
     #[test]
     fn selection_actions_group_ungroup_and_delete_are_undoable() {
         let mut editor = annotation_editor();
-        selection_action(&mut editor, SelectionAction::SelectAll).unwrap();
+        editor.select(None);
+        selection_action(&mut editor, SelectionAction::Invert).unwrap();
         assert_eq!(editor.selected_ids().len(), 2);
         selection_action(&mut editor, SelectionAction::Group).unwrap();
         assert_eq!(editor.document().objects.len(), 1);
@@ -963,7 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn select_all_and_flatten_all_respect_the_active_mode() {
+    fn select_all_selects_the_image_in_every_mode_and_flatten_all_keeps_it() {
         let mut editor = annotation_editor();
         editor.set_tool(Tool::Select);
         assert_eq!(
@@ -980,13 +979,20 @@ mod tests {
         assert!(editor.undo(), "flattening all remains one undoable edit");
         assert_eq!(editor.document().objects.len(), 2);
 
+        editor.set_tool(Tool::Move);
+        assert_eq!(
+            selection_action(&mut editor, SelectionAction::SelectAll).unwrap(),
+            "Image selected."
+        );
+        assert_eq!(editor.tool(), Tool::Move);
+        assert_eq!(editor.selected_region(), Some(IRect::new(0, 0, 80, 60)));
+        assert!(editor.selected_ids().is_empty());
+
         let mut empty = Editor::new(Document::blank(80, 60, Rgba::WHITE));
         empty.set_tool(Tool::Move);
-        assert!(selection_action(&mut empty, SelectionAction::SelectAll)
-            .unwrap_err()
-            .contains("no annotations"));
+        selection_action(&mut empty, SelectionAction::SelectAll).unwrap();
         assert_eq!(empty.tool(), Tool::Move);
-        assert_eq!(empty.selected_region(), None);
+        assert_eq!(empty.selected_region(), Some(IRect::new(0, 0, 80, 60)));
     }
 
     #[test]
@@ -1185,7 +1191,8 @@ mod tests {
     fn clipboard_selection_renders_selected_annotations_as_an_image() {
         let mut editor = annotation_editor();
         editor.set_tool(Tool::Move);
-        editor.select_all();
+        editor.select(None);
+        editor.invert_selection();
         let selection = selection_image(&editor).unwrap().unwrap();
         assert_eq!(selection.objects.as_ref().map(Vec::len), Some(2));
         assert!(selection.pixels.width() > 0 && selection.pixels.height() > 0);

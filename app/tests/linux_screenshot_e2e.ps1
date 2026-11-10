@@ -81,7 +81,7 @@ try {
                 } 'the editor reopened from the tray while the chooser is open'
                 $driver = New-E2EX11Driver $displayName (Get-E2EWindowInfo $environment)
                 Wait-E2EUntil {
-                    Invoke-E2EHotkey $driver '2'
+                    Invoke-E2EHotkey $driver '3'
                     (Get-E2EStatusText $reader $driver).ToLowerInvariant().Contains('arrow tool selected')
                 } 'the reopened editor to accept the Arrow tool shortcut'
                 Wait-E2EUntil { $driver.Capture(275, 315, 220, 100).CountColor(255, 255, 255) -gt 10000 } 'the reopened editor canvas to redraw'

@@ -249,8 +249,8 @@ fn share_items(shares: &[String]) -> Vec<MenuEntry> {
 fn tools_menu(ctx: &Ctx) -> MenuEntry {
     let s = ctx.sink;
     let tools: [(&str, Signal<bool>, Call); 23] = [
-        ("_Move", s.tool_move_enabled, |m| m.tool_move()),
         ("Select _region", s.tool_select_enabled, |m| m.tool_select()),
+        ("_Move", s.tool_move_enabled, |m| m.tool_move()),
         ("_Arrow", s.tool_arrow_enabled, |m| m.tool_arrow()),
         ("_Line", s.tool_line_enabled, |m| m.tool_line()),
         ("_Shape", s.tool_shape_enabled, |m| m.tool_shape()),

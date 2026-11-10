@@ -4974,10 +4974,10 @@ fn image_tools(s: &mut Script, fresh: String) {
     .log(move |_| format!("magic wand: selection={}", k.selection.get_untracked()))
     .drag("Eraser", (0.05, 0.95), (0.20, 0.95), 12)
     .step(|_| {
-        call(|m| m.select_all());
+        call(|m| m.invert_selection());
         120
     })
-    .log(move |_| format!("select all: {} count={}", k.selection.get_untracked(), k.selection_count.get_untracked()))
+    .log(move |_| format!("select annotations: {} count={}", k.selection.get_untracked(), k.selection_count.get_untracked()))
     .step(|_| {
         call(|m| m.group());
         120

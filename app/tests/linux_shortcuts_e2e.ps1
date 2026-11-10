@@ -11,6 +11,18 @@ param(
 
 Import-Module (Join-Path $PSScriptRoot 'LinuxE2E.psm1') -Force
 
+function Select-E2EAllAnnotations {
+    <# Ctrl+A selects the whole image; Ctrl+Shift+I from an empty selection picks every annotation. #>
+    param([Parameter(Mandatory)][JiffshotE2E.X11Driver]$Driver)
+    $Driver.Key('Control_L', $true)
+    $Driver.Key('Shift_L', $true)
+    $Driver.Key('i', $true)
+    $Driver.Key('i', $false)
+    $Driver.Key('Shift_L', $false)
+    $Driver.Key('Control_L', $false)
+    $Driver.Sync()
+}
+
 function Test-EmptyDirectory {
     param([Parameter(Mandatory)][string]$Path)
     @(Get-ChildItem -LiteralPath $Path -Force).Count -eq 0
@@ -89,7 +101,7 @@ try {
         Wait-E2EUntil { $driver.RedCanvasPixels() -gt 100 } 'the annotations to render'
         $baseline = $driver.RedCanvasPixels()
         $driver.Click(20, 400)
-        $driver.SelectAll()
+        Select-E2EAllAnnotations $driver
         Wait-E2ESeconds 0.3
         $selectedBaseline = $driver.RedCanvasPixels()
         Assert-E2E ($selectedBaseline -gt 100) 'selecting annotations hid the fixture'
@@ -98,7 +110,7 @@ try {
         $afterTextEdit = $driver.RedCanvasPixels()
         Assert-E2E ($afterTextEdit -ge $selectedBaseline * 0.8) "editing shortcut text deleted selected annotations: before=$selectedBaseline, after=$afterTextEdit"
         $driver.Click(20, 400)
-        $driver.SelectAll()
+        Select-E2EAllAnnotations $driver
         $driver.Key('Delete', $true)
         $driver.Key('Delete', $false)
         $driver.Sync()

@@ -166,7 +166,7 @@ try {
         Assert-E2E ($bounds.Width -eq 60 -and $bounds.Height -eq 40) "unexpected fixture bounds: $bounds"
         $baseline = $driver.RedCanvasPixels()
 
-        Invoke-E2EHotkey $driver '2'
+        Invoke-E2EHotkey $driver '1'
         Invoke-Drag $driver ($bounds.Left - 10) ($bounds.Top - 10) ($bounds.Left + 70) ($bounds.Top + 50)
         Invoke-E2EHotkey $driver 'c'
         $image = Wait-ClipboardImage $environment 80 60
@@ -195,7 +195,7 @@ try {
         Invoke-Drag $driver ($bounds.Left - 40) ($bounds.Top - 18) ($bounds.Left + 25) ($bounds.Top - 18)
         Wait-E2EUntil { $driver.RedCanvasPixels() -gt $baseline + 50 } 'the first arrow'
         $withArrow = $driver.RedCanvasPixels()
-        Invoke-E2EHotkey $driver '2'
+        Invoke-E2EHotkey $driver '1'
         Invoke-Drag $driver ($bounds.Left - 20) ($bounds.Top - 18) ($bounds.Left + 10) ($bounds.Top + 3) -Alt
         Invoke-E2EHotkey $driver 'c'
         $image = Wait-ClipboardImage $environment 30 21

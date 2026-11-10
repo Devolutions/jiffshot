@@ -28,8 +28,8 @@ const fn tool(name: &'static str, glyph: &'static str, caption: &'static str) ->
 
 /// Every tool, in the usual order.
 pub const TOOLS: [ToolDef; 23] = [
-    tool("Move", "\u{E7C9}", "Move"),
     ToolDef { name: "Select", icon: ToolIcon::Region, caption: "Select Region" },
+    tool("Move", "\u{E7C9}", "Move"),
     tool("Arrow", "\u{E72A}", "Arrow"),
     tool("Line", "\u{E738}", "Line"),
     tool("Shape", "\u{E739}", "Shape"),

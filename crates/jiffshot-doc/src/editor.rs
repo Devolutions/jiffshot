@@ -43,8 +43,8 @@ pub enum Tool {
 }
 
 pub const TOOLS: &[Tool] = &[
-    Tool::Move,
     Tool::Select,
+    Tool::Move,
     Tool::Arrow,
     Tool::Line,
     Tool::Shape,
@@ -818,22 +818,17 @@ impl Editor {
         }
     }
 
-    /// Selects the image in Select mode and annotations in Move mode.
+    /// Selects the whole image, whatever the active tool, so Copy takes the
+    /// flattened image with its annotations. Invert Selection from an empty
+    /// selection picks every annotation instead.
     pub fn select_all(&mut self) {
-        if self.tool == Tool::Select {
-            self.select_region(self.doc.bounds());
-            return;
+        self.finish_polygon();
+        if let Some(Drag::Create { id, history, .. }) = self.drag.take() {
+            self.discard_creation(id, history);
         }
-        if self.doc.objects.is_empty() && self.tool != Tool::Move {
-            self.set_tool(Tool::Select);
-            self.select_region(self.doc.bounds());
-            return;
-        }
-        let ids = self.doc.objects.iter().rev().map(|o| o.id).collect();
-        if self.tool != Tool::Move {
-            self.set_tool(Tool::Move);
-        }
-        self.set_selection(ids);
+        self.seal();
+        self.set_marquee(None);
+        self.select_region(self.doc.bounds());
     }
 
     /// Returns whether the active region intersects any editable annotation.
@@ -3199,12 +3194,13 @@ mod tests {
         raster::set_pixel(&mut pixels, 3, 2, Rgba::new(200, 100, 50, 128));
         raster::set_pixel(&mut pixels, 4, 2, Rgba::TRANSPARENT);
         let mut e = Editor::new(Document::new(pixels.clone()));
+        let tool = e.tool();
         e.select_all();
         assert_eq!(e.selection_box(), Some(Box2::new(0.0, 0.0, 12.0, 8.0)));
         assert_eq!(e.selected_region(), Some(IRect::new(0, 0, 12, 8)));
         assert!(e.selected_ids().is_empty());
         assert_eq!(e.document().flatten().data(), pixels.data());
-        assert_eq!(e.tool(), Tool::Select);
+        assert_eq!(e.tool(), tool, "Select All keeps the active tool");
         e.select_all();
         assert_eq!(e.selected_region(), Some(IRect::new(0, 0, 12, 8)));
         assert!(e.document().objects.is_empty());
@@ -3213,7 +3209,7 @@ mod tests {
     }
 
     #[test]
-    fn select_all_keeps_existing_annotation_selection_behavior() {
+    fn select_all_selects_the_whole_image_over_annotations() {
         let mut e = editor();
         let a = e.add_object(
             "First",
@@ -3231,62 +3227,56 @@ mod tests {
             },
             Style::default(),
         );
+        e.select(Some(a));
         let before = e.document().flatten();
         e.select_all();
-        assert_eq!(e.selected_ids(), vec![b, a]);
+        assert_eq!(e.selected_region(), Some(IRect::new(0, 0, 400, 300)));
+        assert!(e.selected_ids().is_empty());
         assert_eq!(
             e.document().objects.len(),
             2,
             "do not lift the background with annotations"
         );
         assert_eq!(e.document().flatten().data(), before.data());
+
+        e.invert_selection();
+        assert_eq!(e.selected_region(), None);
+        assert_eq!(
+            e.selected_ids(),
+            vec![b, a],
+            "Invert Selection still picks every annotation"
+        );
     }
 
     #[test]
-    fn select_all_targets_the_active_selection_mode() {
-        let mut e = editor();
-        let first = e.add_object(
-            "First",
-            Kind::Shape {
-                rect: Box2::new(20.0, 20.0, 60.0, 60.0),
-                shape: ShapeKind::Rectangle,
-            },
-            Style::default(),
-        );
-        let second = e.add_object(
-            "Second",
-            Kind::Shape {
-                rect: Box2::new(80.0, 20.0, 120.0, 60.0),
-                shape: ShapeKind::Ellipse,
-            },
-            Style::default(),
-        );
+    fn select_all_selects_the_whole_image_in_every_tool() {
+        for tool in [Tool::Move, Tool::Select, Tool::Arrow, Tool::Text, Tool::Pen] {
+            let mut e = editor();
+            e.add_object(
+                "Arrow",
+                Kind::Line {
+                    a: Pt::new(20.0, 20.0),
+                    b: Pt::new(120.0, 90.0),
+                    control: None,
+                },
+                Style::default(),
+            );
+            e.set_tool(tool);
+            e.select_all();
+            assert_eq!(e.tool(), tool, "Select All keeps the active tool");
+            assert_eq!(
+                e.selected_region(),
+                Some(IRect::new(0, 0, 400, 300)),
+                "{tool:?}"
+            );
+            assert!(e.selected_ids().is_empty(), "{tool:?}");
+        }
 
-        e.set_tool(Tool::Select);
-        e.select_all();
-        assert_eq!(e.selected_region(), Some(IRect::new(0, 0, 400, 300)));
-        assert!(
-            e.selected_ids().is_empty(),
-            "Select All selects image pixels in Select mode"
-        );
-
-        e.set_tool(Tool::Move);
-        e.select_all();
-        assert_eq!(e.selected_region(), None);
-        assert_eq!(e.selected_ids(), vec![second, first]);
-    }
-
-    #[test]
-    fn select_all_in_empty_move_mode_does_not_select_the_image() {
-        let mut e = editor();
-        e.set_tool(Tool::Move);
-
-        e.select_all();
-
-        assert_eq!(e.tool(), Tool::Move);
-        assert!(e.selected_ids().is_empty());
-        assert_eq!(e.selected_region(), None);
-        assert!(!e.is_modified());
+        let mut empty = editor();
+        empty.set_tool(Tool::Move);
+        empty.select_all();
+        assert_eq!(empty.selected_region(), Some(IRect::new(0, 0, 400, 300)));
+        assert!(!empty.is_modified());
     }
 
     #[test]

@@ -2909,6 +2909,7 @@ impl App {
     fn toolbar(&mut self, arg: &str) {
         const ALL: &[&str] = &[
             "Select",
+            "Move",
             "Arrow",
             "Line",
             "Shape",
