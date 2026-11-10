@@ -178,7 +178,7 @@ pub fn trim(scope: &AppScope, owner: &Window, w: u32, h: u32, done: impl FnOnce(
 }
 
 /// Help ▸ Keyboard shortcuts' list.
-const SHORTCUTS: [(&str, &str); 26] = [
+const SHORTCUTS: [(&str, &str); 27] = [
     ("Ctrl+Shift+N", "New capture"),
     ("Ctrl+N", "New image"),
     ("Ctrl+O", "Open"),
@@ -203,6 +203,7 @@ const SHORTCUTS: [(&str, &str); 26] = [
     ("Ctrl+G", "Pixel grid"),
     ("Ctrl+L", "Library view"),
     ("Ctrl+,", "Editor preferences"),
+    ("Shift+drag a corner", "Stretch a picture freely / keep a shape's proportions"),
     ("Esc", "Deselect"),
     ("F1", "These shortcuts"),
 ];

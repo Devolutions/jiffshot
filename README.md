@@ -307,6 +307,9 @@ Save the current document as a `.jsd` first if its edits cannot be autosaved.
 With **Select Region**, drag on the image to select a rectangular region. Use **Move**
 to click or drag annotations; drag empty space to select objects in a marquee.
 Shift-click toggles an annotation, and Shift-drag adds annotations to the selection.
+Dragging a corner of a pasted or dropped picture (or a group holding one) keeps its
+proportions; hold Shift to stretch it freely. For other annotations, Shift keeps the
+proportions instead. Side handles always stretch.
 The region remains unchanged until it is moved or deleted; choose its background
 fill in the properties panel. **Lift Selection** offers ellipse and freehand regions.
 `Ctrl+C` copies the visible, composited pixels in a region; **Copy background

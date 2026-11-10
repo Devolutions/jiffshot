@@ -994,9 +994,29 @@ impl Object {
         }
     }
 
-    /// Moves handle `h` to `p`. `square` keeps boxes square and snaps lines
-    /// to 45° steps.
+    /// The width-to-height ratio of the box that corner handles resize, if
+    /// it has one.
+    pub fn aspect(&self) -> Option<f32> {
+        let b = self.rect()?;
+        let (w, h) = (b.width(), b.height());
+        (w >= 1.0 && h >= 1.0).then_some(w / h)
+    }
+
+    /// Whether dragging a corner keeps the proportions. Pictures (and
+    /// groups holding one) keep them unless Shift is held, so screenshots do
+    /// not get distorted; everything else keeps them while Shift is held.
+    pub fn keeps_aspect(&self, shift: bool) -> bool {
+        let mut picture = false;
+        self.walk(&mut |o| picture |= matches!(o.kind, Kind::Image { .. }) && o.zone.is_none());
+        picture != shift
+    }
+
+    /// Moves handle `h` to `p`. `square` (Shift) snaps lines to 45° steps
+    /// and rotation to 15°; corner handles keep the proportions as
+    /// [`Object::keeps_aspect`] says. Interactive drags apply each move to
+    /// the object as the drag started, not to the result of the last move.
     pub fn move_handle(&mut self, h: Handle, p: Pt, square: bool) {
+        let ratio = self.keeps_aspect(square).then(|| self.aspect()).flatten();
         if h == H_ROTATE {
             let c = self.pivot();
             let mut angle = (p.y - c.y).atan2(p.x - c.x).to_degrees() + 90.0;
@@ -1059,7 +1079,7 @@ impl Object {
                 else {
                     return;
                 };
-                let new = resize_box(old, h, p, square);
+                let new = resize_box_with_ratio(old, h, p, ratio);
                 if new.is_degenerate(2.0) {
                     return;
                 }
@@ -1071,14 +1091,20 @@ impl Object {
                 let Some(old) = Box2::bounding(points.iter().copied()) else {
                     return;
                 };
-                let new = resize_box(old, h, p, square);
+                let new = resize_box_with_ratio(old, h, p, ratio);
+                // Squashing a stroke flat would lose its shape for good; a
+                // stroke that is already straight may still be stretched.
+                let flattened = |was: f32, now: f32| was >= 2.0 && now < 2.0;
+                if flattened(old.width(), new.width()) || flattened(old.height(), new.height()) {
+                    return;
+                }
                 for q in points.iter_mut() {
                     *q = old.map(*q, &new);
                 }
             }
             _ => {
                 if let Some(r) = self.rect_mut() {
-                    *r = resize_box(*r, h, p, square);
+                    *r = resize_box_with_ratio(*r, h, p, ratio);
                 }
                 self.fit_text();
             }
@@ -1562,8 +1588,18 @@ fn draw_text(
     }
 }
 
-/// Resizes `r` by dragging handle `h` to `p`.
-pub fn resize_box(r: Box2, h: Handle, p: Pt, square: bool) -> Box2 {
+/// Resizes `r` by dragging handle `h` to `p`. `keep` keeps the box's
+/// proportions on corner handles (a square stays square).
+pub fn resize_box(r: Box2, h: Handle, p: Pt, keep: bool) -> Box2 {
+    let ratio = (keep && r.width() >= 1.0 && r.height() >= 1.0).then(|| r.width() / r.height());
+    resize_box_with_ratio(r, h, p, ratio)
+}
+
+/// Resizes `r` by dragging handle `h` to `p`. With `ratio` (width /
+/// height), corner handles keep that ratio: the box grows to cover the
+/// pointer along whichever side it moved further, from the opposite
+/// corner. Side handles always stretch.
+pub fn resize_box_with_ratio(r: Box2, h: Handle, p: Pt, ratio: Option<f32>) -> Box2 {
     let (mut x0, mut y0, mut x1, mut y1) = (r.x0, r.y0, r.x1, r.y1);
     match h {
         H_TL => (x0, y0) = (p.x, p.y),
@@ -1576,34 +1612,34 @@ pub fn resize_box(r: Box2, h: Handle, p: Pt, square: bool) -> Box2 {
         H_L => x0 = p.x,
         _ => {}
     }
-    if square && matches!(h, H_TL | H_TR | H_BR | H_BL) {
-        let side = (x1 - x0).abs().max((y1 - y0).abs());
-        match h {
-            H_TL => {
-                (x0, y0) = (
-                    x1 - side * (x1 - x0).signum(),
-                    y1 - side * (y1 - y0).signum(),
-                )
-            }
-            H_TR => {
-                (x1, y0) = (
-                    x0 + side * (x1 - x0).signum(),
-                    y1 - side * (y1 - y0).signum(),
-                )
-            }
-            H_BR => {
-                (x1, y1) = (
-                    x0 + side * (x1 - x0).signum(),
-                    y0 + side * (y1 - y0).signum(),
-                )
-            }
-            _ => {
-                (x0, y1) = (
-                    x1 - side * (x1 - x0).signum(),
-                    y0 + side * (y1 - y0).signum(),
-                )
-            }
-        }
+    let Some(ratio) = ratio.filter(|k| k.is_finite() && *k > 0.0) else {
+        return Box2::new(x0, y0, x1, y1);
+    };
+    if !matches!(h, H_TL | H_TR | H_BR | H_BL) {
+        return Box2::new(x0, y0, x1, y1);
+    }
+    // The fixed corner, and which way the dragged one lies from it when
+    // the pointer is level with it on an axis (`signum` of +0 would flip).
+    let (ax, ay, out_x, out_y) = match h {
+        H_TL => (x1, y1, -1.0, -1.0),
+        H_TR => (x0, y1, 1.0, -1.0),
+        H_BR => (x0, y0, 1.0, 1.0),
+        _ => (x1, y0, -1.0, 1.0),
+    };
+    let (dx, dy) = (p.x - ax, p.y - ay);
+    let side = |d: f32, out: f32| if d == 0.0 { out } else { d.signum() };
+    let (mut w, mut hgt) = (dx.abs(), dy.abs());
+    if w >= hgt * ratio {
+        hgt = w / ratio;
+    } else {
+        w = hgt * ratio;
+    }
+    let (cx, cy) = (ax + w * side(dx, out_x), ay + hgt * side(dy, out_y));
+    match h {
+        H_TL => (x0, y0) = (cx, cy),
+        H_TR => (x1, y0) = (cx, cy),
+        H_BR => (x1, y1) = (cx, cy),
+        _ => (x0, y1) = (cx, cy),
     }
     Box2::new(x0, y0, x1, y1)
 }
@@ -2293,6 +2329,77 @@ mod tests {
             ),
             Box2::new(0.0, 0.0, 20.0, 20.0)
         );
+    }
+
+    #[test]
+    fn corner_resizing_keeps_proportions_for_pictures_and_on_shift() {
+        let picture = |zone| {
+            let mut o = Object::new(
+                1,
+                Kind::Image {
+                    rect: Box2::new(0.0, 0.0, 200.0, 100.0),
+                    image: ImageRef::new("p", tiny_skia::Pixmap::new(2, 1).unwrap()),
+                },
+                Style::default(),
+            );
+            o.zone = zone;
+            o
+        };
+        let mut o = picture(None);
+        o.move_handle(H_BR, Pt::new(300.0, 120.0), false);
+        assert_eq!(o.rect(), Some(Box2::new(0.0, 0.0, 300.0, 150.0)));
+        o.move_handle(H_TL, Pt::new(-10.0, 100.0), false);
+        assert_eq!(o.rect(), Some(Box2::new(-10.0, -5.0, 300.0, 150.0)));
+        o.move_handle(H_BR, Pt::new(100.0, 100.0), true);
+        assert_eq!(o.rect(), Some(Box2::new(-10.0, -5.0, 100.0, 100.0)), "Shift frees");
+        o.move_handle(H_R, Pt::new(200.0, 0.0), false);
+        assert_eq!(o.rect(), Some(Box2::new(-10.0, -5.0, 200.0, 100.0)), "sides stretch");
+
+        let mut zone = picture(Some(Zone::default()));
+        zone.move_handle(H_BR, Pt::new(300.0, 120.0), false);
+        assert_eq!(zone.rect(), Some(Box2::new(0.0, 0.0, 300.0, 120.0)), "drop zones are frames");
+
+        let mut group = Object::new(2, Kind::Group { objects: vec![picture(None)] }, Style::default());
+        group.move_handle(H_BR, Pt::new(300.0, 120.0), false);
+        assert_eq!(group.aspect(), Some(2.0), "a group with a picture keeps it undistorted");
+
+        let mut shape = Object::new(
+            3,
+            Kind::Shape {
+                rect: Box2::new(0.0, 0.0, 200.0, 100.0),
+                shape: ShapeKind::Rectangle,
+            },
+            Style::default(),
+        );
+        shape.move_handle(H_BR, Pt::new(300.0, 120.0), false);
+        assert_eq!(shape.rect(), Some(Box2::new(0.0, 0.0, 300.0, 120.0)));
+        shape.move_handle(H_BR, Pt::new(600.0, 0.0), true);
+        assert_eq!(shape.rect(), Some(Box2::new(0.0, 0.0, 600.0, 240.0)), "Shift keeps 5:2");
+    }
+
+    #[test]
+    fn proportional_corners_level_with_the_fixed_corner_do_not_flip() {
+        let r = Box2::new(100.0, 100.0, 300.0, 200.0);
+        for (h, p) in [
+            (H_TR, Pt::new(300.0, 200.0)),
+            (H_TL, Pt::new(100.0, 200.0)),
+            (H_BL, Pt::new(100.0, 100.0)),
+            (H_BR, Pt::new(300.0, 100.0)),
+        ] {
+            assert_eq!(resize_box_with_ratio(r, h, p, Some(2.0)), r, "handle {h}");
+        }
+    }
+
+    #[test]
+    fn pen_strokes_are_not_squashed_flat_but_straight_ones_stretch() {
+        let pen = |points| Object::new(4, Kind::Pen { points }, Style::default());
+        let mut curve = pen(vec![Pt::new(0.0, 0.0), Pt::new(100.0, 50.0)]);
+        curve.move_handle(H_B, Pt::new(50.0, 0.0), false);
+        assert_eq!(curve.rect(), Some(Box2::new(0.0, 0.0, 100.0, 50.0)));
+
+        let mut straight = pen(vec![Pt::new(0.0, 10.0), Pt::new(100.0, 10.0)]);
+        straight.move_handle(H_R, Pt::new(200.0, 10.0), false);
+        assert_eq!(straight.rect(), Some(Box2::new(0.0, 10.0, 200.0, 10.0)));
     }
 
     #[test]
