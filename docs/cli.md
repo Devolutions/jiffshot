@@ -286,7 +286,9 @@ jiffshot-cli doc close --id $d
   A rectangular Select region is reported as `selected_region: {x,y,w,h}`; it is
   separate from the `selected` object IDs. Use `doc draw --tool Select` to draw
   one. The Move tool selects and edits annotations; Select is for image regions.
-  `select-all` selects the image in Select mode and annotations in Move mode.
+  `select-all` always selects the whole image as a region, whatever the active
+  tool, so copying it gives the flattened image with its annotations;
+  `invert-selection` from an empty selection selects every annotation.
   Region copies use visible composited pixels, while destructive region edits are
   blocked when the region overlaps editable annotations; flatten annotations
   explicitly before cutting or moving through them.
