@@ -221,8 +221,10 @@ checked against recorded input activity. `--idle-after S` sets the minimum
 unchanged-frame interval to recognize; `--idle-mode speed` accelerates its
 portion after the retained pause (default `--idle-speed 4`), while
 `--idle-mode cut` removes that portion. `--min-pause S` retains the beginning
-of each detected idle interval (default 0.5 seconds). Input and the 250 ms on
-either side are excluded from otherwise still intervals. Windows, macOS and native
+of each detected idle interval (default 0.5 seconds). Decoded frames must match
+pixel-for-pixel; codec noise can leave otherwise still intervals unedited.
+Input and the 250 ms on either side are excluded from otherwise still intervals.
+Windows, macOS and native
 Linux X11 sessions sample input timing, held keys and mouse buttons, and cursor
 motion, without storing key contents. macOS requires Input Monitoring permission,
 which Jiffshot does not request. Wayland does not expose global physical input,

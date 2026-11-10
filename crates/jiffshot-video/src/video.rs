@@ -2433,9 +2433,42 @@ mod tests {
     #[test]
     fn idle_editing_applies_to_mp4_and_gif_exports() {
         let fixtures = Fixtures::new();
-        let source = fixtures.video("still-source.mp4", None);
-        let duration_ms =
-            (post::inspect(&source).expect("source metadata").duration * 1000.0).round() as u64;
+        let source = fixtures.path("still-source.mp4");
+        let mut writer =
+            Writer::create(&source, VideoSpec::for_size(64, 48, 12), None).expect("encoder");
+        for frame_index in 0..36 {
+            let at = frame_index * HNS_PER_SECOND / 12;
+            let end = (frame_index + 1) * HNS_PER_SECOND / 12;
+            let shade = if frame_index < 6 {
+                30
+            } else if frame_index < 30 {
+                120
+            } else {
+                220
+            };
+            writer
+                .write_frame(&[shade, shade, shade, 0].repeat(64 * 48), at, end - at)
+                .expect("fixture frame");
+        }
+        writer.finish().expect("finalize fixture");
+
+        let duration = post::inspect(&source).expect("source metadata").duration;
+        let duration_ms = (duration * 1000.0).round() as u64;
+        let idle =
+            post::idle_ranges(&source, 0.0, duration, 0.4, &[]).expect("decode idle intervals");
+        assert!(
+            idle.iter().any(|(from, to)| *from <= 1.5 && *to >= 1.5),
+            "fixture should contain an unchanged middle interval: {idle:?}"
+        );
+        let accelerated_seconds: f64 = idle
+            .iter()
+            .map(|(from, to)| (to - from - 0.25).max(0.0))
+            .sum();
+        let expected_duration = duration - accelerated_seconds * 0.75;
+        assert!(
+            duration - expected_duration > 0.5,
+            "fixture should contain enough idle time to shorten: {idle:?}"
+        );
         crate::recording_marks::write(
             &source,
             &crate::recording_marks::RecordingMarks::new(duration_ms, 12, 64, 48, Vec::new())
@@ -2445,7 +2478,7 @@ mod tests {
         let options = json!({
             "path": source,
             "fps": 12,
-            "idle_after": 0.5,
+            "idle_after": 0.4,
             "idle_mode": "speed",
             "idle_speed": 4,
             "min_pause": 0.25
@@ -2457,11 +2490,11 @@ mod tests {
         let mp4_metadata = fixtures
             .run("video.export", Value::Object(mp4_args))
             .expect("idle-edited MP4");
-        let mp4_duration = mp4_metadata["duration"].as_f64().expect("MP4 duration");
+        let mp4_frames = mp4_metadata["frames"].as_u64().expect("MP4 frame count");
+        let expected_frames = (expected_duration * 12.0).ceil() as u64;
         assert!(
-            mp4_duration > 0.3 && mp4_duration < 0.6,
-            "{mp4_duration}; idle ranges {:?}",
-            post::idle_ranges(&source, 0.0, 1.0, 0.5, &[])
+            mp4_frames.abs_diff(expected_frames) <= 1,
+            "expected about {expected_frames} frames, got {mp4_frames}; idle: {idle:?}"
         );
 
         let gif = fixtures.path("idle-edited.gif");
@@ -2472,7 +2505,10 @@ mod tests {
             .run("video.export", Value::Object(gif_args))
             .expect("idle-edited GIF");
         let gif_duration = gif_metadata["duration"].as_f64().expect("GIF duration");
-        assert!(gif_duration > 0.3 && gif_duration < 0.7, "{gif_duration}");
+        assert!(
+            (gif_duration - expected_duration).abs() <= 0.3,
+            "expected about {expected_duration}s, got {gif_duration}s; idle: {idle:?}"
+        );
     }
 
     #[test]

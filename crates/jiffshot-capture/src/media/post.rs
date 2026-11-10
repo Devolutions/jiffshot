@@ -275,19 +275,8 @@ pub fn idle_ranges(
     Ok(idle)
 }
 
-/// Lossy codecs can perturb unchanged pixels slightly between frames, so idle
-/// detection ignores per-channel differences up to this amount.
-const IDLE_PIXEL_TOLERANCE: u8 = 12;
-
 fn frames_match(a: &VideoFrame, b: &VideoFrame) -> bool {
-    a.width == b.width
-        && a.height == b.height
-        && a.bgra.len() == b.bgra.len()
-        && a
-            .bgra
-            .iter()
-            .zip(&b.bgra)
-            .all(|(x, y)| x.abs_diff(*y) <= IDLE_PIXEL_TOLERANCE)
+    a.width == b.width && a.height == b.height && a.bgra == b.bgra
 }
 
 fn collect_idle_range(
@@ -3585,6 +3574,24 @@ mod tests {
                 > output_at_quarter_second.bgra[center_pixel] + 80,
             "2x output at 0.25 seconds should show source time 0.5 seconds"
         );
+    }
+
+    #[test]
+    fn idle_detection_treats_single_level_pixel_changes_as_motion() {
+        let frame = |value| VideoFrame {
+            time: 0,
+            width: 2,
+            height: 1,
+            bgra: vec![value, 0, 0, 255, 0, 0, 0, 255],
+        };
+        assert!(frames_match(&frame(0), &frame(0)));
+        for value in 0..=254 {
+            assert!(
+                !frames_match(&frame(value), &frame(value + 1)),
+                "pixel change from {value} to {} must not be idle",
+                value + 1
+            );
+        }
     }
 
     #[test]
