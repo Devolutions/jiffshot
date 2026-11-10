@@ -333,6 +333,10 @@ enum Drag {
     Handle {
         id: u64,
         handle: Handle,
+        /// The object as the drag found it. Every move resizes this copy
+        /// afresh, so fixed corners, proportions and fitted text cannot
+        /// drift, and a box dragged through zero size recovers.
+        original: std::sync::Arc<Object>,
     },
     Marquee {
         start: Pt,
@@ -2101,13 +2105,18 @@ impl Editor {
             .filter(|o| pick_existing && self.tool != Tool::Select && self.can_use_handles(o))
         {
             let id = o.id;
+            let original = std::sync::Arc::new(o.clone());
             if let Some((h, _)) = o
                 .handles()
                 .into_iter()
                 .find(|(_, q)| q.dist(p) <= tolerance * 1.5)
             {
                 self.checkpoint("Resize", None);
-                self.drag = Some(Drag::Handle { id, handle: h });
+                self.drag = Some(Drag::Handle {
+                    id,
+                    handle: h,
+                    original,
+                });
                 return;
             }
         }
@@ -2342,11 +2351,16 @@ impl Editor {
                     moved: true,
                 });
             }
-            Drag::Handle { id, handle } => {
+            Drag::Handle {
+                id,
+                handle,
+                original,
+            } => {
                 let Some(o) = self.doc.get_mut(id) else {
                     return;
                 };
                 let before = o.bounds();
+                *o = (*original).clone();
                 o.move_handle(handle, p, m.shift);
                 let after = o.bounds();
                 self.invalidate_box(before.union(&after));
@@ -3628,6 +3642,28 @@ mod tests {
         drag(&mut e, (handle.x, handle.y), (handle.x + 20.0, handle.y + 20.0));
         assert_eq!(e.document().objects.len(), 1);
         assert_ne!(e.selection_box(), Some(before));
+    }
+
+    #[test]
+    fn image_corner_handles_keep_proportions_unless_shift_is_held() {
+        let resize = |m: Modifiers| {
+            let mut e = editor();
+            e.set_tool(Tool::Move);
+            e.paste_image(raster::solid(200, 100, Rgba::RED).unwrap());
+            assert_eq!(e.selection_box(), Some(Box2::new(100.0, 100.0, 300.0, 200.0)));
+            e.pointer_down(Pt::new(300.0, 200.0), m, 4.0);
+            // Passing close to and past the fixed corner must not lose the
+            // ratio or move that corner.
+            e.pointer_move(Pt::new(101.0, 100.5), m);
+            e.pointer_move(Pt::new(95.0, 95.0), m);
+            e.pointer_move(Pt::new(100.0, 200.0), m);
+            e.pointer_move(Pt::new(340.0, 260.0), m);
+            e.pointer_up(Pt::new(340.0, 260.0), m);
+            e.selected().and_then(Object::rect).unwrap()
+        };
+        assert_eq!(resize(NONE), Box2::new(100.0, 100.0, 420.0, 260.0));
+        let shift = Modifiers { shift: true, ..NONE };
+        assert_eq!(resize(shift), Box2::new(100.0, 100.0, 340.0, 260.0));
     }
 
     #[test]
