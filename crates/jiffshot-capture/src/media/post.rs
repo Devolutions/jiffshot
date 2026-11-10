@@ -2546,9 +2546,12 @@ mod tests {
         let source = dir.path("codec.mp4");
         let mut writer =
             Writer::create(&source, VideoSpec::for_size(64, 48, 12), None).expect("encoder");
-        writer
-            .write_frame(&[0, 0, 0, 0].repeat(64 * 48), 0, HNS_PER_SECOND / 12)
-            .expect("source frame");
+        let pixels = [0, 0, 0, 0].repeat(64 * 48);
+        for index in 0..12 {
+            writer
+                .write_frame(&pixels, frame_time(index, 12), HNS_PER_SECOND / 12)
+                .expect("source frame");
+        }
         writer.finish().expect("finalize source");
 
         assert_eq!(

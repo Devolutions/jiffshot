@@ -1154,6 +1154,8 @@ mod tests {
         assert!(error.message.contains(&path.display().to_string()));
         assert!(error.message.contains("audio status"));
         assert_eq!(std::fs::read(&path).unwrap(), b"synthetic recording");
+        std::fs::remove_file(crate::recording_marks::sidecar_path(&path))
+            .expect("remove the published marker sidecar");
         std::fs::remove_file(path).expect("remove the published fixture");
         std::fs::remove_dir(directory).expect("remove the recording fixture directory");
     }
