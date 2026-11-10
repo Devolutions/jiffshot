@@ -120,7 +120,26 @@ fn has_package_identity() -> Result<bool, String> {
     }
 }
 
+fn ensure_mta_usage() -> Result<(), String> {
+    use std::sync::Mutex;
+    use windows::Win32::System::Com::CoIncrementMTAUsage;
+
+    static RETAINED: Mutex<bool> = Mutex::new(false);
+    let mut retained = RETAINED.lock().expect("MTA usage lock poisoned");
+    if !*retained {
+        // SAFETY: retains one process-wide MTA usage cookie for the life of the process so
+        // per-worker RoUninitialize calls never drop the process MTA refcount to zero or
+        // unload proxy-stub DLLs (such as OneCoreCommonProxyStub.dll) behind agile factories
+        // cached in process-wide statics (`windows` FactoryCache, `execmodelclient`).
+        let _cookie = unsafe { CoIncrementMTAUsage() }
+            .map_err(|error| format!("Could not initialize Windows COM services: {error}"))?;
+        *retained = true;
+    }
+    Ok(())
+}
+
 fn with_winrt<T>(work: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    ensure_mta_usage()?;
     // SAFETY: the successful call is paired with RoUninitialize on this thread.
     unsafe { RoInitialize(RO_INIT_MULTITHREADED) }
         .map_err(|error| format!("Could not initialize Windows startup services: {error}"))?;
@@ -197,18 +216,31 @@ fn packaged_disable() -> Result<Registration, String> {
     })
 }
 
+fn classify_activated_args<T>(
+    result: windows::core::Result<T>,
+    kind_of: impl FnOnce(T) -> windows::core::Result<ActivationKind>,
+) -> Result<bool, String> {
+    let args = match result {
+        Ok(args) => args,
+        // A packaged desktop process started directly without UWP contract activation returns
+        // S_OK with a null IActivatedEventArgs pointer, which `windows` maps to HRESULT(0).
+        Err(error) if error.code().is_ok() => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "Could not read Windows activation details: {error}"
+            ));
+        }
+    };
+    let kind = kind_of(args)
+        .map_err(|error| format!("Could not read the Windows activation kind: {error}"))?;
+    Ok(kind == ActivationKind::StartupTask)
+}
+
 pub(super) fn is_startup_activation() -> Result<bool, String> {
     if !has_package_identity()? {
         return Ok(false);
     }
-    with_winrt(|| {
-        let args = AppInstance::GetActivatedEventArgs()
-            .map_err(|error| format!("Could not read Windows activation details: {error}"))?;
-        let kind = args
-            .Kind()
-            .map_err(|error| format!("Could not read the Windows activation kind: {error}"))?;
-        Ok(kind == ActivationKind::StartupTask)
-    })
+    on_winrt(|| classify_activated_args(AppInstance::GetActivatedEventArgs(), |args| args.Kind()))
 }
 
 struct RegistryKey(HKEY);
@@ -675,6 +707,37 @@ mod tests {
     }
 
     #[test]
+    fn direct_packaged_launch_without_activated_args_is_not_startup_activation() {
+        use windows::core::{Error, HRESULT};
+
+        assert_eq!(
+            classify_activated_args(Ok(()), |()| Ok(ActivationKind::StartupTask)),
+            Ok(true)
+        );
+        assert_eq!(
+            classify_activated_args(Ok(()), |()| Ok(ActivationKind::Launch)),
+            Ok(false)
+        );
+        assert_eq!(
+            classify_activated_args::<()>(Err(Error::empty()), |()| {
+                unreachable!("null IActivatedEventArgs returns early")
+            }),
+            Ok(false)
+        );
+        let read_err = classify_activated_args::<()>(
+            Err(Error::from_hresult(HRESULT(0x8000_4005u32 as i32))),
+            |()| unreachable!("failed activation lookup returns early"),
+        )
+        .expect_err("real activation HRESULT failure must be reported");
+        assert!(read_err.contains("Could not read Windows activation details"));
+        let kind_err = classify_activated_args(Ok(()), |()| {
+            Err(Error::from_hresult(HRESULT(0x8000_4005u32 as i32)))
+        })
+        .expect_err("failed Kind() lookup must be reported");
+        assert!(kind_err.contains("Could not read the Windows activation kind"));
+    }
+
+    #[test]
     fn desktop_command_quotes_spaces_and_starts_in_background() {
         let exe = Path::new("C:\\Program Files\\Jiffshot\\jiffshot.exe");
         let mut command = run_command(exe).unwrap();
@@ -757,6 +820,361 @@ mod tests {
         marker[0] = 2;
         assert!(!approval_allows_default(REG_SZ, &marker));
         assert!(!approval_allows_default(REG_BINARY, &marker[..4]));
+    }
+
+    const PROXY_CHILD: &str =
+        "startup_windows::backend::tests::cached_startup_factory_survives_across_workers_child";
+    const PROXY_CHILD_ENV: &str = "JIFFSHOT_PRIVATE_STARTUP_PROXY_TEST";
+
+    #[test]
+    fn cached_startup_factory_survives_across_workers_and_preserves_main_sta() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", PROXY_CHILD, "--ignored", "--nocapture"])
+            .env(PROXY_CHILD_ENV, "1")
+            .output()
+            .expect("start isolated startup proxy test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("1 passed; 0 failed"),
+            "isolated startup proxy test failed (status {:?}):\n{stdout}\n{stderr}",
+            output.status.code()
+        );
+    }
+
+    #[test]
+    #[ignore = "run only in the dedicated subprocess started by the parent test"]
+    fn cached_startup_factory_survives_across_workers_child() {
+        use std::ffi::c_void;
+        use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+        use windows::core::{Interface, GUID, HRESULT, HSTRING};
+        use windows::ApplicationModel::{IStartupTaskStatics, IStartupTaskStatics_Vtbl};
+        use windows::Win32::System::Com::{
+            CoFreeUnusedLibrariesEx, CoGetApartmentType, CoInitializeEx, CoUninitialize,
+            IAgileObject, APTTYPE_MAINSTA, APTTYPE_STA, COINIT_APARTMENTTHREADED,
+        };
+        use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, GetMessageW, PostThreadMessageW, TranslateMessage, MSG, WM_QUIT,
+        };
+
+        #[link(name = "ole32")]
+        extern "system" {
+            fn CoMarshalInterThreadInterfaceInStream(
+                riid: *const GUID,
+                p_unk: *mut c_void,
+                pp_stm: *mut *mut c_void,
+            ) -> HRESULT;
+            fn CoGetInterfaceAndReleaseStream(
+                p_stm: *mut c_void,
+                riid: *const GUID,
+                ppv: *mut *mut c_void,
+            ) -> HRESULT;
+        }
+
+        assert_eq!(std::env::var(PROXY_CHILD_ENV).as_deref(), Ok("1"));
+
+        const SENTINEL_HR: HRESULT = HRESULT(0x8004_0201u32 as i32);
+
+        #[repr(C)]
+        struct StubFactory {
+            vtbl: *const IStartupTaskStatics_Vtbl,
+            refs: AtomicU32,
+            calls: AtomicU32,
+        }
+
+        unsafe extern "system" fn query_interface(
+            this: *mut c_void,
+            iid: *const GUID,
+            interface: *mut *mut c_void,
+        ) -> HRESULT {
+            if iid.is_null() || interface.is_null() {
+                return HRESULT(0x8000_4003u32 as i32);
+            }
+            // SAFETY: caller supplied valid non-null pointers for a COM QueryInterface call.
+            let requested = unsafe { *iid };
+            if requested == windows::core::IUnknown::IID
+                || requested == windows::core::IInspectable::IID
+                || requested == IAgileObject::IID
+                || requested == IStartupTaskStatics::IID
+            {
+                // SAFETY: `this` is a valid `StubFactory` instance.
+                unsafe {
+                    add_ref(this);
+                    *interface = this;
+                }
+                HRESULT(0)
+            } else {
+                // SAFETY: `interface` was checked for null above.
+                unsafe { *interface = std::ptr::null_mut() };
+                HRESULT(0x8000_4002u32 as i32)
+            }
+        }
+
+        unsafe extern "system" fn add_ref(this: *mut c_void) -> u32 {
+            // SAFETY: `this` points to a heap-allocated `StubFactory`.
+            let stub = unsafe { &*(this as *const StubFactory) };
+            stub.refs.fetch_add(1, Ordering::Relaxed) + 1
+        }
+
+        unsafe extern "system" fn release(this: *mut c_void) -> u32 {
+            // SAFETY: `this` points to a heap-allocated `StubFactory` with balanced refcounts.
+            let stub = unsafe { &*(this as *const StubFactory) };
+            let remaining = stub.refs.fetch_sub(1, Ordering::Release) - 1;
+            if remaining == 0 {
+                std::sync::atomic::fence(Ordering::Acquire);
+                // SAFETY: the last reference was just released.
+                unsafe { drop(Box::from_raw(this as *mut StubFactory)) };
+            }
+            remaining
+        }
+
+        unsafe extern "system" fn get_iids(
+            _this: *mut c_void,
+            count: *mut u32,
+            iids: *mut *mut GUID,
+        ) -> HRESULT {
+            // SAFETY: WinRT metadata callers pass valid out-pointers.
+            unsafe {
+                if !count.is_null() {
+                    *count = 0;
+                }
+                if !iids.is_null() {
+                    *iids = std::ptr::null_mut();
+                }
+            }
+            HRESULT(0)
+        }
+
+        unsafe extern "system" fn get_runtime_class_name(
+            _this: *mut c_void,
+            name: *mut *mut c_void,
+        ) -> HRESULT {
+            // SAFETY: out-pointer is valid when non-null.
+            unsafe {
+                if !name.is_null() {
+                    *name = std::ptr::null_mut();
+                }
+            }
+            HRESULT(0)
+        }
+
+        unsafe extern "system" fn get_trust_level(_this: *mut c_void, level: *mut i32) -> HRESULT {
+            // SAFETY: out-pointer is valid when non-null.
+            unsafe {
+                if !level.is_null() {
+                    *level = 0;
+                }
+            }
+            HRESULT(0)
+        }
+
+        unsafe extern "system" fn get_for_current_package_async(
+            _this: *mut c_void,
+            result: *mut *mut c_void,
+        ) -> HRESULT {
+            // SAFETY: out-pointer is valid when non-null.
+            unsafe {
+                if !result.is_null() {
+                    *result = std::ptr::null_mut();
+                }
+            }
+            SENTINEL_HR
+        }
+
+        unsafe extern "system" fn get_async(
+            this: *mut c_void,
+            _task_id: *mut c_void,
+            result: *mut *mut c_void,
+        ) -> HRESULT {
+            // SAFETY: `this` points to our `StubFactory` and `result` is the COM out-pointer.
+            let stub = unsafe { &*(this as *const StubFactory) };
+            stub.calls.fetch_add(1, Ordering::SeqCst);
+            // SAFETY: out-pointer is valid when non-null.
+            unsafe {
+                if !result.is_null() {
+                    *result = std::ptr::null_mut();
+                }
+            }
+            SENTINEL_HR
+        }
+
+        static VTBL: IStartupTaskStatics_Vtbl = IStartupTaskStatics_Vtbl {
+            base__: windows::core::IInspectable_Vtbl {
+                base: windows::core::IUnknown_Vtbl {
+                    QueryInterface: query_interface,
+                    AddRef: add_ref,
+                    Release: release,
+                },
+                GetIids: get_iids,
+                GetRuntimeClassName: get_runtime_class_name,
+                GetTrustLevel: get_trust_level,
+            },
+            GetForCurrentPackageAsync: get_for_current_package_async,
+            GetAsync: get_async,
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel::<(usize, u32)>();
+        let server = std::thread::spawn(move || {
+            // SAFETY: balanced with CoUninitialize before this dedicated STA thread exits.
+            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+                .ok()
+                .expect("initialize STA server");
+            // SAFETY: obtains this STA thread's Win32 thread identifier for WM_QUIT.
+            let tid = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
+            let raw = Box::into_raw(Box::new(StubFactory {
+                vtbl: &VTBL,
+                refs: AtomicU32::new(1),
+                calls: AtomicU32::new(0),
+            }));
+            // SAFETY: `raw` is a valid COM object with refcount 1; `from_raw` adopts ownership.
+            let factory: IStartupTaskStatics = unsafe { IStartupTaskStatics::from_raw(raw.cast()) };
+            let mut stream = std::ptr::null_mut();
+            // SAFETY: marshals the STA interface into a cross-apartment stream so MTA resolves CStdProxyBuffer.
+            unsafe {
+                CoMarshalInterThreadInterfaceInStream(
+                    &IStartupTaskStatics::IID,
+                    factory.as_raw(),
+                    &mut stream,
+                )
+            }
+            .ok()
+            .expect("marshal IStartupTaskStatics from STA");
+            tx.send((stream as usize, tid))
+                .expect("send marshaled stream");
+
+            let mut msg: MSG = unsafe { std::mem::zeroed() };
+            // SAFETY: standard STA message loop until the test posts WM_QUIT.
+            while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
+                // SAFETY: translates and dispatches the retrieved message on this STA thread.
+                unsafe {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+            let calls = factory.as_raw() as *const StubFactory;
+            // SAFETY: `factory` is still alive until dropped below.
+            let count = unsafe { (*calls).calls.load(Ordering::SeqCst) };
+            drop(factory);
+            // SAFETY: balances CoInitializeEx on this STA thread.
+            unsafe { CoUninitialize() };
+            count
+        });
+
+        let (stream_raw, server_tid) = rx.recv().expect("receive marshaled stream");
+        static CACHED_FACTORY: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+        // First worker (`packaged_status`): unmarshals the `OneCoreCommonProxyStub.dll`
+        // proxy in the MTA, caches it in a process-wide static just like `windows_core::imp::FactoryCache`,
+        // and invokes `GetAsync` before `on_winrt` exits.
+        let first = on_winrt(move || {
+            let mut raw_proxy = std::ptr::null_mut();
+            // SAFETY: consumes the single-use stream and creates the MTA proxy for IStartupTaskStatics.
+            unsafe {
+                CoGetInterfaceAndReleaseStream(
+                    stream_raw as *mut c_void,
+                    &IStartupTaskStatics::IID,
+                    &mut raw_proxy,
+                )
+            }
+            .ok()
+            .map_err(|e| e.to_string())?;
+            // SAFETY: `raw_proxy` is a valid newly-unmarshaled `IStartupTaskStatics` pointer.
+            let proxy: IStartupTaskStatics = unsafe { IStartupTaskStatics::from_raw(raw_proxy) };
+            proxy
+                .cast::<IAgileObject>()
+                .expect("standard COM proxy is agile, matching FactoryCache::call");
+            CACHED_FACTORY.store(proxy.as_raw(), Ordering::SeqCst);
+            let task_id = HSTRING::from(TASK_ID);
+            let mut op = std::ptr::null_mut();
+            // SAFETY: invokes GetAsync on the freshly unmarshaled proxy.
+            let hr = unsafe {
+                (Interface::vtable(&proxy).GetAsync)(
+                    proxy.as_raw(),
+                    task_id.as_ptr().cast_mut().cast(),
+                    &mut op,
+                )
+            };
+            std::mem::forget(proxy);
+            Ok(hr)
+        })
+        .expect("first on_winrt call");
+        assert_eq!(first, SENTINEL_HR);
+
+        // Force immediate unload of any COM proxy-stub DLLs eligible after MTA teardown
+        // (deterministic equivalent of combase's MTA shutdown / background unload).
+        // SAFETY: standard COM API with zero delay.
+        unsafe { CoFreeUnusedLibrariesEx(0, Some(0)) };
+
+        // Second worker (`packaged_enable`): reuses the cached proxy pointer from `CACHED_FACTORY`,
+        // exactly as `FactoryCache` does on the second `StartupTask::GetAsync` call.
+        let second = on_winrt(|| {
+            let ptr = CACHED_FACTORY.load(Ordering::SeqCst);
+            assert!(!ptr.is_null());
+            // SAFETY: borrows the leaked `IStartupTaskStatics` pointer cached in `CACHED_FACTORY`.
+            let proxy = unsafe { std::mem::transmute::<&*mut c_void, &IStartupTaskStatics>(&ptr) };
+            let task_id = HSTRING::from(TASK_ID);
+            let mut op = std::ptr::null_mut();
+            // SAFETY: invokes GetAsync on the cached proxy across `ObjectStublessClient`.
+            let hr = unsafe {
+                (Interface::vtable(proxy).GetAsync)(
+                    proxy.as_raw(),
+                    task_id.as_ptr().cast_mut().cast(),
+                    &mut op,
+                )
+            };
+            Ok(hr)
+        })
+        .expect("second on_winrt call");
+        assert_eq!(second, SENTINEL_HR);
+
+        // Verify the main thread can still enter STA afterwards, as Rustolonia requires (`OleInitialize`).
+        // SAFETY: balanced with OleUninitialize below on this main thread.
+        unsafe { OleInitialize(None) }.expect("main thread enters OLE STA after startup workers");
+        let mut apt_type = windows::Win32::System::Com::APTTYPE::default();
+        let mut apt_qualifier = windows::Win32::System::Com::APTTYPEQUALIFIER::default();
+        // SAFETY: queries the current thread's COM apartment.
+        unsafe { CoGetApartmentType(&mut apt_type, &mut apt_qualifier) }
+            .expect("query main thread apartment");
+        assert!(
+            apt_type == APTTYPE_MAINSTA || apt_type == APTTYPE_STA,
+            "unexpected main-thread apartment: {apt_type:?}"
+        );
+        // SAFETY: balances OleInitialize above.
+        unsafe { OleUninitialize() };
+
+        // Clean up the STA server thread and ensure that even when the remote server exits and
+        // unused COM libraries are flushed (as with an out-of-process broker), the client proxy's
+        // retained MTA keeps OneCoreCommonProxyStub.dll mapped so calls return a clean HRESULT
+        // instead of faulting in combase!ObjectStublessClient.
+        // SAFETY: posts WM_QUIT to our own STA server thread.
+        unsafe { PostThreadMessageW(server_tid, WM_QUIT, 0, 0) };
+        let total_calls = server.join().expect("join STA server");
+        assert_eq!(total_calls, 2);
+
+        // SAFETY: flushes any COM DLLs that lost their last reference.
+        unsafe { CoFreeUnusedLibrariesEx(0, Some(0)) };
+        let after_server_exit = on_winrt(|| {
+            let ptr = CACHED_FACTORY.load(Ordering::SeqCst);
+            // SAFETY: borrows the leaked `IStartupTaskStatics` pointer cached in `CACHED_FACTORY`.
+            let proxy = unsafe { std::mem::transmute::<&*mut c_void, &IStartupTaskStatics>(&ptr) };
+            let task_id = HSTRING::from(TASK_ID);
+            let mut op = std::ptr::null_mut();
+            // SAFETY: invokes GetAsync on the cached proxy after the server exited.
+            let hr = unsafe {
+                (Interface::vtable(proxy).GetAsync)(
+                    proxy.as_raw(),
+                    task_id.as_ptr().cast_mut().cast(),
+                    &mut op,
+                )
+            };
+            Ok(hr)
+        })
+        .expect("third on_winrt call after server exit");
+        assert!(
+            after_server_exit.is_err(),
+            "disconnected server should return a COM error HRESULT, got {after_server_exit:?}"
+        );
     }
 }
 
