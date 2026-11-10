@@ -252,7 +252,7 @@ pub fn idle_ranges(
             break;
         }
         if let Some(last) = previous.as_ref() {
-            if last.width == frame.width && last.height == frame.height && last.bgra == frame.bgra {
+            if frames_match(last, &frame) {
                 stable_start.get_or_insert(seconds(last.time.max(0)));
                 stable_end = at;
             } else if let Some(start) = stable_start.take() {
@@ -273,6 +273,21 @@ pub fn idle_ranges(
         );
     }
     Ok(idle)
+}
+
+/// Lossy codecs can perturb unchanged pixels slightly between frames, so idle
+/// detection ignores per-channel differences up to this amount.
+const IDLE_PIXEL_TOLERANCE: u8 = 12;
+
+fn frames_match(a: &VideoFrame, b: &VideoFrame) -> bool {
+    a.width == b.width
+        && a.height == b.height
+        && a.bgra.len() == b.bgra.len()
+        && a
+            .bgra
+            .iter()
+            .zip(&b.bgra)
+            .all(|(x, y)| x.abs_diff(*y) <= IDLE_PIXEL_TOLERANCE)
 }
 
 fn collect_idle_range(

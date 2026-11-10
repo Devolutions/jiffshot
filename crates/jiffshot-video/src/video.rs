@@ -2458,7 +2458,11 @@ mod tests {
             .run("video.export", Value::Object(mp4_args))
             .expect("idle-edited MP4");
         let mp4_duration = mp4_metadata["duration"].as_f64().expect("MP4 duration");
-        assert!(mp4_duration > 0.3 && mp4_duration < 0.6, "{mp4_duration}");
+        assert!(
+            mp4_duration > 0.3 && mp4_duration < 0.6,
+            "{mp4_duration}; idle ranges {:?}",
+            post::idle_ranges(&source, 0.0, 1.0, 0.5, &[])
+        );
 
         let gif = fixtures.path("idle-edited.gif");
         let mut gif_args = options.as_object().expect("options object").clone();
