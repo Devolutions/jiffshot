@@ -79,6 +79,12 @@ jobs:
           JIFFSHOT_VERSION: ${{ inputs.version }}
         run: cargo build --release --locked -p jiffshot -p jiffshot-cli --target ${{ matrix.target }}
 
+      - name: Build Windows static host
+        timeout-minutes: 20
+        env:
+          JIFFSHOT_VERSION: ${{ inputs.version }}
+        run: cargo build --release --locked -p jiffshot --features static-host --target ${{ matrix.target }} --target-dir target/static-host
+
       - name: Test
         if: matrix.test
         env:
@@ -107,6 +113,18 @@ jobs:
           cargo test --release --locked -p jiffshot-workflow --target ${{ matrix.target }} text_capture_recognizes_only_the_selected_area -- --ignored --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\app\tests\windows_grab_text_e2e.ps1 -Binary "target\${{ matrix.target }}\release\jiffshot.exe" -AllowDesktopInput
+
+      - name: Test Windows static host
+        if: matrix.test
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'jiffshot-static-host'
+          New-Item -ItemType Directory -Path $root | Out-Null
+          $binary = Join-Path $root 'jiffshot.exe'
+          Copy-Item "target\static-host\${{ matrix.target }}\release\jiffshot.exe" -Destination $binary
+          & .\app\tests\windows_grab_text_e2e.ps1 -Binary $binary -AllowDesktopInput
 
       - name: Package
         shell: pwsh
@@ -283,6 +301,23 @@ jobs:
         run: |
           dbus-run-session -- pwsh -NoProfile -File app/tests/linux_selection_e2e.ps1 \
             -Binary target/release/jiffshot -RuntimeDir target/release
+
+      - name: Test Linux static host
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p jiffshot --features static-host --target-dir target/static-host
+          root="$RUNNER_TEMP/jiffshot-static-host"
+          mkdir -p "$root"
+          cp target/static-host/release/jiffshot "$root/jiffshot"
+          ldd "$root/jiffshot" | tee "$root/dependencies.txt"
+          if grep -Ei 'rustolonia_host|AvaloniaNative|SkiaSharp|HarfBuzzSharp|not found' "$root/dependencies.txt"; then
+            echo 'The static executable has a missing or project companion dependency.' >&2
+            exit 1
+          fi
+          dbus-run-session -- pwsh -NoLogo -NoProfile -File app/tests/linux_selection_e2e.ps1 \
+            -Binary "$root/jiffshot" -RuntimeDir "$root"
 
       - name: Package Ubuntu tar.gz and DEB
         run: pwsh -NoProfile -File package/linux/build.ps1 -Arch "${{ matrix.arch }}" -Format tar.gz,deb
@@ -591,6 +626,39 @@ jobs:
           $env:PSModulePath = "$moduleRoot$([IO.Path]::PathSeparator)$env:PSModulePath"
           Import-Module Pester -RequiredVersion $version
           & ./package/macos/run-tests.ps1
+
+      - name: Test macOS static host
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p jiffshot --features static-host \
+            --target ${{ matrix.target }} --target-dir target/static-host
+          root="$RUNNER_TEMP/jiffshot-static-host"
+          mkdir -p "$root"/{library,config,local}
+          cp "target/static-host/${{ matrix.target }}/release/jiffshot" "$root/jiffshot"
+          if otool -L "$root/jiffshot" | grep -E 'rustolonia_host|AvaloniaNative|SkiaSharp|HarfBuzzSharp'; then
+            echo 'The static executable depends on a project companion library.' >&2
+            exit 1
+          fi
+          for flag in --internal-check-native-popup-gate --internal-check-native-termination \
+            --internal-check-native-file-drag --internal-check-file-drag-abi; do
+            RUSTOLONIA_HOST_LIB="$root/absent.dylib" "$root/jiffshot" "$flag"
+          done
+          if RUSTOLONIA_HOST_LIB="$root/absent.dylib" \
+            "$root/jiffshot" --internal-check-host-discovery > "$root/discovery.txt" 2>&1; then
+            echo 'A static executable must not report a discoverable host.' >&2
+            exit 1
+          fi
+          grep -F 'the Rustolonia host is statically linked' "$root/discovery.txt"
+          trap 'for file in "$root/stdout.txt" "$root/stderr.txt" "$root/ui-log.txt"; do [[ ! -f "$file" ]] || cat "$file"; done' EXIT
+          RUSTOLONIA_HOST_LIB="$root/absent.dylib" \
+            JIFFSHOT_UITEST="$root" JIFFSHOT_UITEST_APP_NAME=1 \
+            JIFFSHOT_LIBRARY="$root/library" JIFFSHOT_CONFIG_DIR="$root/config" \
+            JIFFSHOT_LOCAL_DIR="$root/local" APPDATA="$root/config" LOCALAPPDATA="$root/local" \
+            "$root/jiffshot" > "$root/stdout.txt" 2> "$root/stderr.txt"
+          grep -Fx 'application name: retained after returning to the editor' "$root/ui-log.txt"
+          if grep -q '^FAILED:' "$root/ui-log.txt"; then exit 1; fi
 
       - name: Checkout shared Apple signing actions
         if: steps.signing.outputs.kind == 'unigetui'
@@ -1019,11 +1087,33 @@ jobs:
           name: jiffshot-win-x64
           path: logo-bin
 
+      - name: Test MSIX publisher selection
+        shell: pwsh
+        run: ./package/test-msix-publisher.ps1
+
+      - name: Azure login for test MSIX publisher
+        if: inputs.signing_environment == 'publish-test'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Trust test signing root for MSIX publisher
+        if: inputs.signing_environment == 'publish-test'
+        uses: ./.github/actions/trust-test-signing-root
+        with:
+          endpoint: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          account_name: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          profile_name: ${{ secrets.TRUSTED_SIGNING_PROFILE_NAME }}
+          certificate_path: ${{ runner.temp }}\artifact-signing-test-root.cer
+
       - name: Build the MSIX
         shell: pwsh
         env:
           EXPECTED_VERSION: ${{ inputs.version }}
           PACKAGE_ARCHITECTURE: ${{ matrix.architecture }}
+          SIGNING_REQUIRED: ${{ github.event_name != 'pull_request' && inputs.signing_environment != '' }}
         run: |
           $ErrorActionPreference = 'Stop'
           $cargoToml = Get-Content -LiteralPath Cargo.toml -Raw
@@ -1063,12 +1153,9 @@ jobs:
               throw "Failed to generate MSIX logo $($logo.Name)"
             }
           }
+          . ./package/MsixPublisher.ps1
           $signature = Get-AuthenticodeSignature -LiteralPath $exe
-          $publisher = if ($signature.Status -eq 'Valid' -and $null -ne $signature.SignerCertificate) {
-            $signature.SignerCertificate.Subject
-          } else {
-            'CN=Devolutions Jiffshot CI'
-          }
+          $publisher = Get-MsixPublisher -Signature $signature -RequireSigned ($env:SIGNING_REQUIRED -eq 'true')
           [xml]$manifest = Get-Content -LiteralPath package\AppxManifest.xml -Raw
           $namespace = [System.Xml.XmlNamespaceManager]::new($manifest.NameTable)
           $namespace.AddNamespace('appx', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
@@ -1102,7 +1189,7 @@ jobs:
           TRUSTED_SIGNING_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_PROFILE_NAME }}
           TRUSTED_SIGNING_TIMESTAMP_SERVER: ${{ vars.TRUSTED_SIGNING_TIMESTAMP_SERVER || 'http://timestamp.acs.microsoft.com/' }}
         with:
-          install_test_signing_root: ${{ inputs.signing_environment == 'publish-test' }}
+          install_test_signing_root: 'false'
           files: msix/*.msix
 
       - name: Sign a temporary MSIX for installation testing

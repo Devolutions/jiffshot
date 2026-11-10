@@ -44,6 +44,28 @@ Describe 'Package builder' {
         }
     }
 
+    It 'tests the Linux static host separately from release packaging' {
+        $workflow = Get-WorkflowText 'ci.yml'
+        $static = [regex]::Match($workflow, '(?s)- name: Test Linux static host(.*?)(?=\r?\n      - )').Groups[1].Value
+        $static | Should -Match 'cargo build --release --locked -p jiffshot --features static-host'
+        $static | Should -Match '--target-dir target/static-host'
+        $static | Should -Match 'ldd "\$root/jiffshot"'
+        $static | Should -Match 'linux_selection_e2e\.ps1'
+        $static | Should -Match '-RuntimeDir "\$root"'
+    }
+
+    It 'builds the Windows static host separately from release packaging' {
+        $workflow = Get-WorkflowText 'ci.yml'
+        $static = [regex]::Match($workflow, '(?s)- name: Build Windows static host(.*?)(?=\r?\n      - )').Groups[1].Value
+        $static | Should -Match 'cargo build --release --locked -p jiffshot --features static-host'
+        $static | Should -Match '--target \$\{\{ matrix\.target \}\}'
+        $static | Should -Match '--target-dir target/static-host'
+        $smoke = [regex]::Match($workflow, '(?s)- name: Test Windows static host(.*?)(?=\r?\n      - )').Groups[1].Value
+        $smoke | Should -Match 'if: matrix\.test'
+        $smoke | Should -Match 'Join-Path \$env:RUNNER_TEMP'
+        $smoke | Should -Match 'windows_grab_text_e2e\.ps1 -Binary \$binary -AllowDesktopInput'
+    }
+
     It 'release version matches the workspace and rejects mismatches' {
         $version = Get-JiffshotPackageVersion
         Get-JiffshotPackageVersion -Expected $version | Should -BeExactly $version

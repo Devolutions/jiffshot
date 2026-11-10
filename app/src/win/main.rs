@@ -637,6 +637,10 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         use std::io::Write;
         use std::os::unix::ffi::OsStrExt;
 
+        if rustolonia_sys::STATIC_HOST {
+            eprintln!("jiffshot-host-discovery-v1: the Rustolonia host is statically linked");
+            std::process::exit(1);
+        }
         match rustolonia::discover_host_path() {
             Ok(path) => {
                 let mut stdout = std::io::stdout().lock();

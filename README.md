@@ -429,13 +429,31 @@ workflow engine remains in `jiffshot-workflow`; Linux workflows live under
 
 ### Compiling
 
-Jiffshot requires **Rust 1.88+** and uses Rustolonia's `v12.1.5` release: the first build downloads the platform's prebuilt host, verified against the checksums pinned at the tag. No .NET SDK or Rustolonia checkout is required for that build.
+Jiffshot requires **Rust 1.88+** and uses Rustolonia's `v12.1.6` release: the first build downloads the platform's prebuilt host, verified against the checksums pinned at the tag. No .NET SDK or Rustolonia checkout is required for that build.
 
 ```powershell
 cargo run --release -p jiffshot
 ```
 
 The build copies the host next to `jiffshot.exe`, so `target/release` runs as it is; zip `jiffshot.exe` and the host DLLs beside it, with `app/README-portable.txt`, for the portable app.
+
+Rustolonia 12.1.6 also provides an experimental static host. To build Jiffshot
+with it, use a separate output directory so shared-host build artifacts are not
+mixed in:
+
+```sh
+cargo build --release --locked -p jiffshot --features static-host --target-dir target/static-host
+```
+
+On macOS, prefix this command with `MACOSX_DEPLOYMENT_TARGET=13.0`. Windows
+uses the static C runtime configured in `.cargo/config.toml`. The resulting
+executable does not need the Rustolonia, Avalonia.Native, SkiaSharp,
+HarfBuzzSharp, or ANGLE companion libraries, but still uses operating-system
+libraries; Linux also retains Jiffshot's GStreamer, Tesseract, and other system
+dependencies. The existing packaging and release scripts still require the
+shared host and do not package the static build. CI exercises standalone
+static-host builds on macOS, Ubuntu, and Windows x64; Windows ARM64 is built
+but not run.
 
 On Linux (including WSLg), build and run the image/document editor with:
 
@@ -628,7 +646,7 @@ rustup target add aarch64-pc-windows-msvc
 cargo build --release -p jiffshot --target aarch64-pc-windows-msvc
 ```
 
-CI (`.github/workflows/ci.yml`) builds and tests Windows x64 and cross-builds Windows ARM64. Linux uses native `ubuntu-24.04` (x64) and `ubuntu-24.04-arm` (ARM64) hosted runners: each runs workspace tests, app Clippy, package-content tests, and portable smoke tests. The exhaustive Linux GUI suites are not run in CI; their scripts remain available under `app/tests` for local runs. Portable and installed-package startup smoke tests remain enabled in CI. Fedora 43 containers on each native runner separately compile and test the Fedora build and RPM. Windows artifacts include portable ZIP, MSI, and MSIX packages for both architectures (`jiffshot-win-x64`, `jiffshot-win-arm64`, and their `-msi` / `-msix` variants). Linux artifacts contain Ubuntu 24.04 tar.gz/DEB packages (`jiffshot-linux-x64`, `jiffshot-linux-arm64`) and separately compiled Fedora 43 RPMs (`jiffshot-linux-x64-rpm`, `jiffshot-linux-arm64-rpm`), with architecture/distro-specific caches. Clean Ubuntu/Fedora containers on both native architectures verify package and installed ELF architecture, checksums, dependency resolution, desktop/MIME registration, isolated graphical startup, and removal without deleting user settings. Release assembly requires all six Linux packages and verifies their builder checksums before collecting them, per-architecture Linux checksums, and `SHA256SUMS.txt`; Windows packages are signed, while Linux packages are currently unsigned. Rustolonia [v12.1.5](https://github.com/Devolutions/rustolonia/releases/tag/v12.1.5) publishes both Linux x64 and ARM64 runtime host assets; this availability alone does not establish a successful native Jiffshot ARM64 build or smoke test. To move to a newer Rustolonia, change the tag on the two lines in `Cargo.toml`'s `[workspace.dependencies]`, run `cargo update -p rustolonia`, and commit the manifest and lockfile together.
+CI (`.github/workflows/ci.yml`) builds and tests Windows x64 and cross-builds Windows ARM64. Linux uses native `ubuntu-24.04` (x64) and `ubuntu-24.04-arm` (ARM64) hosted runners: each runs workspace tests, app Clippy, package-content tests, and portable smoke tests. The exhaustive Linux GUI suites are not run in CI; their scripts remain available under `app/tests` for local runs. Portable and installed-package startup smoke tests remain enabled in CI. Fedora 43 containers on each native runner separately compile and test the Fedora build and RPM. Windows artifacts include portable ZIP, MSI, and MSIX packages for both architectures (`jiffshot-win-x64`, `jiffshot-win-arm64`, and their `-msi` / `-msix` variants). Linux artifacts contain Ubuntu 24.04 tar.gz/DEB packages (`jiffshot-linux-x64`, `jiffshot-linux-arm64`) and separately compiled Fedora 43 RPMs (`jiffshot-linux-x64-rpm`, `jiffshot-linux-arm64-rpm`), with architecture/distro-specific caches. Clean Ubuntu/Fedora containers on both native architectures verify package and installed ELF architecture, checksums, dependency resolution, desktop/MIME registration, isolated graphical startup, and removal without deleting user settings. Release assembly requires all six Linux packages and verifies their builder checksums before collecting them, per-architecture Linux checksums, and `SHA256SUMS.txt`; Windows packages are signed, while Linux packages are currently unsigned. Rustolonia [v12.1.6](https://github.com/Devolutions/rustolonia/releases/tag/v12.1.6) publishes both Linux x64 and ARM64 runtime host assets; this availability alone does not establish a successful native Jiffshot ARM64 build or smoke test. To move to a newer Rustolonia, change the tag on the two lines in `Cargo.toml`'s `[workspace.dependencies]`, run `cargo update -p rustolonia`, and commit the manifest and lockfile together.
 
 ### Building and Installing Linux Packages
 
@@ -706,7 +724,7 @@ The MSI lands in `package/out` as `Devolutions.Jiffshot-x64-0.4.0.msi` (with the
 
 `ci.yml` builds and tests unsigned portable packages, MSIs, and MSIX packages for pushes to master, pull requests, and manual runs. The x64 MSIX installation test signs a temporary copy with a short-lived test certificate; the uploaded CI artifact remains unsigned. `release.yml` reuses those jobs with signing enabled: it signs the portable executable and Rustolonia host DLL before building the installers, then signs the MSI and MSIX. The x64 MSI and signed MSIX release builds are installed and uninstalled before the release can proceed.
 
-Run **Release** from GitHub Actions with a version matching `Cargo.toml` (for example, `0.4.0`, without `v`). Update and commit the workspace version before releasing a new version. Dry runs are enabled by default and upload packages as Actions artifacts without creating a tag or release. The `github_env` input selects the signing environment independently of `dry_run`: on master, `auto` (the default) and `prod` use `publish-prod`, while `test` uses `publish-test`. Other branches always use `publish-test` and only permit dry runs, even if `prod` is requested. For test signing, the workflow retrieves the `publish-test` profile root with psign and trusts it only in each ephemeral runner's current user certificate store, so Authenticode validation remains enabled. A non-dry-run dispatch with `github_env=test` publishes test-signed artifacts that are not publicly trusted. The workflow rejects non-dry-run releases from other branches, version mismatches, and existing tags.
+Run **Release** from GitHub Actions with a version matching `Cargo.toml` (for example, `0.4.0`, without `v`). Update and commit the workspace version before releasing a new version. Dry runs are enabled by default and upload packages as Actions artifacts without creating a tag or release. The `github_env` input selects the signing environment independently of `dry_run`: on master, `auto` (the default) and `prod` use `publish-prod`, while `test` uses `publish-test`. Other branches always use `publish-test` and only permit dry runs, even if `prod` is requested. For test signing, the workflow retrieves the `publish-test` profile root with psign and trusts it in each ephemeral runner's machine root store, falling back to the current-user root store if necessary, so Authenticode validation remains enabled. The MSIX job establishes that trust before reading the executable's publisher and requires a valid executable signature when signing is enabled. A non-dry-run dispatch with `github_env=test` publishes test-signed artifacts that are not publicly trusted. The workflow rejects non-dry-run releases from other branches, version mismatches, and existing tags.
 
 Both modes retain the portable, MSI, MSIX, Linux, and macOS Actions artifacts plus a `release-assets` artifact containing x64/ARM64 MSIs, MSIX packages, ZIP archives, all six Linux tar.gz/DEB/RPM packages, the Apple Silicon and Intel macOS DMGs, `SHA256SUMS-linux-x64.txt`, `SHA256SUMS-linux-arm64.txt`, and the overall `SHA256SUMS.txt`. Missing Linux formats, architectures, builder checksum manifests, or mismatched hashes block assembly. After all builds, signing, and validation succeed, a non-dry-run creates `v<version>` at the dispatched commit and publishes a GitHub Release with those same files attached. Do not create the tag manually.
 

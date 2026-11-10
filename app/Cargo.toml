@@ -6,6 +6,9 @@ edition.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[features]
+static-host = ["rustolonia/static-host"]
+
 [dependencies]
 rustolonia.workspace = true
 # Only for the build script to find the staged host (DEP_RUSTOLONIA_HOST_HOST_DIR).
