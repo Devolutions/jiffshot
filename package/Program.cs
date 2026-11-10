@@ -1,11 +1,11 @@
 // Builds the Jiffshot MSI: a per-machine install of jiffshot.exe, its
-// command-line client jiffshot-cli.exe and the Rustolonia host libraries
+// command-line client jiffshot-cli.exe and any shared runtime libraries
 // beside them into C:\Program Files\Devolutions\Jiffshot, with a Start menu
 // shortcut and the .jsd document association.
 //
 //   Jiffshot.Package.exe -bin <dir> -platform x64|arm64 [-version X.Y.Z] [-out <dir>]
 //
-// -bin is the folder holding jiffshot.exe, jiffshot-cli.exe and the DLLs (a
+// -bin is the folder holding jiffshot.exe, jiffshot-cli.exe and optional DLLs (a
 // Cargo release output or a CI artifact). The version defaults to the one in
 // Cargo.toml.
 
@@ -64,8 +64,6 @@ internal static class Program
             throw new InvalidDataException(
                 $"{ExecutableName} has version '{exeVersion.FileVersion}' / '{exeVersion.ProductVersion}', expected '{expectedFileVersion}' / '{o.Version}'");
         var libraries = Directory.GetFiles(o.Bin, "*.dll");
-        if (!libraries.Any(l => Path.GetFileName(l).Equals("rustolonia_host.dll", StringComparison.OrdinalIgnoreCase)))
-            throw new FileNotFoundException($"the Rustolonia host (rustolonia_host.dll) is not in {o.Bin}");
 
         var installDir = $"[{InstallDirProperty}]";
         var program = new File(exe,

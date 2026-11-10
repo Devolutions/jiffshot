@@ -1,9 +1,9 @@
 Jiffshot for Linux x64 and ARM64
 ===============================
 
-The packages contain Jiffshot and its private Rustolonia, SkiaSharp, and
-HarfBuzzSharp native runtime. They do not bundle system libraries or codecs.
-No .NET SDK is required to run the application.
+The packages use Rustolonia's static host and do not bundle companion
+Rustolonia, SkiaSharp, or HarfBuzzSharp libraries. They do not bundle system
+libraries or codecs. No .NET SDK is required to run the application.
 
 The release tar.gz and Debian package are built on Ubuntu 24.04 and target
 Ubuntu 24.04. The RPM is built separately on Fedora 43 and targets Fedora 43.

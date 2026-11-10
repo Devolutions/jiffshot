@@ -44,8 +44,11 @@ Describe 'Package builder' {
         }
     }
 
-    It 'tests the Linux static host separately from release packaging' {
+    It 'uses the static host for Linux release packages and still smoke-tests an isolated build' {
         $workflow = Get-WorkflowText 'ci.yml'
+        $release = [regex]::Match($workflow, '(?s)- name: Build Linux app(.*?)(?=\r?\n      - )').Groups[1].Value
+        $release | Should -Match 'cargo build --release --locked -p jiffshot --features static-host'
+        $workflow | Should -Match 'package/linux/build\.ps1 -Arch "\$\{\{ matrix\.arch \}\}" -Format tar\.gz,deb -StaticHost'
         $static = [regex]::Match($workflow, '(?s)- name: Test Linux static host(.*?)(?=\r?\n      - )').Groups[1].Value
         $static | Should -Match 'cargo build --release --locked -p jiffshot --features static-host'
         $static | Should -Match '--target-dir target/static-host'
@@ -54,8 +57,10 @@ Describe 'Package builder' {
         $static | Should -Match '-RuntimeDir "\$root"'
     }
 
-    It 'builds the Windows static host separately from release packaging' {
+    It 'uses the static host for Windows releases and smoke-tests a separate static build' {
         $workflow = Get-WorkflowText 'ci.yml'
+        $release = [regex]::Match($workflow, '(?s)- name: Build\r?\n(.*?)(?=\r?\n      - name: Build Windows static host)').Groups[1].Value
+        $release | Should -Match 'cargo build --release --locked -p jiffshot -p jiffshot-cli --features jiffshot/static-host'
         $static = [regex]::Match($workflow, '(?s)- name: Build Windows static host(.*?)(?=\r?\n      - )').Groups[1].Value
         $static | Should -Match 'cargo build --release --locked -p jiffshot --features static-host'
         $static | Should -Match '--target \$\{\{ matrix\.target \}\}'
@@ -64,6 +69,7 @@ Describe 'Package builder' {
         $smoke | Should -Match 'if: matrix\.test'
         $smoke | Should -Match 'Join-Path \$env:RUNNER_TEMP'
         $smoke | Should -Match 'windows_grab_text_e2e\.ps1 -Binary \$binary -AllowDesktopInput'
+        $workflow | Should -Not -Match 'rustolonia_host\.dll'
     }
 
     It 'release version matches the workspace and rejects mismatches' {

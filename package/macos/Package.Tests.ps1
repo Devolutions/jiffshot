@@ -460,20 +460,156 @@ Describe 'macOS packaging' {
             foreach ($name in $script:HostLibraries) {
                 [IO.File]::ReadAllText((Join-Path $output "Jiffshot.app/Contents/Frameworks/$name")) | Should -BeExactly $name
                 Test-Path -LiteralPath (Join-Path $output "Jiffshot.app/Contents/MacOS/$name") | Should -BeFalse
-                @($script:Signed | Where-Object { $_.EndsWith("/Frameworks/$name") }).Count | Should -Be 1
+                $frameworkPath = [IO.Path]::Combine('Frameworks', $name)
+                @($script:Signed | Where-Object { $_.EndsWith($frameworkPath) }).Count | Should -Be 1
             }
             [IO.File]::ReadAllText((Join-Path $output 'Jiffshot.app/Contents/MacOS/jiffshot')) | Should -BeExactly 'jiffshot'
             [IO.File]::ReadAllText((Join-Path $output 'Jiffshot.app/Contents/MacOS/jiffshot-cli')) | Should -BeExactly 'jiffshot-cli'
-            $script:Signed[-2] | Should -Match '/Contents/MacOS/jiffshot-cli$'
-            $script:Signed[-1] | Should -Match '/Jiffshot\.app$'
+            $script:Signed[-2] | Should -Match 'Contents[\\/]MacOS[\\/]jiffshot-cli$'
+            $script:Signed[-1] | Should -Match 'Jiffshot\.app$'
             Should -Invoke Sign-MacPath -Times 1 -Exactly -ParameterFilter {
-                $Path.EndsWith('/Jiffshot.app') -and $Identity -ceq '-' -and
-                $Entitlements.EndsWith('/package/macos/entitlements.plist')
+                $Path.EndsWith('Jiffshot.app') -and $Identity -ceq '-' -and
+                $Entitlements -match 'package[\\/]macos[\\/]entitlements\.plist$'
             }
             Should -Invoke Confirm-MacHostDiscovery -Times 1 -Exactly
             Should -Invoke Confirm-MacPopupGate -Times 1 -Exactly
             Should -Invoke Confirm-MacTermination -Times 1 -Exactly
             Should -Invoke Confirm-MacFileDrag -Times 1 -Exactly
+        }
+
+        It 'packages a static app without companion dylibs and checks static-host capabilities' {
+            $binary = Join-Path $script:Work 'jiffshot'
+            $cli = Join-Path $script:Work 'jiffshot-cli'
+            [IO.File]::WriteAllText($binary, 'static executable')
+            [IO.File]::WriteAllText($cli, 'command-line companion')
+            $script:StaticHostProbes = [Collections.Generic.List[object]]::new()
+            Mock Get-MacDeploymentTarget { '13.0' }
+            Mock Get-MacHostLibraries { throw 'static packaging must not inspect dynamic host libraries' }
+            Mock New-MacIcon {}
+            Mock Sign-MacPath {}
+            Mock Invoke-MacCommand {
+                $script:StaticHostProbes.Add([pscustomobject]@{
+                    Argument = $Arguments[0]
+                    Binary = $File
+                    Environment = $Environment
+                })
+                switch ($Arguments[0]) {
+                    '--internal-check-host-discovery' {
+                        [pscustomobject]@{ ExitCode = 1; Stdout = ''; Stderr = 'the Rustolonia host is statically linked' }
+                    }
+                    '--internal-check-native-popup-gate' {
+                        [pscustomobject]@{ ExitCode = 0; Stdout = "jiffshot-native-popup-gate-v1: supported`n"; Stderr = '' }
+                    }
+                    '--internal-check-native-termination' {
+                        [pscustomobject]@{ ExitCode = 0; Stdout = "jiffshot-native-termination-v1: supported`n"; Stderr = '' }
+                    }
+                    '--internal-check-native-file-drag' {
+                        [pscustomobject]@{ ExitCode = 0; Stdout = "jiffshot-native-file-drag-v1: supported`n"; Stderr = '' }
+                    }
+                    '--internal-check-file-drag-abi' {
+                        [pscustomobject]@{ ExitCode = 0; Stdout = "jiffshot-file-drag-abi-v1: supported`n"; Stderr = '' }
+                    }
+                    default { throw "unexpected static-host probe: $($Arguments[0])" }
+                }
+            }
+            Mock Invoke-MacRun {
+                if ($File -ceq '/usr/bin/ditto') {
+                    Copy-Item -LiteralPath $Arguments[0] -Destination $Arguments[1] -Recurse
+                }
+            }
+
+            $output = Join-Path $script:Work 'static-output'
+            Invoke-MacPackage -Binary $binary -Output $output -Arch arm64 -StaticHost `
+                -Identity 'Developer ID Application: Example' -PrepareForExternalNotarization
+
+            $appMacOS = Join-Path $output 'Jiffshot.app/Contents/MacOS'
+            $frameworks = Join-Path $output 'Jiffshot.app/Contents/Frameworks'
+            [IO.File]::ReadAllText((Join-Path $appMacOS 'jiffshot')) | Should -BeExactly 'static executable'
+            [IO.File]::ReadAllText((Join-Path $appMacOS 'jiffshot-cli')) | Should -BeExactly 'command-line companion'
+            @(Get-ChildItem -LiteralPath $frameworks -File) | Should -BeNullOrEmpty
+            @($script:StaticHostProbes.Argument) | Should -BeExactly @(
+                '--internal-check-host-discovery',
+                '--internal-check-native-popup-gate',
+                '--internal-check-native-termination',
+                '--internal-check-native-file-drag',
+                '--internal-check-file-drag-abi'
+            )
+            @($script:StaticHostProbes | Where-Object {
+                $_.Binary -cnotmatch 'Jiffshot\.app[\\/]Contents[\\/]MacOS[\\/]jiffshot$'
+            }).Count | Should -Be 0
+            @($script:StaticHostProbes | Where-Object {
+                $_.Environment.ContainsKey('RUSTOLONIA_HOST_LIB') -or
+                $_.Environment.ContainsKey('RUSTOLONIA_HOST_DIR')
+            }).Count | Should -Be 0
+            Should -Invoke Get-MacHostLibraries -Times 0 -Exactly
+        }
+
+        It 'does not publish a static app when the <Probe> probe fails' -TestCases @(
+            @{
+                Probe = 'host discovery'
+                Argument = '--internal-check-host-discovery'
+                ExpectedError = 'not using the static Rustolonia host'
+            }
+            @{
+                Probe = 'popup gate'
+                Argument = '--internal-check-native-popup-gate'
+                ExpectedError = 'does not pass the popup-gate check'
+            }
+            @{
+                Probe = 'termination'
+                Argument = '--internal-check-native-termination'
+                ExpectedError = 'does not pass the termination check'
+            }
+            @{
+                Probe = 'native file drag'
+                Argument = '--internal-check-native-file-drag'
+                ExpectedError = 'does not pass the file-drag check'
+            }
+            @{
+                Probe = 'file-drag ABI'
+                Argument = '--internal-check-file-drag-abi'
+                ExpectedError = 'does not pass the file-drag ABI check'
+            }
+        ) {
+            param($Probe, $Argument, $ExpectedError)
+            $binary = Join-Path $script:Work 'jiffshot'
+            [IO.File]::WriteAllText($binary, 'static executable')
+            [IO.File]::WriteAllText((Join-Path $script:Work 'jiffshot-cli'), 'command-line companion')
+            Mock Get-MacDeploymentTarget { '13.0' }
+            Mock New-MacIcon {}
+            Mock Sign-MacPath {}
+            Mock Invoke-MacRun {}
+            Mock Invoke-MacCommand {
+                if ($Arguments[0] -ceq $Argument) {
+                    if ($Argument -ceq '--internal-check-host-discovery') {
+                        return [pscustomobject]@{ ExitCode = 1; Stdout = ''; Stderr = 'dynamic host discovery result' }
+                    }
+                    return [pscustomobject]@{ ExitCode = 0; Stdout = "unsupported`n"; Stderr = '' }
+                }
+                switch ($Arguments[0]) {
+                    '--internal-check-host-discovery' {
+                        [pscustomobject]@{ ExitCode = 1; Stdout = ''; Stderr = 'the Rustolonia host is statically linked' }
+                    }
+                    '--internal-check-native-popup-gate' {
+                        [pscustomobject]@{ ExitCode = 0; Stdout = "jiffshot-native-popup-gate-v1: supported`n"; Stderr = '' }
+                    }
+                    '--internal-check-native-termination' {
+                        [pscustomobject]@{ ExitCode = 0; Stdout = "jiffshot-native-termination-v1: supported`n"; Stderr = '' }
+                    }
+                    '--internal-check-native-file-drag' {
+                        [pscustomobject]@{ ExitCode = 0; Stdout = "jiffshot-native-file-drag-v1: supported`n"; Stderr = '' }
+                    }
+                    '--internal-check-file-drag-abi' {
+                        [pscustomobject]@{ ExitCode = 0; Stdout = "jiffshot-file-drag-abi-v1: supported`n"; Stderr = '' }
+                    }
+                }
+            }
+
+            $output = Join-Path $script:Work 'failed-static-output'
+            { Invoke-MacPackage -Binary $binary -Output $output -Arch arm64 -StaticHost } |
+                Should -Throw "*$ExpectedError*"
+            Test-Path -LiteralPath (Join-Path $output 'Jiffshot.app') | Should -BeFalse
+            @(Get-ChildItem -LiteralPath $output -Filter '*.dmg' -ErrorAction Ignore).Count | Should -Be 0
         }
 
         It 'prepares a checked, signed app without creating an image for external notarization' {
@@ -892,7 +1028,7 @@ Export-ModuleMember -Function Invoke-MacPackage
         $packaging | Should -Match 'package/macos/build\.ps1'
     }
 
-    It 'tests the macOS static host separately from release packaging' {
+    It 'smoke-tests a standalone macOS static host in addition to static release packages' {
         $workflow = [IO.File]::ReadAllText((Join-Path $script:Repository '.github/workflows/ci.yml'))
         $static = [regex]::Match($workflow, '(?s)- name: Test macOS static host(.*?)(?=\r?\n      - )').Groups[1].Value
         $static | Should -Match 'cargo build --release --locked -p jiffshot --features static-host'
@@ -907,12 +1043,12 @@ Export-ModuleMember -Function Invoke-MacPackage
         }
     }
 
-    It 'builds both macOS architectures and tests arm64 with the release host before recording its checksums' {
+    It 'builds and packages both macOS architectures with the static host' {
         $workflow = [IO.File]::ReadAllText((Join-Path $script:Repository '.github/workflows/ci.yml'))
         $macos = [regex]::Match($workflow, '(?s)\r?\n  macos:\r?\n(.*?)\r?\n  msi:\r?\n').Groups[1].Value
         $macos | Should -Match '(?m)^[ \t]*- arch: arm64\r?\n[ \t]+target: aarch64-apple-darwin\r?$'
         $macos | Should -Match '(?m)^[ \t]*- arch: x86_64\r?\n[ \t]+target: x86_64-apple-darwin\r?$'
-        $build = [regex]::Match($macos, '- name: Build\r?\n\s+run: cargo build --release --locked -p jiffshot -p jiffshot-cli --target')
+        $build = [regex]::Match($macos, '- name: Build\r?\n\s+run: cargo build --release --locked -p jiffshot -p jiffshot-cli --features jiffshot/static-host --target')
         $test = [regex]::Match($macos, "- name: Test\r?\n\s+if: matrix\.arch == 'arm64'\r?\n\s+run: \|\r?\n\s+cargo test --release --locked --workspace --target")
         $scriptTests = [regex]::Match($macos, "- name: Test macOS PowerShell scripts\r?\n\s+if: matrix\.arch == 'arm64'\r?\n\s+shell: pwsh")
         $build.Success | Should -BeTrue
@@ -920,13 +1056,12 @@ Export-ModuleMember -Function Invoke-MacPackage
         $scriptTests.Success | Should -BeTrue
         $build.Index | Should -BeLessThan $test.Index
         $test.Index | Should -BeLessThan $scriptTests.Index
-        $macos | Should -Match 'RUSTOLONIA_HOST_LIB: \$\{\{ github\.workspace \}\}/target/\$\{\{ matrix\.target \}\}/release/librustolonia_host\.dylib'
+        $macos | Should -Match 'package/macos/build\.ps1'
+        $macos | Should -Match '-StaticHost'
+        $macos | Should -Match 'macos-package/\*\.dmg'
+        $macos | Should -Match 'macos-package/signing\.txt'
         $macos | Should -Not -Match 'build-host\.ps1|RUSTOLONIA_HOST_DIR|\.ci/rustolonia'
-        $macos | Should -Match 'shasum -a 256'
-        foreach ($library in 'librustolonia_host.dylib', 'libAvaloniaNative.dylib', 'libSkiaSharp.dylib', 'libHarfBuzzSharp.dylib') {
-            $macos | Should -Match ([regex]::Escape($library))
-        }
-        $macos | Should -Match 'macos-package/host-SHA256SUMS\.txt'
+        $macos | Should -Not -Match 'RUSTOLONIA_HOST_LIB:|host-SHA256SUMS\.txt'
     }
 
     It 'uses the shared Apple secrets only for release signing and notarizes both artifacts' {

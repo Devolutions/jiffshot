@@ -1,6 +1,5 @@
 //! Embeds the program icon and version resource (see assets/icon_res.rs) and
-//! puts Rustolonia's shared host next to `jiffshot.exe`, so the build output
-//! folder runs as it is and can be zipped as the portable app.
+//! stages Rustolonia's shared host next to `jiffshot.exe` when it is used.
 
 #[cfg(windows)]
 include!("../assets/icon_res.rs");

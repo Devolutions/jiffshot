@@ -270,6 +270,15 @@ function Confirm-MacComponents([string[]]$Paths, [string]$Arch) {
     }
 }
 
+function Get-MacHostLibraries([string]$Directory) {
+    $paths = @($script:HostLibraries | ForEach-Object { Join-Path $Directory $_ })
+    $present = @($paths | Where-Object { [IO.File]::Exists($_) })
+    if ($present.Count -ne 0 -and $present.Count -ne $paths.Count) {
+        throw "The Rustolonia host runtime in $Directory is incomplete"
+    }
+    return $present
+}
+
 function New-MacDiskImage([string]$Staging, [string]$Destination, [string]$Identity, [string]$Keychain, [string]$NotaryProfile) {
     [void][IO.Directory]::CreateSymbolicLink((Join-Path $Staging 'Applications'), '/Applications')
     $temporaryDmg = Join-Path ([IO.Path]::GetDirectoryName($Staging)) ([IO.Path]::GetFileName($Destination))
@@ -361,6 +370,37 @@ function Confirm-MacHostDiscovery([string]$Binary, [string]$HostPath, [string]$T
     if ($null -ne $found) { throw "The application can discover an unstaged Rustolonia host: $found" }
 }
 
+function Confirm-MacStaticHost([string]$Binary) {
+    $environment = Get-CleanHostEnvironment
+    try {
+        $result = Invoke-MacCommand -File $Binary -Arguments @('--internal-check-host-discovery') `
+            -WorkingDirectory ([IO.Path]::GetDirectoryName($Binary)) -Environment $environment `
+            -TimeoutSeconds 30 -AllowFailure
+    }
+    catch { throw "Could not check the statically linked Rustolonia host: $($_.Exception.Message)" }
+    if ($result.ExitCode -ne 1 -or $result.Stdout -or
+        -not $result.Stderr.Contains('the Rustolonia host is statically linked', [StringComparison]::Ordinal)) {
+        $detail = if ($result.Stderr.Trim()) { $result.Stderr.Trim() } else { "exit status $($result.ExitCode)" }
+        throw "The application is not using the static Rustolonia host: $detail"
+    }
+    foreach ($check in @(
+        @('--internal-check-native-popup-gate', $script:PopupGateMarker, 'popup-gate'),
+        @('--internal-check-native-termination', $script:TerminationMarker, 'termination'),
+        @('--internal-check-native-file-drag', $script:FileDragNativeMarker, 'file-drag'),
+        @('--internal-check-file-drag-abi', $script:FileDragAbiMarker, 'file-drag ABI')
+    )) {
+        try {
+            $result = Invoke-MacCommand -File $Binary -Arguments @($check[0]) -Environment $environment `
+                -TimeoutSeconds 30 -AllowFailure
+        }
+        catch { throw "Could not check the static Rustolonia $($check[2]): $($_.Exception.Message)" }
+        if ($result.ExitCode -ne 0 -or $check[1] -cnotin @($result.Stdout -split '\r?\n')) {
+            $detail = if ($result.Stderr.Trim()) { $result.Stderr.Trim() } elseif ($result.Stdout.Trim()) { $result.Stdout.Trim() } else { "exit status $($result.ExitCode)" }
+            throw "The static Rustolonia host does not pass the $($check[2]) check: $detail"
+        }
+    }
+}
+
 function Invoke-MacPackage {
     [CmdletBinding()]
     param(
@@ -373,6 +413,7 @@ function Invoke-MacPackage {
         [bool]$RequirePopupGate = $true,
         [bool]$RequireTermination = $true,
         [bool]$RequireFileDrag = $true,
+        [switch]$StaticHost,
         [switch]$PrepareForExternalNotarization
     )
     $Binary = [IO.Path]::GetFullPath($Binary)
@@ -380,7 +421,7 @@ function Invoke-MacPackage {
     if (-not [IO.File]::Exists($Binary)) { throw "Application binary not found: $Binary" }
     $directory = [IO.Path]::GetDirectoryName($Binary)
     $cli = Join-Path $directory 'jiffshot-cli'
-    $libraries = @($script:HostLibraries | ForEach-Object { Join-Path $directory $_ })
+    $libraries = if ($StaticHost) { @() } else { Get-MacHostLibraries $directory }
     Confirm-MacComponents (@($Binary, $cli) + $libraries) $Arch
     if ($NotaryProfile -and $Identity -ceq '-') { throw 'Notarization requires a Developer ID signing identity' }
     if ($PrepareForExternalNotarization -and (-not $Identity -or $Identity -ceq '-' -or $NotaryProfile)) {
@@ -417,11 +458,16 @@ function Invoke-MacPackage {
         Sign-MacPath $app $Identity $Keychain (Join-Path $script:Root 'package/macos/entitlements.plist')
         Invoke-MacRun '/usr/bin/codesign' @('--verify', '--deep', '--strict', $app)
         $stagedBinary = Join-Path $macos 'jiffshot'
-        $stagedHost = Join-Path $frameworks $script:HostLibraries[0]
-        if ($RequirePopupGate -or $RequireTermination -or $RequireFileDrag) { Confirm-MacHostDiscovery $stagedBinary $stagedHost $temporary }
-        if ($RequirePopupGate) { Confirm-MacPopupGate $stagedBinary $stagedHost }
-        if ($RequireTermination) { Confirm-MacTermination $stagedBinary $stagedHost }
-        if ($RequireFileDrag) { Confirm-MacFileDrag $stagedBinary $stagedHost }
+        if ($StaticHost) {
+            if ($RequirePopupGate -or $RequireTermination -or $RequireFileDrag) { Confirm-MacStaticHost $stagedBinary }
+        }
+        else {
+            $stagedHost = Join-Path $frameworks $script:HostLibraries[0]
+            if ($RequirePopupGate -or $RequireTermination -or $RequireFileDrag) { Confirm-MacHostDiscovery $stagedBinary $stagedHost $temporary }
+            if ($RequirePopupGate) { Confirm-MacPopupGate $stagedBinary $stagedHost }
+            if ($RequireTermination) { Confirm-MacTermination $stagedBinary $stagedHost }
+            if ($RequireFileDrag) { Confirm-MacFileDrag $stagedBinary $stagedHost }
+        }
         if ($PrepareForExternalNotarization) {
             Invoke-MacRun '/usr/bin/ditto' @($app, $appOutput)
             Write-Host "Prepared $appOutput for external notarization."
@@ -461,7 +507,7 @@ function Invoke-MacNotarizedDiskImage {
     $version = Get-MacPackageVersion
     $macos = Join-Path $App 'Contents/MacOS'
     $frameworks = Join-Path $App 'Contents/Frameworks'
-    $libraries = @($script:HostLibraries | ForEach-Object { Join-Path $frameworks $_ })
+    $libraries = Get-MacHostLibraries $frameworks
     Confirm-MacComponents (@((Join-Path $macos 'jiffshot'), (Join-Path $macos 'jiffshot-cli')) + $libraries) $Arch
     $plist = Join-Path $App 'Contents/Info.plist'
     $plistVersion = Invoke-MacCommand -File '/usr/bin/plutil' -Arguments @(

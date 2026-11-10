@@ -15,6 +15,7 @@ param(
     [switch]$RequireNativePopupGate,
     [switch]$RequireNativeTermination,
     [switch]$RequireNativeFileDrag,
+    [switch]$StaticHost,
     [switch]$AllowUncheckedHost,
     [switch]$PrepareForExternalNotarization
 )
@@ -31,6 +32,7 @@ try {
     Invoke-MacPackage -Binary $Binary -Output $Output -Arch $Arch -Identity $Identity `
         -Keychain $Keychain -NotaryProfile $NotaryProfile `
         -RequirePopupGate $checked -RequireTermination $checked -RequireFileDrag $checked `
+        -StaticHost:$StaticHost `
         -PrepareForExternalNotarization:$PrepareForExternalNotarization
 }
 catch {

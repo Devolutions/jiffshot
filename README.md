@@ -435,11 +435,10 @@ Jiffshot requires **Rust 1.88+** and uses Rustolonia's `v12.1.6` release: the fi
 cargo run --release -p jiffshot
 ```
 
-The build copies the host next to `jiffshot.exe`, so `target/release` runs as it is; zip `jiffshot.exe` and the host DLLs beside it, with `app/README-portable.txt`, for the portable app.
+The release packages use the static Rustolonia host, so the executable needs no companion host DLLs. A regular local build uses the shared host and stages its libraries beside the executable.
 
-Rustolonia 12.1.6 also provides an experimental static host. To build Jiffshot
-with it, use a separate output directory so shared-host build artifacts are not
-mixed in:
+Release packaging builds Jiffshot with Rustolonia's static host. To try it locally,
+use a separate output directory so shared-host build artifacts are not mixed in:
 
 ```sh
 cargo build --release --locked -p jiffshot --features static-host --target-dir target/static-host
@@ -450,10 +449,9 @@ uses the static C runtime configured in `.cargo/config.toml`. The resulting
 executable does not need the Rustolonia, Avalonia.Native, SkiaSharp,
 HarfBuzzSharp, or ANGLE companion libraries, but still uses operating-system
 libraries; Linux also retains Jiffshot's GStreamer, Tesseract, and other system
-dependencies. The existing packaging and release scripts still require the
-shared host and do not package the static build. CI exercises standalone
-static-host builds on macOS, Ubuntu, and Windows x64; Windows ARM64 is built
-but not run.
+dependencies. CI tests static-host release packages on all supported platforms;
+the Windows ARM64 static build is compiled but not run. Omit `--features static-host`
+to use the shared host for local development.
 
 On Linux (including WSLg), build and run the image/document editor with:
 
@@ -710,7 +708,7 @@ cargo run --release -p jiffshot -- --write-tray-logo 32 assets\jiffshot-tray.png
 
 ### Building the MSI Installer
 
-`package/` builds a per-machine MSI with [WixSharp](https://github.com/oleg-shilo/wixsharp) on its WiX 4+ stream. It installs `jiffshot.exe` and the host DLLs into `C:\Program Files\Devolutions\Jiffshot`, adds a Start menu shortcut and associates `.jsd` documents; installing a newer MSI upgrades the old one. It needs the .NET SDK (the packager is a small .NET Framework program) and WiX CLI 5.0.2 (`winget install --id WiXToolset.WiXCLI --version 5.0.2.0 --exact`) with `wix.exe` on `PATH`:
+`package/` builds a per-machine MSI with [WixSharp](https://github.com/oleg-shilo/wixsharp) on its WiX 4+ stream. It installs `jiffshot.exe`, `jiffshot-cli.exe`, and any shared runtime DLLs found in the build output into `C:\Program Files\Devolutions\Jiffshot`, adds a Start menu shortcut and associates `.jsd` documents; installing a newer MSI upgrades the old one. Release MSIs use the static host and need no companion DLLs. It needs the .NET SDK (the packager is a small .NET Framework program) and WiX CLI 5.0.2 (`winget install --id WiXToolset.WiXCLI --version 5.0.2.0 --exact`) with `wix.exe` on `PATH`:
 
 ```powershell
 cargo build --release -p jiffshot
@@ -722,7 +720,7 @@ The MSI lands in `package/out` as `Devolutions.Jiffshot-x64-0.4.0.msi` (with the
 
 ### Releases & Code Signing
 
-`ci.yml` builds and tests unsigned portable packages, MSIs, and MSIX packages for pushes to master, pull requests, and manual runs. The x64 MSIX installation test signs a temporary copy with a short-lived test certificate; the uploaded CI artifact remains unsigned. `release.yml` reuses those jobs with signing enabled: it signs the portable executable and Rustolonia host DLL before building the installers, then signs the MSI and MSIX. The x64 MSI and signed MSIX release builds are installed and uninstalled before the release can proceed.
+`ci.yml` builds and tests unsigned portable packages, MSIs, and MSIX packages for pushes to master, pull requests, and manual runs. The x64 MSIX installation test signs a temporary copy with a short-lived test certificate; the uploaded CI artifact remains unsigned. `release.yml` reuses those jobs with signing enabled: it signs the static-host portable executables before building the installers, then signs the MSI and MSIX. The x64 MSI and signed MSIX release builds are installed and uninstalled before the release can proceed.
 
 Run **Release** from GitHub Actions with a version matching `Cargo.toml` (for example, `0.4.0`, without `v`). Update and commit the workspace version before releasing a new version. Dry runs are enabled by default and upload packages as Actions artifacts without creating a tag or release. The `github_env` input selects the signing environment independently of `dry_run`: on master, `auto` (the default) and `prod` use `publish-prod`, while `test` uses `publish-test`. Other branches always use `publish-test` and only permit dry runs, even if `prod` is requested. For test signing, the workflow retrieves the `publish-test` profile root with psign and trusts it in each ephemeral runner's machine root store, falling back to the current-user root store if necessary, so Authenticode validation remains enabled. The MSIX job establishes that trust before reading the executable's publisher and requires a valid executable signature when signing is enabled. A non-dry-run dispatch with `github_env=test` publishes test-signed artifacts that are not publicly trusted. The workflow rejects non-dry-run releases from other branches, version mismatches, and existing tags.
 
