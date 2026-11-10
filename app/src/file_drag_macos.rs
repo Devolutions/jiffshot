@@ -275,10 +275,7 @@ fn coordinator() -> io::Result<Arc<Coordinator>> {
 
 /// Run only in a dedicated package-probe process.
 pub(crate) fn check_native_companion() -> io::Result<()> {
-    let host = rustolonia::discover_host_path().map_err(io::Error::other)?;
-    let directory = host.parent().ok_or_else(|| io::Error::other("the host has no parent directory"))?;
-    crate::termination_macos::check_native_capability(
-        &directory.join("libAvaloniaNative.dylib"),
+    crate::termination_macos::check_host_native_capability(
         b"avn_supports_retained_file_drag_event\0",
         "retained file-drag event",
         "file-drag",

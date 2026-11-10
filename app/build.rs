@@ -1,6 +1,6 @@
 //! Embeds the program icon and version resource (see assets/icon_res.rs) and
-//! puts Rustolonia's host next to `jiffshot.exe`, so the build output folder
-//! runs as it is and can be zipped as the portable app.
+//! puts Rustolonia's shared host next to `jiffshot.exe`, so the build output
+//! folder runs as it is and can be zipped as the portable app.
 
 #[cfg(windows)]
 include!("../assets/icon_res.rs");
@@ -11,7 +11,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../assets/icon_res.rs");
     #[cfg(windows)]
     embed_icon("../assets/jiffshot.ico");
-    copy_host();
+    if std::env::var_os("CARGO_FEATURE_STATIC_HOST").is_none() {
+        copy_host();
+    }
 }
 
 /// Copies the host directory `rustolonia-sys` staged (its native libraries)

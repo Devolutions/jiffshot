@@ -5,8 +5,12 @@ use std::io;
 
 /// Loads the host whose ABI fingerprint matches the pinned Rustolonia bindings.
 pub(crate) fn open_application() -> io::Result<(sys::Host, sys::ComPtr<sys::IAvnApplication>)> {
-    let path = rustolonia::discover_host_path().map_err(io::Error::other)?;
-    let host = sys::Host::load(path).map_err(io::Error::other)?;
+    let host = if sys::STATIC_HOST {
+        sys::Host::load_static()
+    } else {
+        let path = rustolonia::discover_host_path().map_err(io::Error::other)?;
+        sys::Host::load(path)
+    }.map_err(io::Error::other)?;
     let application = host
         .activation_factory()
         .and_then(|factory| factory.create_application())

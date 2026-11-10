@@ -173,7 +173,32 @@ fn dl_error() -> String {
     }
 }
 
-pub(crate) fn check_native_capability(
+unsafe fn check_native_symbol(
+    library: *mut c_void,
+    symbol: &CStr,
+    source: &str,
+    capability_name: &str,
+    result_name: &str,
+) -> io::Result<()> {
+    // SAFETY: callers supply a valid dlsym handle and a known capability
+    // symbol with the no-argument C ABI used by Avalonia.Native.
+    unsafe {
+        libc::dlerror();
+        let symbol = libc::dlsym(library, symbol.as_ptr());
+        if symbol.is_null() {
+            return Err(io::Error::other(format!("{source} lacks {capability_name} support: {}", dl_error())));
+        }
+        let capability: unsafe extern "C" fn() -> libc::c_int = std::mem::transmute(symbol);
+        let value = capability();
+        if value == 1 {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("{source} returned unsupported {result_name} capability {value}")))
+        }
+    }
+}
+
+fn check_native_capability(
     path: &Path,
     symbol: &'static [u8],
     capability_name: &str,
@@ -189,19 +214,7 @@ pub(crate) fn check_native_capability(
         if library.is_null() {
             return Err(io::Error::other(format!("could not load {}: {}", path.display(), dl_error())));
         }
-        libc::dlerror();
-        let symbol = libc::dlsym(library, symbol.as_ptr());
-        let outcome = if symbol.is_null() {
-            Err(io::Error::other(format!("the native companion lacks {capability_name} support: {}", dl_error())))
-        } else {
-            let capability: unsafe extern "C" fn() -> libc::c_int = std::mem::transmute(symbol);
-            let value = capability();
-            if value == 1 {
-                Ok(())
-            } else {
-                Err(io::Error::other(format!("the native companion returned unsupported {result_name} capability {value}")))
-            }
-        };
+        let outcome = check_native_symbol(library, symbol, "the native companion", capability_name, result_name);
         if libc::dlclose(library) != 0 {
             return Err(io::Error::other(format!("could not close {}: {}", path.display(), dl_error())));
         }
@@ -209,15 +222,36 @@ pub(crate) fn check_native_capability(
     }
 }
 
-fn check_native_companion(path: &Path) -> io::Result<()> {
-    check_native_capability(path, b"avn_supports_deferred_termination\0", "deferred termination", "termination")
+fn check_linked_native_capability(
+    symbol: &'static [u8],
+    capability_name: &str,
+    result_name: &str,
+) -> io::Result<()> {
+    let symbol = CStr::from_bytes_with_nul(symbol).map_err(io::Error::other)?;
+    // SAFETY: RTLD_MAIN_ONLY searches the executable, which contains the
+    // statically linked Avalonia.Native capability exports.
+    unsafe {
+        check_native_symbol(libc::RTLD_MAIN_ONLY, symbol, "the statically linked native host", capability_name, result_name)
+    }
+}
+
+pub(crate) fn check_host_native_capability(
+    symbol: &'static [u8],
+    capability_name: &str,
+    result_name: &str,
+) -> io::Result<()> {
+    if sys::STATIC_HOST {
+        check_linked_native_capability(symbol, capability_name, result_name)
+    } else {
+        let host = rustolonia::discover_host_path().map_err(io::Error::other)?;
+        let directory = host.parent().ok_or_else(|| io::Error::other("the host has no parent directory"))?;
+        check_native_capability(&directory.join("libAvaloniaNative.dylib"), symbol, capability_name, result_name)
+    }
 }
 
 /// Run only in the dedicated package-probe process, not in the live app.
 pub(crate) fn check_host() -> io::Result<()> {
-    let host = rustolonia::discover_host_path().map_err(io::Error::other)?;
-    let directory = host.parent().ok_or_else(|| io::Error::other("the host has no parent directory"))?;
-    check_native_companion(&directory.join("libAvaloniaNative.dylib"))?;
+    check_host_native_capability(b"avn_supports_deferred_termination\0", "deferred termination", "termination")?;
     let (_host, application) = crate::mac_host::open_application()?;
     crate::mac_host::check_invalid_token_rejected(application.complete_termination(0, false), "termination host ABI")
 }
@@ -376,7 +410,7 @@ mod tests {
             arch => panic!("unsupported macOS architecture: {arch}"),
         };
         for (name, source) in [
-            ("missing-symbol.dylib", "int another_export(void) { return 1; }"),
+            ("missing-symbol.dylib", "int jiffshot_fixture_dynamic_only(void) { return 1; }"),
             ("unsupported.dylib", "int avn_supports_deferred_termination(void) { return 2; }"),
             ("supported.dylib", "int avn_supports_deferred_termination(void) { return 1; }"),
         ] {
@@ -390,11 +424,36 @@ mod tests {
             let output = compiler.wait_with_output().unwrap();
             assert!(output.status.success(), "fixture compilation failed: {}", String::from_utf8_lossy(&output.stderr));
         }
-        assert!(check_native_companion(&scratch.0.join("absent.dylib")).is_err());
-        assert!(check_native_companion(&scratch.0.join("missing-symbol.dylib")).unwrap_err()
+        let check = |name: &str| check_native_capability(
+            &scratch.0.join(name), b"avn_supports_deferred_termination\0", "deferred termination", "termination",
+        );
+        assert!(check("absent.dylib").is_err());
+        assert!(check("missing-symbol.dylib").unwrap_err()
             .to_string().contains("lacks deferred termination support"));
-        assert!(check_native_companion(&scratch.0.join("unsupported.dylib")).unwrap_err()
+        assert!(check("unsupported.dylib").unwrap_err()
             .to_string().contains("unsupported termination capability 2"));
-        check_native_companion(&scratch.0.join("supported.dylib")).unwrap();
+        check("supported.dylib").unwrap();
+
+        let path = CString::new(scratch.0.join("missing-symbol.dylib").as_os_str().as_bytes()).unwrap();
+        // SAFETY: the fixture path is NUL-terminated and the handle is closed below.
+        let library = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+        assert!(!library.is_null(), "could not load the global fixture: {}", dl_error());
+        let symbol = c"jiffshot_fixture_dynamic_only";
+        // SAFETY: the fixture exports this no-argument C function and remains loaded.
+        let dynamic = unsafe { check_native_symbol(library, symbol, "fixture", "test", "test") };
+        let linked = check_linked_native_capability(b"jiffshot_fixture_dynamic_only\0", "test", "test");
+        // SAFETY: this is the handle returned by dlopen above.
+        let closed = unsafe { libc::dlclose(library) };
+        dynamic.unwrap();
+        assert!(linked.unwrap_err().to_string().contains("statically linked native host lacks test support"));
+        assert_eq!(closed, 0, "could not close the global fixture: {}", dl_error());
+    }
+
+    #[test]
+    fn linked_native_probe_rejects_missing_capabilities() {
+        let error = check_linked_native_capability(
+            b"jiffshot_missing_native_capability\0", "test", "test",
+        ).unwrap_err();
+        assert!(error.to_string().contains("statically linked native host lacks test support"));
     }
 }

@@ -892,6 +892,21 @@ Export-ModuleMember -Function Invoke-MacPackage
         $packaging | Should -Match 'package/macos/build\.ps1'
     }
 
+    It 'tests the macOS static host separately from release packaging' {
+        $workflow = [IO.File]::ReadAllText((Join-Path $script:Repository '.github/workflows/ci.yml'))
+        $static = [regex]::Match($workflow, '(?s)- name: Test macOS static host(.*?)(?=\r?\n      - )').Groups[1].Value
+        $static | Should -Match 'cargo build --release --locked -p jiffshot --features static-host'
+        $static | Should -Match '--target-dir target/static-host'
+        $static | Should -Match 'otool -L'
+        $static | Should -Match 'RUSTOLONIA_HOST_LIB="\$root/absent\.dylib"'
+        $static | Should -Match 'JIFFSHOT_UITEST_APP_NAME=1'
+        foreach ($flag in '--internal-check-native-popup-gate', '--internal-check-native-termination',
+                          '--internal-check-native-file-drag', '--internal-check-file-drag-abi',
+                          '--internal-check-host-discovery') {
+            $static | Should -Match ([regex]::Escape($flag))
+        }
+    }
+
     It 'builds both macOS architectures and tests arm64 with the release host before recording its checksums' {
         $workflow = [IO.File]::ReadAllText((Join-Path $script:Repository '.github/workflows/ci.yml'))
         $macos = [regex]::Match($workflow, '(?s)\r?\n  macos:\r?\n(.*?)\r?\n  msi:\r?\n').Groups[1].Value
