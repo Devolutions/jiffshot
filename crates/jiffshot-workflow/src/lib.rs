@@ -49,16 +49,17 @@ mod overlay;
 pub mod panel;
 pub mod prefs;
 mod recorder;
+pub(crate) use jiffshot_video::recording_marks;
 mod screendraw;
 #[cfg_attr(target_os = "macos", path = "selftest_scroll_mac.rs")]
 mod selftest_scroll;
 pub mod settings;
 #[cfg(target_os = "macos")]
 mod shutdown_macos;
-mod stepcap;
-mod sys;
 #[cfg(windows)]
 mod startup_windows;
+mod stepcap;
+mod sys;
 mod tray;
 pub mod ui_api;
 mod vfx;
@@ -1446,7 +1447,9 @@ pub fn run_command(args: &[String]) -> Option<i32> {
 mod tests {
     use super::*;
     use jiffshot_capture::wide;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, GetDesktopWindow, HWND_MESSAGE};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, GetDesktopWindow, HWND_MESSAGE,
+    };
 
     #[test]
     fn capture_dispatch_accepts_only_windows_in_this_process() {

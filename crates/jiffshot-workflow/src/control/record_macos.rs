@@ -39,6 +39,7 @@ pub(super) fn dispatch(command: &str, a: &Args) -> Reply {
         "record.resume" => pause(a, false),
         "record.options" => options(a),
         "record.annotate" => annotate(a),
+        "record.mark" => mark(a),
         "record.clear" => clear(a),
         "record.stop" => stop(a, false),
         "record.cancel" => stop(a, true),
@@ -52,9 +53,21 @@ fn conflict(message: impl Into<String>) -> Error {
 
 fn recording_json(recording: &Recording) -> Reply {
     let c = &recording.control;
-    let error = c.error.lock().map_err(|_| internal("the recording error state is unavailable"))?.clone();
-    let audio_note = c.audio.lock().map_err(|_| internal("the recording audio state is unavailable"))?.clone();
-    let webcam_corner = c.webcam_corner.lock().map_err(|_| internal("the recording webcam state is unavailable"))?.clone();
+    let error = c
+        .error
+        .lock()
+        .map_err(|_| internal("the recording error state is unavailable"))?
+        .clone();
+    let audio_note = c
+        .audio
+        .lock()
+        .map_err(|_| internal("the recording audio state is unavailable"))?
+        .clone();
+    let webcam_corner = c
+        .webcam_corner
+        .lock()
+        .map_err(|_| internal("the recording webcam state is unavailable"))?
+        .clone();
     Ok(json!({
         "active": true,
         "id": recording.id,
@@ -88,13 +101,40 @@ pub(super) fn status() -> Reply {
     status_from(&RECORDING)
 }
 
+pub(super) fn add_step_caption(text: &str) -> Result<(), Error> {
+    let slot = RECORDING
+        .lock()
+        .map_err(|_| internal("the recording state is unavailable"))?;
+    if let Some(recording) = slot.as_ref() {
+        require_live(recording)?;
+        recorder::add_step_caption(&recording.control, text).map_err(|error| {
+            invalid(format!("could not add the recording step caption: {error}"))
+        })?;
+    }
+    Ok(())
+}
+
+pub(super) fn note_activity() -> Result<(), Error> {
+    let slot = RECORDING
+        .lock()
+        .map_err(|_| internal("the recording state is unavailable"))?;
+    if let Some(recording) = slot.as_ref() {
+        recorder::note_activity(&recording.control).map_err(internal)?;
+    }
+    Ok(())
+}
+
 fn status_from(slot: &Mutex<Option<Recording>>) -> Reply {
-    let recording = slot.lock().map_err(|_| internal("the recording state is unavailable"))?;
+    let recording = slot
+        .lock()
+        .map_err(|_| internal("the recording state is unavailable"))?;
     match &*recording {
         Some(recording) => recording_json(recording),
         None => {
             let finalizing = FINALIZING.load(Ordering::Acquire);
-            let last = LAST_RECORDING.lock().map_err(|_| internal("the last recording state is unavailable"))?;
+            let last = LAST_RECORDING
+                .lock()
+                .map_err(|_| internal("the last recording state is unavailable"))?;
             Ok(json!({
                 "active": false,
                 "finalizing": finalizing,
@@ -106,72 +146,126 @@ fn status_from(slot: &Mutex<Option<Recording>>) -> Reply {
 }
 
 fn validate_corner(corner: &str) -> Result<(), Error> {
-    if matches!(corner, "top-left" | "top-right" | "bottom-left" | "bottom-right") {
+    if matches!(
+        corner,
+        "top-left" | "top-right" | "bottom-left" | "bottom-right"
+    ) {
         Ok(())
     } else {
-        Err(invalid("webcam_corner must be top-left, top-right, bottom-left or bottom-right"))
+        Err(invalid(
+            "webcam_corner must be top-left, top-right, bottom-left or bottom-right",
+        ))
     }
 }
 
 fn start(a: &Args) -> Reply {
     let mut allowed = capture::TARGET.to_vec();
     allowed.extend_from_slice(&[
-        "out", "fps", "audio", "no_cursor", "clicks", "highlight", "max_seconds", "key",
-        "webcam", "webcam_corner", "webcam_circle", "webcam_size", "noise_gate",
+        "out",
+        "fps",
+        "audio",
+        "no_cursor",
+        "clicks",
+        "highlight",
+        "max_seconds",
+        "key",
+        "webcam",
+        "webcam_corner",
+        "webcam_circle",
+        "webcam_size",
+        "noise_gate",
     ]);
     a.only(&allowed)?;
-    let _lifecycle = LIFECYCLE.lock().map_err(|_| internal("the recording lifecycle state is unavailable"))?;
+    let _lifecycle = LIFECYCLE
+        .lock()
+        .map_err(|_| internal("the recording lifecycle state is unavailable"))?;
     let key = a.string("key")?;
     {
-        let current = RECORDING.lock().map_err(|_| internal("the recording state is unavailable"))?;
+        let current = RECORDING
+            .lock()
+            .map_err(|_| internal("the recording state is unavailable"))?;
         if let Some(recording) = current.as_ref() {
             if key.is_some() && recording.key == key {
                 let mut result = recording_json(recording)?;
                 result["already_started"] = json!(true);
                 return Ok(result);
             }
-            return Err(conflict(format!("recording {} is already running; stop it first", recording.id)));
+            return Err(conflict(format!(
+                "recording {} is already running; stop it first",
+                recording.id
+            )));
         }
     }
     let audio = a.string("audio")?.unwrap_or_else(|| "none".into());
-    let audio = if audio == "mic" { "microphone" } else { audio.as_str() };
+    let audio = if audio == "mic" {
+        "microphone"
+    } else {
+        audio.as_str()
+    };
     if !matches!(audio, "none" | "system" | "microphone" | "both") {
         return Err(invalid("audio must be none, system, microphone or both"));
     }
     let fps = a.int("fps", 5, 60)?.unwrap_or(30) as u32;
-    let max = a.number("max_seconds")?.map(|seconds| {
-        if !seconds.is_finite() || !(0.001..=86_400.0).contains(&seconds) {
-            Err(invalid("max_seconds must be finite and between 0.001 and 86400"))
-        } else {
-            Ok(Duration::from_secs_f64(seconds))
-        }
-    }).transpose()?;
+    let max = a
+        .number("max_seconds")?
+        .map(|seconds| {
+            if !seconds.is_finite() || !(0.001..=86_400.0).contains(&seconds) {
+                Err(invalid(
+                    "max_seconds must be finite and between 0.001 and 86400",
+                ))
+            } else {
+                Ok(Duration::from_secs_f64(seconds))
+            }
+        })
+        .transpose()?;
     let mut options = recorder::Options::audio_only(fps, audio);
     options.cursor = !a.bool("no_cursor")?;
     options.click_rings = a.bool("clicks")?;
     options.cursor_highlight = a.bool("highlight")?;
-    let corner = a.string("webcam_corner")?.unwrap_or_else(|| "bottom-right".into());
+    let corner = a
+        .string("webcam_corner")?
+        .unwrap_or_else(|| "bottom-right".into());
     validate_corner(&corner)?;
     options.webcam_corner = corner.clone();
     options.webcam = a.bool("webcam")?.then_some(corner);
     options.webcam_circle = a.bool("webcam_circle")?;
     let size = a.number("webcam_size")?.unwrap_or(0.25);
     if !size.is_finite() || !(0.05..=0.75).contains(&size) {
-        return Err(invalid("webcam_size must be 0.05..0.75 of the recording width"));
+        return Err(invalid(
+            "webcam_size must be 0.05..0.75 of the recording width",
+        ));
     }
     options.webcam_size = size as f32;
     options.noise_gate = a.bool("noise_gate")?;
     let path = match a.out("out", &["mp4"])? {
         Some(path) => path,
-        None => Library::new(jiffshot_capture::config::library_root()).recording_path().map_err(internal)?,
+        None => Library::new(jiffshot_capture::config::library_root())
+            .recording_path()
+            .map_err(internal)?,
     };
     match std::fs::symlink_metadata(&path) {
-        Ok(_) => return Err(conflict("recording output already exists; choose a new path")),
+        Ok(_) => {
+            return Err(conflict(
+                "recording output already exists; choose a new path",
+            ));
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(internal(format!("cannot inspect {}: {error}", path.display()))),
+        Err(error) => {
+            return Err(internal(format!(
+                "cannot inspect {}: {error}",
+                path.display()
+            )));
+        }
+    }
+    if crate::recording_marks::sidecar_path(&path).exists() {
+        return Err(conflict(
+            "recording marker metadata already exists; choose a new output path",
+        ));
     }
     if recorder::is_recording() {
-        return Err(conflict("another recording is already running (tray or CLI)"));
+        return Err(conflict(
+            "another recording is already running (tray or CLI)",
+        ));
     }
     let target = capture::target(a, false)?;
     if crate::shutdown_macos::requested() {
@@ -185,7 +279,12 @@ fn start(a: &Args) -> Reply {
     let id = NEXT_ID
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
         .map_err(|_| internal("too many recording sessions"))?;
-    let (c, staged_path, rect, layout) = (control.clone(), staging.path().to_path_buf(), target.rect, target.layout.clone());
+    let (c, staged_path, rect, layout) = (
+        control.clone(),
+        staging.path().to_path_buf(),
+        target.rect,
+        target.layout.clone(),
+    );
     let worker = std::thread::Builder::new().name("jiffshot-control-record".into()).spawn(move || {
         let result = recorder::record_with_lease(&staged_path, rect, &options, &c, &layout, lease);
         if let Err(error) = &result {
@@ -202,13 +301,21 @@ fn start(a: &Args) -> Reply {
     while control.frames.load(Ordering::Acquire) == 0 && !worker.is_finished() {
         if crate::shutdown_macos::requested() || began.elapsed() >= Duration::from_secs(10) {
             control.stop.store(true, Ordering::Release);
-            let result = worker.join().unwrap_or_else(|_| Err("the recorder crashed".into()));
-            return Err(interrupted_start(staging, result, crate::shutdown_macos::requested));
+            let result = worker
+                .join()
+                .unwrap_or_else(|_| Err("the recorder crashed".into()));
+            return Err(interrupted_start(
+                staging,
+                result,
+                crate::shutdown_macos::requested,
+            ));
         }
         std::thread::sleep(Duration::from_millis(20));
     }
     if control.frames.load(Ordering::Acquire) == 0 {
-        let result = worker.join().unwrap_or_else(|_| Err("the recorder crashed".into()));
+        let result = worker
+            .join()
+            .unwrap_or_else(|_| Err("the recorder crashed".into()));
         return Err(failed_start(staging, result));
     }
     let (finished_failure, state_unavailable) = if worker.is_finished() {
@@ -220,14 +327,19 @@ fn start(a: &Args) -> Reply {
         (false, false)
     };
     if finished_failure {
-        let outcome = worker.join().unwrap_or_else(|_| Err("the recorder crashed".into()));
+        let outcome = worker
+            .join()
+            .unwrap_or_else(|_| Err("the recorder crashed".into()));
         let error = match (state_unavailable, outcome) {
             (true, Err(error)) => format!("the recording error state is unavailable; {error}"),
             (true, Ok(_)) => "the recording error state is unavailable".into(),
             (false, Err(error)) => error,
             (false, Ok(_)) => "the recorder stopped unexpectedly".into(),
         };
-        return Err(discard_failed_start(staging, internal(format!("could not record: {error}"))));
+        return Err(discard_failed_start(
+            staging,
+            internal(format!("could not record: {error}")),
+        ));
     }
     let recording = Recording {
         id: format!("rec-{}-{id}", std::process::id()),
@@ -243,12 +355,19 @@ fn start(a: &Args) -> Reply {
     let (recording, reply) = started_status(recording)?;
     let mut slot = match RECORDING.lock() {
         Ok(slot) => slot,
-        Err(_) => return Err(cancel_started(recording, internal("the recording state is unavailable"))),
+        Err(_) => {
+            return Err(cancel_started(
+                recording,
+                internal("the recording state is unavailable"),
+            ));
+        }
     };
     *slot = Some(recording);
     drop(slot);
     if crate::shutdown_macos::requested() {
-        return Err(conflict("Jiffshot is shutting down; the recording will be finalized"));
+        return Err(conflict(
+            "Jiffshot is shutting down; the recording will be finalized",
+        ));
     }
     Ok(reply)
 }
@@ -281,10 +400,15 @@ fn interrupted_start(
     let mut reason = if shutting_down() {
         conflict("Jiffshot is shutting down; the recording did not start")
     } else {
-        Error::new(ErrorCode::Timeout, "the recording did not start within 10 s")
+        Error::new(
+            ErrorCode::Timeout,
+            "the recording did not start within 10 s",
+        )
     };
     if let Err(error) = outcome {
-        reason.message.push_str(&format!("; recorder error: {error}"));
+        reason
+            .message
+            .push_str(&format!("; recorder error: {error}"));
     }
     with_start_cleanup(reason, cleanup)
 }
@@ -299,11 +423,18 @@ fn started_status(recording: Recording) -> Result<(Recording, Value), Error> {
 fn cancel_started(recording: Recording, reason: Error) -> Error {
     match finish(recording, true) {
         Ok(result) => {
-            let worker_error = result.get("recording_error").and_then(Value::as_str)
-                .map(|error| format!("; recorder error: {error}")).unwrap_or_default();
-            internal(format!("could not report the started recording: {reason}; it was cancelled{worker_error}"))
+            let worker_error = result
+                .get("recording_error")
+                .and_then(Value::as_str)
+                .map(|error| format!("; recorder error: {error}"))
+                .unwrap_or_default();
+            internal(format!(
+                "could not report the started recording: {reason}; it was cancelled{worker_error}"
+            ))
         }
-        Err(error) => internal(format!("could not report the started recording: {reason}; cancellation failed: {error}")),
+        Err(error) => internal(format!(
+            "could not report the started recording: {reason}; cancellation failed: {error}"
+        )),
     }
 }
 
@@ -311,16 +442,18 @@ fn current<'a>(slot: &'a mut Option<Recording>, a: &Args) -> Result<&'a mut Reco
     let id = a.string("id")?;
     match slot {
         None => Err(not_found("no recording is running")),
-        Some(recording) if id.as_ref().is_some_and(|id| *id != recording.id) => {
-            Err(not_found(format!("recording {} is the one running", recording.id)))
-        }
+        Some(recording) if id.as_ref().is_some_and(|id| *id != recording.id) => Err(not_found(
+            format!("recording {} is the one running", recording.id),
+        )),
         Some(recording) => Ok(recording),
     }
 }
 
 fn require_live(recording: &Recording) -> Result<(), Error> {
     if recording.worker.is_finished() || recording.control.stop.load(Ordering::Acquire) {
-        Err(conflict("recording has ended; use record.stop to collect the finalized result"))
+        Err(conflict(
+            "recording has ended; use record.stop to collect the finalized result",
+        ))
     } else {
         Ok(())
     }
@@ -328,37 +461,76 @@ fn require_live(recording: &Recording) -> Result<(), Error> {
 
 fn pause(a: &Args, paused: bool) -> Reply {
     a.only(&["id"])?;
-    let mut slot = RECORDING.lock().map_err(|_| internal("the recording state is unavailable"))?;
+    let mut slot = RECORDING
+        .lock()
+        .map_err(|_| internal("the recording state is unavailable"))?;
     let recording = current(&mut slot, a)?;
     require_live(recording)?;
     recording_json(recording)?;
     recording.control.paused.store(paused, Ordering::Release);
-    recording_json(recording).map_err(|error| internal(format!(
-        "the recording pause state changed, but its status could not be reported: {error}"
-    )))
+    recording_json(recording).map_err(|error| {
+        internal(format!(
+            "the recording pause state changed, but its status could not be reported: {error}"
+        ))
+    })
 }
 
 fn options(a: &Args) -> Reply {
-    a.only(&["id", "cursor", "highlight", "clicks", "webcam", "webcam_circle", "webcam_corner", "system", "microphone"])?;
-    let switches = ["cursor", "highlight", "clicks", "webcam", "webcam_circle", "system", "microphone"]
-        .iter().map(|name| a.flag(name)).collect::<Result<Vec<_>, _>>()?;
+    a.only(&[
+        "id",
+        "cursor",
+        "highlight",
+        "clicks",
+        "webcam",
+        "webcam_circle",
+        "webcam_corner",
+        "system",
+        "microphone",
+    ])?;
+    let switches = [
+        "cursor",
+        "highlight",
+        "clicks",
+        "webcam",
+        "webcam_circle",
+        "system",
+        "microphone",
+    ]
+    .iter()
+    .map(|name| a.flag(name))
+    .collect::<Result<Vec<_>, _>>()?;
     let corner = a.string("webcam_corner")?;
     if let Some(corner) = &corner {
         validate_corner(corner)?;
     }
-    let mut slot = RECORDING.lock().map_err(|_| internal("the recording state is unavailable"))?;
+    let mut slot = RECORDING
+        .lock()
+        .map_err(|_| internal("the recording state is unavailable"))?;
     let recording = current(&mut slot, a)?;
     require_live(recording)?;
     recording_json(recording)?;
     let c = &recording.control;
     let corner_update = match corner {
         Some(corner) => Some((
-            c.webcam_corner.lock().map_err(|_| internal("the recording webcam state is unavailable"))?,
+            c.webcam_corner
+                .lock()
+                .map_err(|_| internal("the recording webcam state is unavailable"))?,
             corner,
         )),
         None => None,
     };
-    for (flag, value) in [&c.cursor, &c.highlight, &c.clicks, &c.webcam, &c.webcam_circle, &c.system, &c.microphone].into_iter().zip(switches) {
+    for (flag, value) in [
+        &c.cursor,
+        &c.highlight,
+        &c.clicks,
+        &c.webcam,
+        &c.webcam_circle,
+        &c.system,
+        &c.microphone,
+    ]
+    .into_iter()
+    .zip(switches)
+    {
         if let Some(value) = value {
             flag.store(value, Ordering::Release);
         }
@@ -366,9 +538,11 @@ fn options(a: &Args) -> Reply {
     if let Some((mut current_corner, corner)) = corner_update {
         *current_corner = corner;
     }
-    recording_json(recording).map_err(|error| internal(format!(
-        "recording options may have changed, but their status could not be reported: {error}"
-    )))
+    recording_json(recording).map_err(|error| {
+        internal(format!(
+            "recording options may have changed, but their status could not be reported: {error}"
+        ))
+    })
 }
 
 fn annotate(a: &Args) -> Reply {
@@ -377,26 +551,58 @@ fn annotate(a: &Args) -> Reply {
 
 fn annotate_in(a: &Args, slot: &Mutex<Option<Recording>>) -> Reply {
     a.only(&["id", "kind", "style", "duration_ms"])?;
-    let kind = document::kind(a.0.get("kind").ok_or_else(|| invalid("kind is required; use the same schema as doc.add"))?)?;
+    let kind = document::kind(
+        a.0.get("kind")
+            .ok_or_else(|| invalid("kind is required; use the same schema as doc.add"))?,
+    )?;
     let style = document::style(a.0.get("style"), jiffshot_doc::object::Style::default())?;
     let object = jiffshot_doc::object::Object::new(0, kind, style);
     let duration = Duration::from_millis(a.int("duration_ms", 0, 3_600_000)?.unwrap_or(0) as u64);
-    let mut slot = slot.lock().map_err(|_| internal("the recording state is unavailable"))?;
+    let mut slot = slot
+        .lock()
+        .map_err(|_| internal("the recording state is unavailable"))?;
     let recording = current(&mut slot, a)?;
     require_live(recording)?;
     let substitutions = jiffshot_doc::text::object_font_substitutions(std::iter::once(&object));
-    let mark = recorder::add_annotation(&recording.control, object.kind, object.style, duration).map_err(invalid)?;
-    Ok(json!({ "id": recording.id, "annotation_id": mark, "coordinates": "recording pixels",
-        "duration_ms": duration.as_millis(), "font_substitutions": substitutions }))
+    let mark = recorder::add_annotation(&recording.control, object.kind, object.style, duration)
+        .map_err(invalid)?;
+    Ok(
+        json!({ "id": recording.id, "annotation_id": mark, "coordinates": "recording pixels",
+        "duration_ms": duration.as_millis(), "font_substitutions": substitutions }),
+    )
 }
 
 fn clear(a: &Args) -> Reply {
     a.only(&["id"])?;
-    let mut slot = RECORDING.lock().map_err(|_| internal("the recording state is unavailable"))?;
+    let mut slot = RECORDING
+        .lock()
+        .map_err(|_| internal("the recording state is unavailable"))?;
     let recording = current(&mut slot, a)?;
     require_live(recording)?;
     recorder::clear_annotations(&recording.control).map_err(internal)?;
     Ok(json!({ "id": recording.id, "cleared": true }))
+}
+
+fn mark(a: &Args) -> Reply {
+    a.only(&["id", "label", "discard"])?;
+    let label = a.string("label")?;
+    let discard = a.bool("discard")?;
+    let mut slot = RECORDING
+        .lock()
+        .map_err(|_| internal("the recording state is unavailable"))?;
+    let recording = current(&mut slot, a)?;
+    require_live(recording)?;
+    if label.is_some() == discard {
+        return Err(invalid("provide exactly one of label or discard=true"));
+    }
+    let at_ms =
+        recorder::add_marker(&recording.control, label.as_deref(), discard).map_err(invalid)?;
+    Ok(json!({
+        "id": recording.id,
+        "at_ms": at_ms,
+        "label": label,
+        "discard": discard
+    }))
 }
 
 struct Finalizing;
@@ -409,11 +615,26 @@ impl Drop for Finalizing {
 
 fn finish(recording: Recording, cancel: bool) -> Reply {
     let _finalizing = Finalizing;
-    let Recording { id, key, path, staging, target, fps, started_at, control, worker } = recording;
+    let Recording {
+        id,
+        key,
+        path,
+        staging,
+        target,
+        fps,
+        started_at,
+        control,
+        worker,
+    } = recording;
     control.paused.store(false, Ordering::Release);
     control.stop.store(true, Ordering::Release);
-    let outcome = worker.join().unwrap_or_else(|_| Err("the recorder crashed".into()));
-    let (frames, duration) = (control.frames.load(Ordering::Relaxed), control.millis.load(Ordering::Relaxed));
+    let outcome = worker
+        .join()
+        .unwrap_or_else(|_| Err("the recorder crashed".into()));
+    let (frames, duration) = (
+        control.frames.load(Ordering::Relaxed),
+        control.millis.load(Ordering::Relaxed),
+    );
     if cancel {
         if let Err(cleanup) = staging.discard() {
             return Err(match &outcome {
@@ -421,7 +642,8 @@ fn finish(recording: Recording, cancel: bool) -> Reply {
                 Ok(_) => internal(cleanup),
             });
         }
-        let mut result = json!({ "id": id, "cancelled": true, "frames": frames, "duration_ms": duration });
+        let mut result =
+            json!({ "id": id, "cancelled": true, "frames": frames, "duration_ms": duration });
         if let Err(error) = outcome {
             result["recording_error"] = json!(error);
         }
@@ -430,7 +652,9 @@ fn finish(recording: Recording, cancel: bool) -> Reply {
     let spec = match outcome {
         Ok(spec) => spec,
         Err(error) => {
-            staging.discard().map_err(|cleanup| internal(format!("the recording failed: {error}; {cleanup}")))?;
+            staging
+                .discard()
+                .map_err(|cleanup| internal(format!("the recording failed: {error}; {cleanup}")))?;
             return Err(internal(format!("the recording failed: {error}")));
         }
     };
@@ -441,11 +665,78 @@ fn finish(recording: Recording, cancel: bool) -> Reply {
             internal(error)
         }
     })?;
+    let markers = control
+        .markers
+        .lock()
+        .map_err(|_| {
+            internal(format!(
+                "recording saved to {}, but markers are unavailable",
+                path.display()
+            ))
+        })?
+        .clone();
+    let captions = control
+        .captions
+        .lock()
+        .map_err(|_| {
+            internal(format!(
+                "recording saved to {}, but captions are unavailable",
+                path.display()
+            ))
+        })?
+        .clone();
+    let activities = control
+        .activities
+        .lock()
+        .map_err(|_| {
+            internal(format!(
+                "recording saved to {}, but activity times are unavailable",
+                path.display()
+            ))
+        })?
+        .clone();
+    crate::recording_marks::write(
+        &path,
+        &crate::recording_marks::RecordingMarks::new(
+            duration,
+            fps,
+            spec.width,
+            spec.height,
+            markers,
+        )
+        .with_captions(captions)
+        .with_activities(activities)
+        .with_activity_tracking_complete(
+            !control.activity_tracking_overflowed.load(Ordering::Acquire)
+                && !control
+                    .activity_tracking_unavailable
+                    .load(Ordering::Acquire),
+        ),
+    )
+    .map_err(|error| {
+        internal(format!(
+            "recording saved to {}, but marker metadata could not be saved: {error}",
+            path.display()
+        ))
+    })?;
     let size = std::fs::metadata(&path)
-        .map_err(|error| internal(format!("recording saved to {}, but its size could not be read: {error}", path.display())))?.len();
-    let audio_note = control.audio.lock().map_err(|_| internal(format!(
-        "recording saved to {}, but its audio status is unavailable", path.display()
-    )))?.clone();
+        .map_err(|error| {
+            internal(format!(
+                "recording saved to {}, but its size could not be read: {error}",
+                path.display()
+            ))
+        })?
+        .len();
+    let audio_note = control
+        .audio
+        .lock()
+        .map_err(|_| {
+            internal(format!(
+                "recording saved to {}, but its audio status is unavailable",
+                path.display()
+            ))
+        })?
+        .clone();
     let result = json!({
         "id": id,
         "key": key,
@@ -462,17 +753,24 @@ fn finish(recording: Recording, cancel: bool) -> Reply {
         "system_silent": control.system_silent.load(Ordering::Relaxed),
         "microphone_silent": control.microphone_silent.load(Ordering::Relaxed),
     });
-    *LAST_RECORDING.lock().map_err(|_| internal(format!(
-        "recording saved to {}, but its final status could not be stored", path.display()
-    )))? = Some(result.clone());
+    *LAST_RECORDING.lock().map_err(|_| {
+        internal(format!(
+            "recording saved to {}, but its final status could not be stored",
+            path.display()
+        ))
+    })? = Some(result.clone());
     Ok(result)
 }
 
 fn stop(a: &Args, cancel: bool) -> Reply {
     a.only(&["id"])?;
-    let _lifecycle = LIFECYCLE.lock().map_err(|_| internal("the recording lifecycle state is unavailable"))?;
+    let _lifecycle = LIFECYCLE
+        .lock()
+        .map_err(|_| internal("the recording lifecycle state is unavailable"))?;
     let recording = {
-        let mut slot = RECORDING.lock().map_err(|_| internal("the recording state is unavailable"))?;
+        let mut slot = RECORDING
+            .lock()
+            .map_err(|_| internal("the recording state is unavailable"))?;
         current(&mut slot, a)?;
         FINALIZING.store(true, Ordering::Release);
         slot.take().expect("the current recording was checked")
@@ -482,9 +780,13 @@ fn stop(a: &Args, cancel: bool) -> Reply {
 
 /// Called after the control server has drained requests, before the engine exits.
 pub(super) fn shutdown() -> Result<(), String> {
-    let _lifecycle = LIFECYCLE.lock().map_err(|_| "the recording lifecycle state is poisoned")?;
+    let _lifecycle = LIFECYCLE
+        .lock()
+        .map_err(|_| "the recording lifecycle state is poisoned")?;
     let recording = {
-        let mut slot = RECORDING.lock().map_err(|_| "the recording state is poisoned")?;
+        let mut slot = RECORDING
+            .lock()
+            .map_err(|_| "the recording state is poisoned")?;
         let recording = slot.take();
         if recording.is_some() {
             FINALIZING.store(true, Ordering::Release);
@@ -492,8 +794,13 @@ pub(super) fn shutdown() -> Result<(), String> {
         recording
     };
     if let Some(recording) = recording {
-        let result = finish(recording, false).map_err(|error| format!("could not finalize the CLI recording during shutdown: {error}"))?;
-        crate::log(&format!("control: finalized recording during shutdown: {}", result["path"]));
+        let result = finish(recording, false).map_err(|error| {
+            format!("could not finalize the CLI recording during shutdown: {error}")
+        })?;
+        crate::log(&format!(
+            "control: finalized recording during shutdown: {}",
+            result["path"]
+        ));
     }
     Ok(())
 }
@@ -512,8 +819,10 @@ mod tests {
         ));
         std::fs::create_dir(&directory).expect("create the recording fixture directory");
         let path = directory.join("fixture.mp4");
-        let staging = StagedRecording::for_destination(&path).expect("create the recording fixture stage");
-        std::fs::write(staging.path(), b"synthetic recording").expect("write the recording fixture");
+        let staging =
+            StagedRecording::for_destination(&path).expect("create the recording fixture stage");
+        std::fs::write(staging.path(), b"synthetic recording")
+            .expect("write the recording fixture");
         (staging, directory)
     }
 
@@ -564,14 +873,23 @@ mod tests {
                 panic!("poison recording webcam state");
             }
             _ => panic!("unknown fixture field"),
-        }).join();
+        })
+        .join();
         assert!(result.is_err());
     }
 
     fn discard_fixture(recording: Recording, directory: &Path) {
-        let Recording { control, staging, worker, .. } = recording;
+        let Recording {
+            control,
+            staging,
+            worker,
+            ..
+        } = recording;
         control.stop.store(true, Ordering::Release);
-        worker.join().expect("join the synthetic recorder").expect("stop the synthetic recorder");
+        worker
+            .join()
+            .expect("join the synthetic recorder")
+            .expect("stop the synthetic recorder");
         staging.discard().expect("discard the recording fixture");
         std::fs::remove_dir(directory).expect("remove the recording fixture directory");
     }
@@ -589,7 +907,8 @@ mod tests {
         if let Some(obstruction) = obstruction {
             assert_eq!(std::fs::read(&obstruction).unwrap(), b"preserve");
             std::fs::remove_file(obstruction).expect("remove the fixture obstruction");
-            std::fs::remove_dir(staged.parent().unwrap()).expect("remove the recording fixture stage");
+            std::fs::remove_dir(staged.parent().unwrap())
+                .expect("remove the recording fixture stage");
         } else {
             assert!(!staged.parent().unwrap().exists());
         }
@@ -616,7 +935,12 @@ mod tests {
                     "the recorder stopped before writing a frame"
                 };
                 assert!(error.message.contains(expected), "{}", error.message);
-                assert_eq!(error.message.contains("could not discard temporary recording"), cleanup_failed);
+                assert_eq!(
+                    error
+                        .message
+                        .contains("could not discard temporary recording"),
+                    cleanup_failed
+                );
                 if cleanup_failed {
                     assert!(error.message.contains(&staged.display().to_string()));
                 }
@@ -650,9 +974,21 @@ mod tests {
                         ErrorCode::Timeout
                     };
                     assert_eq!(error.code, code);
-                    assert!(error.message.contains(if shutdown { "shutting down" } else { "within 10 s" }));
-                    assert_eq!(error.message.contains("synthetic worker failure"), worker_failed);
-                    assert_eq!(error.message.contains("could not discard temporary recording"), cleanup_failed);
+                    assert!(error.message.contains(if shutdown {
+                        "shutting down"
+                    } else {
+                        "within 10 s"
+                    }));
+                    assert_eq!(
+                        error.message.contains("synthetic worker failure"),
+                        worker_failed
+                    );
+                    assert_eq!(
+                        error
+                            .message
+                            .contains("could not discard temporary recording"),
+                        cleanup_failed
+                    );
                     if cleanup_failed {
                         assert!(error.message.contains(&staged.display().to_string()));
                     }
@@ -671,7 +1007,10 @@ mod tests {
             let error = status_from(&slot).unwrap_err();
             assert_eq!(error.code, ErrorCode::Internal);
             assert!(error.message.contains(field), "{}", error.message);
-            let recording = slot.into_inner().expect("the recording slot was poisoned").unwrap();
+            let recording = slot
+                .into_inner()
+                .expect("the recording slot was poisoned")
+                .unwrap();
             discard_fixture(recording, &directory);
         }
     }
@@ -694,29 +1033,44 @@ mod tests {
         recording.control.set_annotation_size(64, 48).unwrap();
         let slot = Mutex::new(Some(recording));
         let family = "Jiffshot unavailable recording face 71c647";
-        let text = annotate_in(&Args::new(json!({
-            "id":"rec-fixture",
-            "kind":{"type":"Text","rect":{"x0":1,"y0":1,"x1":60,"y1":20},"text":"Text"},
-            "style":{"font":family,"italic":true},
-            "duration_ms":1000
-        })).unwrap(), &slot).unwrap();
+        let text = annotate_in(
+            &Args::new(json!({
+                "id":"rec-fixture",
+                "kind":{"type":"Text","rect":{"x0":1,"y0":1,"x1":60,"y1":20},"text":"Text"},
+                "style":{"font":family,"italic":true},
+                "duration_ms":1000
+            }))
+            .unwrap(),
+            &slot,
+        )
+        .unwrap();
         let italic = jiffshot_doc::text::font_substitution(family, false, true).unwrap();
         assert_eq!(text["annotation_id"], 1);
         assert_eq!(text["duration_ms"], 1000);
         assert_eq!(text["font_substitutions"], json!([italic]));
-        let step = annotate_in(&Args::new(json!({
-            "id":"rec-fixture",
-            "kind":{"type":"Step","center":{"x":20,"y":20},"radius":10,"label":"1"},
-            "style":{"font":family,"bold":false,"italic":true}
-        })).unwrap(), &slot).unwrap();
+        let step = annotate_in(
+            &Args::new(json!({
+                "id":"rec-fixture",
+                "kind":{"type":"Step","center":{"x":20,"y":20},"radius":10,"label":"1"},
+                "style":{"font":family,"bold":false,"italic":true}
+            }))
+            .unwrap(),
+            &slot,
+        )
+        .unwrap();
         let bold = jiffshot_doc::text::font_substitution(family, true, false).unwrap();
         assert_eq!(step["annotation_id"], 2);
         assert_eq!(step["font_substitutions"], json!([bold]));
-        let shape = annotate_in(&Args::new(json!({
-            "id":"rec-fixture",
-            "kind":{"type":"Shape","rect":{"x0":1,"y0":1,"x1":20,"y1":20},"shape":"Rectangle"},
-            "style":{"font":family}
-        })).unwrap(), &slot).unwrap();
+        let shape = annotate_in(
+            &Args::new(json!({
+                "id":"rec-fixture",
+                "kind":{"type":"Shape","rect":{"x0":1,"y0":1,"x1":20,"y1":20},"shape":"Rectangle"},
+                "style":{"font":family}
+            }))
+            .unwrap(),
+            &slot,
+        )
+        .unwrap();
         assert_eq!(shape["font_substitutions"], json!([]));
         let recording = slot.into_inner().unwrap().unwrap();
         discard_fixture(recording, &directory);
@@ -728,7 +1082,9 @@ mod tests {
         let control = recording.control.clone();
         let staged = recording.staging.path().to_path_buf();
         poison(&control, "audio");
-        let error = started_status(recording).err().expect("the status should fail");
+        let error = started_status(recording)
+            .err()
+            .expect("the status should fail");
         assert_eq!(error.code, ErrorCode::Internal);
         assert!(error.message.contains("audio state"));
         assert!(error.message.contains("cancelled"));
@@ -742,10 +1098,18 @@ mod tests {
     fn failed_started_status_reports_a_worker_failure() {
         let (mut recording, directory) = fixture();
         recording.control.stop.store(true, Ordering::Release);
-        let worker = std::mem::replace(&mut recording.worker, std::thread::spawn(|| Err("synthetic worker failure".into())));
-        worker.join().expect("join the synthetic recorder").expect("stop the synthetic recorder");
+        let worker = std::mem::replace(
+            &mut recording.worker,
+            std::thread::spawn(|| Err("synthetic worker failure".into())),
+        );
+        worker
+            .join()
+            .expect("join the synthetic recorder")
+            .expect("stop the synthetic recorder");
         poison(&recording.control, "webcam");
-        let error = started_status(recording).err().expect("the status should fail");
+        let error = started_status(recording)
+            .err()
+            .expect("the status should fail");
         assert!(error.message.contains("cancelled"));
         assert!(error.message.contains("synthetic worker failure"));
         std::fs::remove_dir(directory).expect("remove the recording fixture directory");
@@ -755,14 +1119,22 @@ mod tests {
     fn failed_started_status_reports_a_cleanup_failure() {
         let (mut recording, directory) = fixture();
         recording.control.stop.store(true, Ordering::Release);
-        let worker = std::mem::replace(&mut recording.worker, std::thread::spawn(|| Err("synthetic worker failure".into())));
-        worker.join().expect("join the synthetic recorder").expect("stop the synthetic recorder");
+        let worker = std::mem::replace(
+            &mut recording.worker,
+            std::thread::spawn(|| Err("synthetic worker failure".into())),
+        );
+        worker
+            .join()
+            .expect("join the synthetic recorder")
+            .expect("stop the synthetic recorder");
         let staged = recording.staging.path().to_path_buf();
         let stage_directory = staged.parent().unwrap().to_path_buf();
         let obstruction = stage_directory.join("fixture-obstruction");
         std::fs::write(&obstruction, b"preserve").expect("create the fixture obstruction");
         poison(&recording.control, "error");
-        let error = started_status(recording).err().expect("the status should fail");
+        let error = started_status(recording)
+            .err()
+            .expect("the status should fail");
         assert!(error.message.contains("cancellation failed"));
         assert!(error.message.contains("synthetic worker failure"));
         assert!(error.message.contains(&staged.display().to_string()));
@@ -782,6 +1154,8 @@ mod tests {
         assert!(error.message.contains(&path.display().to_string()));
         assert!(error.message.contains("audio status"));
         assert_eq!(std::fs::read(&path).unwrap(), b"synthetic recording");
+        std::fs::remove_file(crate::recording_marks::sidecar_path(&path))
+            .expect("remove the published marker sidecar");
         std::fs::remove_file(path).expect("remove the published fixture");
         std::fs::remove_dir(directory).expect("remove the recording fixture directory");
     }

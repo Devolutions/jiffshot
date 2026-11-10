@@ -36,13 +36,17 @@ gstreamer-pbutils = "0.24"
 gstreamer-video = { version = "0.24", features = ["v1_18"] }
 jiffshot-capture = { path = "../crates/jiffshot-capture" }
 jiffshot-control = { path = "../crates/jiffshot-control" }
+jiffshot-video = { path = "../crates/jiffshot-video" }
 ksni = { version = "0.3", default-features = false, features = ["async-io"] }
 leptess = "0.14"
 png.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 tempfile = "3"
-x11rb = { version = "0.13", default-features = false }
+x11rb = { version = "0.13", default-features = false, features = ["screensaver"] }
 zbus = { version = "5", default-features = false, features = ["async-io"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+x11rb = { version = "0.13", default-features = false, features = ["xtest"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 # Preserve existing development host discovery outside macOS.

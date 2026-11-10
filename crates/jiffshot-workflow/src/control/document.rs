@@ -6,6 +6,7 @@ use jiffshot_doc::combine::{self, Arrangement};
 use jiffshot_doc::editor::{Analyzer, Modifiers, TOOLS};
 use jiffshot_doc::object::{BlurMode, Kind, Style};
 use jiffshot_doc::{effects, io, smart, Box2, Document, Editor, IRect, Pixmap, Pt, Rgba, Tool};
+pub(super) use jiffshot_video::annotation::{kind, style, validate_json};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -71,135 +72,6 @@ fn color(a: &Args, key: &str, default: Rgba) -> Result<Rgba, Error> {
 fn required_path(a: &Args, key: &str, extensions: &[&str]) -> Result<PathBuf, Error> {
     a.out(key, extensions)?
         .ok_or_else(|| invalid(format!("{key} is required")))
-}
-
-/// Bounds serialized geometry and arrays before calling the raster engine.
-pub(super) fn validate_json(v: &Value) -> Result<(), Error> {
-    match v {
-        Value::Number(n)
-            if n.as_f64()
-                .is_none_or(|n| !n.is_finite() || n.abs() > 1_000_000.0) =>
-        {
-            Err(invalid(
-                "annotation numbers must be finite and within +/-1000000",
-            ))
-        }
-        Value::Array(items) => {
-            if items.len() > MAX_POINTS {
-                return Err(invalid("annotation arrays are limited to 10000 entries"));
-            }
-            for item in items {
-                validate_json(item)?;
-            }
-            Ok(())
-        }
-        Value::Object(fields) => {
-            for item in fields.values() {
-                validate_json(item)?;
-            }
-            Ok(())
-        }
-        Value::String(s) if s.len() > 65_536 => {
-            Err(invalid("annotation text is limited to 65536 bytes"))
-        }
-        _ => Ok(()),
-    }
-}
-
-pub(super) fn style(value: Option<&Value>, base: Style) -> Result<Style, Error> {
-    let Some(value) = value else { return Ok(base) };
-    validate_json(value)?;
-    let fields = value
-        .as_object()
-        .ok_or_else(|| invalid("style must be an object"))?;
-    let mut merged = serde_json::to_value(base).map_err(internal)?;
-    let map = merged
-        .as_object_mut()
-        .ok_or_else(|| internal("style is not an object"))?;
-    for (key, value) in fields {
-        if !map.contains_key(key) {
-            return Err(invalid(format!("unknown style property {key:?}")));
-        }
-        map.insert(key.clone(), value.clone());
-    }
-    let style: Style =
-        serde_json::from_value(merged).map_err(|e| invalid(format!("style: {e}")))?;
-    if !(0.0..=1.0).contains(&style.opacity)
-        || !(0.0..=512.0).contains(&style.width)
-        || !(1.0..=512.0).contains(&style.font_size)
-        || !(0.0..=512.0).contains(&style.shadow_blur)
-        || !(0.0..=512.0).contains(&style.outline_width)
-        || !(0.0..=512.0).contains(&style.shadow_distance)
-        || !(0.0..=16.0).contains(&style.head_size)
-    {
-        return Err(invalid("style opacity must be 0..1; width, shadow_blur, outline_width 0..512; font_size 1..512"));
-    }
-    Ok(style)
-}
-
-pub(super) fn kind(value: &Value) -> Result<Kind, Error> {
-    validate_json(value)?;
-    let kind: Kind =
-        serde_json::from_value(value.clone()).map_err(|e| invalid(format!("kind: {e}")))?;
-    validate_kind(&kind, 0)?;
-    Ok(kind)
-}
-
-fn validate_kind(kind: &Kind, depth: usize) -> Result<(), Error> {
-    if depth > 8 {
-        return Err(invalid("groups are limited to eight nesting levels"));
-    }
-    let rect = match kind {
-        Kind::Shape { rect, .. }
-        | Kind::Text { rect, .. }
-        | Kind::Callout { rect, .. }
-        | Kind::Highlight { rect, .. }
-        | Kind::Blur { rect, .. }
-        | Kind::Magnify { rect, .. }
-        | Kind::Spotlight { rect, .. }
-        | Kind::Stamp { rect, .. }
-        | Kind::Image { rect, .. } => Some(rect),
-        _ => None,
-    };
-    if rect.is_some_and(|r| r.width() <= 0.0 || r.height() <= 0.0) {
-        return Err(invalid(
-            "annotation rectangles must have x1 > x0 and y1 > y0",
-        ));
-    }
-    match kind {
-        Kind::Image { .. } => return Err(invalid("use doc.image to load image pixels")),
-        Kind::Group { objects } => {
-            if objects.len() > MAX_OBJECTS {
-                return Err(invalid("too many grouped objects"));
-            }
-            for object in objects {
-                validate_kind(&object.kind, depth + 1)?;
-                style(
-                    Some(&serde_json::to_value(&object.style).map_err(internal)?),
-                    Style::default(),
-                )?;
-            }
-        }
-        Kind::Blur { amount, .. } if !(0.0..=128.0).contains(amount) => {
-            return Err(invalid("blur amount must be 0..128"))
-        }
-        Kind::Magnify { zoom, .. } if !(1.0..=16.0).contains(zoom) => {
-            return Err(invalid("magnification must be 1..16"))
-        }
-        Kind::Spotlight { dim, blur, .. }
-            if !(0.0..=1.0).contains(dim) || !(0.0..=128.0).contains(blur) =>
-        {
-            return Err(invalid("spotlight dim must be 0..1 and blur 0..128"))
-        }
-        Kind::Step { radius, .. } if !(1.0..=512.0).contains(radius) => {
-            return Err(invalid("step radius must be 1..512"))
-        }
-        Kind::Pen { points } | Kind::Polygon { points } if points.len() < 2 => {
-            return Err(invalid("a path needs at least two points"))
-        }
-        _ => {}
-    }
-    Ok(())
 }
 
 fn info(id: &str, session: &Session) -> Value {

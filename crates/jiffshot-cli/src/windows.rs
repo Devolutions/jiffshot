@@ -48,6 +48,7 @@ CAPTURE
     record stop [--id ID]                   waits until the MP4 is final; returns its metadata
     record cancel [--id ID]                 stops and deletes the recording
     record options [--id ID] [--args JSON]  change camera/audio/cursor switches
+    record mark [--label NAME|--discard]    mark a kept range boundary or discard boundary
     record annotate --kind JSON [--style JSON] [--duration-ms N]
     record clear [--id ID]                 clear live annotations
     steps start [TITLE] [--restart]         begin a step-by-step guide
@@ -94,11 +95,18 @@ EDIT IMAGES AND ANNOTATIONS (document pixels, separate from open GUI documents)
     doc close --id ID                      release the document
 
 EDIT VIDEO
-    video info PATH                       dimensions, duration, fps and audio
+    video info PATH [--exact]             metadata; optionally decode to count frames and check CFR
+    video verify PATH                     decode every frame and report verified metadata
     video frame PATH --at N --out FILE.png
-    video export PATH --out FILE.mp4|gif [--from N] [--to N] [--mute]
-                 [--fps N] [--width W --height H] [--overlays JSON]
-    video join --segments JSON --out FILE.mp4 [--mute] [--overlays JSON]
+    video export PATH --out FILE.mp4|gif [--from N] [--to N] [--duration N]
+                 [--keep-marked] [--drop-discarded] [--captions-from-recording] [--mute]
+                 [--idle-after N --idle-mode speed|cut] [--idle-speed N] [--min-pause N]
+                 [--fps N] [--width W --height H] [--palette-size N] [--max-bytes N]
+                 [--dither-mode none|ordered|floyd-steinberg] [--optimize-frames] [--overlays JSON]
+    video join --segments JSON --out FILE.mp4 [--duration N] [--transition S] [--mute] [--overlays JSON]
+                 [--idle-after N --idle-mode speed|cut] [--idle-speed N] [--min-pause N]
+                 each segment may include "speed" (default 1)
+    video edit PLAN.json                     run one JSON plan to MP4 and/or GIF
 
 OTHER
     open [PATH]                             open a capture in the editor (or show the editor)
@@ -237,7 +245,7 @@ USAGE
     jiffshot-cli help agent
 
 AVAILABLE ON LINUX
-    status                              server, library folder and recording
+    status                              server, library, recording and guide
     screenshot [--out FILE] [--cursor]  capture through the desktop portal
     open PATH                           open an image or project in the editor
     ocr --path IMAGE                    recognize text in an image
@@ -246,9 +254,27 @@ AVAILABLE ON LINUX
     library tag PATH TAGS               replace a capture's tags (comma separated)
     library pin PATH                    toggle a capture's pin
     record start [--audio none|system|microphone|both] [--fps source|15|24|30|60] [--cursor]
-    record status | pause | stop | cancel
+    record annotate --kind JSON [--style JSON] [--duration-ms N]
+    record clear
+    record mark --label NAME | --discard
+    record status | pause | resume | stop | cancel
+    steps start [TITLE] [--restart]     begin a manual guide
+    steps add X,Y --description TEXT [--right]
+    steps status | cancel
+    steps finish [--out FILE.png] [--title T] [--open]
+    video info PATH [--exact] | verify PATH
+    video frame PATH --at SECONDS --out FILE.png
+    video export PATH --out FILE.mp4|gif [--duration N] [--keep-marked] [--drop-discarded]
+                 [--captions-from-recording] [--idle-after N --idle-mode speed|cut] [--overlays JSON]
+    video join --segments JSON --out FILE.mp4 [--duration N] [--transition S] [--captions-from-recording]
+    video edit PLAN.json                execute an edit plan
+    run FILE.json                       run a scripted sequence
+    call COMMAND [JSON]                 send a raw command
 
 Screenshots and recordings use the desktop portal and may need your consent.
+Each manual guide step captures a portal-selected image; X,Y are image-local
+pixels and --description is required. Steps do not perform clicks.
+Input-aware idle editing requires a complete native X11 input history.
 
 EXIT CODES
     0 success, 1 failed, 2 invalid usage, 3 unavailable, 4 timed out
@@ -261,6 +287,10 @@ const AGENT: &str = r#"jiffshot-cli on Linux prints one JSON object per command:
 
 Use `status` to discover available commands. The control socket lives in
 $XDG_RUNTIME_DIR/jiffshot and only the same user can connect to it.
+Native X11 recordings can retain input timing for conservative idle edits;
+Wayland recordings have incomplete input histories and cannot use idle editing.
+Guide steps require image-local coordinates and an explicit description. Each
+step opens the desktop portal and does not click or identify UI elements.
 "#;
 
 #[cfg(target_os = "macos")]
@@ -288,6 +318,7 @@ AVAILABLE ON MACOS
     record stop | cancel [--id ID]
     record options [--id ID] [--args JSON]
     record annotate --kind JSON [--style JSON] [--duration-ms N]
+    record mark [--label NAME|--discard]
     record clear [--id ID]
     steps status | start | add | finish | cancel
     click [X,Y] [--text TEXT|--element NAME] [--right|--middle] [--double] [--no-step]
@@ -296,7 +327,7 @@ AVAILABLE ON MACOS
     scroll N [X,Y] [--horizontal]      positive scrolls down (or right)
     type TEXT [TARGET] [--delay-ms N]  type Unicode text
     key COMBO [TARGET] [--repeat N]    e.g. cmd+s, ctrl+shift+a, enter
-    video info | frame | export | join ...
+    video info PATH [--exact] | verify | frame | export | join | edit ...
     open [PATH]                         open a file, or show the editor
     quit                                request a graceful exit
     doc tools | list                    discover tools or list document sessions
@@ -387,6 +418,12 @@ const FLAGS: &[&str] = &[
     "webcam-circle",
     "noise-gate",
     "mute",
+    "optimize-frames",
+    "keep-marked",
+    "drop-discarded",
+    "captions-from-recording",
+    "exact",
+    "discard",
     "shift",
     "ctrl",
     "alt",
@@ -396,7 +433,7 @@ const FLAGS: &[&str] = &[
 
 /// Options holding paths, made absolute against the caller's directory
 /// (Jiffshot runs elsewhere).
-const PATHS: &[&str] = &["out", "path"];
+const PATHS: &[&str] = &["out", "path", "plan"];
 const JSON_OPTIONS: &[&str] = &[
     "kind",
     "style",
@@ -405,6 +442,7 @@ const JSON_OPTIONS: &[&str] = &[
     "document-ids",
     "segments",
     "overlays",
+    "outputs",
 ];
 
 /// What each command's positional arguments mean. A trailing `*` joins the
@@ -435,8 +473,10 @@ const POSITIONALS: &[(&str, &[&str])] = &[
     ("doc.action", &["name"]),
     ("doc.effect", &["name*"]),
     ("video.info", &["path"]),
+    ("video.verify", &["path"]),
     ("video.frame", &["path"]),
     ("video.export", &["path"]),
+    ("video.edit", &["plan"]),
 ];
 
 /// Command groups written as two words (`record start`).
@@ -517,7 +557,7 @@ fn parse(words: &[String], cwd: &Path) -> Result<Action, Error> {
     let mut rest = &words[1..];
     let command = match first.as_str() {
         "help" | "--help" | "-h" | "/?" => {
-            return Ok(Action::Help(rest.first().cloned().unwrap_or_default()))
+            return Ok(Action::Help(rest.first().cloned().unwrap_or_default()));
         }
         "--help-agent" => return Ok(Action::Help("agent".into())),
         "sleep" => {
@@ -644,9 +684,11 @@ fn default_timeout(command: &str, args: &Map<String, Value>) -> Duration {
             Duration::from_millis(ms("timeout_ms").unwrap_or(30_000.0) as u64)
                 + Duration::from_secs(15)
         }
-        "record.stop" | "record.cancel" | "steps.finish" | "video.export" | "video.join" => {
+        "video.info" if args.get("exact").is_some_and(|value| !value.is_null()) => {
             Duration::from_secs(300)
         }
+        "record.stop" | "record.cancel" | "steps.finish" | "video.export" | "video.join"
+        | "video.edit" | "video.verify" => Duration::from_secs(300),
         _ => Duration::from_secs(60),
     }
 }
@@ -746,7 +788,7 @@ fn absolute_paths(args: &mut Map<String, Value>, cwd: &Path) {
             args.insert((*key).to_string(), json!(cwd.join(p)));
         }
     }
-    for key in ["segments", "overlays"] {
+    for key in ["segments", "overlays", "outputs"] {
         if let Some(Value::Array(items)) = args.get_mut(key) {
             for item in items {
                 if let Some(fields) = item.as_object_mut() {
@@ -808,7 +850,7 @@ fn bound_step(
             return (
                 json!({"command":step.get("command"),"ok":false,"error":error_json(&error),"ms":0}),
                 Some(error),
-            )
+            );
         }
     };
     let (entry, error) = run_step(&resolved, g, cwd);
@@ -912,7 +954,7 @@ fn run(file: &Path, g: &Globals, cwd: &Path) -> Result<(Value, Option<Error>), E
         _ => {
             return Err(usage(
                 "the script must be a steps array or an object with steps",
-            ))
+            ));
         }
     };
     if let Some(version) = script.get("version") {
@@ -1061,8 +1103,20 @@ mod tests {
         s.split_whitespace().map(str::to_owned).collect()
     }
 
+    fn test_cwd() -> &'static Path {
+        if cfg!(windows) {
+            Path::new(r"C:\work")
+        } else {
+            Path::new("/work")
+        }
+    }
+
+    fn test_path(name: &str) -> PathBuf {
+        test_cwd().join(name)
+    }
+
     fn call_of(s: &str) -> (String, Value) {
-        match parse(&words(s), Path::new(r"C:\work")).unwrap() {
+        match parse(&words(s), test_cwd()).unwrap() {
             Action::Call { command, args } => (command, Value::Object(args)),
             other => panic!("{other:?}"),
         }
@@ -1138,6 +1192,92 @@ mod tests {
         );
         assert!(parse(&words("key ctrl+s extra"), Path::new(".")).is_err());
         assert!(parse(&words("type --delay-ms"), Path::new(".")).is_err());
+    }
+
+    #[test]
+    fn video_export_and_edit_options_are_forwarded() {
+        assert_eq!(
+            call_of("video info source.mp4 --exact"),
+            (
+                "video.info".into(),
+                json!({"path": test_path("source.mp4"), "exact": true})
+            )
+        );
+        assert_eq!(
+            call_of(
+                "video export source.mp4 --out out.gif --palette-size 32 --dither-mode floyd-steinberg --optimize-frames --max-bytes 500000"
+            ),
+            (
+                "video.export".into(),
+                json!({
+                    "path": test_path("source.mp4"),
+                    "out": test_path("out.gif"),
+                    "palette_size": "32",
+                    "dither_mode": "floyd-steinberg",
+                    "optimize_frames": true,
+                    "max_bytes": "500000"
+                })
+            )
+        );
+        assert_eq!(
+            call_of("video edit plan.json"),
+            (
+                "video.edit".into(),
+                json!({ "plan": test_path("plan.json") })
+            )
+        );
+        assert_eq!(
+            call_of("record mark --label demo"),
+            ("record.mark".into(), json!({"label":"demo"}))
+        );
+        assert_eq!(
+            call_of("record mark --discard"),
+            ("record.mark".into(), json!({"discard":true}))
+        );
+        assert_eq!(
+            call_of(
+                "video export source.mp4 --out kept.mp4 --keep-marked --drop-discarded --captions-from-recording"
+            ),
+            (
+                "video.export".into(),
+                json!({
+                    "path": test_path("source.mp4"),
+                    "out": test_path("kept.mp4"),
+                    "keep_marked": true,
+                    "drop_discarded": true,
+                    "captions_from_recording": true
+                })
+            )
+        );
+        assert_eq!(
+            call_of(
+                "video export source.mp4 --out edited.mp4 --idle-after 2 --idle-mode speed --idle-speed 6 --min-pause 0.75"
+            ),
+            (
+                "video.export".into(),
+                json!({
+                    "path": test_path("source.mp4"),
+                    "out": test_path("edited.mp4"),
+                    "idle_after": "2",
+                    "idle_mode": "speed",
+                    "idle_speed": "6",
+                    "min_pause": "0.75"
+                })
+            )
+        );
+        assert_eq!(
+            call_of(
+                r#"video join --segments [{"path":"first.mp4"},{"path":"second.mp4"}] --out joined.mp4 --transition 0.3"#
+            ),
+            (
+                "video.join".into(),
+                json!({
+                    "segments": [{"path": "first.mp4"}, {"path": "second.mp4"}],
+                    "out": test_path("joined.mp4"),
+                    "transition": "0.3"
+                })
+            )
+        );
     }
 
     #[test]
@@ -1240,6 +1380,15 @@ mod tests {
         );
         assert_eq!(
             default_timeout("video.export", &Map::new()),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            default_timeout("video.info", &Map::new()),
+            Duration::from_secs(60)
+        );
+        let exact = json!({ "exact": true }).as_object().unwrap().clone();
+        assert_eq!(
+            default_timeout("video.info", &exact),
             Duration::from_secs(300)
         );
     }

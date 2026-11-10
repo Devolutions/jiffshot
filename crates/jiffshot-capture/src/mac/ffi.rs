@@ -23,6 +23,7 @@ pub const kCGBitmapByteOrder32Little: u32 = 2 << 12;
 
 pub const kCGEventSourceStateCombinedSessionState: i32 = 0;
 pub const kCGEventSourceStateHIDSystemState: i32 = 1;
+pub const kCGAnyInputEventType: u32 = u32::MAX;
 pub const kCGScrollEventUnitPixel: u32 = 0;
 pub const kCGScrollEventUnitLine: u32 = 1;
 pub const kCGHIDEventTap: u32 = 0;
@@ -34,7 +35,11 @@ pub const kCGNullWindowID: u32 = 0;
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
-    pub fn CGGetActiveDisplayList(max: u32, displays: *mut CGDirectDisplayID, count: *mut u32) -> i32;
+    pub fn CGGetActiveDisplayList(
+        max: u32,
+        displays: *mut CGDirectDisplayID,
+        count: *mut u32,
+    ) -> i32;
     pub fn CGMainDisplayID() -> CGDirectDisplayID;
     pub fn CGDisplayBounds(display: CGDirectDisplayID) -> CGRect;
     pub fn CGDisplayCopyDisplayMode(display: CGDirectDisplayID) -> CGDisplayModeRef;
@@ -49,6 +54,7 @@ extern "C" {
 
     pub fn CGPreflightScreenCaptureAccess() -> bool;
     pub fn CGRequestScreenCaptureAccess() -> bool;
+    pub fn CGPreflightListenEventAccess() -> bool;
 
     pub fn CGBitmapContextCreate(
         data: *mut c_void,
@@ -79,14 +85,21 @@ extern "C" {
         wheel2: i32,
         wheel3: i32,
     ) -> CGEventRef;
-    pub fn CGEventCreateMouseEvent(source: CGEventSourceRef, kind: u32, location: CGPoint, button: u32) -> CGEventRef;
-    pub fn CGEventCreateKeyboardEvent(source: CGEventSourceRef, key: u16, down: bool) -> CGEventRef;
+    pub fn CGEventCreateMouseEvent(
+        source: CGEventSourceRef,
+        kind: u32,
+        location: CGPoint,
+        button: u32,
+    ) -> CGEventRef;
+    pub fn CGEventCreateKeyboardEvent(source: CGEventSourceRef, key: u16, down: bool)
+        -> CGEventRef;
     pub fn CGEventSetFlags(event: CGEventRef, flags: u64);
     pub fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
     pub fn CGEventKeyboardSetUnicodeString(event: CGEventRef, length: usize, unicode: *const u16);
     pub fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
     pub fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
     pub fn CGEventSourceFlagsState(state: i32) -> u64;
+    pub fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
     pub fn CGWarpMouseCursorPosition(point: CGPoint) -> i32;
     pub fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> i32;
 
@@ -118,5 +131,11 @@ impl Drop for Owned {
 }
 
 pub fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
-    CGRect { origin: CGPoint { x, y }, size: CGSize { width: w, height: h } }
+    CGRect {
+        origin: CGPoint { x, y },
+        size: CGSize {
+            width: w,
+            height: h,
+        },
+    }
 }

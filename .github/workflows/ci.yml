@@ -96,6 +96,8 @@ jobs:
         run: |
           $env:JIFFSHOT_CLI_E2E = Join-Path (Get-Location) 'target\${{ matrix.target }}\release\jiffshot-cli.exe'
           cargo test --release --locked -p jiffshot-workflow --target ${{ matrix.target }} cli_edits_artifacts_over_real_ipc_without_desktop_input -- --ignored --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --release --locked -p jiffshot-workflow --target ${{ matrix.target }} cli_guide_finish_retries_after_output_failure_without_desktop_input -- --ignored --test-threads=1
 
       - name: Test Windows Grab Text
         if: matrix.test
@@ -233,6 +235,7 @@ jobs:
             dpkg-dev \
             desktop-file-utils \
             xvfb \
+            xauth \
             x11-utils \
             xclip \
             libxtst6 \
@@ -263,6 +266,12 @@ jobs:
 
       - name: Test
         run: cargo test --release --locked --workspace
+
+      - name: Test Linux recording input tracking
+        run: pwsh -NoLogo -NoProfile -File app/tests/linux_input_activity_e2e.ps1
+
+      - name: Test Linux video CLI
+        run: pwsh -NoLogo -NoProfile -File app/tests/linux_video_cli_e2e.ps1
 
       - name: Lint Linux app
         run: cargo clippy --locked --no-deps -p jiffshot --all-targets -- -D warnings

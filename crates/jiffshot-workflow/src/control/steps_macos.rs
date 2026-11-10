@@ -5,6 +5,7 @@ use jiffshot_capture::library::{CaptureKind, Library, EDITS_EXT};
 use jiffshot_capture::{screen, Rect};
 use jiffshot_control::{Error, ErrorCode};
 use serde_json::{json, Value};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -71,12 +72,17 @@ fn start(a: &Args) -> Reply {
 }
 
 fn add(a: &Args) -> Reply {
-    add_with(a, capture_step_at)
+    add_with(
+        a,
+        capture_step_at,
+        crate::control_macos::add_recording_step_caption,
+    )
 }
 
 fn add_with(
     a: &Args,
     capture: impl FnOnce(Option<(i32, i32)>, bool, Option<String>) -> Result<stepcap::Step, Error>,
+    record_caption: impl FnOnce(&str) -> Result<(), Error>,
 ) -> Reply {
     a.only(&["at", "right", "description"])?;
     let point = a.point("at")?;
@@ -94,6 +100,7 @@ fn add_with(
     }
     let description = step.description.clone();
     let point = step.click;
+    record_caption(&description)?;
     guide.steps.push(step);
     Ok(json!({ "index": guide.steps.len(), "description": description, "at": point_json(point) }))
 }
@@ -116,7 +123,8 @@ fn capture_step_at(
         Some(point) => stepcap::ClickPosition::from_grid(point),
         None => {
             let logical = screen::try_cursor_pos_points().map_err(internal)?;
-            stepcap::ClickPosition::from_points(logical, layout.desktop_scale()).map_err(internal)?
+            stepcap::ClickPosition::from_points(logical, layout.desktop_scale())
+                .map_err(internal)?
         }
     };
     let (x, y) = point.reference();
@@ -148,12 +156,27 @@ pub(super) fn click_with_step(
     description: Option<String>,
     perform: impl FnOnce() -> Result<(), Error>,
 ) -> Result<Option<Value>, Error> {
-    click_with_step_and_capture(requested, point, right, description, capture_step, perform)
+    click_with_step_and_capture(
+        requested,
+        point,
+        right,
+        description,
+        capture_step,
+        perform,
+        crate::control_macos::add_recording_step_caption,
+    )
 }
 
 pub(super) fn require_for_click(requested: Option<bool>) -> Result<(), Error> {
-    if requested == Some(true) && GUIDE.lock().map_err(|_| internal("the guide state is unavailable"))?.is_none() {
-        return Err(not_found("step needs a guide in progress; run steps.start first"));
+    if requested == Some(true)
+        && GUIDE
+            .lock()
+            .map_err(|_| internal("the guide state is unavailable"))?
+            .is_none()
+    {
+        return Err(not_found(
+            "step needs a guide in progress; run steps.start first",
+        ));
     }
     Ok(())
 }
@@ -165,15 +188,20 @@ fn click_with_step_and_capture(
     description: Option<String>,
     capture: impl FnOnce((i32, i32), bool, Option<String>) -> Result<stepcap::Step, Error>,
     perform: impl FnOnce() -> Result<(), Error>,
+    record_caption: impl FnOnce(&str) -> Result<(), Error>,
 ) -> Result<Option<Value>, Error> {
     if requested == Some(false) {
         perform()?;
         return Ok(None);
     }
-    let mut slot = GUIDE.lock().map_err(|_| internal("the guide state is unavailable"))?;
+    let mut slot = GUIDE
+        .lock()
+        .map_err(|_| internal("the guide state is unavailable"))?;
     let Some(guide) = slot.as_mut() else {
         if requested == Some(true) {
-            return Err(not_found("step needs a guide in progress; run steps.start first"));
+            return Err(not_found(
+                "step needs a guide in progress; run steps.start first",
+            ));
         }
         drop(slot);
         perform()?;
@@ -187,10 +215,27 @@ fn click_with_step_and_capture(
     perform()?;
     let description = step.description.clone();
     guide.steps.push(step);
-    Ok(Some(json!({ "index": guide.steps.len(), "description": description, "at": point_json(point) })))
+    record_caption(&description).map_err(|error| {
+        Error::new(
+            error.code,
+            format!(
+                "the click and guide step succeeded, but recording the step caption failed: {}",
+                error.message
+            ),
+        )
+    })?;
+    Ok(Some(
+        json!({ "index": guide.steps.len(), "description": description, "at": point_json(point) }),
+    ))
 }
 
 fn finish(a: &Args) -> Reply {
+    finish_with_open(a, |path| {
+        crate::hooks().is_some_and(|hooks| (hooks.open_in_editor)(path))
+    })
+}
+
+fn finish_with_open(a: &Args, open_in_editor: impl FnOnce(&Path) -> bool) -> Reply {
     a.only(&["out", "title", "open"])?;
     let out = a.out("out", &["png"])?;
     let title = a.string("title")?;
@@ -234,19 +279,20 @@ fn finish(a: &Args) -> Reply {
     let document = path.with_extension(EDITS_EXT);
     jiffshot_doc::io::write_atomic(&document, &document_bytes)
         .map_err(|error| internal(format!("the guide image was saved to {}, but its editable document could not be saved: {error}", path.display())))?;
-    let opened = open && crate::hooks().is_some_and(|hooks| (hooks.open_in_editor)(&path));
-    let result = json!({
+    let mut result = json!({
         "id": guide.id,
         "title": title,
         "path": path,
         "document": document,
         "width": capture.frame.width,
         "height": capture.frame.height,
-        "opened": opened,
+        "opened": false,
         "steps": steps_json(guide),
         "font_substitutions": doc.font_substitutions(),
     });
     *slot = None;
+    drop(slot);
+    result["opened"] = json!(open && open_in_editor(&path));
     Ok(result)
 }
 
@@ -261,7 +307,9 @@ fn cancel(a: &Args) -> Reply {
 }
 
 pub(super) fn status() -> Reply {
-    let guide = GUIDE.lock().map_err(|_| internal("the guide state is unavailable"))?;
+    let guide = GUIDE
+        .lock()
+        .map_err(|_| internal("the guide state is unavailable"))?;
     Ok(summary(&guide))
 }
 
@@ -338,6 +386,7 @@ mod tests {
                     description: description.unwrap(),
                 })
             },
+            |_| Ok(()),
         )
         .unwrap();
         assert_eq!(
@@ -362,11 +411,17 @@ mod tests {
         std::fs::remove_dir(root.join("guide.jsd")).unwrap();
         let result = call("steps.finish", json!({"out":out, "title":"Retried"})).unwrap();
         assert_eq!(result["title"], "Retried");
-        assert_eq!(result["steps"], json!([{"index":1, "at":{"x":3, "y":4}, "description":"Test step"}]));
+        assert_eq!(
+            result["steps"],
+            json!([{"index":1, "at":{"x":3, "y":4}, "description":"Test step"}])
+        );
         assert!(out.is_file() && root.join("guide.jsd").is_file());
         let document = jiffshot_doc::io::load_document(&root.join("guide.jsd")).unwrap();
         assert!(document.objects.iter().any(|object| matches!(&object.kind, jiffshot_doc::object::Kind::Text { text, .. } if text == "Test step")));
-        assert_eq!(result["font_substitutions"], json!(document.font_substitutions()));
+        assert_eq!(
+            result["font_substitutions"],
+            json!(document.font_substitutions())
+        );
         assert_eq!(
             call("steps.status", json!({})).unwrap(),
             json!({"active":false})
@@ -377,24 +432,139 @@ mod tests {
     }
 
     #[test]
-    fn adding_a_step_without_coordinates_returns_the_captured_pointer_position() {
+    fn finishing_releases_the_guide_before_opening_the_editor() {
         let _test = TEST_LOCK.lock().unwrap();
         *GUIDE.lock().unwrap() = None;
-        call("steps.start", json!({})).unwrap();
-        let added = add_with(&Args::new(json!({"description": "Pointer step"})).unwrap(), |point, right, description| {
-            assert_eq!(point, None);
-            Ok(stepcap::Step {
+        let started = call("steps.start", json!({ "title": "Original guide" })).unwrap();
+        GUIDE
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .steps
+            .push(stepcap::Step {
                 frame: Frame::new(4, 4),
                 area: Rect::new(0, 0, 4, 4),
                 mapping: None,
                 click: (2, 3),
-                click_precise: Some((2.25, 3.25)),
-                right,
-                description: description.unwrap(),
-            })
-        }).unwrap();
-        assert_eq!(added, json!({"index":1, "at":{"x":2, "y":3}, "description":"Pointer step"}));
+                click_precise: None,
+                right: false,
+                description: "Open settings".into(),
+            });
+        let root = std::env::temp_dir().join(format!(
+            "jiffshot-step-open-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let output = root.join("guide.png");
+        let mut unlocked_and_finished = false;
+        let mut opened_path = None;
+        let mut restarted = None;
+        let result = finish_with_open(
+            &Args::new(json!({ "out": output, "open": true })).unwrap(),
+            |path| {
+                opened_path = Some(path.to_path_buf());
+                unlocked_and_finished = GUIDE.try_lock().is_ok_and(|guide| guide.is_none());
+                if unlocked_and_finished {
+                    restarted =
+                        Some(call("steps.start", json!({ "title": "Next guide" })).unwrap());
+                }
+                true
+            },
+        )
+        .unwrap();
+        assert!(unlocked_and_finished);
+        assert_eq!(opened_path, Some(output.clone()));
+        assert_eq!(result["opened"], true);
+        assert_eq!(result["id"], started["id"]);
+        let restarted = restarted.expect("the editor callback could start a new guide");
+        assert_eq!(
+            call("steps.status", json!({})).unwrap()["id"],
+            restarted["id"]
+        );
+        assert_eq!(
+            call("steps.cancel", json!({})).unwrap()["id"],
+            restarted["id"]
+        );
+        std::fs::remove_file(output).unwrap();
+        std::fs::remove_file(root.join("guide.jsd")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn adding_a_step_without_coordinates_returns_the_captured_pointer_position() {
+        let _test = TEST_LOCK.lock().unwrap();
+        *GUIDE.lock().unwrap() = None;
+        call("steps.start", json!({})).unwrap();
+        let added = add_with(
+            &Args::new(json!({"description": "Pointer step"})).unwrap(),
+            |point, right, description| {
+                assert_eq!(point, None);
+                Ok(stepcap::Step {
+                    frame: Frame::new(4, 4),
+                    area: Rect::new(0, 0, 4, 4),
+                    mapping: None,
+                    click: (2, 3),
+                    click_precise: Some((2.25, 3.25)),
+                    right,
+                    description: description.unwrap(),
+                })
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(
+            added,
+            json!({"index":1, "at":{"x":2, "y":3}, "description":"Pointer step"})
+        );
         assert_eq!(call("steps.cancel", json!({})).unwrap()["steps"], 1);
+    }
+
+    #[test]
+    fn explicit_step_records_caption_and_leaves_guide_unchanged_on_failure() {
+        let _test = TEST_LOCK.lock().unwrap();
+        *GUIDE.lock().unwrap() = None;
+        call("steps.start", json!({})).unwrap();
+        let args = Args::new(json!({"at": [2, 3], "description": "Open settings"})).unwrap();
+        let capture = |point: Option<(i32, i32)>, right, description: Option<String>| {
+            Ok(stepcap::Step {
+                frame: Frame::new(4, 4),
+                area: Rect::new(0, 0, 4, 4),
+                mapping: None,
+                click: point.expect("the test specified a point"),
+                click_precise: None,
+                right,
+                description: description.expect("the test specified a description"),
+            })
+        };
+        let mut recorded = Vec::new();
+        let added = add_with(&args, capture, |text| {
+            recorded.push(text.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(recorded, ["Open settings"]);
+        assert_eq!(added["description"], "Open settings");
+        assert_eq!(
+            call("steps.status", json!({})).unwrap()["steps"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let error =
+            add_with(&args, capture, |_| Err(internal("caption history is full"))).unwrap_err();
+        assert!(error.message.contains("caption history is full"));
+        assert_eq!(
+            call("steps.status", json!({})).unwrap()["steps"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        call("steps.cancel", json!({})).unwrap();
     }
 
     #[test]
@@ -413,17 +583,102 @@ mod tests {
             })
         };
         assert_eq!(
-            click_with_step_and_capture(Some(true), (2, 3), false, None, capture, || Ok(()))
-                .unwrap_err().code,
+            click_with_step_and_capture(
+                Some(true),
+                (2, 3),
+                false,
+                None,
+                capture,
+                || Ok(()),
+                |_| Ok(())
+            )
+            .unwrap_err()
+            .code,
             ErrorCode::NotFound
         );
-        assert!(click_with_step_and_capture(None, (2, 3), false, None, capture, || Ok(())).unwrap().is_none());
+        assert!(click_with_step_and_capture(
+            None,
+            (2, 3),
+            false,
+            None,
+            capture,
+            || Ok(()),
+            |_| Ok(())
+        )
+        .unwrap()
+        .is_none());
         call("steps.start", json!({})).unwrap();
-        assert!(click_with_step_and_capture(None, (2, 3), false, None, capture, || Err(internal("input failed"))).is_err());
+        assert!(click_with_step_and_capture(
+            None,
+            (2, 3),
+            false,
+            None,
+            capture,
+            || Err(internal("input failed")),
+            |_| Ok(())
+        )
+        .is_err());
         assert_eq!(call("steps.status", json!({})).unwrap()["steps"], json!([]));
-        let step = click_with_step_and_capture(None, (2, 3), true, Some("Button".into()), capture, || Ok(())).unwrap();
-        assert_eq!(step, Some(json!({"index":1, "at":{"x":2, "y":3}, "description":"Button"})));
-        assert!(click_with_step_and_capture(Some(false), (2, 3), false, None, capture, || Ok(())).unwrap().is_none());
+        let step = click_with_step_and_capture(
+            None,
+            (2, 3),
+            true,
+            Some("Button".into()),
+            capture,
+            || Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(
+            step,
+            Some(json!({"index":1, "at":{"x":2, "y":3}, "description":"Button"}))
+        );
+        assert!(click_with_step_and_capture(
+            Some(false),
+            (2, 3),
+            false,
+            None,
+            capture,
+            || Ok(()),
+            |_| Ok(())
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(call("steps.cancel", json!({})).unwrap()["steps"], 1);
+    }
+
+    #[test]
+    fn caption_failure_after_click_preserves_step_and_reports_completed_input() {
+        let _test = TEST_LOCK.lock().unwrap();
+        *GUIDE.lock().unwrap() = None;
+        call("steps.start", json!({})).unwrap();
+        let mut clicked = false;
+        let error = click_with_step_and_capture(
+            Some(true),
+            (2, 3),
+            false,
+            Some("Button".into()),
+            |point, right, description| {
+                Ok(stepcap::Step {
+                    frame: Frame::new(4, 4),
+                    area: Rect::new(0, 0, 4, 4),
+                    mapping: None,
+                    click: point,
+                    click_precise: None,
+                    right,
+                    description: description.unwrap(),
+                })
+            },
+            || {
+                clicked = true;
+                Ok(())
+            },
+            |_| Err(internal("caption history is full")),
+        )
+        .unwrap_err();
+        assert!(clicked);
+        assert!(error.message.contains("click and guide step succeeded"));
+        assert!(error.message.contains("caption history is full"));
         assert_eq!(call("steps.cancel", json!({})).unwrap()["steps"], 1);
     }
 }

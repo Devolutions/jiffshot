@@ -15,6 +15,10 @@ pub use imp::{capture_audio, capture_audio_cancellable, startup, AudioCapture, R
 #[path = "media/post.rs"]
 pub mod post;
 
+#[doc(hidden)]
+#[path = "media/mp4.rs"]
+pub mod mp4;
+
 pub type Result<T> = std::result::Result<T, String>;
 
 pub const HNS_PER_SECOND: i64 = 10_000_000;
@@ -37,7 +41,7 @@ impl VideoSpec {
             .saturating_mul(u64::from(h))
             .saturating_mul(u64::from(fps))
             / 6)
-            .clamp(1_500_000, 40_000_000) as u32;
+        .clamp(1_500_000, 40_000_000) as u32;
         VideoSpec {
             width: w,
             height: h,

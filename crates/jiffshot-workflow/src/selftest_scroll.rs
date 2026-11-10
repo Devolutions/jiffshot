@@ -161,6 +161,43 @@ fn open_window() -> Rect {
     Rect::new(p.x, p.y, W, H)
 }
 
+#[cfg(all(test, feature = "test-control"))]
+pub(crate) struct RecordingTestWindow {
+    pub(crate) rect: Rect,
+    hwnd: isize,
+}
+
+#[cfg(all(test, feature = "test-control"))]
+impl RecordingTestWindow {
+    pub(crate) fn open() -> std::io::Result<Self> {
+        TOP.store(0, Ordering::Relaxed);
+        HWND_.store(0, Ordering::Release);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let rect = open_window();
+            let _ = sender.send((rect, HWND_.load(Ordering::Acquire)));
+        });
+        let (rect, hwnd) = receiver
+            .recv_timeout(std::time::Duration::from_secs(8))
+            .map_err(std::io::Error::other)?;
+        Ok(Self { rect, hwnd })
+    }
+
+    pub(crate) fn scroll(&self, top: i32) {
+        TOP.store(top.clamp(0, PAGE_H - H), Ordering::Relaxed);
+        // SAFETY: this is the live test window created by open_window.
+        unsafe { InvalidateRect(self.hwnd as HWND, std::ptr::null(), 0) };
+    }
+}
+
+#[cfg(all(test, feature = "test-control"))]
+impl Drop for RecordingTestWindow {
+    fn drop(&mut self) {
+        // SAFETY: this is the test window created by open_window.
+        unsafe { PostMessageW(self.hwnd as HWND, WM_CLOSE, 0, 0) };
+    }
+}
+
 pub fn run(dir: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let rect = open_window();

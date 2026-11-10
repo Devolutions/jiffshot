@@ -5,9 +5,10 @@
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::POINT;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, VkKeyScanW, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+    SendInput, VkKeyScanW, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_HWHEEL,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
 
@@ -42,16 +43,45 @@ fn send(inputs: &[INPUT]) -> bool {
         return true;
     }
     // SAFETY: well-formed inputs, count and size passed alongside.
-    let sent = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
+    let sent = unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
     sent as usize == inputs.len()
 }
 
 fn mouse(flags: u32, data: i32) -> INPUT {
-    INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: data as u32, dwFlags: flags, time: 0, dwExtraInfo: 0 } } }
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: data as u32,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
 }
 
 fn key(vk: u16, scan: u16, flags: u32) -> INPUT {
-    INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: 0 } } }
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
 }
 
 /// An input event of our own: Windows lets only the process that sent the
@@ -76,13 +106,21 @@ pub fn move_to(to: (i32, i32), glide: Duration) -> bool {
     })
 }
 
-fn move_to_with(to: (i32, i32), glide: Duration, mut set_cursor: impl FnMut(i32, i32) -> bool) -> bool {
+fn move_to_with(
+    to: (i32, i32),
+    glide: Duration,
+    mut set_cursor: impl FnMut(i32, i32) -> bool,
+) -> bool {
     let from = cursor();
     if !glide.is_zero() && from != to {
         let started = Instant::now();
         loop {
             let t = (started.elapsed().as_secs_f32() / glide.as_secs_f32()).min(1.0);
-            let e = if t < 0.5 { 2.0 * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(2) / 2.0 };
+            let e = if t < 0.5 {
+                2.0 * t * t
+            } else {
+                1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
+            };
             let x = from.0 + ((to.0 - from.0) as f32 * e).round() as i32;
             let y = from.1 + ((to.1 - from.1) as f32 * e).round() as i32;
             if !set_cursor(x, y) {
@@ -125,7 +163,10 @@ pub fn drag(from: (i32, i32), to: (i32, i32), button: Button, glide: Duration) -
     std::thread::sleep(Duration::from_millis(80));
     // A small first step, so the target sees a drag start.
     if !move_to(
-        (from.0 + (to.0 - from.0).signum() * 4, from.1 + (to.1 - from.1).signum() * 4),
+        (
+            from.0 + (to.0 - from.0).signum() * 4,
+            from.1 + (to.1 - from.1).signum() * 4,
+        ),
         Duration::ZERO,
     ) {
         let _ = send(&[mouse(up, 0)]);
@@ -143,7 +184,11 @@ pub fn drag(from: (i32, i32), to: (i32, i32), button: Button, glide: Duration) -
 
 /// Wheel `notches` (positive scrolls up, or right when `horizontal`).
 pub fn scroll(notches: i32, horizontal: bool) -> bool {
-    let flag = if horizontal { MOUSEEVENTF_HWHEEL } else { MOUSEEVENTF_WHEEL };
+    let flag = if horizontal {
+        MOUSEEVENTF_HWHEEL
+    } else {
+        MOUSEEVENTF_WHEEL
+    };
     let mut ok = true;
     for _ in 0..notches.unsigned_abs() {
         ok &= send(&[mouse(flag, notches.signum() * 120)]);
@@ -179,21 +224,40 @@ pub fn type_text(text: &str, delay: Duration) -> bool {
 }
 
 fn extended(vk: u16) -> bool {
-    matches!(vk, 0x21..=0x28 | 0x2D | 0x2E | 0x5B | 0x5C | 0x5D | 0x6F | 0x90 | 0xA3 | 0xA5)
+    matches!(
+        vk,
+        0x21..=0x28 | 0x2D | 0x2E | 0x5B | 0x5C | 0x5D | 0x6F | 0x90 | 0xA3 | 0xA5
+    )
 }
 
 fn tap(modifiers: &[u16], vk: u16) -> bool {
-    let flags = |vk: u16| if extended(vk) { KEYEVENTF_EXTENDEDKEY } else { 0 };
+    let flags = |vk: u16| {
+        if extended(vk) {
+            KEYEVENTF_EXTENDEDKEY
+        } else {
+            0
+        }
+    };
     let mut inputs: Vec<INPUT> = modifiers.iter().map(|&m| key(m, 0, flags(m))).collect();
     inputs.push(key(vk, 0, flags(vk)));
     inputs.push(key(vk, 0, flags(vk) | KEYEVENTF_KEYUP));
-    inputs.extend(modifiers.iter().rev().map(|&m| key(m, 0, flags(m) | KEYEVENTF_KEYUP)));
+    inputs.extend(
+        modifiers
+            .iter()
+            .rev()
+            .map(|&m| key(m, 0, flags(m) | KEYEVENTF_KEYUP)),
+    );
     if send(&inputs) {
         return true;
     }
 
     let mut releases = vec![key(vk, 0, flags(vk) | KEYEVENTF_KEYUP)];
-    releases.extend(modifiers.iter().rev().map(|&m| key(m, 0, flags(m) | KEYEVENTF_KEYUP)));
+    releases.extend(
+        modifiers
+            .iter()
+            .rev()
+            .map(|&m| key(m, 0, flags(m) | KEYEVENTF_KEYUP)),
+    );
     if !send(&releases) {
         crate::log("control: Windows rejected key-release cleanup after a partial key press");
     }
@@ -251,7 +315,10 @@ fn utf16_key_unit(character: char) -> Option<u16> {
 /// A key combination such as `ctrl+shift+s`, `alt+f4` or `enter`: modifier
 /// keys plus one key.
 pub fn parse_combo(combo: &str) -> Result<(Vec<u16>, u16), String> {
-    let parts: Vec<String> = combo.split('+').map(|p| p.trim().to_ascii_lowercase()).collect();
+    let parts: Vec<String> = combo
+        .split('+')
+        .map(|p| p.trim().to_ascii_lowercase())
+        .collect();
     if parts.iter().any(String::is_empty) {
         return Err(format!("bad key combination {combo:?}"));
     }
@@ -284,7 +351,9 @@ pub fn parse_combo(combo: &str) -> Result<(Vec<u16>, u16), String> {
         };
         if i + 1 < parts.len() {
             if !matches!(vk, 0x10 | 0x11 | 0x12 | 0x5B) {
-                return Err(format!("{part:?} is not a modifier (ctrl, shift, alt, win) in {combo:?}"));
+                return Err(format!(
+                    "{part:?} is not a modifier (ctrl, shift, alt, win) in {combo:?}"
+                ));
             }
             if modifiers.contains(&vk) {
                 return Err(format!("duplicate modifier {part:?} in {combo:?}"));
@@ -320,7 +389,10 @@ mod tests {
 
     #[test]
     fn combos_parse_to_modifiers_and_a_key() {
-        assert_eq!(parse_combo("ctrl+shift+s").unwrap(), (vec![0x11, 0x10], b'S' as u16));
+        assert_eq!(
+            parse_combo("ctrl+shift+s").unwrap(),
+            (vec![0x11, 0x10], b'S' as u16)
+        );
         assert_eq!(parse_combo("Alt+F4").unwrap(), (vec![0x12], 0x73));
         assert_eq!(parse_combo("enter").unwrap(), (vec![], 0x0D));
         assert_eq!(parse_combo("win+up").unwrap(), (vec![0x5B], 0x26));
