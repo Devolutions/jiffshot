@@ -293,7 +293,7 @@ Save the current document as a `.jsd` first if its edits cannot be autosaved.
 | `Ctrl+P` / `Ctrl+W` | Print / Close current capture |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / Redo |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / Cut / Paste selected objects or image regions |
-| `Ctrl+A` / `Ctrl+D` / `Ctrl+Shift+I` | Select the whole image in Select Region mode or all annotations in Move mode / Deselect / Invert selection |
+| `Ctrl+A` / `Ctrl+D` / `Ctrl+Shift+I` | Select the whole image (in any tool) / Deselect / Invert selection (with nothing selected, selects every annotation) |
 | `Ctrl+Shift+G` / `Ctrl+Shift+U` | Group / Ungroup selected objects |
 | `Ctrl+Shift+F` / `Ctrl+Shift+B` | Bring forward / Send backward |
 | `Ctrl+T` / `Ctrl+Shift+T` | Flatten selected objects / Flatten all objects into background |
@@ -314,8 +314,8 @@ only** omits annotations. Annotations remain separate and editable. Cutting a
 region that overlaps annotations is blocked to protect them; select annotations
 with **Move** to edit or delete them. To cut across annotations, explicitly
 flatten them first with **Flatten all**. Cut removes a safe region only after
-copying succeeds, and Undo restores it. `Ctrl+A` selects the whole image in **Select Region**
-mode and all annotations in **Move** mode. Pan with the middle or right mouse
+copying succeeds, and Undo restores it. `Ctrl+A` selects the whole image in any tool, so
+`Ctrl+C` then copies it flattened with its annotations. Pan with the middle or right mouse
 button; Alt-drag pans with other tools. With nothing selected, **Move**, Arrow,
 Line, and Shape show canvas resize handles at every edge and corner. **Select Region**
 leaves the image edges free for drawing a region.

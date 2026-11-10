@@ -43,8 +43,8 @@ pub enum Tool {
 }
 
 pub const TOOLS: &[Tool] = &[
-    Tool::Move,
     Tool::Select,
+    Tool::Move,
     Tool::Arrow,
     Tool::Line,
     Tool::Shape,
