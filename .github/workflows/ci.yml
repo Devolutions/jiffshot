@@ -312,6 +312,7 @@ jobs:
       - name: Test Linux package builder and contents
         env:
           JIFFSHOT_TEST_FORMATS: tar.gz,deb
+          JIFFSHOT_TEST_STATIC_HOST: '1'
         run: pwsh -NoProfile -File package/linux/run-tests.ps1
 
       - uses: actions/upload-artifact@v7
@@ -418,6 +419,7 @@ jobs:
         env:
           JIFFSHOT_TEST_FORMATS: rpm
           JIFFSHOT_PACKAGE_DIR: package/out/linux-rpm
+          JIFFSHOT_TEST_STATIC_HOST: '1'
         run: pwsh -NoProfile -File package/linux/run-tests.ps1
 
       - uses: actions/upload-artifact@v7

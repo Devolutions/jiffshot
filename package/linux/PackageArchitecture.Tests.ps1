@@ -625,6 +625,17 @@ Describe 'Architecture workflows' {
         $job | Should -Match 'build\.ps1 .* -StaticHost'
     }
 
+    It '<JobName> selects static-host package content checks' -ForEach @(
+        @{ JobName = 'linux'; StepName = 'Test Linux package builder and contents' }
+        @{ JobName = 'linux-rpm'; StepName = 'Test RPM builder and contents' }
+    ) {
+        $job = Get-WorkflowJob $JobName
+        $pattern = '(?s)- name: ' + [regex]::Escape($StepName) + '(.*?)(?=\n      - )'
+        $step = [regex]::Match($job, $pattern).Groups[1].Value
+        $step | Should -Match "(?m)^\s*JIFFSHOT_TEST_STATIC_HOST: '1'\s*$"
+        $step | Should -Match 'pwsh -NoProfile -File package/linux/run-tests\.ps1'
+    }
+
     It 'Fedora runs in a container' {
         (Get-WorkflowJob 'linux-rpm').Contains('container: fedora:43') | Should -BeTrue
     }

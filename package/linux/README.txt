@@ -286,11 +286,11 @@ Settings and captures live in the user's XDG config/Pictures directories;
 installing or removing a package does not modify or delete them.
 
 Building packages from the repository on native Ubuntu 24.04 x64 or ARM64:
-  cargo build --release --locked -p jiffshot
+  cargo build --release --locked -p jiffshot --features static-host
   sudo apt install binutils dpkg-dev desktop-file-utils
   # Also install PowerShell 7.4 or newer (pwsh); see
   # https://learn.microsoft.com/powershell/scripting/install/install-ubuntu
-  pwsh package/linux/build.ps1 -Format tar.gz,deb
+  pwsh package/linux/build.ps1 -Format tar.gz,deb -StaticHost
 
 Build the Fedora binary and RPM on native Fedora 43 on each architecture
 (or in a Fedora 43 container on a matching native runner):
@@ -305,10 +305,10 @@ Build the Fedora binary and RPM on native Fedora 43 on each architecture
   sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-43.noarch.rpm
   sudo dnf swap ffmpeg-free ffmpeg --allowerasing
   sudo dnf install gstreamer1-plugins-ugly gstreamer1-plugins-bad-freeworld
-  cargo build --release --locked -p jiffshot
+  cargo build --release --locked -p jiffshot --features static-host
   # Also install PowerShell 7.4 or newer (pwsh); see
   # https://learn.microsoft.com/powershell/scripting/install/install-rhel
-  pwsh package/linux/build.ps1 -Format rpm -OutputDir package/out/linux-rpm
+  pwsh package/linux/build.ps1 -Format rpm -OutputDir package/out/linux-rpm -StaticHost
 
 The CI Fedora container explicitly installs media plugins, PipeWire's GStreamer
 source, English OCR data and DejaVu Sans fonts before workspace tests; development
@@ -329,7 +329,9 @@ Outputs default to package/out/linux. The default formats are tar.gz and DEB.
 Select -Format rpm for the native Fedora build. DEB and RPM cannot be selected
 together, and the builder rejects Ubuntu's incompatible OCR ABI for Fedora RPMs.
 Fedora inputs must require libleptonica.so.6 and must not require liblept.so.5.
-All four inputs must be valid little-endian ELF64 for one supported architecture;
+The default shared-host mode requires the executable and three companion
+libraries; -StaticHost packages only the static-host executable. All selected
+inputs must be valid little-endian ELF64 for one supported architecture;
 every private library must be a shared object. -Arch x64 or -Arch arm64 is an
 optional assertion against actual ELF headers, never a relabeling option.
 Tar names/top directories use linux-x64 or linux-arm64; DEB architecture and
@@ -346,9 +348,10 @@ Package tests (Pester 5):
   # Unit/regression tests only, no compiled application required:
   pwsh package/linux/run-tests.ps1 -ExcludeTag PackageContent
   # Real packages from native builds; use JIFFSHOT_TEST_ARCH=arm64 on ARM64:
-  JIFFSHOT_TEST_FORMATS=tar.gz,deb pwsh package/linux/run-tests.ps1
-  JIFFSHOT_TEST_FORMATS=rpm JIFFSHOT_PACKAGE_DIR=package/out/linux-rpm \
+  JIFFSHOT_TEST_STATIC_HOST=1 JIFFSHOT_TEST_FORMATS=tar.gz,deb pwsh package/linux/run-tests.ps1
+  JIFFSHOT_TEST_STATIC_HOST=1 JIFFSHOT_TEST_FORMATS=rpm JIFFSHOT_PACKAGE_DIR=package/out/linux-rpm \
     pwsh package/linux/run-tests.ps1
+  # Omit JIFFSHOT_TEST_STATIC_HOST for packages built with the shared host.
   # Content tests default to the native machine; CI explicitly asserts the arch.
   # Synthetic ARM64 ELF unit tests do not execute an ARM64 runtime.
 CI also verifies clean installation/removal and desktop/MIME registration on
