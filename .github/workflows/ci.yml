@@ -1169,7 +1169,6 @@ jobs:
           Get-Item -LiteralPath $output | Format-Table Name, Length
 
       - name: Sign MSIX
-        id: sign_msix
         if: github.event_name != 'pull_request' && inputs.signing_environment != ''
         uses: ./.github/actions/sign
         env:
@@ -1183,43 +1182,6 @@ jobs:
         with:
           install_test_signing_root: 'false'
           files: msix/*.msix
-
-      - name: Diagnose failed test MSIX signing
-        if: ${{ failure() && inputs.signing_environment == 'publish-test' && steps.sign_msix.outcome == 'failure' }}
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $packages = @(Get-ChildItem -LiteralPath msix -Filter '*.msix' -File)
-          if ($packages.Count -ne 1) { throw "Expected one MSIX, found $($packages.Count)" }
-          $sdkBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
-          $signTool = Get-ChildItem -LiteralPath $sdkBin -Directory |
-            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'x64\signtool.exe') } |
-            Sort-Object { [version]$_.Name } -Descending |
-            Select-Object -First 1 |
-            ForEach-Object { Join-Path $_.FullName 'x64\signtool.exe' }
-          if (-not $signTool) { throw "Windows SDK SignTool.exe was not found under $sdkBin" }
-          & $signTool verify /pa /v /debug $packages[0].FullName
-          $verifyExitCode = $LASTEXITCODE
-          Write-Output "SignTool verification exit code: $verifyExitCode"
-          $LASTEXITCODE = 0
-          foreach ($log in @('Microsoft-Windows-AppxPackaging/Operational', 'Microsoft-Windows-AppXDeploymentServer/Operational')) {
-            $eventErrors = @()
-            $events = @(Get-WinEvent -FilterHashtable @{ LogName = $log; StartTime = (Get-Date).AddMinutes(-15) } `
-              -ErrorAction SilentlyContinue -ErrorVariable eventErrors)
-            foreach ($eventError in $eventErrors) {
-              Write-Warning "Could not read ${log}: $eventError"
-            }
-            $events | Select-Object -First 20 TimeCreated, Id, Message | Format-List
-          }
-
-      - name: Upload failed test MSIX for diagnosis
-        if: ${{ failure() && inputs.signing_environment == 'publish-test' && steps.sign_msix.outcome == 'failure' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: failed-test-msix-${{ matrix.rid }}
-          path: msix/*.msix
-          if-no-files-found: error
-          retention-days: 1
 
       - name: Sign a temporary MSIX for installation testing
         if: matrix.test && (github.event_name == 'pull_request' || inputs.signing_environment == '')

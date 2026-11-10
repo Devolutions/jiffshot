@@ -25,27 +25,27 @@ function Assert-Throws([scriptblock]$Action, [string]$ExpectedMessage) {
 
 $subject = "CN=Example (TEST ONLY), O=Example, S=Qu$([char]0xE9)bec"
 $valid = [pscustomobject]@{
-    Status = 'Valid'
+    Status = [System.Management.Automation.SignatureStatus]::Valid
     StatusMessage = 'Valid'
     SignerCertificate = [pscustomobject]@{ Subject = $subject }
 }
 $untrusted = [pscustomobject]@{
-    Status = 'UnknownError'
+    Status = [System.Management.Automation.SignatureStatus]::UnknownError
     StatusMessage = 'The certificate root is not trusted.'
     SignerCertificate = [pscustomobject]@{ Subject = $subject }
 }
 $unsigned = [pscustomobject]@{
-    Status = 'NotSigned'
+    Status = [System.Management.Automation.SignatureStatus]::NotSigned
     StatusMessage = 'The file is not signed.'
     SignerCertificate = $null
 }
 $missingSigner = [pscustomobject]@{
-    Status = 'Valid'
+    Status = [System.Management.Automation.SignatureStatus]::Valid
     StatusMessage = 'Valid'
     SignerCertificate = $null
 }
 $missingSubject = [pscustomobject]@{
-    Status = 'Valid'
+    Status = [System.Management.Automation.SignatureStatus]::Valid
     StatusMessage = 'Valid'
     SignerCertificate = [pscustomobject]@{ Subject = ' ' }
 }
@@ -70,6 +70,8 @@ $build = [regex]::Match($msixJob, '(?ms)^      - name: Build the MSIX\r?\n.*?(?=
 $sign = [regex]::Match($msixJob, '(?ms)^      - name: Sign MSIX\r?\n.*?(?=^      - |\z)')
 if (-not $login.Success -or -not $trust.Success -or -not $build.Success -or -not $sign.Success -or
     $login.Index -ge $trust.Index -or $trust.Index -ge $build.Index -or $build.Index -ge $sign.Index -or
+    $login.Value -notmatch "if: inputs\.signing_environment == 'publish-test'" -or
+    $login.Value -notmatch 'uses: azure/login@v3' -or
     $trust.Value -notmatch "if: inputs\.signing_environment == 'publish-test'" -or
     $trust.Value -notmatch 'uses: \./\.github/actions/trust-test-signing-root' -or
     $build.Value -notmatch 'SIGNING_REQUIRED:' -or
