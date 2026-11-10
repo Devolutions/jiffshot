@@ -15,8 +15,8 @@ function Get-MsixPublisher {
         return $Signature.SignerCertificate.Subject
     }
 
-    if ($RequireSigned) {
-        throw "Cannot determine the MSIX publisher from an invalid executable signature: $($Signature.StatusMessage)"
+    if (-not $RequireSigned -and $Signature.Status -eq 'NotSigned') {
+        return 'CN=Devolutions Jiffshot CI'
     }
-    return 'CN=Devolutions Jiffshot CI'
+    throw "Cannot determine the MSIX publisher from the executable signature ($($Signature.Status)): $($Signature.StatusMessage)"
 }

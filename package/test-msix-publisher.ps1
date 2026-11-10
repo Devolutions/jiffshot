@@ -39,6 +39,11 @@ $unsigned = [pscustomobject]@{
     StatusMessage = 'The file is not signed.'
     SignerCertificate = $null
 }
+$tampered = [pscustomobject]@{
+    Status = [System.Management.Automation.SignatureStatus]::HashMismatch
+    StatusMessage = 'The file hash does not match the signature.'
+    SignerCertificate = [pscustomobject]@{ Subject = $subject }
+}
 $missingSigner = [pscustomobject]@{
     Status = [System.Management.Automation.SignatureStatus]::Valid
     StatusMessage = 'Valid'
@@ -54,11 +59,11 @@ foreach ($requireSigned in @($true, $false)) {
     Assert-Equal (Get-MsixPublisher -Signature $valid -RequireSigned $requireSigned) $subject
     Assert-Throws { Get-MsixPublisher -Signature $missingSigner -RequireSigned $requireSigned } 'no signer subject'
     Assert-Throws { Get-MsixPublisher -Signature $missingSubject -RequireSigned $requireSigned } 'no signer subject'
+    Assert-Throws { Get-MsixPublisher -Signature $untrusted -RequireSigned $requireSigned } 'The certificate root is not trusted.'
+    Assert-Throws { Get-MsixPublisher -Signature $tampered -RequireSigned $requireSigned } 'The file hash does not match the signature.'
 }
 Assert-Equal (Get-MsixPublisher -Signature $unsigned -RequireSigned $false) 'CN=Devolutions Jiffshot CI'
-Assert-Equal (Get-MsixPublisher -Signature $untrusted -RequireSigned $false) 'CN=Devolutions Jiffshot CI'
 Assert-Throws { Get-MsixPublisher -Signature $unsigned -RequireSigned $true } 'The file is not signed.'
-Assert-Throws { Get-MsixPublisher -Signature $untrusted -RequireSigned $true } 'The certificate root is not trusted.'
 
 $workflow = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '../.github/workflows/ci.yml'))
 $jobStart = $workflow.IndexOf("`n  msix:")
