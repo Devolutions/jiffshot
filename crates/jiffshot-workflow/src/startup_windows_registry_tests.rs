@@ -362,7 +362,7 @@ fn private_registry_child() {
     let packaged = SystemService {
         backend: BackendKind::Packaged,
         exe: PathBuf::from(format!(
-            "{package_root}\\Devolutions.Jiffshot_0.6.0.0_x64__8wekyb3d8bbwe\\jiffshot.exe"
+            "{package_root}\\Devolutions.Jiffshot_0.7.0.0_x64__8wekyb3d8bbwe\\jiffshot.exe"
         )),
     };
     put_command(&format!("\"{old_exe}\""));
