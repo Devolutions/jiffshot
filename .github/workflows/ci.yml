@@ -1078,11 +1078,33 @@ jobs:
           name: jiffshot-win-x64
           path: logo-bin
 
+      - name: Test MSIX publisher selection
+        shell: pwsh
+        run: ./package/test-msix-publisher.ps1
+
+      - name: Azure login for test MSIX publisher
+        if: inputs.signing_environment == 'publish-test'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Trust test signing root for MSIX publisher
+        if: inputs.signing_environment == 'publish-test'
+        uses: ./.github/actions/trust-test-signing-root
+        with:
+          endpoint: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          account_name: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          profile_name: ${{ secrets.TRUSTED_SIGNING_PROFILE_NAME }}
+          certificate_path: ${{ runner.temp }}\artifact-signing-test-root.cer
+
       - name: Build the MSIX
         shell: pwsh
         env:
           EXPECTED_VERSION: ${{ inputs.version }}
           PACKAGE_ARCHITECTURE: ${{ matrix.architecture }}
+          SIGNING_REQUIRED: ${{ github.event_name != 'pull_request' && inputs.signing_environment != '' }}
         run: |
           $ErrorActionPreference = 'Stop'
           $cargoToml = Get-Content -LiteralPath Cargo.toml -Raw
@@ -1122,12 +1144,9 @@ jobs:
               throw "Failed to generate MSIX logo $($logo.Name)"
             }
           }
+          . ./package/MsixPublisher.ps1
           $signature = Get-AuthenticodeSignature -LiteralPath $exe
-          $publisher = if ($signature.Status -eq 'Valid' -and $null -ne $signature.SignerCertificate) {
-            $signature.SignerCertificate.Subject
-          } else {
-            'CN=Devolutions Jiffshot CI'
-          }
+          $publisher = Get-MsixPublisher -Signature $signature -RequireSigned ($env:SIGNING_REQUIRED -eq 'true')
           [xml]$manifest = Get-Content -LiteralPath package\AppxManifest.xml -Raw
           $namespace = [System.Xml.XmlNamespaceManager]::new($manifest.NameTable)
           $namespace.AddNamespace('appx', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
@@ -1162,7 +1181,7 @@ jobs:
           TRUSTED_SIGNING_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_PROFILE_NAME }}
           TRUSTED_SIGNING_TIMESTAMP_SERVER: ${{ vars.TRUSTED_SIGNING_TIMESTAMP_SERVER || 'http://timestamp.acs.microsoft.com/' }}
         with:
-          install_test_signing_root: ${{ inputs.signing_environment == 'publish-test' }}
+          install_test_signing_root: 'false'
           files: msix/*.msix
 
       - name: Diagnose failed test MSIX signing
