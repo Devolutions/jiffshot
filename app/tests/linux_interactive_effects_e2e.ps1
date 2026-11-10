@@ -140,7 +140,7 @@ function Start-Watermark {
 
 function Add-Annotation {
     param([Parameter(Mandatory)][JiffshotE2E.X11Driver]$Driver)
-    Invoke-E2EHotkey $Driver '2'
+    Invoke-E2EHotkey $Driver '3'
     $Driver.Move(310, 340)
     $Driver.Button(1, $true)
     $Driver.Move(480, 420)
