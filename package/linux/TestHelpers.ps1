@@ -4,17 +4,31 @@ $script:PackageModule = Join-Path $PSScriptRoot 'JiffshotLinuxPackage.psm1'
 $script:Assets = $PSScriptRoot
 $script:Root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $script:RuntimeFiles = @('jiffshot', 'librustolonia_host.so', 'libSkiaSharp.so', 'libHarfBuzzSharp.so')
-$script:ExpectedFiles = @(
-    $script:RuntimeFiles | ForEach-Object { "lib/jiffshot/$_" }
-    'bin/jiffshot'
-    'share/applications/com.devolutions.Jiffshot.desktop'
-    'share/icons/hicolor/scalable/apps/com.devolutions.Jiffshot.svg'
-    'share/mime/packages/com.devolutions.Jiffshot.xml'
-    'share/doc/jiffshot/README-linux.txt'
-    'share/doc/jiffshot/README.md'
-    'share/doc/jiffshot/LICENSE-MIT'
-    'share/doc/jiffshot/LICENSE-APACHE'
-) | Sort-Object -CaseSensitive
+
+function Get-ExpectedPackageRuntimeFiles([string]$StaticHostSetting) {
+    switch -CaseSensitive ($StaticHostSetting) {
+        '' { $script:RuntimeFiles }
+        '0' { $script:RuntimeFiles }
+        '1' { 'jiffshot' }
+        default { throw "JIFFSHOT_TEST_STATIC_HOST must be '0' or '1' (or unset)" }
+    }
+}
+
+function Get-ExpectedPackageFiles([string[]]$RuntimeFiles) {
+    @(
+        $RuntimeFiles | ForEach-Object { "lib/jiffshot/$_" }
+        'bin/jiffshot'
+        'share/applications/com.devolutions.Jiffshot.desktop'
+        'share/icons/hicolor/scalable/apps/com.devolutions.Jiffshot.svg'
+        'share/mime/packages/com.devolutions.Jiffshot.xml'
+        'share/doc/jiffshot/README-linux.txt'
+        'share/doc/jiffshot/README.md'
+        'share/doc/jiffshot/LICENSE-MIT'
+        'share/doc/jiffshot/LICENSE-APACHE'
+    ) | Sort-Object -CaseSensitive
+}
+
+$script:ExpectedFiles = @(Get-ExpectedPackageFiles -RuntimeFiles $script:RuntimeFiles)
 
 function New-ElfHeader([int]$Machine = 62, [int]$ElfType = 3) {
     # Synthetic ELF64 header, never an executable runtime fixture.

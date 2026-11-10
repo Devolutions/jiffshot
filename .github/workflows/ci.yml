@@ -77,7 +77,7 @@ jobs:
       - name: Build
         env:
           JIFFSHOT_VERSION: ${{ inputs.version }}
-        run: cargo build --release --locked -p jiffshot -p jiffshot-cli --target ${{ matrix.target }}
+        run: cargo build --release --locked -p jiffshot -p jiffshot-cli --features jiffshot/static-host --target ${{ matrix.target }}
 
       - name: Build Windows static host
         timeout-minutes: 20
@@ -132,11 +132,10 @@ jobs:
           EXPECTED_VERSION: ${{ inputs.version }}
         run: |
           $ErrorActionPreference = 'Stop'
-          # The build script puts the Rustolonia host next to jiffshot.exe.
           $out = "target/${{ matrix.target }}/release"
           $dir = "jiffshot-${{ matrix.rid }}"
           New-Item -ItemType Directory -Path $dir | Out-Null
-          Copy-Item "$out/jiffshot.exe", "$out/jiffshot-cli.exe", "$out/*.dll", "app/README-portable.txt" -Destination $dir
+          Copy-Item "$out/jiffshot.exe", "$out/jiffshot-cli.exe", "app/README-portable.txt" -Destination $dir
           $cargoToml = Get-Content -LiteralPath Cargo.toml -Raw
           if ($cargoToml -notmatch '(?ms)^\[workspace\.package\].*?^\s*version\s*=\s*"(?<v>[0-9]+\.[0-9]+\.[0-9]+)"') {
             throw 'Could not read [workspace.package] version from Cargo.toml'
@@ -169,18 +168,7 @@ jobs:
           if ($exeInfo.ProductVersion -ne $expectedVersion) {
             throw "jiffshot.exe ProductVersion '$($exeInfo.ProductVersion)' does not match '$expectedVersion'"
           }
-          if ($cargoToml -notmatch 'rustolonia\s*=\s*\{[^}]*tag\s*=\s*"v(?<rv>[0-9]+\.[0-9]+\.[0-9]+)"') {
-            throw 'Could not read rustolonia tag from Cargo.toml'
-          }
-          $rustoloniaVersion = $Matches['rv']
-          $hostInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path "$dir/rustolonia_host.dll"))
-          if ($hostInfo.FileVersion -ne "$rustoloniaVersion.0") {
-            throw "rustolonia_host.dll FileVersion '$($hostInfo.FileVersion)' does not match '$rustoloniaVersion.0'"
-          }
-          if (-not $hostInfo.ProductVersion.StartsWith($rustoloniaVersion)) {
-            throw "rustolonia_host.dll ProductVersion '$($hostInfo.ProductVersion)' does not start with '$rustoloniaVersion'"
-          }
-          Write-Host "Version OK: jiffshot.exe FileVersion=$($exeInfo.FileVersion) ProductVersion=$($exeInfo.ProductVersion); rustolonia_host.dll FileVersion=$($hostInfo.FileVersion)"
+          Write-Host "Version OK: jiffshot.exe FileVersion=$($exeInfo.FileVersion) ProductVersion=$($exeInfo.ProductVersion)"
           Get-ChildItem $dir | Format-Table Name, Length
 
       - name: Sign portable binaries
@@ -199,7 +187,6 @@ jobs:
           files: |
             jiffshot-${{ matrix.rid }}\jiffshot.exe
             jiffshot-${{ matrix.rid }}\jiffshot-cli.exe
-            jiffshot-${{ matrix.rid }}\rustolonia_host.dll
 
       - uses: actions/upload-artifact@v7
         with:
@@ -295,7 +282,7 @@ jobs:
         run: cargo clippy --locked --no-deps -p jiffshot --all-targets -- -D warnings
 
       - name: Build Linux app
-        run: cargo build --release --locked -p jiffshot
+        run: cargo build --release --locked -p jiffshot --features static-host
 
       - name: Test Linux editor selection
         run: |
@@ -320,11 +307,12 @@ jobs:
             -Binary "$root/jiffshot" -RuntimeDir "$root"
 
       - name: Package Ubuntu tar.gz and DEB
-        run: pwsh -NoProfile -File package/linux/build.ps1 -Arch "${{ matrix.arch }}" -Format tar.gz,deb
+        run: pwsh -NoProfile -File package/linux/build.ps1 -Arch "${{ matrix.arch }}" -Format tar.gz,deb -StaticHost
 
       - name: Test Linux package builder and contents
         env:
           JIFFSHOT_TEST_FORMATS: tar.gz,deb
+          JIFFSHOT_TEST_STATIC_HOST: '1'
         run: pwsh -NoProfile -File package/linux/run-tests.ps1
 
       - uses: actions/upload-artifact@v7
@@ -422,15 +410,16 @@ jobs:
         run: cargo test --release --locked --workspace
 
       - name: Build against Fedora runtime libraries
-        run: cargo build --release --locked -p jiffshot
+        run: cargo build --release --locked -p jiffshot --features static-host
 
       - name: Package native Fedora RPM
-        run: pwsh -NoProfile -File package/linux/build.ps1 -Arch "${{ matrix.arch }}" -Format rpm -OutputDir package/out/linux-rpm
+        run: pwsh -NoProfile -File package/linux/build.ps1 -Arch "${{ matrix.arch }}" -Format rpm -OutputDir package/out/linux-rpm -StaticHost
 
       - name: Test RPM builder and contents
         env:
           JIFFSHOT_TEST_FORMATS: rpm
           JIFFSHOT_PACKAGE_DIR: package/out/linux-rpm
+          JIFFSHOT_TEST_STATIC_HOST: '1'
         run: pwsh -NoProfile -File package/linux/run-tests.ps1
 
       - uses: actions/upload-artifact@v7
@@ -511,7 +500,7 @@ jobs:
                 test "$(rpm -q --queryformat "%{ARCH}" jiffshot)" = "$3"
               fi
               ln -s /opt/microsoft/powershell/7/pwsh /usr/local/bin/pwsh
-              pwsh -NoProfile -File /work/package/linux/validate-installed.ps1 -Arch "$4"
+              pwsh -NoProfile -File /work/package/linux/validate-installed.ps1 -Arch "$4" -StaticHost
               grep -F "application/x-jiffshot=" /usr/share/applications/mimeinfo.cache
               grep -F "application/x-jiffshot" /usr/share/mime/globs2
               mkdir -p /root/.config/Jiffshot
@@ -544,7 +533,6 @@ jobs:
       CARGO_TERM_COLOR: always
       MACOSX_DEPLOYMENT_TARGET: '13.0'
       JIFFSHOT_VERSION: ${{ inputs.version }}
-      RUSTOLONIA_HOST_LIB: ${{ github.workspace }}/target/${{ matrix.target }}/release/librustolonia_host.dylib
     steps:
       - uses: actions/checkout@v7
 
@@ -584,7 +572,7 @@ jobs:
           restore-keys: macos-${{ matrix.arch }}-
 
       - name: Build
-        run: cargo build --release --locked -p jiffshot -p jiffshot-cli --target ${{ matrix.target }}
+        run: cargo build --release --locked -p jiffshot -p jiffshot-cli --features jiffshot/static-host --target ${{ matrix.target }}
 
       - name: Test
         if: matrix.arch == 'arm64'
@@ -736,7 +724,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          args=(-Binary "target/${{ matrix.target }}/release/jiffshot" -Output macos-package -Arch "${{ matrix.arch }}" -RequireNativePopupGate -RequireNativeTermination -RequireNativeFileDrag)
+          args=(-Binary "target/${{ matrix.target }}/release/jiffshot" -Output macos-package -Arch "${{ matrix.arch }}" -StaticHost -RequireNativePopupGate -RequireNativeTermination -RequireNativeFileDrag)
           if [[ "$SIGNING_ENABLED" == true ]]; then
             args+=(-Identity "$IDENTITY")
             if [[ "$SIGNING_KIND" == legacy ]]; then
@@ -861,17 +849,12 @@ jobs:
           trap - EXIT
           rmdir "$mountpoint"
           printf '%s\n' "$status" > macos-package/signing.txt
-          (cd "target/${{ matrix.target }}/release" && shasum -a 256 \
-            librustolonia_host.dylib libAvaloniaNative.dylib libSkiaSharp.dylib libHarfBuzzSharp.dylib) \
-            > macos-package/host-SHA256SUMS.txt
-
       - uses: actions/upload-artifact@v7
         with:
           name: jiffshot-macos-${{ matrix.arch }}
           path: |
             macos-package/*.dmg
             macos-package/signing.txt
-            macos-package/host-SHA256SUMS.txt
           if-no-files-found: error
 
       - name: Remove temporary legacy signing keychain
@@ -1013,7 +996,6 @@ jobs:
         run: |
           $msi = (Get-ChildItem msi/*.msi).FullName
           $exe = "$env:ProgramFiles\Devolutions\Jiffshot\jiffshot.exe"
-          $hostDll = "$env:ProgramFiles\Devolutions\Jiffshot\rustolonia_host.dll"
           $cli = "$env:ProgramFiles\Devolutions\Jiffshot\jiffshot-cli.exe"
           function Invoke-Msiexec($arguments) {
             $p = Start-Process msiexec.exe -ArgumentList $arguments -Wait -PassThru
@@ -1021,14 +1003,13 @@ jobs:
           }
           Invoke-Msiexec "/i `"$msi`" /qn /l*v msiexec.log"
           if (-not (Test-Path $exe)) { throw "$exe is missing" }
-          if (-not (Test-Path $hostDll)) { throw "the Rustolonia host is missing" }
           if (-not (Test-Path $cli)) { throw "$cli is missing" }
           # With no Jiffshot running, the CLI reports it as unavailable (exit code 3).
           $reply = & $cli status --no-launch | ConvertFrom-Json
           if ($LASTEXITCODE -ne 3 -or $reply.error.code -ne 'unavailable') { throw "jiffshot-cli status: exit $LASTEXITCODE, $($reply | ConvertTo-Json -Compress)" }
           $global:LASTEXITCODE = 0
           if ('${{ github.event_name }}' -ne 'pull_request' -and -not [string]::IsNullOrWhiteSpace($env:SIGNING_ENVIRONMENT)) {
-            foreach ($installedPath in @($exe, $cli, $hostDll)) {
+            foreach ($installedPath in @($exe, $cli)) {
               $sig = Get-AuthenticodeSignature -LiteralPath $installedPath
               if ($sig.Status -ne 'Valid' -or $null -eq $sig.SignerCertificate -or $null -eq $sig.TimeStamperCertificate) {
                 throw "Installed binary signature verification failed for ${installedPath}: $($sig.StatusMessage)"
@@ -1135,7 +1116,6 @@ jobs:
             Where-Object { $_.Name -in @('jiffshot.exe', 'jiffshot-cli.exe') -or $_.Extension -eq '.dll' })
           if (-not ($binaries | Where-Object { $_.Name -eq 'jiffshot.exe' })) { throw 'jiffshot.exe is missing from the build artifact' }
           if (-not ($binaries | Where-Object { $_.Name -eq 'jiffshot-cli.exe' })) { throw 'jiffshot-cli.exe is missing from the build artifact' }
-          if (-not ($binaries | Where-Object { $_.Name -eq 'rustolonia_host.dll' })) { throw 'rustolonia_host.dll is missing from the build artifact' }
           $binaries | Copy-Item -Destination $stage
           # Logo rendering is architecture-independent, but the ARM64 executable
           # cannot run on the x64 GitHub-hosted runner.

@@ -428,19 +428,20 @@ function Confirm-JiffshotElfBinary {
 function Confirm-JiffshotBuild {
     <#
     .SYNOPSIS
-    Validates the executable and every private runtime library, returning their shared architecture.
+    Validates the executable and the requested runtime libraries, returning their shared architecture.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$BuildDir,
-        [string]$Arch
+        [string]$Arch,
+        [string[]]$RuntimeFiles = $script:RuntimeFiles
     )
     if ($Arch -and $Arch -cnotin $script:Architectures.Keys) {
         throw (New-PackagingError "unsupported architecture assertion: '$Arch'; expected x64 or arm64")
     }
     $expected = if ($Arch) { $script:Architectures[$Arch] } else { $null }
     $architecture = Confirm-JiffshotElfBinary -Path (Join-Path $BuildDir 'jiffshot') -Expected $expected
-    foreach ($name in $script:RuntimeFiles | Select-Object -Skip 1) {
+    foreach ($name in $RuntimeFiles | Select-Object -Skip 1) {
         [void](Confirm-JiffshotElfBinary -Path (Join-Path $BuildDir $name) -Expected $architecture -Shared)
     }
     $architecture
@@ -494,13 +495,14 @@ function New-JiffshotPayload {
     param(
         [Parameter(Mandatory)][string]$BuildDir,
         [Parameter(Mandatory)][string]$Payload,
-        [object]$Architecture
+        [object]$Architecture,
+        [string[]]$RuntimeFiles = $script:RuntimeFiles
     )
-    $detected = Confirm-JiffshotBuild -BuildDir $BuildDir -Arch $(if ($Architecture) { $Architecture.Name })
+    $detected = Confirm-JiffshotBuild -BuildDir $BuildDir -Arch $(if ($Architecture) { $Architecture.Name }) -RuntimeFiles $RuntimeFiles
     $Payload = Resolve-FullPath $Payload
     $runtime = Join-Path $Payload 'lib/jiffshot'
     New-Directory $runtime -MustNotExist
-    foreach ($name in $script:RuntimeFiles) {
+    foreach ($name in $RuntimeFiles) {
         $destination = Join-Path $runtime $name
         [System.IO.File]::Copy((Join-Path $BuildDir $name), $destination, $true)
         Set-UnixMode $destination $script:Mode755
@@ -697,7 +699,8 @@ function New-JiffshotDeb {
         [Parameter(Mandatory)][string]$Payload,
         [Parameter(Mandatory)][string]$Work,
         [Parameter(Mandatory)][string]$Version,
-        [Parameter(Mandatory)][object]$Architecture
+        [Parameter(Mandatory)][object]$Architecture,
+        [string[]]$RuntimeFiles = $script:RuntimeFiles
     )
     $root = Join-Path $Work 'deb'
     Copy-DirectoryTree $Payload (Join-Path $root 'usr')
@@ -709,7 +712,7 @@ function New-JiffshotDeb {
         "Package: jiffshot`nArchitecture: $($Architecture.Deb)`nDescription: Jiffshot screen capture and editor`n")
     # Scan every ELF, including the runtime loaded with dlopen. System package
     # names and minimum symbol versions come from the build distro's shlibs data.
-    $scan = @('dpkg-shlibdeps', '-O') + @($script:RuntimeFiles | ForEach-Object { "-e$(Join-Path $root "usr/lib/jiffshot/$_")" })
+    $scan = @('dpkg-shlibdeps', '-O') + @($RuntimeFiles | ForEach-Object { "-e$(Join-Path $root "usr/lib/jiffshot/$_")" })
     $dependencies = ([string](Invoke-JiffshotNativeCommand -Command $scan -WorkingDirectory (Split-Path $metadata -Parent)).Stdout).Trim()
     $prefix = 'shlibs:Depends='
     if (-not $dependencies.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
@@ -816,7 +819,8 @@ function Invoke-JiffshotLinuxPackageBuild {
         [ValidateSet('tar.gz', 'deb', 'rpm', IgnoreCase = $false)]
         [string[]]$Format = @('tar.gz', 'deb'),
         [ValidateSet('x64', 'arm64', IgnoreCase = $false)]
-        [string]$Arch
+        [string]$Arch,
+        [switch]$StaticHost
     )
     if (-not (Test-JiffshotLinuxHost)) {
         throw (New-PackagingError 'run this packaging script on Linux (or in WSL)')
@@ -830,7 +834,8 @@ function Invoke-JiffshotLinuxPackageBuild {
         throw (New-PackagingError 'DEB and Fedora RPM require separate native builds; generate them in separate invocations')
     }
     $BuildDir = Resolve-FullPath $BuildDir
-    $architecture = Confirm-JiffshotBuild -BuildDir $BuildDir -Arch $Arch
+    $runtimeFiles = if ($StaticHost) { @('jiffshot') } else { $script:RuntimeFiles }
+    $architecture = Confirm-JiffshotBuild -BuildDir $BuildDir -Arch $Arch -RuntimeFiles $runtimeFiles
     Confirm-JiffshotPackagingTool -Format $formats
     if ($formats.Contains('rpm')) {
         Confirm-JiffshotRpmInput -BuildDir $BuildDir
@@ -841,7 +846,7 @@ function Invoke-JiffshotLinuxPackageBuild {
     try {
         [System.Environment]::SetEnvironmentVariable('SOURCE_DATE_EPOCH', "$epoch")
         $payload = Join-Path $work 'payload'
-        New-JiffshotPayload -BuildDir $BuildDir -Payload $payload -Architecture $architecture
+        New-JiffshotPayload -BuildDir $BuildDir -Payload $payload -Architecture $architecture -RuntimeFiles $runtimeFiles
         $artifacts = [System.Collections.Generic.List[string]]::new()
         if ($formats.Contains('tar.gz')) {
             $destination = Join-Path $work "Devolutions.Jiffshot-linux-$($architecture.Name)-$Version.tar.gz"
@@ -849,7 +854,7 @@ function Invoke-JiffshotLinuxPackageBuild {
             $artifacts.Add($destination)
         }
         if ($formats.Contains('deb')) {
-            $artifacts.Add((New-JiffshotDeb -Payload $payload -Work $work -Version $Version -Architecture $architecture))
+            $artifacts.Add((New-JiffshotDeb -Payload $payload -Work $work -Version $Version -Architecture $architecture -RuntimeFiles $runtimeFiles))
         }
         if ($formats.Contains('rpm')) {
             $artifacts.Add((New-JiffshotRpm -Payload $payload -Work $work -Version $Version -Epoch $epoch -Architecture $architecture))

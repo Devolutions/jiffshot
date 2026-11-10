@@ -9,7 +9,8 @@ param(
     [Parameter(Mandatory)]
     [ValidateSet('x64', 'arm64', IgnoreCase = $false)]
     [string]$Arch,
-    [string]$RuntimeDir = '/usr/lib/jiffshot'
+    [string]$RuntimeDir = '/usr/lib/jiffshot',
+    [switch]$StaticHost
 )
 
 Set-StrictMode -Version Latest
@@ -18,4 +19,5 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 Import-Module (Join-Path $PSScriptRoot 'JiffshotLinuxPackage.psm1') -Force
 
-"Installed runtime: Linux $((Confirm-JiffshotBuild -BuildDir $RuntimeDir -Arch $Arch).Name)"
+$runtimeFiles = if ($StaticHost) { @('jiffshot') } else { (Get-JiffshotPackageInfo).RuntimeFiles }
+"Installed runtime: Linux $((Confirm-JiffshotBuild -BuildDir $RuntimeDir -Arch $Arch -RuntimeFiles $runtimeFiles).Name)"

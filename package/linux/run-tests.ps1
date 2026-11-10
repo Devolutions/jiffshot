@@ -8,6 +8,8 @@ Run the Linux packaging Pester tests.
 Package content tests read built packages from JIFFSHOT_PACKAGE_DIR (defaults to
 package/out/linux) for the formats in JIFFSHOT_TEST_FORMATS (defaults to
 tar.gz,deb,rpm) and JIFFSHOT_TEST_ARCH (defaults to the host architecture).
+Set JIFFSHOT_TEST_STATIC_HOST=1 for packages built with -StaticHost; the default
+expects the shared-host runtime libraries.
 Use -ExcludeTag PackageContent to run only the builder regression tests.
 #>
 [CmdletBinding()]

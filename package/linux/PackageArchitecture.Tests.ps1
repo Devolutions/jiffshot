@@ -174,6 +174,21 @@ Describe 'ELF architecture' {
         $result.Stdout | Should -BeExactly ''
         $result.Stderr | Should -MatchExactly '(?s)libHarfBuzzSharp\.so.*expected Linux arm64'
     }
+
+    It 'installed validator checks only the static executable when requested' {
+        $inputs = Join-Path $script:Work 'static-runtime'
+        [void][System.IO.Directory]::CreateDirectory($inputs)
+        [System.IO.File]::WriteAllBytes((Join-Path $inputs 'jiffshot'), (New-ElfHeader 62))
+        [System.IO.File]::WriteAllText((Join-Path $inputs 'libHarfBuzzSharp.so'), 'not an ELF shared library')
+        $validator = Join-Path $script:Assets 'validate-installed.ps1'
+
+        (& $validator -Arch x64 -RuntimeDir $inputs -StaticHost) |
+            Should -BeExactly "Installed runtime: Linux x64"
+
+        [System.IO.File]::WriteAllBytes((Join-Path $inputs 'jiffshot'), (New-ElfHeader 183))
+        { & $validator -Arch x64 -RuntimeDir $inputs -StaticHost } |
+            Should -Throw '*jiffshot is Linux arm64, expected Linux x64*'
+    }
 }
 
 Describe 'Architecture packaging' {
@@ -215,6 +230,42 @@ Describe 'Architecture packaging' {
             ($members | Where-Object Name -CEQ "$prefix/lib/jiffshot/$runtime").Data | Should -Be $content
             [System.IO.File]::ReadAllBytes((Join-Path $inputs $runtime)) | Should -Be $content
         }
+    }
+
+    It 'static-host tar packages stage and strip only the executable' {
+        $inputs = New-TestInputs $script:Work 62
+        $content = Join-Bytes (New-ElfHeader 62) (Get-AsciiBytes 'static executable')
+        [System.IO.File]::WriteAllBytes((Join-Path $inputs 'jiffshot'), $content)
+        foreach ($library in $script:RuntimeFiles | Select-Object -Skip 1) {
+            [System.IO.File]::WriteAllText((Join-Path $inputs $library), 'deliberately invalid companion')
+        }
+
+        $output = Join-Path $script:Work 'static'
+        $calls = [System.Collections.Generic.List[object]]::new()
+        Mock -ModuleName JiffshotLinuxPackage Confirm-JiffshotPackagingTool { }
+        Mock -ModuleName JiffshotLinuxPackage Invoke-JiffshotNativeCommand {
+            $calls.Add([string[]]$Command)
+        }
+        $previous = $env:SOURCE_DATE_EPOCH
+        try {
+            $env:SOURCE_DATE_EPOCH = '0'
+            [void](Invoke-JiffshotLinuxPackageBuild -BuildDir $inputs -OutputDir $output `
+                -Format tar.gz -StaticHost)
+        }
+        finally {
+            $env:SOURCE_DATE_EPOCH = $previous
+        }
+
+        $archive = Get-ChildItem -LiteralPath $output -Filter '*.tar.gz' | Select-Object -First 1
+        $archive | Should -Not -BeNullOrEmpty
+        $prefix = "jiffshot-$(Get-JiffshotPackageVersion)-linux-x64"
+        $members = @(Read-TarGz $archive.FullName -Content)
+        @($members.Name | Where-Object { $_.StartsWith("$prefix/lib/jiffshot/", [StringComparison]::Ordinal) }) |
+            Should -BeExactly @("$prefix/lib/jiffshot/jiffshot")
+        ($members | Where-Object Name -CEQ "$prefix/lib/jiffshot/jiffshot").Data | Should -Be $content
+        @($calls | Where-Object { $_[0] -ceq 'strip' }).Count | Should -Be 1
+        $strip = @($calls | Where-Object { $_[0] -ceq 'strip' })[0]
+        [IO.Path]::GetFileName($strip[-1]) | Should -BeExactly 'jiffshot'
     }
 
     It 'DEB metadata and filename follow the <Arch> ELF architecture' -ForEach @(
@@ -563,7 +614,7 @@ Describe 'Architecture workflows' {
                 'JIFFSHOT_TEST_ARCH: ${{ matrix.arch }}'
                 'build.ps1 -Arch "${{ matrix.arch }}" -Format'
                 'cargo test --release --locked --workspace'
-                'cargo build --release --locked -p jiffshot'
+                'cargo build --release --locked -p jiffshot --features static-host'
                 'pwsh -NoProfile -File package/linux/run-tests.ps1'
                 "name: jiffshot-linux-`${{ matrix.arch }}$Suffix"
                 "key: $CachePrefix-linux-`${{ matrix.arch }}-"
@@ -571,6 +622,18 @@ Describe 'Architecture workflows' {
             )) {
             $job.Contains($expected) | Should -BeTrue -Because "$JobName must contain $expected"
         }
+        $job | Should -Match 'build\.ps1 .* -StaticHost'
+    }
+
+    It '<JobName> selects static-host package content checks' -ForEach @(
+        @{ JobName = 'linux'; StepName = 'Test Linux package builder and contents' }
+        @{ JobName = 'linux-rpm'; StepName = 'Test RPM builder and contents' }
+    ) {
+        $job = Get-WorkflowJob $JobName
+        $pattern = '(?s)- name: ' + [regex]::Escape($StepName) + '(.*?)(?=\n      - )'
+        $step = [regex]::Match($job, $pattern).Groups[1].Value
+        $step | Should -Match "(?m)^\s*JIFFSHOT_TEST_STATIC_HOST: '1'\s*$"
+        $step | Should -Match 'pwsh -NoProfile -File package/linux/run-tests\.ps1'
     }
 
     It 'Fedora runs in a container' {
@@ -590,7 +653,7 @@ Describe 'Architecture workflows' {
         foreach ($expected in @(
                 'runs-on: ${{ matrix.runner }}'
                 'sha256sum --check "SHA256SUMS-linux-$4.txt"'
-                'validate-installed.ps1 -Arch "$4"'
+                'validate-installed.ps1 -Arch "$4" -StaticHost'
                 'test "$(uname -m)" = "$2"'
                 'package-removal-sentinel'
                 'apt-get remove -y jiffshot'

@@ -33,6 +33,43 @@ Describe 'Package builder' {
         $desktop['Desktop Action Record']['Exec'] | Should -BeExactly 'jiffshot --record'
     }
 
+    It 'checks <Label> host package expectations against the staged payload' -ForEach @(
+        @{
+            Label = 'default shared'; Setting = ''
+            ExpectedRuntime = @('jiffshot', 'librustolonia_host.so', 'libSkiaSharp.so', 'libHarfBuzzSharp.so')
+        }
+        @{
+            Label = 'explicit shared'; Setting = '0'
+            ExpectedRuntime = @('jiffshot', 'librustolonia_host.so', 'libSkiaSharp.so', 'libHarfBuzzSharp.so')
+        }
+        @{ Label = 'static'; Setting = '1'; ExpectedRuntime = @('jiffshot') }
+    ) {
+        $runtimeFiles = @(Get-ExpectedPackageRuntimeFiles -StaticHostSetting $Setting)
+        $runtimeFiles | Should -BeExactly $ExpectedRuntime
+
+        $inputs = Join-Path $script:Work 'release'
+        [void][System.IO.Directory]::CreateDirectory($inputs)
+        foreach ($name in $script:RuntimeFiles) {
+            [System.IO.File]::WriteAllBytes((Join-Path $inputs $name), (New-ElfHeader))
+        }
+        $payload = Join-Path $script:Work 'payload'
+        Mock -ModuleName JiffshotLinuxPackage Invoke-JiffshotNativeCommand { }
+        New-JiffshotPayload -BuildDir $inputs -Payload $payload -RuntimeFiles $runtimeFiles
+
+        $actual = @(Get-RelativeFiles $payload)
+        $actual | Should -BeExactly @(Get-ExpectedPackageFiles -RuntimeFiles $runtimeFiles)
+        $otherSetting = if ($Setting -ceq '1') { '0' } else { '1' }
+        $otherRuntime = @(Get-ExpectedPackageRuntimeFiles -StaticHostSetting $otherSetting)
+        $otherExpected = @(Get-ExpectedPackageFiles -RuntimeFiles $otherRuntime)
+        @(Compare-Object -ReferenceObject $actual -DifferenceObject $otherExpected -CaseSensitive) |
+            Should -Not -BeNullOrEmpty
+    }
+
+    It 'rejects invalid static-host content test settings' {
+        { Get-ExpectedPackageRuntimeFiles -StaticHostSetting 'true' } |
+            Should -Throw "*JIFFSHOT_TEST_STATIC_HOST must be '0' or '1'*"
+    }
+
     It 'CI jobs are unique and include Linux package builds' {
         $workflow = Get-WorkflowText 'ci.yml'
         $workflow | Should -Match "`njobs:`n"
@@ -44,8 +81,11 @@ Describe 'Package builder' {
         }
     }
 
-    It 'tests the Linux static host separately from release packaging' {
+    It 'uses the static host for Linux release packages and still smoke-tests an isolated build' {
         $workflow = Get-WorkflowText 'ci.yml'
+        $release = [regex]::Match($workflow, '(?s)- name: Build Linux app(.*?)(?=\r?\n      - )').Groups[1].Value
+        $release | Should -Match 'cargo build --release --locked -p jiffshot --features static-host'
+        $workflow | Should -Match 'package/linux/build\.ps1 -Arch "\$\{\{ matrix\.arch \}\}" -Format tar\.gz,deb -StaticHost'
         $static = [regex]::Match($workflow, '(?s)- name: Test Linux static host(.*?)(?=\r?\n      - )').Groups[1].Value
         $static | Should -Match 'cargo build --release --locked -p jiffshot --features static-host'
         $static | Should -Match '--target-dir target/static-host'
@@ -54,8 +94,10 @@ Describe 'Package builder' {
         $static | Should -Match '-RuntimeDir "\$root"'
     }
 
-    It 'builds the Windows static host separately from release packaging' {
+    It 'uses the static host for Windows releases and smoke-tests a separate static build' {
         $workflow = Get-WorkflowText 'ci.yml'
+        $release = [regex]::Match($workflow, '(?s)- name: Build\r?\n(.*?)(?=\r?\n      - name: Build Windows static host)').Groups[1].Value
+        $release | Should -Match 'cargo build --release --locked -p jiffshot -p jiffshot-cli --features jiffshot/static-host'
         $static = [regex]::Match($workflow, '(?s)- name: Build Windows static host(.*?)(?=\r?\n      - )').Groups[1].Value
         $static | Should -Match 'cargo build --release --locked -p jiffshot --features static-host'
         $static | Should -Match '--target \$\{\{ matrix\.target \}\}'
@@ -64,6 +106,7 @@ Describe 'Package builder' {
         $smoke | Should -Match 'if: matrix\.test'
         $smoke | Should -Match 'Join-Path \$env:RUNNER_TEMP'
         $smoke | Should -Match 'windows_grab_text_e2e\.ps1 -Binary \$binary -AllowDesktopInput'
+        $workflow | Should -Not -Match 'rustolonia_host\.dll'
     }
 
     It 'release version matches the workspace and rejects mismatches' {
@@ -226,6 +269,8 @@ Describe 'Package contents' -Tag PackageContent {
         $directory = if ($env:JIFFSHOT_PACKAGE_DIR) { $env:JIFFSHOT_PACKAGE_DIR } else { Join-Path $script:Root 'package/out/linux' }
         $script:Output = [System.IO.Path]::GetFullPath($directory)
         $script:Formats = @(([string]$(if ($env:JIFFSHOT_TEST_FORMATS) { $env:JIFFSHOT_TEST_FORMATS } else { 'tar.gz,deb,rpm' })).Split(','))
+        $script:PackageRuntimeFiles = @(Get-ExpectedPackageRuntimeFiles -StaticHostSetting $env:JIFFSHOT_TEST_STATIC_HOST)
+        $script:PackageExpectedFiles = @(Get-ExpectedPackageFiles -RuntimeFiles $script:PackageRuntimeFiles)
         $script:Names = @{
             'tar.gz' = "Devolutions.Jiffshot-linux-$($script:Arch)-$($script:Version).tar.gz"
             'deb'    = "jiffshot_$($script:Version)_$($script:DebArch).deb"
@@ -326,10 +371,10 @@ Describe 'Package contents' -Tag PackageContent {
                 $root = Join-Path $destination 'usr'
             }
         }
-        Get-RelativeFiles $root | Should -BeExactly $script:ExpectedFiles
+        Get-RelativeFiles $root | Should -BeExactly $script:PackageExpectedFiles
         (Get-UnixMode (Join-Path $root 'bin/jiffshot')) -band 0x1FF | Should -Be 0x1ED
         [System.IO.File]::ReadAllBytes((Join-Path $root 'bin/jiffshot')) | Should -Not -Contain ([byte]13)
-        foreach ($name in $script:RuntimeFiles) {
+        foreach ($name in $script:PackageRuntimeFiles) {
             $binary = Join-Path $root "lib/jiffshot/$name"
             $header = [System.IO.File]::ReadAllBytes($binary)[0..63]
             $header[0..6] | Should -Be @(0x7F, 0x45, 0x4C, 0x46, 0x02, 0x01, 0x01) -Because $name
@@ -353,7 +398,7 @@ Describe 'Package contents' -Tag PackageContent {
             Set-ItResult -Skipped -Because 'both tar.gz and deb formats are required'
             return
         }
-        foreach ($relative in $script:ExpectedFiles) {
+        foreach ($relative in $script:PackageExpectedFiles) {
             Get-TestSha256 (Join-Path $script:Roots['tar.gz'] $relative) | Should -BeExactly (Get-TestSha256 (Join-Path $script:Roots['deb'] $relative)) -Because $relative
         }
     }
