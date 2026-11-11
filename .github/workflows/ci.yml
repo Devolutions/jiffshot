@@ -301,6 +301,12 @@ jobs:
           dbus-run-session -- pwsh -NoProfile -File app/tests/linux_selection_e2e.ps1 \
             -Binary target/release/jiffshot -RuntimeDir target/release
 
+      - name: Test Linux tray lifecycle
+        timeout-minutes: 10
+        run: |
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_tray_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
+
       - name: Test Linux static host
         timeout-minutes: 20
         shell: bash

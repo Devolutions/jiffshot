@@ -556,7 +556,7 @@ pub(crate) fn run() -> Result<()> {
         let window_ref = NodeRef::<Window>::new();
         let tray_ui = TrayUi {
             scope: scope.clone(),
-            window: window_ref,
+            window: Arc::new(ui::UiOnly::new(window_ref)),
             canvas: Arc::new(canvas.clone()),
             status,
             captures,
@@ -1846,7 +1846,7 @@ fn apply_selection_action(
     }
 }
 
-fn action_button(label: &'static str, action: impl Fn(&AppScope) + Send + 'static) -> El<Button> {
+fn action_button(label: &'static str, action: impl Fn(&AppScope) + 'static) -> El<Button> {
     Button::el().content(label).with_op(move |scope, button| {
         let scope = scope.clone();
         let callback_scope = scope.clone();
@@ -1867,7 +1867,7 @@ enum TrayStart {
 #[derive(Clone)]
 struct TrayUi {
     scope: AppScope,
-    window: NodeRef<Window>,
+    window: Arc<ui::UiOnly<NodeRef<Window>>>,
     canvas: Arc<ui::UiOnly<ui::canvas_view::CanvasView>>,
     status: Signal<String>,
     captures: Signal<Vec<PathBuf>>,
@@ -1999,6 +1999,7 @@ impl TrayUi {
     fn show_window(&self) -> std::result::Result<(), String> {
         self.window
             .get()
+            .get()
             .ok_or_else(|| "the editor window is unavailable".to_owned())?
             .show()
             .map_err(|error| error.to_string())?;
@@ -2008,6 +2009,7 @@ impl TrayUi {
 
     fn hide_window(&self) -> std::result::Result<(), String> {
         self.window
+            .get()
             .get()
             .ok_or_else(|| "the editor window is unavailable".to_owned())?
             .hide()
@@ -2551,7 +2553,7 @@ fn run_capture_preset(
 }
 
 fn screen_preset_button(
-    preset: Signal<settings::ScreenCapturePreset>,
+    preset: rustolonia::Signal<settings::ScreenCapturePreset>,
     canvas: ui::UiOnly<ui::canvas_view::CanvasView>,
     status: Signal<String>,
     captures: Signal<Vec<PathBuf>>,

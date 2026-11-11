@@ -83,6 +83,7 @@ try {
     try {
         $server = Start-E2EXvfb $xvfbLog
         $environment = New-E2EEnvironment $server.Display $work $runtime
+        $environment['JIFFSHOT_CLASSIC_UI'] = '1'
         $reader = New-E2ETextReader
 
         $app = Start-App
