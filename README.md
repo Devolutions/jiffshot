@@ -639,14 +639,15 @@ On macOS, Preferences refuses to replace unreadable or malformed settings. If it
 
 The capture service applies Capture window and Preferences capture changes in order and reports settings-save failures. Fixed and scheduled-area confirmations are not installed unless their settings are saved. Other capture settings, presets and hotkeys can take effect only for the current session after a failed save; a later successful settings write may persist them. Editor and Share changes are saved separately.
 
-The Capture window's **Auto-open editor** checkbox beside the Capture button uses
-the same preference as **Preview in Editor** (enabled by default). Turn it off
-to save images and deliver them to the clipboard or configured destination without
-opening the editor. After a one-shot image capture from this window, Capture
-returns ready for another shot, with a brief **Capture saved** confirmation and
-an **Edit** action for that image. Interval and scheduled captures do not reopen
-the Capture window after each image. On Linux, images are saved in the configured
-capture directory and copied when **Send to → Clipboard** is enabled.
+The Capture window's **Open in editor** toggle in the quick-options row beside the
+Capture button uses the same preference as **Preview in Editor** (enabled by
+default). Turn it off to save images and deliver them to the clipboard or
+configured destination without opening the editor. After a one-shot image capture
+from this window, Capture returns ready for another shot, with a brief **Capture
+saved** confirmation pill and an **Edit** action for that image. Interval and
+scheduled captures do not reopen the Capture window after each image. On Linux,
+images are saved in the configured capture directory and copied when **Send to →
+Clipboard** is enabled.
 
 macOS recordings are staged in the library and published without replacing an existing recording. If publication fails, the error identifies the temporary location for recovery.
 

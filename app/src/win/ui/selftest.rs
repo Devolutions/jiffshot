@@ -8544,6 +8544,15 @@ fn capture_window_steps(s: &mut Script) {
 
 fn capture_workflow_script() -> Script {
     use super::capture_view;
+    let shot_capture_window = |test: &mut Test, name: &str| {
+        let scope = super::scope().unwrap();
+        let window = crate::capture_window::window().unwrap();
+        if let Ok(handle) = scope.platform_handle(&window) {
+            #[cfg(target_os = "macos")]
+            let handle = crate::mac_window::window(handle).unwrap().windowNumber() as isize;
+            test.shot_of(handle, name);
+        }
+    };
     let mut script = Script(VecDeque::new());
     script.wait(800).step(|test| {
         let library = empty_scratch_library(test);
@@ -8552,8 +8561,14 @@ fn capture_workflow_script() -> Script {
             image.fill(tiny_skia::Color::from_rgba8(30, 90, 160, 255));
             image.save_png(library.join(name)).unwrap();
         }
+        run("theme:Dark");
         crate::app::act(|app| app.show_capture_window()).unwrap();
         capture_window_selftest_action("tab:1".into());
+        350
+    });
+    script.step(move |test| {
+        assert!(capture_view::workflow_state_for_selftest().unwrap().0);
+        shot_capture_window(test, "capture-default-on.png");
         capture_window_selftest_action("switch:preview".into());
         let mut settings = jiffshot_workflow::settings::Settings::load();
         settings.open_in_editor = false;
@@ -8570,6 +8585,8 @@ fn capture_workflow_script() -> Script {
         crate::capture_window::window().unwrap().hide().unwrap();
         let path = PathBuf::from(std::env::var_os("JIFFSHOT_LIBRARY").unwrap()).join("first-shot.png");
         assert!(capture_view::image_finished(Some(path.clone()), false));
+        assert!(capture_view::take_suppressed_save_toast("Capture saved", false));
+        assert!(!capture_view::take_suppressed_save_toast("Capture saved", false));
         crate::app::act(|app| app.show_capture_window()).unwrap();
         assert!(!scope.main_window().unwrap().get_is_visible().unwrap(), "saving opened the editor");
         assert_eq!(sink().title.get_untracked(), title, "saving replaced the editor document");
@@ -8591,21 +8608,36 @@ fn capture_workflow_script() -> Script {
         assert_eq!(capture_view::workflow_state_for_selftest().unwrap().2, Some(path));
         4500
     });
-    script.step(|test| {
+    script.step(move |test| {
         let (_, confirmation, path) = capture_view::workflow_state_for_selftest().unwrap();
         assert_eq!(confirmation, "Capture saved", "the previous timer dismissed the newer capture");
         assert!(path.unwrap().ends_with("second-shot.png"));
-        let scope = super::scope().unwrap();
-        let window = crate::capture_window::window().unwrap();
-        if let Ok(handle) = scope.platform_handle(&window) {
-            #[cfg(target_os = "macos")]
-            let handle = crate::mac_window::window(handle).unwrap().windowNumber() as isize;
-            test.shot_of(handle, "capture-without-editor.png");
-        }
+        shot_capture_window(test, "capture-without-editor.png");
+        run("theme:Light");
+        300
+    });
+    script.step(move |test| {
+        shot_capture_window(test, "capture-without-editor-light.png");
+        run("theme:Dark");
+        capture_window_selftest_action("tab:0".into());
+        300
+    });
+    script.step(move |test| {
+        shot_capture_window(test, "capture-select-tab.png");
+        capture_window_selftest_action("tab:1".into());
+        3500
+    });
+    script.step(|_| {
+        let (_, confirmation, path) = capture_view::workflow_state_for_selftest().unwrap();
+        assert!(confirmation.is_empty() && path.is_none(), "the confirmation did not expire");
+        capture_view::starting_capture(true);
+        let path = PathBuf::from(std::env::var_os("JIFFSHOT_LIBRARY").unwrap()).join("second-shot.png");
+        assert!(capture_view::image_finished(Some(path), false));
         capture_view::edit_last_capture();
+        assert!(capture_view::workflow_state_for_selftest().unwrap().1.is_empty(), "Edit did not clear the confirmation");
         500
     });
-    script.step(|test| {
+    script.step(|_| {
         assert!(super::scope().unwrap().main_window().unwrap().get_is_visible().unwrap());
         assert!(sink().title.get_untracked().contains("second-shot"), "Edit did not open the most recent image");
         capture_window_selftest_action("switch:preview".into());
@@ -8613,16 +8645,15 @@ fn capture_workflow_script() -> Script {
         settings.open_in_editor = true;
         settings.save();
         crate::app::act(|app| app.show_capture_window()).unwrap();
-        test.line("Edit opened the correct image; cancellation and stale confirmation timers were isolated");
-        3500
+        300
     });
     script.step(|test| {
         let (open, confirmation, path) = capture_view::workflow_state_for_selftest().unwrap();
         assert!(open, "the auto-open default could not be restored");
-        assert!(confirmation.is_empty() && path.is_none(), "the confirmation did not expire");
+        assert!(confirmation.is_empty() && path.is_none());
         capture_view::starting_capture(false);
         assert!(!capture_view::image_finished(Some(test.dir.join("interval.png")), false), "an interval request reopened Capture");
-        test.line("capture workflow confirmation expired and interval captures stayed in the background");
+        test.line("capture workflow confirmation expired, Edit dismissed and opened the image, and interval captures stayed in the background");
         0
     });
     script

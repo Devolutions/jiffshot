@@ -1026,7 +1026,11 @@ pub(crate) fn run() -> rustolonia::Result<()> {
                 }),
                 notify: Box::new(|title, text, problem| {
                     let (title, text) = (title.to_owned(), text.to_owned());
-                    app::post(move |app| app.toast(&title, &text, problem));
+                    app::post(move |app| {
+                        if !crate::ui::capture_view::take_suppressed_save_toast(&title, problem) {
+                            app.toast(&title, &text, problem);
+                        }
+                    });
                 }),
                 #[cfg(windows)]
                 startup_notice: Box::new(|title, text, problem| {

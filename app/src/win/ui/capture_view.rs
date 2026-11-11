@@ -29,7 +29,7 @@ pub enum CaptureTiming {
     Schedule,
 }
 use rustolonia::{
-    AppScope, AsControl, Border, Button, CheckBox, Color, Control, Dock, DockPanel, Effect, El, Flyout, FontWeight, Grid, HorizontalAlignment, Key, MenuFlyout,
+    AppScope, AsControl, Border, Button, Color, Control, Dock, DockPanel, Effect, El, Flyout, FontWeight, Grid, HorizontalAlignment, Key, MenuFlyout,
     MenuItem, MenuItemToggleType, NodeRef, Orientation, PlacementMode, Result, ScrollViewer, Separator, Signal, StackPanel, TextAlignment, TextBlock, TextWrapping, Upcast,
     VerticalAlignment, Window, WindowStartupLocation,
 };
@@ -90,6 +90,12 @@ const MODE_GLYPHS: [&str; 3] = ["\u{E8B3}", "\u{E722}", "\u{E714}"];
 const WHITE: Color = parts::rgb(0xFFFFFF);
 const SELECTED_MODE_DARK: Color = parts::rgb(dark_blue::windows_or(dark_blue::SELECTION, 0x284662));
 const SELECTED_MODE_ICON_DARK: Color = parts::rgb(dark_blue::windows_or(dark_blue::ACCENT_TEXT, 0x73BAFF));
+const SELECTED_PILL_LIGHT: Color = parts::rgb(0xE5F1FB);
+const SELECTED_PILL_TEXT_LIGHT: Color = parts::rgb(0x0F4C85);
+const SAVED_DARK: Color = parts::rgb(0x3FB950);
+const SAVED_LIGHT: Color = parts::rgb(0x1A7F37);
+const PROBLEM_DARK: Color = parts::rgb(0xFF6B63);
+const PROBLEM_LIGHT: Color = parts::rgb(0xC42B1C);
 const CAPTURE_RED: Color = parts::rgb(0xD13438);
 const CAPTURE_RED_HOVER: Color = parts::rgb(0xB82B2F);
 const CAPTURE_RING: Color = parts::rgb(0xF5B0A8);
@@ -216,9 +222,13 @@ struct MenuButton {
 /// The window and what its callbacks need. UI thread only.
 struct Ui {
     open_in_editor: Signal<bool>,
+    editor_toggle_hover: Signal<bool>,
     confirmation: Signal<String>,
+    confirmation_problem: Signal<bool>,
+    edit_last_hover: Signal<bool>,
     captured_path: Option<std::path::PathBuf>,
     capture_pending: bool,
+    suppress_save_toast: bool,
     confirmation_revision: u64,
     scope: AppScope,
     window: NodeRef<Window>,
@@ -267,18 +277,39 @@ fn run(action: String) {
 pub(crate) fn starting_capture(editor_free_image: bool) {
     with_ui(|ui| {
         ui.capture_pending = editor_free_image;
+        ui.suppress_save_toast = false;
         ui.confirmation_revision = ui.confirmation_revision.wrapping_add(1);
         ui.confirmation.set(String::new());
+        ui.confirmation_problem.set(false);
+        ui.edit_last_hover.set_if_changed(false);
         ui.captured_path = None;
     });
 }
 
 pub(crate) fn clear_pending_capture() {
-    with_ui(|ui| ui.capture_pending = false);
+    with_ui(|ui| {
+        ui.capture_pending = false;
+        ui.suppress_save_toast = false;
+    });
+}
+
+pub(crate) fn take_suppressed_save_toast(title: &str, problem: bool) -> bool {
+    !problem
+        && title == "Capture saved"
+        && with_ui(|ui| std::mem::replace(&mut ui.suppress_save_toast, false)).unwrap_or(false)
 }
 
 pub(crate) fn edit_last_capture() {
-    if let Some(path) = with_ui(|ui| ui.captured_path.clone()).flatten() {
+    let path = with_ui(|ui| {
+        let path = ui.captured_path.take()?;
+        ui.confirmation_revision = ui.confirmation_revision.wrapping_add(1);
+        ui.confirmation.set(String::new());
+        ui.confirmation_problem.set(false);
+        ui.edit_last_hover.set_if_changed(false);
+        Some(path)
+    })
+    .flatten();
+    if let Some(path) = path {
         crate::app::post(move |app| app.incoming(path));
     }
 }
@@ -296,6 +327,8 @@ pub(crate) fn image_finished(path: Option<std::path::PathBuf>, problem: bool) ->
         }
         let saved = path.is_some();
         ui.captured_path = path;
+        ui.suppress_save_toast = saved && !problem;
+        ui.confirmation_problem.set(saved && problem);
         ui.confirmation.set(if !saved { "" } else if problem { "Saved with problems" } else { "Capture saved" }.into());
         ui.confirmation_revision = ui.confirmation_revision.wrapping_add(1);
         Some((ui.scope.clone(), ui.confirmation_revision))
@@ -306,6 +339,8 @@ pub(crate) fn image_finished(path: Option<std::path::PathBuf>, problem: bool) ->
         with_ui(|ui| {
             if ui.confirmation_revision == revision {
                 ui.confirmation.set(String::new());
+                ui.confirmation_problem.set(false);
+                ui.edit_last_hover.set_if_changed(false);
                 ui.captured_path = None;
             }
         });
@@ -347,7 +382,10 @@ fn popup_target() -> Option<(AppScope, Window, Control, Subscriptions)> {
 /// Builds the Capture window for `binding` (not yet shown).
 pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
     let open_in_editor = scope.signal(true);
+    let editor_toggle_hover = scope.signal(false);
     let confirmation = scope.signal(String::new());
+    let confirmation_problem = scope.signal(false);
+    let edit_last_hover = scope.signal(false);
     let dark = scope.signal(parts::dark_theme(scope));
     let tab = scope.signal(0_usize);
     let recording = scope.signal(false);
@@ -514,19 +552,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         .horizontal_alignment(HorizontalAlignment::Center)
         .child(mode_capsule)
         .child(capture_button.margin((0.0, 12.0, 0.0, 0.0)))
-        .child(detail.margin((0.0, 6.0, 0.0, 0.0)))
-        .child(on_click(
-            CheckBox::el()
-                .name("capture-auto-editor")
-                .checked(move || Some(open_in_editor.get()))
-                .visible(move || tab.get() != 2)
-                .padding((4.0, 3.0))
-                .tool_tip_tip("Open each capture in the editor automatically")
-                .content("Auto-open editor")
-                .font_size(12.0),
-            &subs,
-            |_| run("switch:preview".into()),
-        ));
+        .child(detail.margin((0.0, 6.0, 0.0, 0.0)));
     let stop_interval = status_button(dark, &subs, "Stop", "Stop interval capture", "stop-interval");
     let cancel_schedule = status_button(dark, &subs, "Cancel", "Cancel daily scheduled capture", "cancel-schedule");
     let show_recording_controls = status_button(
@@ -619,7 +645,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         );
 
     let editor = on_click(
-        flat(dark).dock_panel_dock(Dock::Right).vertical_alignment(VerticalAlignment::Center).content(
+        flat(dark).grid_column(2).vertical_alignment(VerticalAlignment::Center).content(
             StackPanel::el()
                 .orientation(Orientation::Horizontal)
                 .spacing(8.0)
@@ -647,21 +673,83 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         &subs,
         |button: &Button| request("menu", "new-preset", button.upcast()),
     );
-    let bottom_bar = DockPanel::el()
-        .grid_row(2)
-        .margin((8.0, 0.0, 8.0, 0.0))
-        .child(editor)
+    let confirmation_pill = Border::el()
+        .grid_column(1)
+        .height(28.0)
+        .padding((11.0, 0.0, 4.0, 0.0))
+        .corner_radius(7.0)
+        .horizontal_alignment(HorizontalAlignment::Center)
+        .vertical_alignment(VerticalAlignment::Center)
+        .background(move || palette(dark).card)
+        .border_brush(move || palette(dark).edge)
+        .border_thickness(1.0)
+        .visible(move || !confirmation.get().is_empty())
         .child(
             StackPanel::el()
-                .dock_panel_dock(Dock::Right)
                 .orientation(Orientation::Horizontal)
-                .spacing(4.0)
+                .spacing(0.0)
                 .vertical_alignment(VerticalAlignment::Center)
-                .visible(move || !confirmation.get().is_empty())
-                .child(TextBlock::el().text(confirmation).font_size(12.0).vertical_alignment(VerticalAlignment::Center))
-                .child(on_click(flat(dark).name("capture-edit-last").content("Edit"), &subs, |_| edit_last_capture())),
-        )
-        .child(StackPanel::el().orientation(Orientation::Horizontal).spacing(2.0).vertical_alignment(VerticalAlignment::Center).child(presets).child(new_preset));
+                .child(
+                    TextBlock::el()
+                        .text(move || if confirmation_problem.get() { "!".to_owned() } else { "\u{2713}".to_owned() })
+                        .font_size(12.0)
+                        .font_weight(FontWeight::Bold)
+                        .margin((0.0, 0.0, 6.0, 0.0))
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .foreground(move || match (dark.get(), confirmation_problem.get()) {
+                            (true, false) => SAVED_DARK,
+                            (false, false) => SAVED_LIGHT,
+                            (true, true) => PROBLEM_DARK,
+                            (false, true) => PROBLEM_LIGHT,
+                        }),
+                )
+                .child(
+                    TextBlock::el()
+                        .text(confirmation)
+                        .font_size(12.0)
+                        .margin((0.0, 0.0, 10.0, 0.0))
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .foreground(move || palette(dark).text),
+                )
+                .child(
+                    Border::el()
+                        .width(1.0)
+                        .height(13.0)
+                        .margin((0.0, 0.0, 3.0, 0.0))
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .background(move || palette(dark).edge),
+                )
+                .child(on_click(
+                    Button::el()
+                        .name("capture-edit-last")
+                        .height(22.0)
+                        .padding((7.0, 0.0))
+                        .corner_radius(5.0)
+                        .border_thickness(0.0)
+                        .horizontal_content_alignment(HorizontalAlignment::Center)
+                        .vertical_content_alignment(VerticalAlignment::Center)
+                        .background(move || if edit_last_hover.get() { palette(dark).track } else { parts::TRANSPARENT })
+                        .on_pointer_entered(move |_| edit_last_hover.set(true))
+                        .on_pointer_exited(move |_| edit_last_hover.set(false))
+                        .tool_tip_tip("Open this capture in the editor")
+                        .content(
+                            TextBlock::el()
+                                .text("Edit")
+                                .font_size(12.0)
+                                .font_weight(FontWeight::DemiBold)
+                                .foreground(move || if dark.get() { SELECTED_MODE_ICON_DARK } else { palette(dark).accent }),
+                        ),
+                    &subs,
+                    |_| edit_last_capture(),
+                )),
+        );
+    let bottom_bar = Grid::el()
+        .grid_row(2)
+        .column_definitions("Auto,*,Auto")
+        .margin((8.0, 0.0, 8.0, 0.0))
+        .child(StackPanel::el().orientation(Orientation::Horizontal).spacing(2.0).vertical_alignment(VerticalAlignment::Center).child(presets).child(new_preset))
+        .child(confirmation_pill)
+        .child(editor);
 
     let theme_scope = scope.clone();
     let closing_scope = scope.clone();
@@ -690,7 +778,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                 .set_extend_client_area_to_decorations_hint(false)
                 .and_then(|_| window.set_window_decorations(WindowDecorations::Full))
                 .and_then(|_| window.set_title(TITLE))
-                .and_then(|_| window.set_height(374.0));
+                .and_then(|_| window.set_height(350.0));
             if let Err(error) = fallback {
                 eprintln!("Capture window native title bar: {error:?}");
             }
@@ -699,7 +787,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
     let window = window
         .icon(super::icon_file())
         .width(if cfg!(target_os = "linux") { 660.0 } else { 560.0 })
-        .height(if cfg!(target_os = "linux") { 424.0 } else { 344.0 })
+        .height(if cfg!(target_os = "linux") { 400.0 } else { 320.0 })
         .can_resize(false)
         .can_maximize(false);
     #[cfg(windows)]
@@ -741,9 +829,13 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
     UI.with(|ui| {
         *ui.borrow_mut() = Some(Ui {
             open_in_editor,
+            editor_toggle_hover,
             confirmation,
+            confirmation_problem,
+            edit_last_hover,
             captured_path: None,
             capture_pending: false,
+            suppress_save_toast: false,
             confirmation_revision: 0,
             scope: scope.clone(),
             window: window_ref,
@@ -926,8 +1018,8 @@ fn apply_view(json: &str) -> Result<()> {
     with_ui(|ui| ui.open_in_editor.set_if_changed(view.open_in_editor));
     #[cfg(target_os = "macos")]
     with_ui(|ui| ui.native_menu.update(&view.menus)).transpose()?;
-    let Some((scope, dark, fields, rows, (tab, recording, timing, interval_running, active_schedule, action))) =
-        with_ui(|ui| Some((ui.scope.clone(), ui.dark, ui.fields.get()?, ui.rows.clone(), (ui.tab, ui.recording, ui.timing, ui.interval_running, ui.active_schedule, ui.action))))
+    let Some((scope, dark, editor_hover, fields, rows, (tab, recording, timing, interval_running, active_schedule, action))) =
+        with_ui(|ui| Some((ui.scope.clone(), ui.dark, ui.editor_toggle_hover, ui.fields.get()?, ui.rows.clone(), (ui.tab, ui.recording, ui.timing, ui.interval_running, ui.active_schedule, ui.action))))
             .flatten()
     else {
         return Ok(());
@@ -939,6 +1031,7 @@ fn apply_view(json: &str) -> Result<()> {
     active_schedule.set_if_changed(view.active_schedule);
     let Action { verb, detail, hint } = view.capture;
     action.set_if_changed((verb, detail, hint));
+    editor_hover.set_if_changed(false);
     rows.clear();
 
     let list = fields.children()?;
@@ -947,19 +1040,29 @@ fn apply_view(json: &str) -> Result<()> {
         list.add(field_row(dark, &rows, field).build(&scope)?)?;
     }
     if !view.toggles.is_empty() {
-        list.add(toggle_row(dark, &rows, &view.toggles).build(&scope)?)?;
+        list.add(toggle_row(dark, editor_hover, &rows, view.tab, &view.toggles, view.open_in_editor).build(&scope)?)?;
     }
     Ok(())
 }
 
-/// The quick switches (cursor and copy for images; microphone, system audio
-/// and webcam for video) and the more-options menu.
-fn toggle_row(dark: Signal<bool>, subs: &Subscriptions, toggles: &[Toggle]) -> El<Grid> {
-    let chips = StackPanel::el().orientation(Orientation::Horizontal).spacing(4.0).children_iter(toggles.iter().enumerate().map(|(i, toggle)| {
-        // A gap between the image switches and the video ones in Select mode.
+/// The quick switches (cursor, copy and editor preview for images; microphone,
+/// system audio and webcam for video) and the more-options menu.
+fn toggle_row(dark: Signal<bool>, editor_hover: Signal<bool>, subs: &Subscriptions, tab: usize, toggles: &[Toggle], open_in_editor: bool) -> El<Grid> {
+    let mut items = Vec::with_capacity(toggles.len() + 1);
+    for (i, toggle) in toggles.iter().enumerate() {
+        // Keep image switches grouped before the video switches in Select mode.
         let gap = if i == 2 && toggles.len() == 5 { 10.0 } else { 0.0 };
-        toggle_chip(dark, subs, toggle).margin((gap, 0.0, 0.0, 0.0))
-    }));
+        items.push(toggle_chip(dark, subs, toggle).margin((gap, 0.0, 0.0, 0.0)));
+        if tab == 0 && i == 1 {
+            items.push(editor_toggle_chip(dark, editor_hover, subs, tab, open_in_editor));
+        }
+    }
+    if tab == 1 {
+        items.push(editor_toggle_chip(dark, editor_hover, subs, tab, open_in_editor).margin((4.0, 0.0, 0.0, 0.0)));
+    } else if tab == 2 {
+        items.push(editor_toggle_chip(dark, editor_hover, subs, tab, open_in_editor).margin((10.0, 0.0, 0.0, 0.0)));
+    }
+    let chips = StackPanel::el().orientation(Orientation::Horizontal).spacing(4.0).children_iter(items);
     Grid::el()
         .column_definitions("*,Auto")
         .height(34.0)
@@ -981,6 +1084,94 @@ fn toggle_row(dark: Signal<bool>, subs: &Subscriptions, toggles: &[Toggle]) -> E
                 move |button: &Button| request("menu", "more", button.upcast()),
             ),
         )
+}
+
+fn editor_toggle_chip(dark: Signal<bool>, hover: Signal<bool>, subs: &Subscriptions, tab: usize, on: bool) -> El<Button> {
+    let state = if on { "on" } else { "off" };
+    let tip = if tab == 2 {
+        format!("Open recordings in the editor: {state}")
+    } else {
+        format!("Open captures in the editor: {state}")
+    };
+    let button = Button::el()
+        .name("capture-auto-editor")
+        .height(32.0)
+        .corner_radius(6.0)
+        .border_thickness(1.0)
+        .horizontal_content_alignment(HorizontalAlignment::Center)
+        .vertical_content_alignment(VerticalAlignment::Center)
+        .on_pointer_entered(move |_| hover.set(true))
+        .on_pointer_exited(move |_| hover.set(false))
+        .tool_tip_tip(tip);
+    let button = if tab == 1 {
+        button
+            .padding((10.0, 0.0))
+            .background(move || {
+                if on {
+                    if dark.get() { SELECTED_MODE_DARK } else { SELECTED_PILL_LIGHT }
+                } else if hover.get() {
+                    palette(dark).track
+                } else {
+                    parts::TRANSPARENT
+                }
+            })
+            .border_brush(move || if on { palette(dark).accent } else { palette(dark).frame })
+            .content(
+                StackPanel::el()
+                    .orientation(Orientation::Horizontal)
+                    .spacing(6.0)
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .child(glyph("\u{E70F}", 14.0).foreground(move || {
+                        if !on {
+                            palette(dark).muted
+                        } else if dark.get() {
+                            SELECTED_MODE_ICON_DARK
+                        } else {
+                            SELECTED_PILL_TEXT_LIGHT
+                        }
+                    }))
+                    .child(
+                        TextBlock::el()
+                            .text("Open in editor")
+                            .font_size(12.5)
+                            .font_weight(if on { FontWeight::DemiBold } else { FontWeight::Normal })
+                            .vertical_alignment(VerticalAlignment::Center)
+                            .foreground(move || {
+                                if !on {
+                                    if hover.get() { palette(dark).text } else { palette(dark).muted }
+                                } else if dark.get() {
+                                    WHITE
+                                } else {
+                                    SELECTED_PILL_TEXT_LIGHT
+                                }
+                            }),
+                    ),
+            )
+    } else {
+        button
+            .width(34.0)
+            .padding(0.0)
+            .background(move || {
+                if on {
+                    palette(dark).accent
+                } else if hover.get() {
+                    palette(dark).track
+                } else {
+                    parts::TRANSPARENT
+                }
+            })
+            .border_brush(move || if on { palette(dark).accent } else { palette(dark).frame })
+            .content(glyph("\u{E70F}", 16.0).foreground(move || {
+                if on {
+                    WHITE
+                } else if hover.get() {
+                    palette(dark).text
+                } else {
+                    palette(dark).muted
+                }
+            }))
+    };
+    on_click(button, subs, |_| run("switch:preview".into()))
 }
 
 fn toggle_chip(dark: Signal<bool>, subs: &Subscriptions, toggle: &Toggle) -> El<Button> {
@@ -1704,6 +1895,14 @@ mod tests {
         }
         let ratio = contrast(SELECTED_MODE_ICON_DARK, SELECTED_MODE_DARK);
         assert!(ratio >= 4.5, "dark selected mode contrast {ratio:.2} is below 4.5:1");
+        assert!(contrast(WHITE, SELECTED_MODE_DARK) >= 4.5, "dark active pill text contrast is below 4.5:1");
+        assert!(contrast(SELECTED_PILL_TEXT_LIGHT, SELECTED_PILL_LIGHT) >= 4.5, "light active pill text contrast is below 4.5:1");
+        assert!(contrast(SELECTED_MODE_ICON_DARK, DARK.card) >= 4.5, "dark confirmation Edit contrast is below 4.5:1");
+        assert!(contrast(LIGHT.accent, LIGHT.card) >= 4.5, "light confirmation Edit contrast is below 4.5:1");
+        assert!(contrast(SAVED_DARK, DARK.card) >= 4.5, "dark saved badge contrast is below 4.5:1");
+        assert!(contrast(SAVED_LIGHT, LIGHT.card) >= 4.5, "light saved badge contrast is below 4.5:1");
+        assert!(contrast(PROBLEM_DARK, DARK.card) >= 4.5, "dark problem badge contrast is below 4.5:1");
+        assert!(contrast(PROBLEM_LIGHT, LIGHT.card) >= 4.5, "light problem badge contrast is below 4.5:1");
     }
 
     #[test]
