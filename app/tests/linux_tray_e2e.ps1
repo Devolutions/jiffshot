@@ -258,11 +258,9 @@ try {
         $portal.ScreenMode = 'hold-start'
         $previousStarts = $portal.ScreenStarts.Count
         Invoke-E2ETrayMenuItem $watcher $trayItem $trayMenu['Capture screen or window']
-        Wait-E2EUntil { Test-WindowShown } 'the tray capture to restore the editor'
         Wait-E2EUntil { $portal.ScreenStarts.Count -gt $previousStarts } 'the tray capture chooser'
         $captureSession, $captureRequest = $portal.ScreenStarts[$portal.ScreenStarts.Count - 1]
-        $driver.RequestClose()
-        Wait-E2EUntil { -not (Test-WindowShown) } 'the editor hidden during capture'
+        Assert-E2E (-not (Test-WindowShown)) 'the editor must be hidden during the tray capture chooser'
         Invoke-E2ETrayMenuItem $watcher $trayItem $trayMenu['Quit Jiffshot']
         Wait-E2EUntil { Test-WindowShown } 'quit to restore an active capture'
         Assert-E2E (-not $app.HasExited) 'quit must not discard an active capture'
