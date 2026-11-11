@@ -4,11 +4,13 @@
 
 use super::{Line, Word};
 use crate::Rect;
+use std::sync::Mutex;
 use windows::Foundation::Rect as WinRect;
 use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
 use windows::Storage::Streams::DataWriter;
-use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
+use windows::Win32::System::Com::CoIncrementMTAUsage;
+use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
 
 /// Images smaller than this are enlarged first: the engine misses text
 /// below roughly 10 pixels high.
@@ -43,10 +45,26 @@ fn upscale(width: u32, height: u32, bgra: &[u8], k: u32) -> Vec<u8> {
 
 fn run(width: u32, height: u32, bgra: Vec<u8>) -> Result<Vec<Line>, String> {
     let e = |error: windows::core::Error| error.message().to_string();
-    // SAFETY: initializes WinRT on this fresh thread only.
-    unsafe {
-        let _ = RoInitialize(RO_INIT_MULTITHREADED);
+    static RETAINED_MTA: Mutex<bool> = Mutex::new(false);
+    {
+        let mut retained = RETAINED_MTA.lock().expect("OCR MTA usage lock poisoned");
+        if !*retained {
+            // SAFETY: keeps the process MTA alive across OCR worker threads so agile
+            // WinRT factories cached by `windows` remain backed by loaded COM servers.
+            unsafe { CoIncrementMTAUsage() }.map_err(e)?;
+            *retained = true;
+        }
     }
+    // SAFETY: balanced with RoUninitialize on this fresh worker thread below.
+    unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.map_err(e)?;
+    struct Apartment;
+    impl Drop for Apartment {
+        fn drop(&mut self) {
+            // SAFETY: paired with the successful RoInitialize above on this thread.
+            unsafe { RoUninitialize() };
+        }
+    }
+    let _apartment = Apartment;
     let engine = OcrEngine::TryCreateFromUserProfileLanguages().map_err(|_| {
         "no OCR language is installed (Settings › Time & language › Language)".to_owned()
     })?;
