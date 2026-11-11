@@ -14,6 +14,118 @@ static UI: OnceLock<(ThreadId, AppScope)> = OnceLock::new();
 thread_local! {
     /// Set while the model's values are written to signals.
     static PUBLISHING: Cell<u32> = const { Cell::new(0) };
+    static SIGNALS: RefCell<Vec<Box<dyn std::any::Any>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A sendable address, not a reactive handle. Resolve it only on its owning
+/// thread; values and callbacks cross the dispatcher, never `Signal` itself.
+pub struct Published<T: 'static> {
+    index: usize,
+    thread: ThreadId,
+    marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> Copy for Published<T> {}
+impl<T> Clone for Published<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> std::fmt::Debug for Published<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Published")
+            .field("index", &self.index)
+            .field("thread", &self.thread)
+            .finish()
+    }
+}
+impl<T> PartialEq for Published<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index && self.thread == other.thread
+    }
+}
+impl<T> Eq for Published<T> {}
+
+impl<T> Published<T> {
+    pub fn new(value: T) -> Self {
+        let signal = Signal::new(value);
+        let index = SIGNALS.with(|signals| {
+            let mut signals = signals.borrow_mut();
+            let index = signals.len();
+            signals.push(Box::new(signal));
+            index
+        });
+        Self {
+            index,
+            thread: std::thread::current().id(),
+            marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn local(self) -> Signal<T> {
+        assert_eq!(
+            self.thread,
+            std::thread::current().id(),
+            "published signal accessed off its UI thread"
+        );
+        SIGNALS.with(|signals| {
+            *signals.borrow()[self.index]
+                .downcast_ref::<Signal<T>>()
+                .expect("published signal type")
+        })
+    }
+
+    pub fn get(self) -> T
+    where
+        T: Clone,
+    {
+        self.local().get()
+    }
+    pub fn get_untracked(self) -> T
+    where
+        T: Clone,
+    {
+        self.local().get_untracked()
+    }
+    pub fn with<R>(self, f: impl FnOnce(&T) -> R) -> R {
+        self.local().with(f)
+    }
+    pub fn with_untracked<R>(self, f: impl FnOnce(&T) -> R) -> R {
+        self.local().with_untracked(f)
+    }
+    pub fn set(self, value: T) {
+        self.local().set(value);
+    }
+    pub fn set_if_changed(self, value: T)
+    where
+        T: PartialEq,
+    {
+        self.local().set_if_changed(value);
+    }
+    pub fn update(self, f: impl FnOnce(&mut T)) {
+        self.local().update(f);
+    }
+    pub fn two_way(self) -> rustolonia::TwoWay<T> {
+        self.local().two_way()
+    }
+}
+
+impl<T: Clone> rustolonia::view::IntoProp<T, rustolonia::view::markers::SignalMarker> for Published<T> {
+    fn into_prop(self) -> rustolonia::view::PropBinding<T> {
+        self.local().into_prop()
+    }
+}
+
+impl rustolonia::view::IntoProp<Option<String>, rustolonia::view::markers::SignalOptionMarker> for Published<String> {
+    fn into_prop(self) -> rustolonia::view::PropBinding<Option<String>> {
+        self.local().into_prop()
+    }
+}
+
+impl rustolonia::view::IntoProp<Option<bool>, rustolonia::view::markers::SignalOptionMarker> for Published<bool> {
+    fn into_prop(self) -> rustolonia::view::PropBinding<Option<bool>> {
+        self.local().into_prop()
+    }
 }
 
 /// Remembers the UI thread and how to reach it; call once, from it, before
@@ -27,11 +139,13 @@ pub fn on_ui_thread() -> bool {
 }
 
 /// Runs `f` on the UI thread: now when already there, otherwise posted.
-pub fn on_ui(f: impl FnOnce() + Send + 'static) {
+pub fn on_ui(f: impl FnOnce() + Send + 'static) -> Result<()> {
     if on_ui_thread() {
         f();
-    } else if let Some((_, scope)) = UI.get() {
-        let _ = scope.post(f);
+        Ok(())
+    } else {
+        let (_, scope) = UI.get().ok_or(rustolonia::Error::NoUiContext)?;
+        scope.post(f)
     }
 }
 
@@ -55,15 +169,13 @@ pub fn as_publisher<R>(f: impl FnOnce() -> R) -> R {
 }
 
 /// Sets `signal` to `value` when it differs, from any thread.
-pub fn publish<T: PartialEq + Send + 'static>(signal: Signal<T>, value: T) -> Result<()> {
-    on_ui(move || as_publisher(|| signal.set_if_changed(value)));
-    Ok(())
+pub fn publish<T: PartialEq + Send + 'static>(signal: Published<T>, value: T) -> Result<()> {
+    on_ui(move || as_publisher(|| signal.set_if_changed(value)))
 }
 
 /// Changes `signal`'s value in place, from any thread.
-pub fn publish_update<T: Send + 'static>(signal: Signal<T>, f: impl FnOnce(&mut T) + Send + 'static) -> Result<()> {
-    on_ui(move || as_publisher(|| signal.update(f)));
-    Ok(())
+pub fn publish_update<T: Send + 'static>(signal: Published<T>, f: impl FnOnce(&mut T) + Send + 'static) -> Result<()> {
+    on_ui(move || as_publisher(|| signal.update(f)))
 }
 
 /// A model shared by its window's controls. Calls that arrive while it is
@@ -102,7 +214,7 @@ impl<M: ?Sized> ModelCell<M> {
 /// Calls the model's setter when a control changes `signal` (a two-way
 /// binding), but not for values the model published.
 pub fn watch<T, M: ?Sized + 'static>(
-    signal: Signal<T>,
+    signal: Published<T>,
     model: &ModelCell<M>,
     set: impl Fn(&mut M, T) -> Result<()> + 'static,
 ) -> Result<()>
@@ -128,7 +240,7 @@ where
 /// values it published and its model. Views bind to [`Element::fields`] and
 /// run commands through [`Element::model`].
 pub struct Element<F: 'static, M: ?Sized> {
-    pub fields: Signal<F>,
+    pub fields: Published<F>,
     pub model: ModelCell<M>,
     /// Stable for the element's life: a key for list views.
     pub key: u64,
@@ -146,7 +258,7 @@ impl<F: 'static, M: ?Sized> Drop for Element<F, M> {
 /// An element's sink: usable from any thread, and harmless once the element
 /// is gone (its signal may already serve another element).
 pub struct ElementSink<F: 'static> {
-    fields: Signal<F>,
+    fields: Published<F>,
     key: u64,
 }
 
@@ -180,8 +292,7 @@ impl<F: Clone + PartialEq + 'static> ElementSink<F> {
                 f(&mut value);
                 as_publisher(|| fields.set_if_changed(value));
             }
-        });
-        Ok(())
+        })
     }
 }
 
@@ -193,26 +304,26 @@ thread_local! {
     static NEXT_KEY: Cell<u64> = const { Cell::new(1) };
 }
 
-fn with_slots<F: 'static, R>(f: impl FnOnce(&mut Vec<(Signal<F>, u64)>) -> R) -> R {
+fn with_slots<F: 'static, R>(f: impl FnOnce(&mut Vec<(Published<F>, u64)>) -> R) -> R {
     SLOTS.with(|slots| {
         let mut slots = slots.borrow_mut();
         let entry = slots
             .entry(std::any::TypeId::of::<F>())
-            .or_insert_with(|| Box::new(Vec::<(Signal<F>, u64)>::new()));
+            .or_insert_with(|| Box::new(Vec::<(Published<F>, u64)>::new()));
         f(entry.downcast_mut().expect("slot type"))
     })
 }
 
-fn owner_of<F: 'static>(fields: Signal<F>) -> Option<u64> {
-    with_slots(|slots: &mut Vec<(Signal<F>, u64)>| slots.iter().find(|(s, _)| *s == fields).map(|(_, k)| *k))
+fn owner_of<F: 'static>(fields: Published<F>) -> Option<u64> {
+    with_slots(|slots: &mut Vec<(Published<F>, u64)>| slots.iter().find(|(s, _)| *s == fields).map(|(_, k)| *k))
 }
 
-fn recycle<F: 'static>(fields: Signal<F>, key: u64) {
+fn recycle<F: 'static>(fields: Published<F>, key: u64) {
     // At native process exit, the slot cache may already have been dropped.
     let _ = SLOTS.try_with(|slots| {
         let mut slots = slots.borrow_mut();
         if let Some(entries) = slots.get_mut(&std::any::TypeId::of::<F>()) {
-            let entries = entries.downcast_mut::<Vec<(Signal<F>, u64)>>().expect("slot type");
+            let entries = entries.downcast_mut::<Vec<(Published<F>, u64)>>().expect("slot type");
             if let Some(slot) = entries.iter_mut().find(|(s, k)| *s == fields && *k == key) {
                 slot.1 = 0;
             }
@@ -220,9 +331,9 @@ fn recycle<F: 'static>(fields: Signal<F>, key: u64) {
     });
 }
 
-fn fresh<F: Default + 'static>() -> (Signal<F>, u64) {
+fn fresh<F: Default + 'static>() -> (Published<F>, u64) {
     let key = NEXT_KEY.with(|k| k.replace(k.get() + 1));
-    let reused = with_slots(|slots: &mut Vec<(Signal<F>, u64)>| {
+    let reused = with_slots(|slots: &mut Vec<(Published<F>, u64)>| {
         slots.iter_mut().find(|(_, k)| *k == 0).map(|slot| {
             slot.1 = key;
             slot.0
@@ -234,7 +345,7 @@ fn fresh<F: Default + 'static>() -> (Signal<F>, u64) {
             signal
         }
         None => {
-            let signal = Signal::new(F::default());
+            let signal = Published::new(F::default());
             with_slots(|slots| slots.push((signal, key)));
             signal
         }
@@ -249,8 +360,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn publishing_without_a_ui_dispatcher_returns_an_error() {
+        let value = Published::new(0);
+        assert!(matches!(publish(value, 1), Err(rustolonia::Error::NoUiContext)));
+        assert_eq!(value.get(), 0);
+    }
+
+    #[test]
+    fn published_addresses_reject_foreign_thread_arenas() {
+        fn send_sync_copy<T: Send + Sync + Copy>() {}
+        send_sync_copy::<Published<Rc<String>>>();
+        let value = Published::new(Rc::new("UI owned".to_owned()));
+        assert!(std::thread::spawn(move || {
+            let _other = Published::new(Rc::new("another arena".to_owned()));
+            value.local();
+        }).join().is_err());
+        assert_eq!(value.get().as_str(), "UI owned");
+    }
+
+    #[test]
+    fn published_addresses_preserve_reactivity_and_publisher_guards() {
+        let value = Published::new(String::from("before"));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let observer = seen.clone();
+        let _effect = Effect::new(move || {
+            observer.borrow_mut().push((value.get(), publishing()));
+            Ok(())
+        }).unwrap();
+        as_publisher(|| value.set_if_changed(String::from("after")));
+        as_publisher(|| value.set_if_changed(String::from("after")));
+        assert_eq!(&*seen.borrow(), &[
+            (String::from("before"), false),
+            (String::from("after"), true),
+        ]);
+        assert!(!publishing());
+    }
+
+    #[test]
     fn recycling_after_the_slot_cache_is_destroyed_is_safe() {
-        struct LateDrop(Signal<u8>);
+        struct LateDrop(Published<u8>);
         impl Drop for LateDrop {
             fn drop(&mut self) {
                 recycle(self.0, 1);
@@ -260,9 +408,9 @@ mod tests {
             static LATE: RefCell<Option<LateDrop>> = const { RefCell::new(None) };
         }
         std::thread::spawn(|| {
-            let signal = Signal::new(0u8);
+            let signal = Published::new(0u8);
             LATE.with(|late| *late.borrow_mut() = Some(LateDrop(signal)));
-            with_slots(|slots: &mut Vec<(Signal<u8>, u64)>| slots.push((signal, 1)));
+            with_slots(|slots: &mut Vec<(Published<u8>, u64)>| slots.push((signal, 1)));
         }).join().unwrap();
     }
 
@@ -280,7 +428,7 @@ mod tests {
             detached: Arc<AtomicUsize>,
         }
 
-        fn replace(list: Signal<Vec<Rc<Element<usize, Model>>>>, models: Vec<Model>) {
+        fn replace(list: Published<Vec<Rc<Element<usize, Model>>>>, models: Vec<Model>) {
             Element::replace_on_ui(
                 list,
                 models,
@@ -307,7 +455,7 @@ mod tests {
                 attached: attached.clone(),
                 detached: detached.clone(),
             };
-            let list = Signal::new(Vec::new());
+            let list = Published::new(Vec::new());
             let notifications = Rc::new(Cell::new(0));
             let observed = notifications.clone();
             let _effect = Effect::new(move || {
@@ -423,7 +571,7 @@ impl<F: Clone + Default + PartialEq + 'static, M: ?Sized + 'static> Element<F, M
     }
 
     pub fn add<V: Send + 'static>(
-        list: Signal<Vec<Rc<Self>>>,
+        list: Published<Vec<Rc<Self>>>,
         value: V,
         boxed: fn(V) -> Box<M>,
         attach: Attach<M, F>,
@@ -432,22 +580,20 @@ impl<F: Clone + Default + PartialEq + 'static, M: ?Sized + 'static> Element<F, M
         on_ui(move || {
             let element = Self::make(value, boxed, attach, detach);
             as_publisher(|| list.update(|l| l.push(element)));
-        });
-        Ok(())
+        })
     }
 
-    pub fn clear(list: Signal<Vec<Rc<Self>>>) -> Result<()> {
+    pub fn clear(list: Published<Vec<Rc<Self>>>) -> Result<()> {
         on_ui(move || {
             let mut old = Vec::new();
             as_publisher(|| list.update(|l| old = std::mem::take(l)));
             drop(old);
-        });
-        Ok(())
+        })
     }
 
     /// Publishes a collection once, retaining the elements whose keys are supplied.
     pub fn replace<V: Send + 'static>(
-        list: Signal<Vec<Rc<Self>>>,
+        list: Published<Vec<Rc<Self>>>,
         values: Vec<V>,
         key: fn(&V) -> Option<u64>,
         boxed: fn(V) -> Box<M>,
@@ -456,12 +602,11 @@ impl<F: Clone + Default + PartialEq + 'static, M: ?Sized + 'static> Element<F, M
     ) -> Result<()> {
         on_ui(move || {
             Self::replace_on_ui(list, values, key, boxed, attach, detach);
-        });
-        Ok(())
+        })
     }
 
     fn replace_on_ui<V: Send + 'static>(
-        list: Signal<Vec<Rc<Self>>>,
+        list: Published<Vec<Rc<Self>>>,
         values: Vec<V>,
         key: fn(&V) -> Option<u64>,
         boxed: fn(V) -> Box<M>,

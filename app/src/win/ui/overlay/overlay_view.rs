@@ -95,19 +95,28 @@ impl MonitorWindow {
         input.set_background(Some(HIT_TEST_BACKGROUND))?;
         input.set_cursor(Cursor::Cross)?;
         let decor = Decor::new()?;
-        let root = Panel::new()?.child(snapshot.control())?.child(&decor.canvas)?.child(input.control())?;
+        let root = {
+            let control = Panel::new()?;
+            control.children()?.add(snapshot.control())?;
+            control.children()?.add(&decor.canvas)?;
+            control.children()?.add(input.control())?;
+            control
+        };
         #[cfg(not(target_os = "macos"))]
         let background = Color::rgb(0, 0, 0);
         #[cfg(target_os = "macos")]
         let background = Color::new(0, 0, 0, 0);
-        let window = Window::new()?
-            .title("Jiffshot selection")?
-            .window_decorations(WindowDecorations::None)?
-            .show_activated(false)?
-            .show_in_taskbar(false)?
-            .can_resize(false)?
-            .background(Brush::solid(background))?
-            .content(Some(&root))?;
+        let window = {
+            let control = Window::new()?;
+            control.set_title("Jiffshot selection")?;
+            control.set_window_decorations(WindowDecorations::None)?;
+            control.set_show_activated(false)?;
+            control.set_show_in_taskbar(false)?;
+            control.set_can_resize(false)?;
+            control.set_background(Brush::solid(background))?;
+            control.set_content(&root)?;
+            control
+        };
         #[cfg(target_os = "macos")]
         scope.set_transparent(&window, true)?;
         scope.set_topmost(&window, true)?;
@@ -220,9 +229,9 @@ impl MonitorWindow {
         Ok(Some(super::GuideVisual {
             monitor: self.rect,
             scale: self.scaling(),
-            bounds: [Canvas::get_left(border)?, Canvas::get_top(border)?, border.get_width()?, border.get_height()?],
-            label: label.get_text()?,
-            visible: border.get_is_visible()? && label.get_is_visible()?,
+            bounds: [border.canvas_left()?, border.canvas_top()?, border.width()?, border.height()?],
+            label: label.text()?,
+            visible: border.is_visible()? && label.is_visible()?,
         }))
     }
 
@@ -367,10 +376,13 @@ fn line_height(px: f32) -> i32 {
 // ---- the decorations -------------------------------------------------------------
 
 fn text_block(color: Color, bold: bool) -> Result<TextBlock> {
-    TextBlock::new()?
-        .font_family(FONT)?
-        .foreground(Brush::solid(color))?
-        .font_weight(if bold { FontWeight::DemiBold } else { FontWeight::Normal })
+    {
+        let control = TextBlock::new()?;
+        control.set_font_family(FONT)?;
+        control.set_foreground(Brush::solid(color))?;
+        control.set_font_weight(if bold { FontWeight::DemiBold } else { FontWeight::Normal })?;
+        Ok(control)
+    }
 }
 
 fn at(control: &impl AsControl, x: f64, y: f64) -> Result<()> {
@@ -395,16 +407,32 @@ fn outline(b: &Border, r: Rect, t: i32, frame: [f64; 4], s: f64) -> Result<()> {
 }
 
 fn outline_border(color: Color) -> Result<Border> {
-    Border::new()?.border_brush(Brush::solid(color))?.visible(false)
+    {
+        let control = Border::new()?;
+        control.set_border_brush(Brush::solid(color))?;
+        control.set_visible(false)?;
+        Ok(control)
+    }
 }
 
 fn filled(color: Color) -> Result<Border> {
-    Border::new()?.background(Brush::solid(color))?.visible(false)
+    {
+        let control = Border::new()?;
+        control.set_background(Brush::solid(color))?;
+        control.set_visible(false)?;
+        Ok(control)
+    }
 }
 
 /// A dark box holding text.
 fn panel(child: &dyn AsControl) -> Result<Border> {
-    Border::new()?.background(Brush::solid(LABEL_BACK))?.child(Some(child))?.visible(false)
+    {
+        let control = Border::new()?;
+        control.set_background(Brush::solid(LABEL_BACK))?;
+        control.set_child(child)?;
+        control.set_visible(false)?;
+        Ok(control)
+    }
 }
 
 /// The magnifier to draw: where (desktop pixels, the accent frame
@@ -507,20 +535,36 @@ impl Decor {
     fn new() -> Result<Self> {
         let label_title = text_block(LABEL_MUTED, false)?;
         let label_size = text_block(LABEL_TEXT, true)?;
-        let label_row = StackPanel::new()?
-            .orientation(Orientation::Horizontal)?
-            .child(&label_title)?
-            .child(&label_size)?;
+        let label_row = {
+            let control = StackPanel::new()?;
+            control.set_orientation(Orientation::Horizontal)?;
+            control.children()?.add(&label_title)?;
+            control.children()?.add(&label_size)?;
+            control
+        };
         let help_lines = StackPanel::new()?;
         let hint_text = text_block(LABEL_MUTED, false)?;
         let this = Decor {
-            canvas: Canvas::new()?.visible(false)?,
-            dim: Border::new()?.border_brush(Brush::solid(DIM))?,
+            canvas: {
+                let control = Canvas::new()?;
+                control.set_visible(false)?;
+                control
+            },
+            dim: {
+                let control = Border::new()?;
+                control.set_border_brush(Brush::solid(DIM))?;
+                control
+            },
             cross_h: filled(CROSSHAIR)?,
             cross_v: filled(CROSSHAIR)?,
             regions: Canvas::new()?,
             region_borders: Vec::new(),
-            path: Polyline::new()?.stroke(Brush::solid(ACCENT))?.visible(false)?,
+            path: {
+                let control = Polyline::new()?;
+                control.set_stroke(Brush::solid(ACCENT))?;
+                control.set_visible(false)?;
+                control
+            },
             path_shown: Vec::new(),
             guides: Canvas::new()?,
             guide_items: Vec::new(),
@@ -532,9 +576,9 @@ impl Decor {
             help_lines,
             help_shown: Vec::new(),
             mag_panel: filled(LABEL_BACK)?,
-            mag_coords: text_block(LABEL_TEXT, false)?.visible(false)?,
+            mag_coords: { let text = text_block(LABEL_TEXT, false)?; text.set_visible(false)?; text },
             mag_swatch: filled(LABEL_BACK)?,
-            mag_hex: text_block(LABEL_TEXT, false)?.visible(false)?,
+            mag_hex: { let text = text_block(LABEL_TEXT, false)?; text.set_visible(false)?; text },
             hint: panel(&hint_text)?,
             hint_text,
         };
@@ -708,7 +752,9 @@ impl Decor {
                 let lines = self.help_lines.children()?;
                 lines.clear()?;
                 for line in &scene.help {
-                    lines.add(text_block(LABEL_TEXT, false)?.text(line)?)?;
+                    let text = text_block(LABEL_TEXT, false)?;
+                    text.set_text(line)?;
+                    lines.add(text)?;
                 }
                 self.help_shown.clone_from(&scene.help);
             }

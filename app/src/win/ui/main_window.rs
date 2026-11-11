@@ -32,14 +32,14 @@ use rustolonia::{
 use std::cell::Cell;
 
 /// `WindowCloseReason.ApplicationShutdown` and `OSShutdown`.
-const CLOSE_APPLICATION_SHUTDOWN: i32 = 3;
-const CLOSE_OS_SHUTDOWN: i32 = 4;
+const CLOSE_APPLICATION_SHUTDOWN: rustolonia::WindowCloseReason = rustolonia::WindowCloseReason::ApplicationShutdown;
+const CLOSE_OS_SHUTDOWN: rustolonia::WindowCloseReason = rustolonia::WindowCloseReason::OSShutdown;
 
 /// Builds the editor window for `binding` (not yet shown).
 pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
     let sink = binding.sink;
     let canvas = CanvasView::new(scope)?;
-    canvas.follow_theme(sink.theme)?;
+    canvas.follow_theme(sink.theme.local())?;
     super::set_canvas(canvas.clone());
     let ctx = Ctx {
         scope: scope.clone(),
@@ -134,7 +134,7 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
                 .tool_tip_tip("Open the Capture window")
                 .background(solid(RED))
                 .foreground(solid(WHITE))
-                .command(main_common::command(s.open_capture_window_enabled, |m| m.open_capture_window())),
+                .command(main_common::command(s.open_capture_window_enabled.local(), |m| m.open_capture_window())),
         )
         .child(with_flyout(Button::el().content("Create ▾").tool_tip_tip("An image from a template, combined images, or a video from images"), create_flyout(ctx)))
         .child(rule(theme, (4.0, 6.0)));
@@ -145,7 +145,7 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
         .vertical_alignment(VerticalAlignment::Center)
         .child(rule(theme, (4.0, 6.0)))
         .child(ToggleButton::el().content("✦ Effects").checked(s.show_effects.two_way()).tool_tip_tip("Show or hide the Effects panel"))
-        .child(Button::el().content("Copy All").tool_tip_tip(shortcut("Copy the whole image (Ctrl+Shift+C)")).command(main_common::command(s.copy_image_enabled, |m| m.copy_image())))
+        .child(Button::el().content("Copy All").tool_tip_tip(shortcut("Copy the whole image (Ctrl+Shift+C)")).command(main_common::command(s.copy_image_enabled.local(), |m| m.copy_image())))
         .child(with_flyout(Button::el().content("Share ▾").tool_tip_tip("Send the capture to another app, a file or a printer"), share_flyout(ctx)));
     Border::el()
         .dock_panel_dock(Dock::Top)
@@ -267,12 +267,13 @@ fn wire_canvas(ctx: &Ctx, zoom: ZoomView) -> Result<()> {
 /// Focuses the properties' text box and selects its text, once the panel
 /// shows it.
 fn focus_text(scope: &AppScope, editor: NodeRef<TextBox>) {
-    let _ = scope.post(move || {
-        let Some(editor) = editor.get() else { return };
-        if editor.get_is_visible().unwrap_or(false) {
-            let _ = editor.focus_with_navigation_method_and_key_modifiers(0, 0);
+    super::capture_view::parts::post(scope, "Focus editor text", move || {
+        let Some(editor) = editor.get() else { return Ok(()) };
+        if editor.is_visible().unwrap_or(false) {
+            let _ = editor.focus_with_navigation_method_and_key_modifiers(rustolonia::NavigationMethod::Unspecified, rustolonia::KeyModifiers::NONE);
             let _ = editor.select_all();
         }
+        Ok(())
     });
 }
 
@@ -280,7 +281,7 @@ fn focus_text(scope: &AppScope, editor: NodeRef<TextBox>) {
 /// the tray) except when Windows or the application is shutting down.
 fn wire_window(ctx: &Ctx, window: &Window) -> Result<()> {
     window.clone().on_key_down(&ctx.scope, |args| {
-        if !args.handled && args.key == Key::Escape as i32 {
+        if !args.handled && args.key == Key::Escape {
             run("deselect");
             args.handled = true;
         }

@@ -1198,16 +1198,19 @@ fn open_draw(scope: &AppScope, id: u64, mapping: CaptureMapping) -> std::result:
         surface.set_background(Some(0x00FF_FFFF))?;
         surface.set_cursor(Cursor::Cross)?;
         let [left, top, right, bottom] = viewport.frame;
-        let window = Window::new()?
-            .title("Jiffshot Screen Draw")?
-            .window_decorations(WindowDecorations::None)?
-            .show_in_taskbar(false)?
-            .can_resize(false)?
-            .width((right - left) / scale)?
-            .height((bottom - top) / scale)?
-            .position((area.x, area.y))?
-            .background(Brush::solid(Color::new(0, 0, 0, 0)))?
-            .content(Some(surface.control()))?;
+        let window = {
+            let control = Window::new()?;
+            control.set_title("Jiffshot Screen Draw")?;
+            control.set_window_decorations(WindowDecorations::None)?;
+            control.set_show_in_taskbar(false)?;
+            control.set_can_resize(false)?;
+            control.set_width((right - left) / scale)?;
+            control.set_height((bottom - top) / scale)?;
+            control.set_position((area.x, area.y))?;
+            control.set_background(Brush::solid(Color::new(0, 0, 0, 0)))?;
+            control.set_content(surface.control())?;
+            control
+        };
         scope.set_transparent(&window, true)?;
         scope.set_topmost(&window, true)?;
         Ok((surface, window))

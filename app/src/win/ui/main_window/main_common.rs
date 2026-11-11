@@ -69,7 +69,7 @@ pub fn action(action: impl Into<String>) -> Command {
 }
 
 /// A command that runs `f` (on the UI thread, where commands run).
-pub fn act(mut f: impl FnMut() + Send + 'static) -> Command {
+pub fn act(mut f: impl FnMut() + 'static) -> Command {
     Command::new(move |_| {
         f();
         Ok(())
@@ -279,11 +279,11 @@ pub fn choice_box(theme: Theme, items: impl Fn() -> Vec<String> + 'static, value
 
 /// A list that runs `pick` with the chosen entry and goes back to showing
 /// none (Quick styles' Theme… list).
-pub fn action_box(theme: Theme, items: impl Fn() -> Vec<String> + 'static, pick: impl Fn(String) + Send + 'static) -> El<ComboBox> {
+pub fn action_box(theme: Theme, items: impl Fn() -> Vec<String> + 'static, pick: impl Fn(String) + 'static) -> El<ComboBox> {
     choices(theme, items, String::new, pick).with_op(|scope, combo| {
         let (scope, reset) = (scope.clone(), combo.clone());
         combo.clone().on_selection_changed(&scope.clone(), move |_| {
-            if reset.get_selected_index().unwrap_or(-1) >= 0 {
+            if reset.selected_index().unwrap_or(-1) >= 0 {
                 let reset = reset.clone();
                 let _ = scope.post(move || {
                     let _ = reset.set_selected_index(-1);
@@ -294,7 +294,7 @@ pub fn action_box(theme: Theme, items: impl Fn() -> Vec<String> + 'static, pick:
     })
 }
 
-fn choices(theme: Theme, items: impl Fn() -> Vec<String> + 'static, current: impl Fn() -> String + 'static, pick: impl Fn(String) + Send + 'static) -> El<ComboBox> {
+fn choices(theme: Theme, items: impl Fn() -> Vec<String> + 'static, current: impl Fn() -> String + 'static, pick: impl Fn(String) + 'static) -> El<ComboBox> {
     ComboBox::el().with_op(move |scope, combo| {
         let shown: Arc<Mutex<Shown>> = Arc::default();
         // Set while the list or its selection is changed from here.
@@ -316,7 +316,7 @@ fn choices(theme: Theme, items: impl Fn() -> Vec<String> + 'static, current: imp
             if syncing.load(Ordering::SeqCst) {
                 return;
             }
-            let index = reader.get_selected_index().unwrap_or(-1);
+            let index = reader.selected_index().unwrap_or(-1);
             let list = shown.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(picked) = usize::try_from(index).ok().and_then(|i| list.items.get(i)).cloned() {
                 drop(list);
@@ -345,12 +345,21 @@ fn show_choices(combo: &ComboBox, shown: &Mutex<Shown>, list: Vec<String>, text:
         combo.set_selected_index(-1)?;
         items.clear()?;
         for entry in &list {
-            items.add(ComboBoxItem::new()?.content(Some(&TextBlock::new()?.text(entry)?.foreground(text)?))?)?;
+            items.add({
+                let control = ComboBoxItem::new()?;
+                control.set_content(&{
+                    let control = TextBlock::new()?;
+                    control.set_text(entry)?;
+                    control.set_foreground(text)?;
+                    control
+                })?;
+                control
+            })?;
         }
         *current = Shown { items: list, text: Some(text) };
     }
     let index = current.items.iter().position(|s| s == value).and_then(|i| i32::try_from(i).ok()).unwrap_or(-1);
-    if combo.get_selected_index()? != index {
+    if combo.selected_index()? != index {
         combo.set_selected_index(index)?;
     }
     Ok(())
@@ -359,7 +368,7 @@ fn show_choices(combo: &ComboBox, shown: &Mutex<Shown>, list: Vec<String>, text:
 /// A toggle that shows `value` (one way) and runs `toggle` when clicked; it
 /// shows `value` again afterwards, so a toggle the model refused springs
 /// back.
-pub fn one_way_toggle(value: impl Fn() -> bool + Clone + Send + 'static, toggle: impl Fn() + Send + 'static) -> El<rustolonia::ToggleButton> {
+pub fn one_way_toggle(value: impl Fn() -> bool + Clone + 'static, toggle: impl Fn() + 'static) -> El<rustolonia::ToggleButton> {
     let shown = value.clone();
     rustolonia::ToggleButton::el().checked(move || Some(shown())).with_op(move |scope, button| {
         let target = button.clone();

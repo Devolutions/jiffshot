@@ -2,9 +2,9 @@
 //! no managed code. Windows bind to the signals of the view models in
 //! [`crate::vm`] and send what the user does to their models.
 //!
-//! Event callbacks must be `Send`, but view models live on the UI thread:
-//! callbacks reach the main and Capture windows' bindings through [`main`]
-//! and [`capture`], and carry anything else in a [`UiOnly`].
+//! UI callbacks can capture UI-thread state directly. Cross-thread posts
+//! still use [`UiOnly`] where needed; view-model sinks carry thread-tagged
+//! addresses and resolve reactive handles only on the owning UI thread.
 
 #[path = "../../ui/canvas_view.rs"]
 pub mod canvas_view;
@@ -78,9 +78,9 @@ pub(crate) fn shortcut(text: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) const COMMAND_MODIFIER: i32 = rustolonia::key_modifiers::META;
+pub(crate) const COMMAND_MODIFIER: rustolonia::KeyModifiers = rustolonia::KeyModifiers::META;
 #[cfg(not(target_os = "macos"))]
-pub(crate) const COMMAND_MODIFIER: i32 = rustolonia::key_modifiers::CONTROL;
+pub(crate) const COMMAND_MODIFIER: rustolonia::KeyModifiers = rustolonia::KeyModifiers::CONTROL;
 
 thread_local! {
     static MAIN: RefCell<Option<MainBinding>> = const { RefCell::new(None) };

@@ -10,7 +10,7 @@ use super::{native, place_beside, run};
 use crate::ui::{capture_view::parts::rgb, dark_blue};
 use jiffshot_capture::Rect;
 use rustolonia::{
-    size_to_content, AppScope, AsControl, Border, Brush, Color, Control, Ellipse, EventSubscription, FontWeight, HorizontalAlignment, Line, MenuFlyout,
+    SizeToContent, AppScope, AsControl, Border, Brush, Color, Control, Ellipse, EventSubscription, FontWeight, HorizontalAlignment, Line, MenuFlyout,
     MenuItem, MenuItemToggleType, Orientation, Panel, Path, PlacementMode, Rectangle, Result, Separator, StackPanel, TextBlock, TextWrapping, Upcast,
     VerticalAlignment, Window,
 };
@@ -71,27 +71,41 @@ impl ToolButton {
         subscriptions: &mut Vec<EventSubscription>,
         click: impl FnMut() + Send + 'static,
     ) -> Result<Self> {
-        let glyph = TextBlock::new()?
-            .text(super::super::icons::glyph(glyph))?
-            .font_family(ICONS)?
-            .font_size(size)?
-            .foreground(Brush::solid(WHITE))?
-            .horizontal_alignment(HorizontalAlignment::Center)?
-            .vertical_alignment(VerticalAlignment::Center)?;
+        let glyph = {
+            let control = TextBlock::new()?;
+            control.set_text(super::super::icons::glyph(glyph))?;
+            control.set_font_family(ICONS)?;
+            control.set_font_size(size)?;
+            control.set_foreground(Brush::solid(WHITE))?;
+            control.set_horizontal_alignment(HorizontalAlignment::Center)?;
+            control.set_vertical_alignment(VerticalAlignment::Center)?;
+            control
+        };
         let half = size * 0.55;
-        let strike = Line::new()?
-            .start_point((width / 2.0 - half, height / 2.0 + half))?
-            .end_point((width / 2.0 + half, height / 2.0 - half))?
-            .stroke(Brush::solid(WHITE))?
-            .stroke_thickness(1.6)?
-            .visible(false)?;
-        let content = Panel::new()?.child(&glyph)?.child(&strike)?;
-        let border = Border::new()?
-            .width(width)?
-            .height(height)?
-            .background(Brush::solid(fill))?
-            .corner_radius(10.0)?
-            .child(Some(&content))?;
+        let strike = {
+            let control = Line::new()?;
+            control.set_start_point((width / 2.0 - half, height / 2.0 + half))?;
+            control.set_end_point((width / 2.0 + half, height / 2.0 - half))?;
+            control.set_stroke(Brush::solid(WHITE))?;
+            control.set_stroke_thickness(1.6)?;
+            control.set_visible(false)?;
+            control
+        };
+        let content = {
+            let control = Panel::new()?;
+            control.children()?.add(&glyph)?;
+            control.children()?.add(&strike)?;
+            control
+        };
+        let border = {
+            let control = Border::new()?;
+            control.set_width(width)?;
+            control.set_height(height)?;
+            control.set_background(Brush::solid(fill))?;
+            control.set_corner_radius(10.0)?;
+            control.set_child(&content)?;
+            control
+        };
         let hover = border.clone();
         subscriptions.push(border.subscribe_pointer_entered(move |_| {
             let _ = hover.set_opacity(0.85);
@@ -148,46 +162,63 @@ impl ToolButton {
 
 /// Filled shapes for Stop, Pause and Resume (the icon font's are outlines).
 fn stop_shape(size: f64) -> Result<Control> {
-    Ok(Rectangle::new()?
-        .width(size)?
-        .height(size)?
-        .radius_x(3.0)?
-        .radius_y(3.0)?
-        .fill(Brush::solid(WHITE))?
+    Ok({
+        let control = Rectangle::new()?;
+        control.set_width(size)?;
+        control.set_height(size)?;
+        control.set_radius_x(3.0)?;
+        control.set_radius_y(3.0)?;
+        control.set_fill(Brush::solid(WHITE))?;
+        control
+    }
         .upcast())
 }
 
 fn pause_shape() -> Result<Control> {
     let bar = || -> Result<Rectangle> {
-        Rectangle::new()?
-            .width(6.0)?
-            .height(20.0)?
-            .radius_x(2.0)?
-            .radius_y(2.0)?
-            .fill(Brush::solid(WHITE))
+        {
+            let control = Rectangle::new()?;
+            control.set_width(6.0)?;
+            control.set_height(20.0)?;
+            control.set_radius_x(2.0)?;
+            control.set_radius_y(2.0)?;
+            control.set_fill(Brush::solid(WHITE))?;
+            Ok(control)
+        }
     };
-    Ok(StackPanel::new()?
-        .orientation(Orientation::Horizontal)?
-        .spacing(6.0)?
-        .horizontal_alignment(HorizontalAlignment::Center)?
-        .vertical_alignment(VerticalAlignment::Center)?
-        .child(bar()?)?
-        .child(bar()?)?
+    Ok({
+        let control = StackPanel::new()?;
+        control.set_orientation(Orientation::Horizontal)?;
+        control.set_spacing(6.0)?;
+        control.set_horizontal_alignment(HorizontalAlignment::Center)?;
+        control.set_vertical_alignment(VerticalAlignment::Center)?;
+        control.children()?.add(bar()?)?;
+        control.children()?.add(bar()?)?;
+        control
+    }
         .upcast())
 }
 
 fn resume_shape() -> Result<Control> {
-    Ok(Path::new()?
-        .data("M 0,0 L 17,10 L 0,20 Z")?
-        .fill(Brush::solid(WHITE))?
-        .horizontal_alignment(HorizontalAlignment::Center)?
-        .vertical_alignment(VerticalAlignment::Center)?
-        .margin((4.0, 0.0, 0.0, 0.0))?
+    Ok({
+        let control = Path::new()?;
+        control.set_data("M 0,0 L 17,10 L 0,20 Z")?;
+        control.set_fill(Brush::solid(WHITE))?;
+        control.set_horizontal_alignment(HorizontalAlignment::Center)?;
+        control.set_vertical_alignment(VerticalAlignment::Center)?;
+        control.set_margin((4.0, 0.0, 0.0, 0.0))?;
+        control
+    }
         .upcast())
 }
 
 fn row(spacing: f64, items: &[&dyn AsControl]) -> Result<StackPanel> {
-    let panel = StackPanel::new()?.orientation(Orientation::Horizontal)?.spacing(spacing)?;
+    let panel = {
+        let control = StackPanel::new()?;
+        control.set_orientation(Orientation::Horizontal)?;
+        control.set_spacing(spacing)?;
+        control
+    };
     for item in items {
         panel.children()?.add(*item)?;
     }
@@ -195,7 +226,11 @@ fn row(spacing: f64, items: &[&dyn AsControl]) -> Result<StackPanel> {
 }
 
 fn column(spacing: f64, items: &[&dyn AsControl]) -> Result<StackPanel> {
-    let panel = StackPanel::new()?.spacing(spacing)?;
+    let panel = {
+        let control = StackPanel::new()?;
+        control.set_spacing(spacing)?;
+        control
+    };
     for item in items {
         panel.children()?.add(*item)?;
     }
@@ -203,24 +238,36 @@ fn column(spacing: f64, items: &[&dyn AsControl]) -> Result<StackPanel> {
 }
 
 fn dot(size: f64) -> Result<Ellipse> {
-    Ellipse::new()?
-        .width(size)?
-        .height(size)?
-        .fill(Brush::solid(LIVE))?
-        .vertical_alignment(VerticalAlignment::Center)
+    {
+        let control = Ellipse::new()?;
+        control.set_width(size)?;
+        control.set_height(size)?;
+        control.set_fill(Brush::solid(LIVE))?;
+        control.set_vertical_alignment(VerticalAlignment::Center)?;
+        Ok(control)
+    }
 }
 
 fn time_text(size: f64) -> Result<TextBlock> {
-    TextBlock::new()?
-        .font_size(size)?
-        .font_weight(FontWeight::DemiBold)?
-        .foreground(Brush::solid(WHITE))?
-        .vertical_alignment(VerticalAlignment::Center)
+    {
+        let control = TextBlock::new()?;
+        control.set_font_size(size)?;
+        control.set_font_weight(FontWeight::DemiBold)?;
+        control.set_foreground(Brush::solid(WHITE))?;
+        control.set_vertical_alignment(VerticalAlignment::Center)?;
+        Ok(control)
+    }
 }
 
 /// A ▾ menu entry sending `action`.
 fn menu_item(header: &str, kind: MenuItemToggleType, on: bool, id: u64, action: String) -> Result<MenuItem> {
-    let item = MenuItem::new()?.header_text(header)?.toggle_type(kind)?.checked(on)?;
+    let item = {
+        let control = MenuItem::new()?;
+        control.set_header_text(header)?;
+        control.set_toggle_type(kind)?;
+        control.set_checked(on)?;
+        control
+    };
     let subscription = item.subscribe_click(move |_| run(format!("hud:{id}:act:{action}")))?;
     MENU.with(|m| m.borrow_mut().push(subscription));
     Ok(item)
@@ -230,7 +277,11 @@ fn menu_item(header: &str, kind: MenuItemToggleType, on: bool, id: u64, action: 
 /// entries, `None` for a separator.
 fn open_menu(target: &Border, id: u64, entries: &[Option<(&str, MenuItemToggleType, bool, String)>]) -> Result<MenuFlyout> {
     MENU.with(|m| m.borrow_mut().clear());
-    let menu = MenuFlyout::new()?.placement(PlacementMode::Top)?;
+    let menu = {
+        let control = MenuFlyout::new()?;
+        control.set_placement(PlacementMode::Top)?;
+        control
+    };
     let items = menu.items()?;
     for entry in entries {
         match entry {
@@ -358,35 +409,48 @@ impl RecordingToolbar {
         let restart = ToolButton::new("\u{E72C}", 46.0, 54.0, GREY, 18.0, &mut subs, send("restart"))?.tip("Restart: throw this take away and record again")?;
         let cancel = ToolButton::new("\u{E711}", 58.0, 54.0, GREY, 20.0, &mut subs, send("cancel"))?.tip("Cancel the recording (Esc)")?;
 
-        let time = time_text(24.0)?.font_features("tnum")?;
+        let time = time_text(24.0)?;
+        time.set_font_features("tnum")?;
         let mini_time = time_text(16.0)?;
         let dot_big = dot(9.0)?;
         let mini_dot = dot(8.0)?;
-        let mini_warning_text = TextBlock::new()?
-            .text("!")?
-            .font_size(15.0)?
-            .foreground(Brush::solid(WHITE))?
-            .horizontal_alignment(HorizontalAlignment::Center)?
-            .vertical_alignment(VerticalAlignment::Center)?;
-        let mini_warning = Border::new()?
-            .background(Brush::solid(WARNING))?
-            .corner_radius(8.0)?
-            .padding((5.0, 1.0))?
-            .visible(false)?
-            .child(Some(&mini_warning_text))?;
-        let note_text = TextBlock::new()?
-            .font_size(12.0)?
-            .foreground(Brush::solid(Color::rgb(0xE8, 0xEA, 0xED)))?
-            .text_wrapping(TextWrapping::Wrap)?
-            .max_width(640.0)?;
-        let note = Border::new()?
-            .background(Brush::solid(PILL))?
-            .corner_radius(8.0)?
-            .padding((10.0, 5.0))?
-            .margin((66.0, 6.0, 0.0, 0.0))?
-            .horizontal_alignment(HorizontalAlignment::Left)?
-            .visible(false)?
-            .child(Some(&note_text))?;
+        let mini_warning_text = {
+            let control = TextBlock::new()?;
+            control.set_text("!")?;
+            control.set_font_size(15.0)?;
+            control.set_foreground(Brush::solid(WHITE))?;
+            control.set_horizontal_alignment(HorizontalAlignment::Center)?;
+            control.set_vertical_alignment(VerticalAlignment::Center)?;
+            control
+        };
+        let mini_warning = {
+            let control = Border::new()?;
+            control.set_background(Brush::solid(WARNING))?;
+            control.set_corner_radius(8.0)?;
+            control.set_padding((5.0, 1.0))?;
+            control.set_visible(false)?;
+            control.set_child(&mini_warning_text)?;
+            control
+        };
+        let note_text = {
+            let control = TextBlock::new()?;
+            control.set_font_size(12.0)?;
+            control.set_foreground(Brush::solid(Color::rgb(0xE8, 0xEA, 0xED)))?;
+            control.set_text_wrapping(TextWrapping::Wrap)?;
+            control.set_max_width(640.0)?;
+            control
+        };
+        let note = {
+            let control = Border::new()?;
+            control.set_background(Brush::solid(PILL))?;
+            control.set_corner_radius(8.0)?;
+            control.set_padding((10.0, 5.0))?;
+            control.set_margin((66.0, 6.0, 0.0, 0.0))?;
+            control.set_horizontal_alignment(HorizontalAlignment::Left)?;
+            control.set_visible(false)?;
+            control.set_child(&note_text)?;
+            control
+        };
 
         let switches = row(
             8.0,
@@ -401,7 +465,8 @@ impl RecordingToolbar {
                 &column(4.0, &[&system.border, &microphone.border])?,
             ],
         )?;
-        let clock_row = row(8.0, &[&dot_big, &time])?.margin((10.0, 0.0, 10.0, 0.0))?;
+        let clock_row = row(8.0, &[&dot_big, &time])?;
+        clock_row.set_margin((10.0, 0.0, 10.0, 0.0))?;
 
         // Minimize swaps the whole toolbar for the small one.
         let full_slot: Arc<Mutex<Option<(Control, Control)>>> = Arc::default();
@@ -423,11 +488,12 @@ impl RecordingToolbar {
         .tip("Show the whole toolbar")?;
         let mini_stop = ToolButton::with_shape(&stop_shape(13.0)?, 44.0, 36.0, BLUE, &mut subs, send("stop"))?.tip("Stop and save (Shift+F10)")?;
 
-        let pill = Border::new()?
-            .background(Brush::solid(PILL))?
-            .corner_radius(14.0)?
-            .padding(8.0)?
-            .child(Some(&row(
+        let pill = {
+            let control = Border::new()?;
+            control.set_background(Brush::solid(PILL))?;
+            control.set_corner_radius(14.0)?;
+            control.set_padding(8.0)?;
+            control.set_child(&row(
                 8.0,
                 &[
                     &stop.border,
@@ -438,36 +504,44 @@ impl RecordingToolbar {
                     &minimize.border,
                     &cancel.border,
                 ],
-            )?))?;
-        let draw_box = Border::new()?
-            .background(Brush::solid(PILL))?
-            .corner_radius(12.0)?
-            .padding(5.0)?
-            .vertical_alignment(VerticalAlignment::Center)?
-            .child(Some(&draw.border))?;
+            )?)?;
+            control
+        };
+        let draw_box = {
+            let control = Border::new()?;
+            control.set_background(Brush::solid(PILL))?;
+            control.set_corner_radius(12.0)?;
+            control.set_padding(5.0)?;
+            control.set_vertical_alignment(VerticalAlignment::Center)?;
+            control.set_child(&draw.border)?;
+            control
+        };
         let full = column(0.0, &[&row(12.0, &[&draw_box, &pill])?, &note])?;
-        let mini = Border::new()?
-            .background(Brush::solid(PILL))?
-            .corner_radius(12.0)?
-            .padding(6.0)?
-            .visible(false)?
-            .child(Some(&row(
+        let mini_clock = row(6.0, &[&mini_dot, &mini_time])?;
+        mini_clock.set_margin((4.0, 0.0, 4.0, 0.0))?;
+        let mini = {
+            let control = Border::new()?;
+            control.set_background(Brush::solid(PILL))?;
+            control.set_corner_radius(12.0)?;
+            control.set_padding(6.0)?;
+            control.set_visible(false)?;
+            control.set_child(&row(
                 8.0,
-                &[
-                    &mini_stop.border,
-                    &mini_warning,
-                    &row(6.0, &[&mini_dot, &mini_time])?.margin((4.0, 0.0, 4.0, 0.0))?,
-                    &expand.border,
-                ],
-            )?))?;
+                &[&mini_stop.border, &mini_warning, &mini_clock, &expand.border],
+            )?)?;
+            control
+        };
         if let Ok(mut s) = full_slot.lock() {
             *s = Some((full.upcast(), mini.upcast()));
         }
 
-        let window = super::hud_window()?
-            .size_to_content(size_to_content::WIDTHANDHEIGHT)?
-            .background(Brush::solid(Color::new(0, 0, 0, 0)))?
-            .content(Some(&Panel::new()?.child(&full)?.child(&mini)?))?;
+        let window = super::hud_window()?;
+        window.set_size_to_content(SizeToContent::WIDTH_AND_HEIGHT)?;
+        window.set_background(Brush::solid(Color::new(0, 0, 0, 0)))?;
+        let content = Panel::new()?;
+        content.children()?.add(&full)?;
+        content.children()?.add(&mini)?;
+        window.set_content(&content)?;
         scope.set_transparent(&window, true)?;
         scope.set_topmost(&window, true)?;
         let placed = window.clone();

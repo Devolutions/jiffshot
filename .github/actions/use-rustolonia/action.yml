@@ -1,0 +1,33 @@
+name: Use pinned Rustolonia host
+description: Stage the source-built host archives from this workflow, never a released ABI.
+inputs:
+  rid:
+    description: Target NativeAOT runtime identifier.
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v8
+      with:
+        name: rustolonia-host-${{ inputs.rid }}
+        path: ${{ runner.temp }}/rustolonia-archives
+    - name: Verify and stage both host linkages
+      shell: pwsh
+      env:
+        HOST_RID: ${{ inputs.rid }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        Import-Module ./package/RustoloniaHost.psm1 -Force
+        $revision = Get-JiffshotRustoloniaRevision -Manifest ./Cargo.toml
+        $root = Join-Path $env:RUNNER_TEMP 'jiffshot-rustolonia'
+        $archives = Join-Path $env:RUNNER_TEMP 'rustolonia-archives'
+        foreach ($linkage in 'Shared', 'Static') {
+          $suffix = if ($linkage -eq 'Static') { '-static' } else { '' }
+          $files = @(Get-ChildItem -LiteralPath $archives -Filter "*-$($env:HOST_RID)$suffix.tar.gz")
+          if ($files.Count -ne 1) { throw "Expected one $linkage host archive for $env:HOST_RID" }
+          $destination = Join-Path $root $linkage.ToLowerInvariant()
+          Expand-JiffshotRustoloniaHost -Archive $files[0].FullName -Destination $destination `
+            -Revision $revision -Rid $env:HOST_RID -Linkage $linkage
+          $variable = if ($linkage -eq 'Static') { 'RUSTOLONIA_STATIC_HOST_DIR' } else { 'RUSTOLONIA_HOST_DIR' }
+          "$variable=$destination" | Out-File -LiteralPath $env:GITHUB_ENV -Encoding utf8 -Append
+        }

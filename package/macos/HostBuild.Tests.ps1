@@ -17,6 +17,10 @@ Describe 'macOS source host build' {
         Mock pwsh { $global:LASTEXITCODE = 0 }
         Mock dotnet { $global:LASTEXITCODE = 0 }
         Mock xcodebuild { $global:LASTEXITCODE = 0 }
+        Mock git {
+            $global:LASTEXITCODE = 0
+            Get-JiffshotRustoloniaRevision -Manifest (Join-Path $PSScriptRoot '../../Cargo.toml')
+        }
     }
 
     AfterEach {
@@ -63,6 +67,14 @@ Describe 'macOS source host build' {
         { & $script:BuildScript -Source $script:Source -Arch arm64 } |
             Should -Throw '*dotnet failed with exit code 42*'
         Should -Invoke xcodebuild -Times 0
+        Test-Path -LiteralPath $env:GITHUB_ENV | Should -BeFalse
+    }
+
+    It 'rejects a host source from a different revision before building' {
+        Mock git { $global:LASTEXITCODE = 0; '941feb8799e1bcfb7d70b92e1395ef2311df0136' }
+        { & $script:BuildScript -Source $script:Source -Arch arm64 } |
+            Should -Throw '*Cargo-pinned revision*'
+        Should -Invoke dotnet -Times 0
         Test-Path -LiteralPath $env:GITHUB_ENV | Should -BeFalse
     }
 

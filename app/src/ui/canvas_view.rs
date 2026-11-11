@@ -830,9 +830,9 @@ mod tests {
 
     #[test]
     fn alt_select_is_routed_to_the_editor_without_disabling_other_pan_gestures() {
-        let alt = Modifiers(rustolonia::key_modifiers::ALT);
+        let alt = Modifiers(rustolonia::KeyModifiers::ALT.bits());
         let shift_alt =
-            Modifiers(rustolonia::key_modifiers::SHIFT | rustolonia::key_modifiers::ALT);
+            Modifiers((rustolonia::KeyModifiers::SHIFT | rustolonia::KeyModifiers::ALT).bits());
         assert!(!pans_with_pointer(MouseButton::Left, alt, Some(Tool::Select)));
         assert!(pans_with_pointer(MouseButton::Left, alt, Some(Tool::Arrow)));
         assert!(pans_with_pointer(MouseButton::Left, alt, None));

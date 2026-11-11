@@ -435,16 +435,49 @@ workflow engine remains in `jiffshot-workflow`; Linux workflows live under
 
 ### Compiling
 
-Jiffshot requires **Rust 1.88+** and uses Rustolonia's `v12.1.6` release: the first build downloads the platform's prebuilt host, verified against the checksums pinned at the tag. No .NET SDK or Rustolonia checkout is required for that build.
+Jiffshot requires **Rust 1.88+** and currently pins Rustolonia's Rust-native UI
+ergonomics work at `841feb8799e1bcfb7d70b92e1395ef2311df0136`
+([Devolutions/rustolonia#43](https://github.com/Devolutions/rustolonia/pull/43)).
+This is not the published `v12.1.6` ABI, even though the crate version is still
+`12.1.6`. **Do not use the release host with these crates.**
+
+Build the host with PowerShell 7.4+, .NET 10 and the platform's native compiler
+(Xcode on macOS, Visual Studio C++ tools on Windows, Clang on Linux):
 
 ```powershell
+pwsh ./package/build-rustolonia.ps1 -Rid osx-arm64 -OutputDirectory target/host-archives
+```
+
+Use `osx-x64`, `win-x64`, `win-arm64`, `linux-x64` or `linux-arm64` for the
+other targets. The script reads both crate pins from `Cargo.toml`, creates a
+disposable checkout under `target/rustolonia-source`, verifies the source revision
+and patched producer, and packages both shared and static hosts with checksums,
+source manifests and notices. `-Source <checkout>` must name a **disposable**
+checkout, not another active development session; the script builds and patches
+inside it. Linux static graphics must first be built using that revision's
+`rust/build-linux-static-graphics.sh` on native Ubuntu 22.04; export its output as
+`RUSTOLONIA_LINUX_STATIC_GRAPHICS_DIR`. CI builds those hosts on the supported
+glibc baseline and uses them for both Ubuntu and Fedora application builds.
+
+Stage a matching archive into a fresh directory, verifying its checksum and
+revision before setting `RUSTOLONIA_HOST_DIR` (example for the shared macOS host):
+
+```powershell
+Import-Module ./package/RustoloniaHost.psm1
+$revision = Get-JiffshotRustoloniaRevision -Manifest ./Cargo.toml
+$archive = (Get-ChildItem target/host-archives/*-osx-arm64.tar.gz).FullName
+Expand-JiffshotRustoloniaHost -Archive $archive -Destination target/host/shared `
+    -Revision $revision -Rid osx-arm64 -Linkage Shared
+$env:RUSTOLONIA_HOST_DIR = (Resolve-Path target/host/shared).Path
 cargo run --release -p jiffshot
 ```
 
 The release packages use the static Rustolonia host, so the executable needs no companion host DLLs. A regular local build uses the shared host and stages its libraries beside the executable.
 
 Release packaging builds Jiffshot with Rustolonia's static host. To try it locally,
-use a separate output directory so shared-host build artifacts are not mixed in:
+stage the `*-static.tar.gz` archive with `-Linkage Static`, point
+`RUSTOLONIA_HOST_DIR` at that directory, and use a separate output directory so
+shared-host build artifacts are not mixed in:
 
 ```sh
 cargo build --release --locked -p jiffshot --features static-host --target-dir target/static-host
@@ -573,7 +606,13 @@ MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --release --locked -p jiffshot -p jiff
 pwsh -NoLogo -NoProfile -File package/macos/build.ps1 -Binary target/release/jiffshot -Output macos-package -Arch arm64
 ```
 
-CI uses the release host for each target and records checksums of the staged dylibs. Both macOS CI jobs use ARM `macos-15` runners; the Intel target is cross-built and tested with Rosetta, not an Intel runner. This does not replace testing on physical Intel hardware. To build a matching host from source instead, use `package/macos/build-host.ps1 -Source <checkout> -Arch arm64` (or `x86_64`) with a checkout of the matching Rustolonia release, recursive submodules, the .NET 10 SDK, and Xcode tools; set `RUSTOLONIA_HOST_DIR` to its output before building Jiffshot.
+CI builds shared and static hosts from the exact Cargo revision for every target,
+then verifies each archive's checksum, source revision, RID and linkage before
+building the application. Both macOS CI jobs use ARM `macos-15` runners; the Intel
+target is cross-built and tested with Rosetta, not an Intel runner. This does not
+replace testing on physical Intel hardware. For shared-host debugging only,
+`package/macos/build-host.ps1 -Source <disposable-checkout> -Arch arm64` (or
+`x86_64`) builds that same pinned revision and its native companions.
 
 Use `-Arch x86_64` on an Intel Mac. The output contains `Jiffshot.app` and a DMG; the Rustolonia host and its companion libraries are kept together in the app's `Contents/Frameworks` directory, and `jiffshot-cli` is in `Contents/MacOS`. Packaging requires both executables and rejects any selected-architecture component whose deployment target is newer than macOS 13; this check does not substitute for testing on macOS 13. By default, the output is ad-hoc signed for local testing, not notarized for distribution. For local distribution builds, pass `-Identity` with a Developer ID Application identity and `-NotaryProfile` with an existing `xcrun notarytool` keychain profile. Release CI can also prepare an app for external notarization and build its disk image after the app's ticket has been stapled.
 
@@ -650,7 +689,16 @@ rustup target add aarch64-pc-windows-msvc
 cargo build --release -p jiffshot --target aarch64-pc-windows-msvc
 ```
 
-CI (`.github/workflows/ci.yml`) builds and tests Windows x64 and cross-builds Windows ARM64. Linux uses native `ubuntu-24.04` (x64) and `ubuntu-24.04-arm` (ARM64) hosted runners: each runs workspace tests, app Clippy, package-content tests, and portable smoke tests. The exhaustive Linux GUI suites are not run in CI; their scripts remain available under `app/tests` for local runs. Portable and installed-package startup smoke tests remain enabled in CI. Fedora 43 containers on each native runner separately compile and test the Fedora build and RPM. Windows artifacts include portable ZIP, MSI, and MSIX packages for both architectures (`jiffshot-win-x64`, `jiffshot-win-arm64`, and their `-msi` / `-msix` variants). Linux artifacts contain Ubuntu 24.04 tar.gz/DEB packages (`jiffshot-linux-x64`, `jiffshot-linux-arm64`) and separately compiled Fedora 43 RPMs (`jiffshot-linux-x64-rpm`, `jiffshot-linux-arm64-rpm`), with architecture/distro-specific caches. Clean Ubuntu/Fedora containers on both native architectures verify package and installed ELF architecture, checksums, dependency resolution, desktop/MIME registration, isolated graphical startup, and removal without deleting user settings. Release assembly requires all six Linux packages and verifies their builder checksums before collecting them, per-architecture Linux checksums, and `SHA256SUMS.txt`; Windows packages are signed, while Linux packages are currently unsigned. Rustolonia [v12.1.6](https://github.com/Devolutions/rustolonia/releases/tag/v12.1.6) publishes both Linux x64 and ARM64 runtime host assets; this availability alone does not establish a successful native Jiffshot ARM64 build or smoke test. To move to a newer Rustolonia, change the tag on the two lines in `Cargo.toml`'s `[workspace.dependencies]`, run `cargo update -p rustolonia`, and commit the manifest and lockfile together.
+CI (`.github/workflows/ci.yml`) builds and tests Windows x64 and cross-builds Windows ARM64. Linux uses native `ubuntu-24.04` (x64) and `ubuntu-24.04-arm` (ARM64) hosted runners: each runs workspace tests, app Clippy, package-content tests, and portable smoke tests. The exhaustive Linux GUI suites are not run in CI; their scripts remain available under `app/tests` for local runs. Portable and installed-package startup smoke tests remain enabled in CI. Fedora 43 containers on each native runner separately compile and test the Fedora build and RPM. Windows artifacts include portable ZIP, MSI, and MSIX packages for both architectures (`jiffshot-win-x64`, `jiffshot-win-arm64`, and their `-msi` / `-msix` variants). Linux artifacts contain Ubuntu 24.04 tar.gz/DEB packages (`jiffshot-linux-x64`, `jiffshot-linux-arm64`) and separately compiled Fedora 43 RPMs (`jiffshot-linux-x64-rpm`, `jiffshot-linux-arm64-rpm`), with architecture/distro-specific caches. Clean Ubuntu/Fedora containers on both native architectures verify package and installed ELF architecture, checksums, dependency resolution, desktop/MIME registration, isolated graphical startup, and removal without deleting user settings. Release assembly requires all six Linux packages and verifies their builder checksums before collecting them, per-architecture Linux checksums, and `SHA256SUMS.txt`; Windows packages are signed, while Linux packages are currently unsigned.
+
+All six target hosts are source-built at the same revision as the Rust crates;
+availability of a host archive alone does not establish a successful native
+Jiffshot ARM64 build or smoke test. To update Rustolonia, change both full `rev`
+values in `Cargo.toml`'s `[workspace.dependencies]`, run
+`cargo update -p rustolonia`, rebuild matching hosts, and commit the manifest and
+lockfile together. The git crates include the projection generated at that
+revision; Jiffshot has no application AXAML or separate bindgen/compiler generation
+step to update.
 
 ### Building and Installing Linux Packages
 

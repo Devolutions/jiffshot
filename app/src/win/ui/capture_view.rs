@@ -1024,11 +1024,11 @@ fn on_key(e: &mut rustolonia::ControlKeyDownEventArgs) {
     if e.handled {
         return;
     }
-    let command = e.key_modifiers & super::COMMAND_MODIFIER != 0;
-    match Key::try_from(e.key) {
-        Ok(Key::Return) => run("capture".into()),
-        Ok(Key::Escape) => close_to_tray(),
-        Ok(key @ (Key::D1 | Key::D2 | Key::D3)) if command => run(format!("tab:{}", key as i32 - Key::D1 as i32)),
+    let command = e.key_modifiers.contains(super::COMMAND_MODIFIER);
+    match e.key {
+        Key::Return => run("capture".into()),
+        Key::Escape => close_to_tray(),
+        key @ (Key::D1 | Key::D2 | Key::D3) if command => run(format!("tab:{}", key as i32 - Key::D1 as i32)),
         _ => return,
     }
     e.handled = true;
@@ -1123,9 +1123,13 @@ fn show_menu(json: &str) -> Result<()> {
         previous.hide()?;
     }
     popup.clear();
-    let flyout = MenuFlyout::new()?.placement(PlacementMode::BottomEdgeAlignedLeft)?;
+    let flyout = {
+        let control = MenuFlyout::new()?;
+        control.set_placement(PlacementMode::BottomEdgeAlignedLeft)?;
+        control
+    };
     if active.get_untracked().is_some() {
-        flyout.set_overlay_input_pass_through_element(menu_bar.as_ref().map(|bar| bar as &dyn AsControl))?;
+        flyout.set_overlay_input_pass_through_element(menu_bar.as_ref().map(|bar| -> Control { bar.clone().upcast() }))?;
     }
     let id = flyout.object_id()?;
     popup.keep(flyout.subscribe_closed(move |_| {
@@ -1149,7 +1153,7 @@ fn show_menu(json: &str) -> Result<()> {
     with_ui(|ui| ui.open_menu = Some(flyout.clone()));
     #[cfg(windows)]
     if dark.get_untracked() {
-        let presenter = flyout.popup()?.get_child()?.and_then(|child| child.cast::<TemplatedControl>())
+        let presenter = flyout.popup()?.child()?.and_then(|child| child.cast::<TemplatedControl>())
             .ok_or_else(|| rustolonia::Error::Async { hresult: 0x80004005_u32 as i32, message: "Capture menu presenter is not a templated control".into() })?;
         presenter.set_background(Brush::solid(parts::rgb(dark_blue::WINDOW)))?;
         presenter.set_border_brush(Brush::solid(parts::rgb(dark_blue::INPUT_BORDER)))?;
@@ -1171,7 +1175,12 @@ fn menu_entry(entry: &MenuEntry, subs: &Subscriptions, _dark: Signal<bool>) -> R
         Some((label, keys)) => (label, Some(keys)),
         None => (entry.label.as_str(), None),
     };
-    let item = MenuItem::new()?.enabled(entry.enabled)?.stays_open_on_click(entry.keep_open)?;
+    let item = {
+        let control = MenuItem::new()?;
+        control.set_enabled(entry.enabled)?;
+        control.set_stays_open_on_click(entry.keep_open)?;
+        control
+    };
     #[cfg(windows)]
     if _dark.get_untracked() {
         item.set_background(Brush::solid(parts::rgb(dark_blue::WINDOW)))?;
@@ -1180,11 +1189,25 @@ fn menu_entry(entry: &MenuEntry, subs: &Subscriptions, _dark: Signal<bool>) -> R
     match keys {
         // A shortcut or preset hotkey, as text: not every one parses as a gesture.
         Some(keys) => {
-            let header = DockPanel::new()?
-                .min_width(220.0)?
-                .child(TextBlock::new()?.text(keys)?.opacity(0.65)?.margin((24.0, 0.0, 0.0, 0.0))?.dock_panel_dock(Dock::Right)?)?
-                .child(TextBlock::new()?.text(label)?)?;
-            item.set_header(Some(&header as &dyn AsControl))?;
+            let header = {
+                let control = DockPanel::new()?;
+                control.set_min_width(220.0)?;
+                control.children()?.add({
+                    let control = TextBlock::new()?;
+                    control.set_text(keys)?;
+                    control.set_opacity(0.65)?;
+                    control.set_margin((24.0, 0.0, 0.0, 0.0))?;
+                    control.set_dock_panel_dock(Dock::Right)?;
+                    control
+                })?;
+                control.children()?.add({
+                    let control = TextBlock::new()?;
+                    control.set_text(label)?;
+                    control
+                })?;
+                control
+            };
+            item.set_header(&header)?;
         }
         None => item.set_header_text(label)?,
     }
@@ -1205,7 +1228,7 @@ fn menu_entry(entry: &MenuEntry, subs: &Subscriptions, _dark: Signal<bool>) -> R
     let (id, keep_open, this) = (entry.id.clone(), entry.keep_open, item.clone());
     subs.keep(item.subscribe_click(move |_| {
         if keep_open {
-            let checked = this.get_is_checked().unwrap_or(false);
+            let checked = this.is_checked().unwrap_or(false);
             let _ = this.set_checked(!checked);
         }
         pick(&id);
@@ -1243,7 +1266,7 @@ pub(super) fn native_menu_anchor_for_selftest() -> Result<bool> {
 pub(super) fn native_menu_layout_for_selftest() -> Result<(usize, f64)> {
     with_ui(|ui| {
         let anchor = ui.menu_bar.get().ok_or_else(|| rustolonia::Error::Load("the Capture menu anchor is unavailable".into()))?;
-        Ok((anchor.children()?.len()?, anchor.get_height()?))
+        Ok((anchor.children()?.len()?, anchor.height()?))
     }).ok_or_else(|| rustolonia::Error::Load("the Capture window is unavailable".into()))?
 }
 
@@ -1373,16 +1396,36 @@ fn show_panel_with_height(json: &str, max_height: Option<f64>) -> Result<Option<
     let Some(owner) = with_ui(|ui| ui.window) else { return Ok(None) };
     popup.clear();
 
-    let body = StackPanel::new()?.spacing(8.0)?.margin(4.0)?.min_width(280.0)?;
+    let body = {
+        let control = StackPanel::new()?;
+        control.set_spacing(8.0)?;
+        control.set_margin(4.0)?;
+        control.set_min_width(280.0)?;
+        control
+    };
     let children = body.children()?;
-    children.add(TextBlock::new()?.text(&panel.title)?.font_weight(FontWeight::DemiBold)?.font_size(14.0)?.margin((0.0, 0.0, 0.0, 4.0))?)?;
+    children.add({
+        let control = TextBlock::new()?;
+        control.set_text(&panel.title)?;
+        control.set_font_weight(FontWeight::DemiBold)?;
+        control.set_font_size(14.0)?;
+        control.set_margin((0.0, 0.0, 0.0, 4.0))?;
+        control
+    })?;
     #[cfg(target_os = "macos")]
     let (rows, scroll) = if is_timing_panel(&panel.id) {
-        let content = StackPanel::new()?.spacing(8.0)?;
-        let scroll = ScrollViewer::new()?
-            .max_height(max_height.unwrap_or_else(|| delay_rows_height(&scope, &window)))?
-            .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)?
-            .content(Some(&content))?;
+        let content = {
+            let control = StackPanel::new()?;
+            control.set_spacing(8.0)?;
+            control
+        };
+        let scroll = {
+            let control = ScrollViewer::new()?;
+            control.set_max_height(max_height.unwrap_or_else(|| delay_rows_height(&scope, &window)))?;
+            control.set_vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)?;
+            control.set_content(&content)?;
+            control
+        };
         children.add(&scroll)?;
         (content.children()?, Some(scroll))
     } else {
@@ -1397,11 +1440,21 @@ fn show_panel_with_height(json: &str, max_height: Option<f64>) -> Result<Option<
     for row in &panel.rows {
         rows.add(parts::row(&scope, Form::Panel, row, owner, &mut inputs, &popup)?)?;
     }
-    let flyout = Flyout::new()?.placement(PlacementMode::BottomEdgeAlignedLeft)?.content(Some(&body as &dyn AsControl))?;
+    let flyout = {
+        let control = Flyout::new()?;
+        control.set_placement(PlacementMode::BottomEdgeAlignedLeft)?;
+        control.set_content(&body as &dyn AsControl)?;
+        control
+    };
 
     let mut panel_action: Option<Rc<dyn Fn()>> = None;
     if let Some(action) = &panel.action {
-        let button = Button::new()?.content_text(&action.label)?.horizontal_alignment(HorizontalAlignment::Stretch)?;
+        let button = {
+            let control = Button::new()?;
+            control.set_content_text(&action.label)?;
+            control.set_horizontal_alignment(HorizontalAlignment::Stretch)?;
+            control
+        };
         let (id, open, values) = (action.id.clone(), flyout.clone(), inputs.clone());
         popup.keep(button.subscribe_click(move |_| activate_panel_action(&id, &open, &values))?);
         let (id, open, values) = (action.id.clone(), flyout.clone(), inputs.clone());
@@ -1409,9 +1462,23 @@ fn show_panel_with_height(json: &str, max_height: Option<f64>) -> Result<Option<
         children.add(&button)?;
     }
 
-    let buttons = StackPanel::new()?.orientation(Orientation::Horizontal)?.spacing(8.0)?.horizontal_alignment(HorizontalAlignment::Right)?.margin((0.0, 8.0, 0.0, 0.0))?;
+    let buttons = {
+        let control = StackPanel::new()?;
+        control.set_orientation(Orientation::Horizontal)?;
+        control.set_spacing(8.0)?;
+        control.set_horizontal_alignment(HorizontalAlignment::Right)?;
+        control.set_margin((0.0, 8.0, 0.0, 0.0))?;
+        control
+    };
     if let Some(ok) = &panel.ok {
-        let apply = Button::new()?.content_text(ok)?.default(true)?.min_width(72.0)?.horizontal_content_alignment(HorizontalAlignment::Center)?;
+        let apply = {
+            let control = Button::new()?;
+            control.set_content_text(ok)?;
+            control.set_default(true)?;
+            control.set_min_width(72.0)?;
+            control.set_horizontal_content_alignment(HorizontalAlignment::Center)?;
+            control
+        };
         let (id, open) = (panel.id.clone(), flyout.clone());
         popup.keep(apply.subscribe_click(move |_| {
             let _ = open.hide();
@@ -1419,10 +1486,13 @@ fn show_panel_with_height(json: &str, max_height: Option<f64>) -> Result<Option<
         })?);
         buttons.children()?.add(&apply)?;
     }
-    let close = Button::new()?
-        .content_text(if panel.ok.is_some() { "Cancel" } else { "Close" })?
-        .min_width(72.0)?
-        .horizontal_content_alignment(HorizontalAlignment::Center)?;
+    let close = {
+        let control = Button::new()?;
+        control.set_content_text(if panel.ok.is_some() { "Cancel" } else { "Close" })?;
+        control.set_min_width(72.0)?;
+        control.set_horizontal_content_alignment(HorizontalAlignment::Center)?;
+        control
+    };
     let open = flyout.clone();
     popup.keep(close.subscribe_click(move |_| {
         let _ = open.hide();
@@ -1441,8 +1511,20 @@ pub(super) fn show_delay_for_selftest(json: &str, height: f64) -> Result<Option<
 fn show_problem(text: &str) -> Result<()> {
     dismiss_menu()?;
     let Some((_, _, anchor, _)) = popup_target() else { return Ok(()) };
-    let note = TextBlock::new()?.text(text)?.text_wrapping(TextWrapping::Wrap)?.max_width(320.0)?.margin(4.0)?;
-    Flyout::new()?.placement(PlacementMode::BottomEdgeAlignedLeft)?.content(Some(&note as &dyn AsControl))?.show_at_with_control(&anchor)
+    let note = {
+        let control = TextBlock::new()?;
+        control.set_text(text)?;
+        control.set_text_wrapping(TextWrapping::Wrap)?;
+        control.set_max_width(320.0)?;
+        control.set_margin(4.0)?;
+        control
+    };
+    {
+        let control = Flyout::new()?;
+        control.set_placement(PlacementMode::BottomEdgeAlignedLeft)?;
+        control.set_content(&note as &dyn AsControl)?;
+        control
+    }.show_at_with_control(&anchor)
 }
 
 #[cfg(all(test, not(target_os = "linux")))]
@@ -1466,9 +1548,9 @@ mod tests {
             pointer_over: bool,
             text: Option<String>,
             tooltip: Option<String>,
-            foreground: Option<Brush>,
-            overridden_foreground: Option<Brush>,
-            background: Option<Brush>,
+            foreground: Option<rustolonia::Paint>,
+            overridden_foreground: Option<rustolonia::Paint>,
+            background: Option<rustolonia::Paint>,
         }
 
         let (sender, receiver) = mpsc::channel();
@@ -1489,7 +1571,7 @@ mod tests {
                     let wrapper = grid.children()?.get(index)?.cast::<Grid>().expect("caption wrapper");
                     let background = wrapper.children()?.get(0)?.cast::<Border>().expect("caption background");
                     let button = wrapper.children()?.get(2)?.cast::<Button>().expect("caption button");
-                    let text = button.get_content()?.and_then(|content| content.cast::<TextBlock>()).expect("caption label");
+                    let text = button.content()?.and_then(|content| content.cast::<TextBlock>()).expect("caption label");
                     buttons.push((label, button, text, background));
                 }
                 let window = Window::el()
@@ -1506,7 +1588,7 @@ mod tests {
                 scope.mount(window.clone())?;
                 let hwnd = scope.platform_handle(&window)?;
                 let app = scope.clone();
-                scope.spawn(async move {
+                scope.spawn_local(async move {
                     // SAFETY: hwnd belongs to the mounted fixture window on this UI thread.
                     let dpi = unsafe { GetDpiForWindow(hwnd as windows_sys::Win32::Foundation::HWND) };
                     let result = if dpi == 0 {
@@ -1532,17 +1614,17 @@ mod tests {
                                         }
                                         app.delay(Duration::from_millis(25))?.await?;
                                     };
-                                    let foreground = text.get_foreground()?;
+                                    let foreground = text.foreground()?;
                                     button.set_foreground(Brush::solid(if is_dark { WHITE } else { parts::rgb(0x000000) }))?;
                                     observed.push(Observation {
                                         dark: is_dark,
                                         label,
                                         pointer_over,
-                                        text: text.get_text()?,
-                                        tooltip: button.get_tool_tip_tip()?,
+                                        text: text.text()?,
+                                        tooltip: button.tool_tip_tip()?,
                                         foreground,
-                                        overridden_foreground: text.get_foreground()?,
-                                        background: background.get_background()?,
+                                        overridden_foreground: text.foreground()?,
+                                        background: background.background()?,
                                     });
                                     if !pointer_over {
                                         return Ok(observed);
@@ -1568,9 +1650,13 @@ mod tests {
             assert!(observed.pointer_over, "{theme} {label}: hover did not reach the button");
             assert_eq!(observed.text.as_deref(), Some(label), "{theme} {label}: accessible text changed");
             assert_eq!(observed.tooltip.as_deref(), Some(label), "{theme} {label}: tooltip changed");
-            assert_eq!(observed.foreground.map(|brush| brush.color.a), Some(0), "{theme} {label}: hovered text became visible");
-            assert_eq!(observed.overridden_foreground.map(|brush| brush.color.a), Some(0), "{theme} {label}: parent foreground exposed the text");
-            assert_eq!(observed.background.map(|brush| brush.color), Some(background), "{theme} {label}: hover background changed");
+            let color = |paint| match paint {
+                rustolonia::Paint::Solid(brush) => brush.color,
+                _ => panic!("{theme} {label}: expected a solid brush"),
+            };
+            assert_eq!(observed.foreground.map(|paint| color(paint).a), Some(0), "{theme} {label}: hovered text became visible");
+            assert_eq!(observed.overridden_foreground.map(|paint| color(paint).a), Some(0), "{theme} {label}: parent foreground exposed the text");
+            assert_eq!(observed.background.map(color), Some(background), "{theme} {label}: hover background changed");
         }
         assert_eq!(count, 4, "both buttons must be observed in both themes");
     }
