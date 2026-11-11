@@ -1371,7 +1371,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jiffshot"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "arboard",
  "ashpd",
@@ -1415,7 +1415,7 @@ dependencies = [
 
 [[package]]
 name = "jiffshot-capture"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "arboard",
  "block2",
@@ -1450,7 +1450,7 @@ dependencies = [
 
 [[package]]
 name = "jiffshot-cli"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "jiffshot-control",
  "serde_json",
@@ -1459,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "jiffshot-control"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "jiffshot-capture",
  "libc",
@@ -1470,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "jiffshot-doc"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ab_glyph",
  "fontdb",
@@ -1483,7 +1483,7 @@ dependencies = [
 
 [[package]]
 name = "jiffshot-video"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "jiffshot-capture",
  "jiffshot-control",
@@ -1495,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "jiffshot-workflow"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "block2",
  "dispatch2",
