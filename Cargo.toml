@@ -9,9 +9,9 @@ publish = false
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-# Build the native host from this same revision; released hosts have a different ABI.
-rustolonia = { git = "https://github.com/Devolutions/rustolonia", rev = "841feb8799e1bcfb7d70b92e1395ef2311df0136", default-features = false }
-rustolonia-sys = { git = "https://github.com/Devolutions/rustolonia", rev = "841feb8799e1bcfb7d70b92e1395ef2311df0136", default-features = false }
+# Both crates and their downloaded host must come from the same release.
+rustolonia = { git = "https://github.com/Devolutions/rustolonia", tag = "v12.1.7", default-features = false }
+rustolonia-sys = { git = "https://github.com/Devolutions/rustolonia", tag = "v12.1.7", default-features = false }
 ab_glyph = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif", "webp"] }
 gif = "0.14"

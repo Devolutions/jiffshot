@@ -26,7 +26,8 @@ Import-Module (Join-Path $PSScriptRoot 'RustoloniaHost.psm1') -Force
 
 $repository = Split-Path -Parent $PSScriptRoot
 $revision = Get-JiffshotRustoloniaRevision -Manifest (Join-Path $repository 'Cargo.toml')
-if (-not $Source) { $Source = Join-Path $repository 'target/rustolonia-source' }
+$version = Get-JiffshotRustoloniaVersion -Manifest (Join-Path $repository 'Cargo.toml')
+if (-not $Source) { $Source = Join-Path $repository "target/rustolonia-source-$version" }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repository "target/rustolonia-host/$Rid" }
 $Source = [IO.Path]::GetFullPath($Source)
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)

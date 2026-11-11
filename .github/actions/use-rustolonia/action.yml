@@ -1,5 +1,5 @@
 name: Use pinned Rustolonia host
-description: Stage the source-built host archives from this workflow, never a released ABI.
+description: Stage the version-matched host archives from the pinned Rustolonia release.
 inputs:
   rid:
     description: Target NativeAOT runtime identifier.
@@ -7,10 +7,6 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: actions/download-artifact@v8
-      with:
-        name: rustolonia-host-${{ inputs.rid }}
-        path: ${{ runner.temp }}/rustolonia-archives
     - name: Verify and stage both host linkages
       shell: pwsh
       env:
@@ -18,16 +14,28 @@ runs:
       run: |
         $ErrorActionPreference = 'Stop'
         Import-Module ./package/RustoloniaHost.psm1 -Force
-        $revision = Get-JiffshotRustoloniaRevision -Manifest ./Cargo.toml
+        $manifest = (Resolve-Path ./Cargo.toml).Path
+        $null = Get-JiffshotRustoloniaRevision -Manifest $manifest
+        $version = Get-JiffshotRustoloniaVersion -Manifest $manifest
         $root = Join-Path $env:RUNNER_TEMP 'jiffshot-rustolonia'
         $archives = Join-Path $env:RUNNER_TEMP 'rustolonia-archives'
+        [void][IO.Directory]::CreateDirectory($archives)
+        $release = "https://github.com/Devolutions/rustolonia/releases/download/v$version"
+        $checksums = Join-Path $archives 'SHA256SUMS'
+        Invoke-WebRequest -Uri "$release/SHA256SUMS" -OutFile $checksums
+        $checksumLines = Get-Content -LiteralPath $checksums
         foreach ($linkage in 'Shared', 'Static') {
           $suffix = if ($linkage -eq 'Static') { '-static' } else { '' }
-          $files = @(Get-ChildItem -LiteralPath $archives -Filter "*-$($env:HOST_RID)$suffix.tar.gz")
-          if ($files.Count -ne 1) { throw "Expected one $linkage host archive for $env:HOST_RID" }
+          $name = "rustolonia-host-$version-$($env:HOST_RID)$suffix.tar.gz"
+          $expected = [regex]::Match(($checksumLines -join "`n"), "(?m)^(?<hash>[a-f0-9]{64})\s+\*?$([regex]::Escape($name))$")
+          if (-not $expected.Success) { throw "Rustolonia release checksum is missing $name" }
+          $archive = Join-Path $archives $name
+          Invoke-WebRequest -Uri "$release/$name" -OutFile $archive
+          "$($expected.Groups['hash'].Value)  $name" |
+            Set-Content -LiteralPath "$archive.sha256" -NoNewline
           $destination = Join-Path $root $linkage.ToLowerInvariant()
-          Expand-JiffshotRustoloniaHost -Archive $files[0].FullName -Destination $destination `
-            -Revision $revision -Rid $env:HOST_RID -Linkage $linkage
+          Expand-JiffshotRustoloniaHost -Archive $archive -Destination $destination `
+            -Rid $env:HOST_RID -Linkage $linkage -Version $version
           $variable = if ($linkage -eq 'Static') { 'RUSTOLONIA_STATIC_HOST_DIR' } else { 'RUSTOLONIA_HOST_DIR' }
           "$variable=$destination" | Out-File -LiteralPath $env:GITHUB_ENV -Encoding utf8 -Append
         }

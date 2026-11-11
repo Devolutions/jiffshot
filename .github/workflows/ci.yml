@@ -28,80 +28,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  rustolonia-host:
-    name: Rustolonia host (${{ matrix.rid }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { rid: win-x64, runner: windows-latest, target: x86_64-pc-windows-msvc }
-          - { rid: win-arm64, runner: windows-latest, target: aarch64-pc-windows-msvc }
-          - { rid: linux-x64, runner: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
-          - { rid: linux-arm64, runner: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
-          - { rid: osx-arm64, runner: macos-15, target: aarch64-apple-darwin }
-          - { rid: osx-x64, runner: macos-15, target: x86_64-apple-darwin }
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up PowerShell
-        if: runner.os == 'Linux'
-        uses: ./.github/actions/setup-pwsh
-        with:
-          pester: 'false'
-
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-
-      - name: Set up Rust
-        shell: pwsh
-        run: |
-          rustup show
-          rustup target add ${{ matrix.target }}
-
-      - name: Checkout the pinned Rustolonia source
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          Import-Module ./package/RustoloniaHost.psm1
-          $revision = Get-JiffshotRustoloniaRevision -Manifest ./Cargo.toml
-          git init --quiet target/rustolonia-source
-          git -C target/rustolonia-source remote add origin https://github.com/Devolutions/rustolonia
-          git -C target/rustolonia-source fetch --quiet --depth 1 origin $revision
-          git -C target/rustolonia-source checkout --quiet --detach $revision
-          git -C target/rustolonia-source submodule update --init --recursive
-
-      - name: Install Linux static graphics dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            clang build-essential generate-ninja ninja-build pkg-config \
-            libfontconfig1-dev libfreetype6-dev libpng-dev libexpat1-dev \
-            zlib1g-dev libbrotli-dev uuid-dev
-
-      - name: Build Linux static graphics on the supported glibc baseline
-        if: runner.os == 'Linux'
-        run: |
-          sh target/rustolonia-source/rust/build-linux-static-graphics.sh \
-            "${{ matrix.rid }}" "$RUNNER_TEMP/rustolonia-static-graphics"
-          echo "RUSTOLONIA_LINUX_STATIC_GRAPHICS_DIR=$RUNNER_TEMP/rustolonia-static-graphics/out/${{ matrix.rid }}" >> "$GITHUB_ENV"
-
-      - name: Build both host linkages from the pinned revision
-        shell: pwsh
-        run: ./package/build-rustolonia.ps1 -Rid ${{ matrix.rid }} -OutputDirectory target/host-archives
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: rustolonia-host-${{ matrix.rid }}
-          path: target/host-archives/*
-          if-no-files-found: error
-
   build:
     name: ${{ matrix.rid }}
-    needs: rustolonia-host
     environment:
       name: ${{ inputs.signing_environment || '' }}
     permissions:
@@ -274,7 +202,6 @@ jobs:
 
   linux:
     name: linux-${{ matrix.arch }}
-    needs: rustolonia-host
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -410,7 +337,6 @@ jobs:
 
   linux-rpm:
     name: linux-${{ matrix.arch }} Fedora RPM
-    needs: rustolonia-host
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -612,7 +538,6 @@ jobs:
 
   macos:
     name: macOS ${{ matrix.arch }}
-    needs: rustolonia-host
     runs-on: macos-15
     environment:
       name: ${{ inputs.signing_environment || '' }}
