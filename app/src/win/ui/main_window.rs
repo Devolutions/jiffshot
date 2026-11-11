@@ -234,6 +234,14 @@ fn wire_canvas(ctx: &Ctx, zoom: ZoomView) -> Result<()> {
         focus_text(&scope, editor);
     });
     canvas.on_cancel_requested(|| run("deselect"));
+    #[cfg(target_os = "macos")]
+    canvas.on_delete_requested(move || {
+        if !s.delete_enabled.get_untracked() {
+            return false;
+        }
+        call(|m| m.delete());
+        true
+    });
     canvas.on_zoom_changed(move |z| zoom.show(z));
     // Files dropped on the canvas go where they were dropped; the drop
     // carries no position, so that is the middle of the image.

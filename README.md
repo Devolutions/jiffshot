@@ -296,6 +296,7 @@ Save the current document as a `.jsd` first if its edits cannot be autosaved.
 | `Ctrl+P` / `Ctrl+W` | Print / Close current capture |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / Redo |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / Cut / Paste selected objects or image regions |
+| `Delete` | Delete the selection; on the macOS canvas, `Backspace` and `Cmd+Backspace` also work |
 | `Ctrl+A` / `Ctrl+D` / `Ctrl+Shift+I` | Select the whole image (in any tool) / Deselect / Invert selection (with nothing selected, selects every annotation) |
 | `Ctrl+Shift+G` / `Ctrl+Shift+U` | Group / Ungroup selected objects |
 | `Ctrl+Shift+F` / `Ctrl+Shift+B` | Bring forward / Send backward |
@@ -804,6 +805,7 @@ creates only one.
 
 The editor drives its own UI when `JIFFSHOT_UITEST=DIR` is set (with `JIFFSHOT_UITEST_IMAGE`, `JIFFSHOT_UITEST_VIDEO`, an isolated `JIFFSHOT_LIBRARY` and, to leave your settings alone, scratch `APPDATA` and `LOCALAPPDATA`), writing screenshots of every window and `ui-log.txt` to `DIR`. Set `JIFFSHOT_UITEST_CAPTURE_ONLY=1` to check just the Capture window and chooser, or `JIFFSHOT_UITEST_HUD_ONLY=1` to check the recording toolbar, including restoring hidden controls. Set `JIFFSHOT_UITEST_KEEP=1` to leave the Capture window open for inspection. To exercise library edits, set `JIFFSHOT_LIBRARY` to an existing folder inside `DIR`; otherwise those steps are skipped to protect the normal library. `cargo run -p jiffshot-doc --example synthetic -- OUT.png` writes the test image its coordinates assume.
 Set `JIFFSHOT_UITEST_CANVAS=1` to check all canvas handle cursors and view-coordinate crop and expansion at fit and zoom, without moving the system pointer.
+On macOS, set `JIFFSHOT_UITEST_CANVAS_KEYS=1` to check Backspace, Cmd+Backspace, forward Delete, undo, protected selections and text editing with keyboard events sent only to the fixture application. Use isolated settings, cache and library paths.
 Set `JIFFSHOT_UITEST_SELECTION=1` to check full-image and Select-region selection, Alt-drag routing, background-fill controls, rectangular Copy/Cut, clipboard failure reporting and undo without changing the system clipboard.
 Set `JIFFSHOT_UITEST_NEW_FROM_CLIPBOARD=1` to check clipboard imports and unsaved-document protection with synthetic data, without changing the system clipboard.
 On Linux, `dbus-run-session -- pwsh -File app/tests/linux_selection_e2e.ps1 -Binary target/release/jiffshot -RuntimeDir target/release` checks selection, clipboard shortcuts and Select-to-Arrow transitions in the classic editor, plus the shared editor's responsive toolbar and clipboard File-menu command. It requires Xvfb, xclip, xwininfo and libXtst, and uses a private X11 display and clipboard.

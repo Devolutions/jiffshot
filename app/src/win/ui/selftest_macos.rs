@@ -779,14 +779,18 @@ pub(super) fn close_named_dialog(title: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn press_native_menu_key(character: &str, key_code: u16) -> Result<(), String> {
-    use objc2_core_graphics::{CGEvent, CGEventFlags};
-    let (_, app) = app().ok_or("native menu shortcuts must run on the main thread")?;
-    app.keyWindow().ok_or("the menu fixture has no key window")?;
+pub(super) fn press_native_key(
+    character: &str,
+    key_code: u16,
+    modifiers: objc2_core_graphics::CGEventFlags,
+) -> Result<(), String> {
+    use objc2_core_graphics::CGEvent;
+    let (_, app) = app().ok_or("native keyboard input must run on the main thread")?;
+    app.keyWindow().ok_or("the keyboard fixture has no key window")?;
     // Keep CoreGraphics' keyboard-layout metadata, which AppKit uses to
     // distinguish shifted and unshifted key equivalents.
-    let raw = CGEvent::new_keyboard_event(None, key_code, true).ok_or("could not create the native menu shortcut event")?;
-    CGEvent::set_flags(Some(&raw), CGEventFlags::MaskCommand);
+    let raw = CGEvent::new_keyboard_event(None, key_code, true).ok_or("could not create the native keyboard event")?;
+    CGEvent::set_flags(Some(&raw), modifiers);
     let text: Vec<u16> = character.encode_utf16().collect();
     // SAFETY: the UTF-16 buffer is live and contains exactly text.len() units.
     unsafe { CGEvent::keyboard_set_unicode_string(Some(&raw), text.len() as u64, text.as_ptr()); }

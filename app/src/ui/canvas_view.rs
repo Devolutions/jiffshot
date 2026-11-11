@@ -77,6 +77,8 @@ struct Handlers {
     edit_requested: RefCell<Option<Rc<dyn Fn()>>>,
     zoom_changed: RefCell<Option<ZoomChangedHandler>>,
     cancel_requested: RefCell<Option<Rc<dyn Fn()>>>,
+    #[cfg(target_os = "macos")]
+    delete_requested: RefCell<Option<Rc<dyn Fn() -> bool>>>,
 }
 
 type ChangedHandler = Rc<dyn Fn(i32)>;
@@ -475,6 +477,12 @@ impl CanvasView {
     pub fn on_cancel_requested(&self, f: impl Fn() + 'static) {
         *self.inner.handlers.cancel_requested.borrow_mut() = Some(Rc::new(f));
     }
+
+    /// Backspace on the macOS canvas, if the selection can be deleted.
+    #[cfg(target_os = "macos")]
+    pub fn on_delete_requested(&self, f: impl Fn() -> bool + 'static) {
+        *self.inner.handlers.delete_requested.borrow_mut() = Some(Rc::new(f));
+    }
 }
 
 impl Inner {
@@ -672,6 +680,11 @@ impl Inner {
                     f();
                 }
                 return true;
+            }
+            #[cfg(target_os = "macos")]
+            Key::Back if !modifiers.shift() && !modifiers.control() && !modifiers.alt() => {
+                let delete = self.handlers.delete_requested.borrow().clone();
+                return delete.is_some_and(|f| f());
             }
             _ => return false,
         };

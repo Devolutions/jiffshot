@@ -629,6 +629,22 @@ jobs:
           grep -Fx 'grab text: editor undo and redo history remained intact' "$root/ui-log.txt"
           if grep -q '^FAILED:' "$root/ui-log.txt"; then exit 1; fi
 
+      - name: Test macOS canvas deletion shortcuts
+        if: matrix.arch == 'arm64'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/jiffshot-canvas-keys"
+          mkdir -p "$root"/{library,config,local}
+          trap 'if [[ -f "$root/ui-log.txt" ]]; then cat "$root/ui-log.txt"; fi' EXIT
+          JIFFSHOT_UITEST="$root" JIFFSHOT_UITEST_CANVAS_KEYS=1 \
+            JIFFSHOT_LIBRARY="$root/library" JIFFSHOT_CONFIG_DIR="$root/config" \
+            JIFFSHOT_LOCAL_DIR="$root/local" APPDATA="$root/config" LOCALAPPDATA="$root/local" \
+            "target/${{ matrix.target }}/release/jiffshot"
+          grep -Fx 'canvas keys: Backspace and Command+Backspace keep normal text editing' "$root/ui-log.txt"
+          if grep -q '^FAILED:' "$root/ui-log.txt"; then exit 1; fi
+
       - name: Test macOS PowerShell scripts
         if: matrix.arch == 'arm64'
         shell: pwsh
