@@ -48,7 +48,7 @@ pub(super) fn timeline(sink: MainViewModelSink, theme: Theme) -> El<Border> {
                     None => Ok(false),
                 }
             })?;
-            border.set_child(Some(surface.control()))?;
+            border.set_child(surface.control())?;
             let view = Rc::new(TimelineView {
                 surface,
                 sink,

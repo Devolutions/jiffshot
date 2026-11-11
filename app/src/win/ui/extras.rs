@@ -144,7 +144,7 @@ fn set_widget(on: bool) -> Result<()> {
         widget_failed(format!("could not protect its popups: {error}"));
         return Ok(());
     }
-    if window.get_is_visible()? {
+    if window.is_visible()? {
         return Ok(());
     }
     #[cfg(windows)]
@@ -283,7 +283,7 @@ fn hovered(inside: bool) {
 pub(super) fn widget_visible_for_selftest() -> std::result::Result<bool, String> {
     let window = with(|extras| extras.widget.as_ref().map(|widget| widget.window.clone())).flatten();
     match window {
-        Some(window) => window.get_is_visible().map_err(|error| error.to_string()),
+        Some(window) => window.is_visible().map_err(|error| error.to_string()),
         None => Ok(false),
     }
 }
@@ -310,7 +310,7 @@ pub(super) fn try_close_widget_for_selftest() -> std::result::Result<bool, Strin
     let window = with(|extras| extras.widget.as_ref().map(|widget| widget.window.clone()))
         .flatten().ok_or("the test Capture Widget is unavailable")?;
     window.close().map_err(|error| error.to_string())?;
-    window.get_is_visible().map_err(|error| error.to_string())
+    window.is_visible().map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -334,7 +334,11 @@ fn build_widget(scope: &AppScope) -> Result<Widget> {
     let dark = scope.signal(parts::dark_theme(scope));
     let subs = Subscriptions::default();
     let more_button = NodeRef::<Button>::new();
-    let menu = MenuFlyout::new()?.placement(PlacementMode::BottomEdgeAlignedRight)?;
+    let menu = {
+        let control = MenuFlyout::new()?;
+        control.set_placement(PlacementMode::BottomEdgeAlignedRight)?;
+        control
+    };
     let items = menu.items()?;
     for (label, command) in [
         ("Hide Capture Widget", "hide"),
@@ -438,7 +442,7 @@ fn build_widget(scope: &AppScope) -> Result<Widget> {
                 if widget.pending { return None; }
                 Some(widget.window.clone())
             })).flatten() {
-                if window.get_is_visible().unwrap_or(false) {
+                if window.is_visible().unwrap_or(false) {
                     if let Err(error) = place_widget(&resize_scope, &window) {
                         eprintln!("Capture Widget: could not place the window: {error}");
                     }
@@ -478,8 +482,8 @@ pub(super) fn hide_widget_for_selftest() -> Result<()> {
     let menu = with(|extras| extras.widget.as_ref().map(|widget| widget.menu.clone()))
         .flatten().expect("the test widget is mounted");
     let item = menu.items()?.get(0)?.cast::<MenuItem>().expect("the first widget option is a menu item");
-    let command = item.get_command()?.expect("Hide Capture Widget has a bound command");
-    Ok(command.execute(Default::default())?)
+    let command = item.command()?.expect("Hide Capture Widget has a bound command");
+    Ok(command.execute(rustolonia::Variant::None)?)
 }
 
 fn widget_command(command: &str) {
@@ -544,7 +548,7 @@ pub(super) fn widget_menu_for_selftest(open: bool) -> Result<()> {
 pub(super) fn widget_menu_open_for_selftest() -> Result<bool> {
     let (menu, expanded) = with(|extras| extras.widget.as_ref().map(|widget| (widget.menu.clone(), widget.expanded)))
         .flatten().expect("the test widget is mounted");
-    Ok(menu.get_is_open()? && expanded.get_untracked())
+    Ok(menu.is_open()? && expanded.get_untracked())
 }
 
 // ---- Grab Text ----------------------------------------------------------------
@@ -582,7 +586,7 @@ fn build_grab_text(scope: &AppScope) -> Result<GrabText> {
     let source = text.clone();
     let copy = Button::el().content("Copy all").min_width(90.0).horizontal_content_alignment(HorizontalAlignment::Center).on_click(move |_| {
         let Some(window) = window_ref.get() else { return };
-        let all = source.get_text().ok().flatten().unwrap_or_default();
+        let all = source.text().ok().flatten().unwrap_or_default();
         let copied = copy_scope.clipboard_set_text(&window, all).and_then(|operation| {
             copy_scope.spawn(async move {
                 let _ = operation.await;

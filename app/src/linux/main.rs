@@ -3,6 +3,7 @@ use super::{
     ocr, schedule, screen_text, screenshot, scroll, settings, share, shortcut, template, tray, video,
 };
 use crate::{canvas, ui};
+use crate::vm_support::Published as Signal;
 use file_dialog::PickerOutcome;
 use jiffshot_doc::combine::Arrangement;
 use jiffshot_doc::editor::{BackgroundFill, Editor, Tool, TOOLS};
@@ -13,7 +14,7 @@ use rustolonia::storage::{
 };
 use rustolonia::{
     AnyEl, App, AppScope, Button, CheckBox, ComboBox, ComboBoxItem, Dock, DockPanel, El, Key,
-    NodeRef, Orientation, Result, ScrollBarVisibility, ScrollViewer, Signal, StackPanel, TextBlock,
+    NodeRef, Orientation, Result, ScrollBarVisibility, ScrollViewer, StackPanel, TextBlock,
     TextBox, ThemeVariant, Window, WindowCloseReason, WrapPanel,
 };
 use std::os::fd::AsFd;
@@ -555,7 +556,7 @@ pub(crate) fn run() -> Result<()> {
         let window_ref = NodeRef::<Window>::new();
         let tray_ui = TrayUi {
             scope: scope.clone(),
-            window: window_ref,
+            window: Arc::new(ui::UiOnly::new(window_ref)),
             canvas: Arc::new(canvas.clone()),
             status,
             captures,
@@ -1413,7 +1414,7 @@ pub(crate) fn run() -> Result<()> {
                             .children_for(
                                 recent_items,
                                 PathBuf::clone,
-                                move |path: Signal<PathBuf>| {
+                                move |path: rustolonia::Signal<PathBuf>| {
                                     recent_capture_button(
                                         path,
                                         recent_canvas.clone(),
@@ -1486,8 +1487,8 @@ pub(crate) fn run() -> Result<()> {
         let closing_window = Arc::new(ui::UiOnly::new(window.clone()));
         window.clone().on_closing(scope, move |args| {
             let ending = matches!(
-                WindowCloseReason::try_from(args.close_reason),
-                Ok(WindowCloseReason::ApplicationShutdown | WindowCloseReason::OSShutdown)
+                args.close_reason,
+                WindowCloseReason::ApplicationShutdown | WindowCloseReason::OSShutdown
             );
             if ending || !tray_is_active() {
                 return;
@@ -1729,9 +1730,7 @@ fn wire_editor_shortcuts(
             if args.handled {
                 return;
             }
-            let Ok(key) = Key::try_from(args.key) else {
-                return;
-            };
+            let key = args.key;
             if let Some(action) = selection_shortcut(key, args.key_modifiers) {
                 apply_selection_action(&canvas, status, action);
                 args.handled = true;
@@ -1752,9 +1751,9 @@ fn wire_editor_shortcuts(
                 args.handled = true;
                 return;
             }
-            use rustolonia::key_modifiers::{CONTROL, SHIFT};
+            use rustolonia::KeyModifiers;
             let modifiers = args.key_modifiers;
-            if modifiers == (CONTROL | SHIFT) {
+            if modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) {
                 match key {
                     Key::N => {
                         capture_screen(&callback_scope, canvas.clone(), status, captures, library)
@@ -1764,7 +1763,7 @@ fn wire_editor_shortcuts(
                     Key::S => save_document(&callback_scope, status),
                     _ => return,
                 }
-            } else if modifiers == CONTROL {
+            } else if modifiers == KeyModifiers::CONTROL {
                 match key {
                     Key::O => open_document(&callback_scope, canvas.clone(), status),
                     Key::S => save_document(&callback_scope, status),
@@ -1802,25 +1801,25 @@ fn wire_editor_shortcuts(
         .map(|_| ())
 }
 
-fn clipboard_shortcut(key: Key, modifiers: i32) -> Option<ClipboardShortcut> {
-    use rustolonia::key_modifiers::CONTROL;
+fn clipboard_shortcut(key: Key, modifiers: rustolonia::KeyModifiers) -> Option<ClipboardShortcut> {
+    use rustolonia::KeyModifiers;
     match (key, modifiers) {
-        (Key::C, CONTROL) => Some(ClipboardShortcut::Copy),
-        (Key::X, CONTROL) => Some(ClipboardShortcut::Cut),
-        (Key::V, CONTROL) => Some(ClipboardShortcut::Paste),
+        (Key::C, KeyModifiers::CONTROL) => Some(ClipboardShortcut::Copy),
+        (Key::X, KeyModifiers::CONTROL) => Some(ClipboardShortcut::Cut),
+        (Key::V, KeyModifiers::CONTROL) => Some(ClipboardShortcut::Paste),
         _ => None,
     }
 }
 
-fn selection_shortcut(key: Key, modifiers: i32) -> Option<editor::SelectionAction> {
+fn selection_shortcut(key: Key, modifiers: rustolonia::KeyModifiers) -> Option<editor::SelectionAction> {
     use editor::SelectionAction as Action;
-    use rustolonia::key_modifiers::{CONTROL, SHIFT};
-    const CONTROL_SHIFT: i32 = CONTROL | SHIFT;
+    use rustolonia::KeyModifiers;
+    const CONTROL_SHIFT: KeyModifiers = KeyModifiers::from_bits_retain(KeyModifiers::CONTROL.bits() | KeyModifiers::SHIFT.bits());
     match (key, modifiers) {
-        (Key::Delete, 0) => Some(Action::Delete),
-        (Key::A, CONTROL) => Some(Action::SelectAll),
-        (Key::D, CONTROL) => Some(Action::Deselect),
-        (Key::T, CONTROL) => Some(Action::FlattenSelected),
+        (Key::Delete, KeyModifiers::NONE) => Some(Action::Delete),
+        (Key::A, KeyModifiers::CONTROL) => Some(Action::SelectAll),
+        (Key::D, KeyModifiers::CONTROL) => Some(Action::Deselect),
+        (Key::T, KeyModifiers::CONTROL) => Some(Action::FlattenSelected),
         (Key::I, CONTROL_SHIFT) => Some(Action::Invert),
         (Key::G, CONTROL_SHIFT) => Some(Action::Group),
         (Key::U, CONTROL_SHIFT) => Some(Action::Ungroup),
@@ -1847,7 +1846,7 @@ fn apply_selection_action(
     }
 }
 
-fn action_button(label: &'static str, action: impl Fn(&AppScope) + Send + 'static) -> El<Button> {
+fn action_button(label: &'static str, action: impl Fn(&AppScope) + 'static) -> El<Button> {
     Button::el().content(label).with_op(move |scope, button| {
         let scope = scope.clone();
         let callback_scope = scope.clone();
@@ -1868,7 +1867,7 @@ enum TrayStart {
 #[derive(Clone)]
 struct TrayUi {
     scope: AppScope,
-    window: NodeRef<Window>,
+    window: Arc<ui::UiOnly<NodeRef<Window>>>,
     canvas: Arc<ui::UiOnly<ui::canvas_view::CanvasView>>,
     status: Signal<String>,
     captures: Signal<Vec<PathBuf>>,
@@ -2000,6 +1999,7 @@ impl TrayUi {
     fn show_window(&self) -> std::result::Result<(), String> {
         self.window
             .get()
+            .get()
             .ok_or_else(|| "the editor window is unavailable".to_owned())?
             .show()
             .map_err(|error| error.to_string())?;
@@ -2009,6 +2009,7 @@ impl TrayUi {
 
     fn hide_window(&self) -> std::result::Result<(), String> {
         self.window
+            .get()
             .get()
             .ok_or_else(|| "the editor window is unavailable".to_owned())?
             .hide()
@@ -2074,7 +2075,7 @@ fn editor_properties_panel(
         .with_op(move |scope, combo| {
             let reader = combo.clone();
             combo.clone().on_selection_changed(scope, move |_| {
-                match reader.get_selected_index() {
+                match reader.selected_index() {
                     Ok(index) => {
                         if controls.effect_index.get() != index {
                             controls.effect_parameter.set_if_changed(String::new());
@@ -2250,7 +2251,7 @@ fn editor_properties_panel(
             move |scope, combo| {
                 let reader = combo.clone();
                 combo.clone().on_selection_changed(scope, move |_| {
-                    match reader.get_selected_index() {
+                    match reader.selected_index() {
                         Ok(index) => editor_action(
                             &canvas,
                             status,
@@ -2433,7 +2434,7 @@ fn template_selector(
         .with_op(move |scope, combo| {
             let reader = combo.clone();
             combo.clone().on_selection_changed(scope, move |_| {
-                match reader.get_selected_index() {
+                match reader.selected_index() {
                     Ok(index) => selected.set_if_changed(index),
                     Err(error) => status
                         .set_if_changed(format!("Could not read the selected {label}: {error}")),
@@ -2552,7 +2553,7 @@ fn run_capture_preset(
 }
 
 fn screen_preset_button(
-    preset: Signal<settings::ScreenCapturePreset>,
+    preset: rustolonia::Signal<settings::ScreenCapturePreset>,
     canvas: ui::UiOnly<ui::canvas_view::CanvasView>,
     status: Signal<String>,
     captures: Signal<Vec<PathBuf>>,
@@ -3277,7 +3278,7 @@ fn copy_selected_capture_dialog(
 }
 
 fn recent_capture_button(
-    path: Signal<PathBuf>,
+    path: rustolonia::Signal<PathBuf>,
     canvas: ui::UiOnly<ui::canvas_view::CanvasView>,
     library: LibraryControls,
     status: Signal<String>,
@@ -6579,40 +6580,40 @@ mod tests {
     #[test]
     fn selection_shortcuts_require_their_exact_modifiers() {
         use editor::SelectionAction as Action;
-        use rustolonia::key_modifiers::{ALT, CONTROL, SHIFT};
+        use rustolonia::KeyModifiers;
         for (key, modifiers, action) in [
-            (Key::Delete, 0, Action::Delete),
-            (Key::A, CONTROL, Action::SelectAll),
-            (Key::D, CONTROL, Action::Deselect),
-            (Key::T, CONTROL, Action::FlattenSelected),
-            (Key::I, CONTROL | SHIFT, Action::Invert),
-            (Key::G, CONTROL | SHIFT, Action::Group),
-            (Key::U, CONTROL | SHIFT, Action::Ungroup),
-            (Key::F, CONTROL | SHIFT, Action::BringForward),
-            (Key::B, CONTROL | SHIFT, Action::SendBackward),
-            (Key::T, CONTROL | SHIFT, Action::FlattenAll),
+            (Key::Delete, KeyModifiers::NONE, Action::Delete),
+            (Key::A, KeyModifiers::CONTROL, Action::SelectAll),
+            (Key::D, KeyModifiers::CONTROL, Action::Deselect),
+            (Key::T, KeyModifiers::CONTROL, Action::FlattenSelected),
+            (Key::I, KeyModifiers::CONTROL | KeyModifiers::SHIFT, Action::Invert),
+            (Key::G, KeyModifiers::CONTROL | KeyModifiers::SHIFT, Action::Group),
+            (Key::U, KeyModifiers::CONTROL | KeyModifiers::SHIFT, Action::Ungroup),
+            (Key::F, KeyModifiers::CONTROL | KeyModifiers::SHIFT, Action::BringForward),
+            (Key::B, KeyModifiers::CONTROL | KeyModifiers::SHIFT, Action::SendBackward),
+            (Key::T, KeyModifiers::CONTROL | KeyModifiers::SHIFT, Action::FlattenAll),
         ] {
             assert_eq!(selection_shortcut(key, modifiers), Some(action));
         }
-        assert_eq!(selection_shortcut(Key::G, CONTROL), None);
-        assert_eq!(selection_shortcut(Key::G, SHIFT), None);
-        assert_eq!(selection_shortcut(Key::G, CONTROL | ALT), None);
-        assert_eq!(selection_shortcut(Key::A, CONTROL | SHIFT), None);
-        assert_eq!(selection_shortcut(Key::Delete, CONTROL), None);
+        assert_eq!(selection_shortcut(Key::G, KeyModifiers::CONTROL), None);
+        assert_eq!(selection_shortcut(Key::G, KeyModifiers::SHIFT), None);
+        assert_eq!(selection_shortcut(Key::G, KeyModifiers::CONTROL | KeyModifiers::ALT), None);
+        assert_eq!(selection_shortcut(Key::A, KeyModifiers::CONTROL | KeyModifiers::SHIFT), None);
+        assert_eq!(selection_shortcut(Key::Delete, KeyModifiers::CONTROL), None);
     }
 
     #[test]
     fn clipboard_shortcuts_require_control_without_other_modifiers() {
-        use rustolonia::key_modifiers::{ALT, CONTROL, SHIFT};
+        use rustolonia::KeyModifiers;
         for (key, action) in [
             (Key::C, ClipboardShortcut::Copy),
             (Key::X, ClipboardShortcut::Cut),
             (Key::V, ClipboardShortcut::Paste),
         ] {
-            assert_eq!(clipboard_shortcut(key, CONTROL), Some(action));
-            assert_eq!(clipboard_shortcut(key, 0), None);
-            assert_eq!(clipboard_shortcut(key, CONTROL | ALT), None);
-            assert_eq!(clipboard_shortcut(key, CONTROL | SHIFT), None);
+            assert_eq!(clipboard_shortcut(key, KeyModifiers::CONTROL), Some(action));
+            assert_eq!(clipboard_shortcut(key, KeyModifiers::NONE), None);
+            assert_eq!(clipboard_shortcut(key, KeyModifiers::CONTROL | KeyModifiers::ALT), None);
+            assert_eq!(clipboard_shortcut(key, KeyModifiers::CONTROL | KeyModifiers::SHIFT), None);
         }
     }
 

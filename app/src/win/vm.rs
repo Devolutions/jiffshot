@@ -10,8 +10,8 @@
 //! The model code (`app.rs`, `library.rs`, `tray.rs`, `capture_window.rs`)
 //! uses these names; keep them when adding members.
 
-use crate::vm_support::{publish, publish_update, watch, Element, ElementSink, ModelCell};
-use rustolonia::{Result, Signal};
+use crate::vm_support::{publish, publish_update, watch, Element, ElementSink, ModelCell, Published as Signal};
+use rustolonia::Result;
 
 /// Linux has no workflow crate; this stands in for the one name used from it.
 #[cfg(target_os = "linux")]

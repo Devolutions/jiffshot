@@ -90,7 +90,7 @@ pub fn reveal_when_excluded(
     scope.spawn(async move {
         let deadline = Instant::now() + Duration::from_secs(30);
         let outcome = loop {
-            match target.get_is_visible() {
+            match target.is_visible() {
                 Ok(false) => return,
                 Ok(true) => {}
                 Err(error) => break Err(format!("could not inspect the capture window: {error}")),

@@ -84,7 +84,7 @@ fn show(scope: &AppScope, title: String, text: String, problem: bool) -> Result<
     title_signal.set_if_changed(title);
     text_signal.set_if_changed(text);
     problem_signal.set_if_changed(problem);
-    if !window.get_is_visible()? {
+    if !window.is_visible()? {
         #[cfg(windows)]
         {
             // Shown off screen first: its size is only known once it is shown.
@@ -218,7 +218,7 @@ fn build(scope: &AppScope) -> Result<Toast> {
                 if toast.pending { return None; }
                 Some(toast.window.clone())
             })) {
-                if window.get_is_visible().unwrap_or(false) {
+                if window.is_visible().unwrap_or(false) {
                     if let Err(error) = place(&resize_scope, &window) {
                         eprintln!("toast: could not place the notification: {error}");
                     }

@@ -400,7 +400,7 @@ pub(super) fn discard_failed_owner(window: &Window) -> io::Result<()> {
     if !OWNERS.with(|owners| owners.borrow().contains_key(&key)) {
         return Ok(());
     }
-    if window.get_is_visible().map_err(io::Error::other)? {
+    if window.is_visible().map_err(io::Error::other)? {
         return Err(io::Error::other("a failed popup owner is still visible"));
     }
     clear_owner(key)
@@ -438,12 +438,12 @@ pub(in crate::ui) fn prepare_shutdown(scope: &AppScope) -> io::Result<()> {
     });
     let outcome = (|| {
         for (key, window, unloaded) in owners {
-            if !unloaded || window.get_is_visible().map_err(io::Error::other)? {
+            if !unloaded || window.is_visible().map_err(io::Error::other)? {
                 window.close().map_err(io::Error::other)?;
             }
             let still_owned = OWNERS.with(|owners| owners.borrow().contains_key(&key));
             if still_owned {
-                if window.get_is_visible().map_err(io::Error::other)? {
+                if window.is_visible().map_err(io::Error::other)? {
                     return Err(io::Error::other("a protected popup owner did not close; its gate remains installed"));
                 }
                 clear_unloaded_owner(key)?;

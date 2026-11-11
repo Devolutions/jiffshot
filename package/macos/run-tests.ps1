@@ -7,7 +7,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module Pester -RequiredVersion 5.9.1
 $configuration = New-PesterConfiguration
-$configuration.Run.Path = $PSScriptRoot
+$configuration.Run.Path = @($PSScriptRoot, (Join-Path $PSScriptRoot '../RustoloniaHost.Tests.ps1'))
 $configuration.Run.Exit = $true
 $configuration.Output.Verbosity = 'Detailed'
 Invoke-Pester -Configuration $configuration

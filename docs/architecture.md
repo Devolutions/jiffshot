@@ -40,6 +40,15 @@ pieces cover what ordinary controls cannot: pixel surfaces (the editor
 canvas, the selection overlay and Screen Draw draw Rust pixels and take the
 raw pointer stream) and a Rust-built tray icon.
 
+Rustolonia's Copy `Signal<T>` handles and UI callbacks are UI-thread-only.
+Jiffshot's Copy sinks remain sendable: `vm_support::Published<T>` stores only an
+owner-thread tag and an address into that thread's signal registry, never a
+reactive handle. Worker updates post sendable values or callbacks to the UI
+dispatcher before resolving that address; local controls use `.local()`.
+Registry entries are not reused across threads, and existing element keys still
+reject stale collection sinks. Missing UI context and dispatcher failures are
+returned to the publisher rather than reported as successful updates.
+
 ## Windows threads
 
 - **UI thread (Avalonia).** Every window: the editor, the Capture window, the

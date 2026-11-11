@@ -1,7 +1,7 @@
 use std::mem::ManuallyDrop;
 use std::thread::ThreadId;
 
-/// Carries a UI-thread value through Rustolonia's `Send` event callbacks.
+/// Carries a UI-thread value through `Send` dispatcher callbacks.
 pub struct UiOnly<T> {
     value: ManuallyDrop<T>,
     thread: ThreadId,

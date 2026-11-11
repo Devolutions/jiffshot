@@ -69,13 +69,13 @@ fn startup_header(notice: StartupNotice) -> &'static str {
 /// The switches: menu id, header, and the sink value it shows.
 fn switches(sink: &TrayViewModelSink) -> [(u32, &'static str, rustolonia::Signal<bool>); 7] {
     [
-        (TIME_LAPSE, "_Time-lapse", sink.time_lapse),
-        (SCHEDULE, schedule_header(sink.schedule_paused.get_untracked()), sink.schedule),
-        (COPY_TO_CLIPBOARD, "Copy to clip_board", sink.copy_to_clipboard),
-        (OPEN_IN_EDITOR, "Open in the edit_or", sink.open_in_editor),
-        (INCLUDE_CURSOR, "Include the c_ursor", sink.include_cursor),
-        (SHOW_WIDGET, "Show the Capture Wid_get", sink.show_widget),
-        (RUN_AT_STARTUP, startup_header(sink.startup_notice.get_untracked()), sink.run_at_startup),
+        (TIME_LAPSE, "_Time-lapse", sink.time_lapse.local()),
+        (SCHEDULE, schedule_header(sink.schedule_paused.get_untracked()), sink.schedule.local()),
+        (COPY_TO_CLIPBOARD, "Copy to clip_board", sink.copy_to_clipboard.local()),
+        (OPEN_IN_EDITOR, "Open in the edit_or", sink.open_in_editor.local()),
+        (INCLUDE_CURSOR, "Include the c_ursor", sink.include_cursor.local()),
+        (SHOW_WIDGET, "Show the Capture Wid_get", sink.show_widget.local()),
+        (RUN_AT_STARTUP, startup_header(sink.startup_notice.get_untracked()), sink.run_at_startup.local()),
     ]
 }
 

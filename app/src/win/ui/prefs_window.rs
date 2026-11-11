@@ -78,7 +78,7 @@ fn share_values(inputs: &[Input]) -> std::result::Result<Value, String> {
     }
     let values = inputs.iter().enumerate().map(|(index, input)| match (index, input) {
         (0, Input::Nothing) => Ok(Value::Null),
-        (1.., Input::Check(control)) => share_checkbox(control.get_is_checked().map_err(|error| format!("could not read a Share destination: {error}"))),
+        (1.., Input::Check(control)) => share_checkbox(control.is_checked().map_err(|error| format!("could not read a Share destination: {error}"))),
         _ => Err("the Share preference fields are invalid".into()),
     }).collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(Value::Array(values))
@@ -114,7 +114,12 @@ fn show(json: &str) -> Result<()> {
     let mut tabs: Vec<(String, Vec<Input>)> = Vec::new();
     let mut items = Vec::new();
     for tab in &dialog.tabs {
-        let rows = StackPanel::new()?.spacing(10.0)?.margin((18.0, 16.0, 18.0, 16.0))?;
+        let rows = {
+            let control = StackPanel::new()?;
+            control.set_spacing(10.0)?;
+            control.set_margin((18.0, 16.0, 18.0, 16.0))?;
+            control
+        };
         let list = rows.children()?;
         let mut inputs = Vec::new();
         for row in &tab.rows {
@@ -208,7 +213,7 @@ fn show(json: &str) -> Result<()> {
     subs.keep(window.subscribe_closing(|_| parts::pause_hotkeys(false))?);
 
     // Over the editor when it is showing.
-    match scope.main_window().filter(|main| main.get_is_visible().unwrap_or(false)) {
+    match scope.main_window().filter(|main| main.is_visible().unwrap_or(false)) {
         Some(owner) => window.show_with_window(&owner)?,
         None => window.show()?,
     }

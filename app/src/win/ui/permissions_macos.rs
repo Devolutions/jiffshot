@@ -63,7 +63,7 @@ fn show(scope: &AppScope, permission: Permission) -> Result<()> {
     };
     // Repeated failures (for example an interval capture) must not open more
     // windows or steal focus from System Settings while the user enables access.
-    if !window.get_is_visible()? {
+    if !window.is_visible()? {
         window.show()?;
         if let Some(handle) = parts::hwnd(scope, &window) {
             crate::winutil::bring_forward(handle as isize);
@@ -75,9 +75,12 @@ fn show(scope: &AppScope, permission: Permission) -> Result<()> {
 fn build(scope: &AppScope, permission: Permission) -> Result<Guidance> {
     let subscriptions = Subscriptions::default();
     let window_ref = NodeRef::<Window>::new();
-    let status = TextBlock::new()?
-        .text_wrapping(TextWrapping::Wrap)?
-        .max_width(460.0)?;
+    let status = {
+        let control = TextBlock::new()?;
+        control.set_text_wrapping(TextWrapping::Wrap)?;
+        control.set_max_width(460.0)?;
+        control
+    };
     let error_status = status.clone();
     let settings = parts::on_click(
         Button::el()
