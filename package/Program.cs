@@ -29,6 +29,8 @@ internal static class Program
     private const string ExecutableName = "jiffshot.exe";
     private const string CliName = "jiffshot-cli.exe";
     private const string DocumentProgId = "jiffshot.Document";
+    private const string NativeArchitectureProperty = "NATIVE_ARCHITECTURE";
+    private const string NativeArchitectureSignature = "NativeArchitecture";
     private const string X64ConditionMessage =
         "This installer requires Windows x64. Download the ARM64 MSI for a Windows on ARM device.";
     private const string Arm64ConditionMessage =
@@ -125,11 +127,34 @@ internal static class Program
                 component.SetAttributeValue("Bitness", "always64");
 
             var package = doc.Descendants().Single(e => e.Name.LocalName == "Package");
+            var ns = package.Name.Namespace;
             var isArm64 = o.Platform == Platform.arm64;
-            package.Add(new XElement(
-                package.Name.Namespace + "Launch",
-                new XAttribute("Condition", isArm64 ? "Arm64" : "NOT Arm64"),
-                new XAttribute("Message", isArm64 ? Arm64ConditionMessage : X64ConditionMessage)));
+            // Windows Installer has no built-in Arm64 property, and Windows 11
+            // on ARM sets Msix64 for x64 packages under emulation. Read the OS
+            // native PROCESSOR_ARCHITECTURE from HKLM\SYSTEM via AppSearch
+            // before LaunchConditions runs, and mark it Secure so UAC handoff
+            // from InstallUISequence to InstallExecuteSequence preserves it.
+            package.Add(
+                new XElement(
+                    ns + "Property",
+                    new XAttribute("Id", NativeArchitectureProperty),
+                    new XAttribute("Secure", "yes"),
+                    new XElement(
+                        ns + "RegistrySearch",
+                        new XAttribute("Id", NativeArchitectureSignature),
+                        new XAttribute("Root", "HKLM"),
+                        new XAttribute("Key", @"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+                        new XAttribute("Name", "PROCESSOR_ARCHITECTURE"),
+                        new XAttribute("Type", "raw"),
+                        new XAttribute("Bitness", "always64"))),
+                new XElement(
+                    ns + "Launch",
+                    new XAttribute(
+                        "Condition",
+                        isArm64
+                            ? $"Installed OR {NativeArchitectureProperty} ~= \"ARM64\""
+                            : $"Installed OR {NativeArchitectureProperty} ~= \"AMD64\""),
+                    new XAttribute("Message", isArm64 ? Arm64ConditionMessage : X64ConditionMessage)));
         };
 
         // Light leaves an MSI behind even when validation fails, and BuildMsi

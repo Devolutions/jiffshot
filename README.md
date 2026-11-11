@@ -719,7 +719,7 @@ dotnet build package -c Release
 package/bin/Release/net472/Jiffshot.Package.exe -bin target/release -platform x64
 ```
 
-The MSI lands in `package/out` as `Devolutions.Jiffshot-x64-0.4.0.msi` (with the selected architecture and version; `-out` picks another folder). Programs and Features lists it as **Devolutions Jiffshot** under publisher **Devolutions Inc.**. Each MSI displays an architecture-specific error if run on the other platform: the x64 MSI directs Windows on ARM users to the ARM64 MSI, and the ARM64 MSI directs Intel/AMD PC users to the x64 MSI. The version comes from `Cargo.toml` unless `-version` gives one. CI builds both MSIs from its builds (`jiffshot-win-x64-msi`, `jiffshot-win-arm64-msi`), and installs and uninstalls the x64 one.
+The MSI lands in `package/out` as `Devolutions.Jiffshot-x64-0.4.0.msi` (with the selected architecture and version; `-out` picks another folder). Programs and Features lists it as **Devolutions Jiffshot** under publisher **Devolutions Inc.**. Each MSI checks the host OS's native `PROCESSOR_ARCHITECTURE` registry value before `LaunchConditions`: on Windows on ARM, the x64 MSI directs users to the ARM64 MSI rather than installing under emulation, and on Intel/AMD PCs Windows Installer rejects the ARM64 MSI package (with a matching ARM64 launch condition in the package). The version comes from `Cargo.toml` unless `-version` gives one. CI builds both MSIs from its builds (`jiffshot-win-x64-msi`, `jiffshot-win-arm64-msi`), and installs and uninstalls the x64 one.
 
 ### Releases & Code Signing
 
