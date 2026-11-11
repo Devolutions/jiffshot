@@ -8,6 +8,7 @@
 //! `JIFFSHOT_UITEST_CAPTURE_ONLY` checks the Capture window and chooser
 //! without running the editor and overlay walk.
 //! `JIFFSHOT_UITEST_CANVAS` checks canvas handles through view-coordinate input.
+//! On macOS, `JIFFSHOT_UITEST_CANVAS_KEYS` checks canvas deletion shortcuts.
 //! `JIFFSHOT_UITEST_SELECTION` checks selecting, copying and cutting image pixels.
 //! `JIFFSHOT_UITEST_NEW_FROM_CLIPBOARD` checks creating images without touching the system clipboard.
 //! `JIFFSHOT_UITEST_CAPTURE_MENUS` checks menu switching and DarkBlue popups.
@@ -591,6 +592,197 @@ fn canvas_handle_script() -> Script {
     s
 }
 
+#[cfg(target_os = "macos")]
+fn canvas_keys_script() -> Script {
+    use jiffshot_doc::object::{Kind, ShapeKind, Style};
+    use jiffshot_doc::{Box2, Document, Rgba};
+    use objc2_core_graphics::CGEventFlags;
+    use rustolonia::{KeyModifiers, NavigationMethod};
+
+    fn select_first_two() {
+        crate::app::act(|_| {
+            crate::canvas::with_editor(|editor| {
+                let ids = editor.document().objects.iter().take(2).map(|object| object.id).collect();
+                editor.set_selection(ids);
+            })
+            .expect("the editor is unavailable");
+        })
+        .expect("select annotations");
+    }
+
+    let mut script = Script(VecDeque::new());
+    script.wait(500).step(|_| {
+        let handle = super::main_window_handle().expect("the editor is unavailable");
+        crate::mac_window::activate(handle).expect("activate the keyboard fixture");
+        crate::app::act(|app| {
+            app.load(Document::blank(180, 90, Rgba::WHITE), None, None);
+            crate::canvas::with_editor(|editor| {
+                let ids = [10.0, 60.0, 110.0].map(|x| {
+                    editor.add_object(
+                        "Annotation",
+                        Kind::Shape {
+                            rect: Box2::new(x, 10.0, x + 30.0, 50.0),
+                            shape: ShapeKind::Rectangle,
+                        },
+                        Style::default(),
+                    )
+                });
+                editor.set_selection(ids[..2].to_vec());
+            })
+            .expect("the editor is unavailable");
+        })
+        .expect("load the keyboard fixture");
+        300
+    });
+    script.step(|test| {
+        assert!(sink().delete_enabled.get_untracked(), "selected annotations must be deletable");
+        test.note = crate::canvas::with_editor(|editor| editor.document().objects[2].id.to_string())
+            .expect("the editor is unavailable");
+        super::canvas()
+            .expect("the canvas is unavailable")
+            .control()
+            .focus_with_navigation_method_and_key_modifiers(NavigationMethod::Unspecified, KeyModifiers::NONE)
+            .expect("focus the canvas");
+        platform::press_native_key("\u{7f}", 51, CGEventFlags::empty()).expect("send Backspace");
+        150
+    });
+    script.step(|test| {
+        let kept: u64 = test.note.parse().expect("the unselected annotation ID");
+        crate::canvas::with_editor(|editor| {
+            let remaining: Vec<_> = editor.document().objects.iter().map(|object| object.id).collect();
+            assert_eq!(remaining, [kept], "Backspace must delete only the selected annotations");
+            assert!(editor.selected_ids().is_empty());
+        })
+        .unwrap();
+        test.line("canvas keys: Backspace deletes the selected annotations");
+        call(|model| model.undo());
+        150
+    });
+    script.step(|_| {
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(3), "Undo restores both annotations");
+        select_first_two();
+        150
+    });
+    script.step(|_| {
+        platform::press_native_key("\u{7f}", 51, CGEventFlags::MaskCommand).expect("send Command+Backspace");
+        150
+    });
+    script.step(|test| {
+        let kept: u64 = test.note.parse().expect("the unselected annotation ID");
+        assert_eq!(
+            crate::canvas::with_editor(|editor| editor.document().objects.iter().map(|object| object.id).collect::<Vec<_>>()),
+            Some(vec![kept]),
+            "Command+Backspace must delete only the selected annotations"
+        );
+        assert!(!sink().status.get_untracked().contains("Only library captures"), "Command+Backspace must not invoke Delete file");
+        test.line("canvas keys: Undo restores annotations and Command+Backspace deletes them");
+        platform::press_native_key("\u{7f}", 51, CGEventFlags::empty()).expect("send Backspace without a selection");
+        platform::press_native_key("\u{7f}", 51, CGEventFlags::MaskCommand).expect("send Command+Backspace without a selection");
+        150
+    });
+    script.step(|_| {
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(1), "Backspace without a selection must do nothing");
+        assert!(!sink().status.get_untracked().contains("Only library captures"), "Command+Backspace must not invoke Delete file");
+        call(|model| model.undo());
+        150
+    });
+    script.step(|_| {
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(3));
+        select_first_two();
+        150
+    });
+    script.step(|_| {
+        for modifiers in [
+            CGEventFlags::MaskShift,
+            CGEventFlags::MaskAlternate,
+            CGEventFlags::MaskControl,
+            CGEventFlags::MaskCommand | CGEventFlags::MaskShift,
+        ] {
+            platform::press_native_key("\u{7f}", 51, modifiers).expect("send a modified Backspace");
+        }
+        150
+    });
+    script.step(|test| {
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(3), "unrelated Backspace combinations must not delete");
+        platform::press_native_key("\u{f728}", 117, CGEventFlags::empty()).expect("send forward Delete");
+        test.line("canvas keys: empty and unrelated modified Backspace leave the document unchanged");
+        150
+    });
+    script.step(|test| {
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(1), "forward Delete must still work");
+        test.line("canvas keys: forward Delete still deletes selected annotations");
+        crate::app::act(|app| {
+            app.load(Document::blank(180, 90, Rgba::WHITE), None, None);
+            crate::canvas::with_editor(|editor| {
+                editor.add_object(
+                    "Annotation",
+                    Kind::Shape {
+                        rect: Box2::new(16.0, 16.0, 40.0, 40.0),
+                        shape: ShapeKind::Rectangle,
+                    },
+                    Style::default(),
+                );
+                editor.set_tool(jiffshot_doc::editor::Tool::Select);
+                editor.mark_saved();
+            })
+            .unwrap();
+            crate::canvas::pointer(POINTER_PRESSED, 10.0, 10.0, 0, 1.0);
+            crate::canvas::pointer(POINTER_MOVED, 30.0, 30.0, 0, 1.0);
+            crate::canvas::pointer(POINTER_RELEASED, 30.0, 30.0, 0, 1.0);
+            app.sync();
+        })
+        .unwrap();
+        150
+    });
+    script.step(|_| {
+        assert!(!sink().delete_enabled.get_untracked(), "an overlapping image region must not be deletable");
+        platform::press_native_key("\u{7f}", 51, CGEventFlags::empty()).expect("send Backspace to the protected region");
+        platform::press_native_key("\u{7f}", 51, CGEventFlags::MaskCommand).expect("send Command+Backspace to the protected region");
+        150
+    });
+    script.step(|test| {
+        crate::canvas::with_editor(|editor| {
+            assert_eq!(editor.document().objects.len(), 1);
+            assert_eq!(editor.selected_region(), Some(jiffshot_doc::IRect::new(10, 10, 20, 20)));
+            assert!(!editor.is_modified(), "a protected image region must not be deleted");
+        })
+        .unwrap();
+        assert!(!sink().status.get_untracked().contains("Only library captures"), "Command+Backspace must not invoke Delete file");
+        test.line("canvas keys: a protected overlapping image region remains unchanged");
+        crate::app::act(|app| app.load(Document::blank(180, 90, Rgba::WHITE), None, None)).unwrap();
+        run("tool:Text");
+        canvas_feed(POINTER_PRESSED, 20.0, 20.0);
+        canvas_feed(POINTER_RELEASED, 20.0, 20.0);
+        300
+    });
+    script.step(|_| {
+        for (text, key_code) in [("a", 0), ("b", 11), ("c", 8)] {
+            platform::press_native_key(text, key_code, CGEventFlags::empty()).expect("type in the annotation text field");
+        }
+        150
+    });
+    script.step(|_| {
+        assert_eq!(sink().text.get_untracked(), "abc", "typing must reach the text field");
+        platform::press_native_key("\u{7f}", 51, CGEventFlags::empty()).expect("send Backspace to the text field");
+        150
+    });
+    script.step(|_| {
+        assert_eq!(sink().text.get_untracked(), "ab", "Backspace must edit text");
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(1));
+        platform::press_native_key("\u{7f}", 51, CGEventFlags::MaskCommand).expect("send Command+Backspace to the text field");
+        150
+    });
+    script.step(|test| {
+        let text = sink().text.get_untracked();
+        assert!(text.len() < 2, "Command+Backspace must edit text: {text:?}");
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(1), "text editing must not delete the annotation");
+        crate::canvas::with_editor(|editor| editor.mark_saved()).unwrap();
+        test.line("canvas keys: Backspace and Command+Backspace keep normal text editing");
+        0
+    });
+    script
+}
+
 /// The whole walk, in order.
 fn script() -> Script {
     if env("JIFFSHOT_UITEST_SELECTION").is_some() {
@@ -602,6 +794,10 @@ fn script() -> Script {
     let mut s = Script(VecDeque::new());
     if env("JIFFSHOT_UITEST_CANVAS").is_some() {
         return canvas_handle_script();
+    }
+    #[cfg(target_os = "macos")]
+    if env("JIFFSHOT_UITEST_CANVAS_KEYS").is_some() {
+        return canvas_keys_script();
     }
     if env("JIFFSHOT_UITEST_GRAB_TEXT").is_some() {
         return grab_text_script();
@@ -1710,7 +1906,7 @@ fn native_menu_script() -> Script {
         platform::native_menu_item(&["File", "Open recent", "native_menu_fixture.png"]).expect("dynamic recent file");
         let grid = super::canvas().expect("the canvas is unavailable").show_pixel_grid();
         test.note = grid.to_string();
-        platform::press_native_menu_key("g", 5).expect("send Command+G to the fixture");
+        platform::press_native_key("g", 5, objc2_core_graphics::CGEventFlags::MaskCommand).expect("send Command+G to the fixture");
         200
     }).step(|test| {
         let original: bool = test.note.parse().expect("saved pixel grid state");

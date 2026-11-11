@@ -261,7 +261,7 @@ pub fn trim(scope: &AppScope, owner: &Window, w: u32, h: u32, done: impl FnOnce(
 }
 
 /// Help ▸ Keyboard shortcuts' list.
-const SHORTCUTS: [(&str, &str); 27] = [
+const SHORTCUTS: [(&str, &str); 28] = [
     ("Ctrl+Shift+N", "New capture"),
     ("Ctrl+N", "New image"),
     ("Ctrl+O", "Open"),
@@ -273,6 +273,7 @@ const SHORTCUTS: [(&str, &str); 27] = [
     ("Ctrl+Shift+V", "New from clipboard"),
     ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
     ("Ctrl+C / Ctrl+X / Ctrl+V", "Copy / cut / paste"),
+    (if cfg!(target_os = "macos") { "Backspace / Cmd+Backspace / Delete" } else { "Delete" }, "Delete selection"),
     ("Ctrl+Shift+C", "Copy all"),
     ("Ctrl+A / Ctrl+D", "Select all / deselect"),
     ("Ctrl+Shift+I", "Invert selection"),
