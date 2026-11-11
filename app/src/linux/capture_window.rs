@@ -128,7 +128,11 @@ pub fn show() {
 
 fn hide() {
     if let Some(window) = with(|s| s.window.clone()) {
-        let _ = window.hide();
+        if let Err(error) = crate::ui::capture_visibility::hide_window(&window) {
+            crate::app::post(move |app| app.toast(
+                "Capture failed", &format!("Could not hide the Capture window: {error}"), true,
+            ));
+        }
     }
 }
 

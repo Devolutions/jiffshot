@@ -148,7 +148,9 @@ pub fn show(scope: &AppScope) {
 
 fn hide() {
     if let Some(window) = window() {
-        let _ = window.hide();
+        if let Err(error) = crate::ui::capture_visibility::hide_window(&window) {
+            problem(&format!("Could not hide the Capture window: {error}"));
+        }
     }
 }
 
@@ -442,7 +444,7 @@ fn open_scheduled_area_selector() {
         problem("The Capture window is unavailable.");
         return;
     };
-    if let Err(error) = window.hide() {
+    if let Err(error) = crate::ui::capture_visibility::hide_window(&window) {
         problem(&format!("Could not hide the Capture window: {error:?}"));
         return;
     }

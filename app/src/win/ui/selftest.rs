@@ -631,10 +631,19 @@ fn script() -> Script {
             let shown = rustolonia::Window::new().expect("create a visible test window");
             scope.mount(shown.clone()).expect("mount the visible test window");
             let activated = editor.get_show_activated().unwrap();
+            #[cfg(target_os = "macos")]
+            let native = crate::mac_window::window(scope.platform_handle(&editor).unwrap()).unwrap();
+            #[cfg(target_os = "macos")]
+            let animation = native.animationBehavior();
+            #[cfg(target_os = "macos")]
+            native.setAnimationBehavior(objc2_app_kit::NSWindowAnimationBehavior::DocumentWindow);
             let first = jiffshot_capture::visibility::hide().expect("hide application windows");
+            let ready = first.hidden_since().expect("hiding did not publish a safe frame timestamp");
+            assert!(ready <= Instant::now(), "capture returned before the compositor settled");
             assert!(scope.windows().iter().all(|window| !window.get_is_visible().unwrap()),
                 "a Jiffshot window remained visible");
             let second = jiffshot_capture::visibility::hide().expect("nest window hiding");
+            assert_eq!(second.hidden_since(), Some(ready), "nested capture changed the frame cutoff");
             drop(first);
             assert!(!editor.get_is_visible().unwrap(), "nested capture restored the editor too early");
             drop(second);
@@ -643,6 +652,12 @@ fn script() -> Script {
             assert!(!hidden.get_is_visible().unwrap(), "capture opened a previously hidden window");
             assert_eq!(editor.get_show_activated().unwrap(), activated,
                 "capture changed the editor's activation policy");
+            #[cfg(target_os = "macos")]
+            {
+                assert_eq!(native.animationBehavior(), objc2_app_kit::NSWindowAnimationBehavior::DocumentWindow,
+                    "capture changed the editor's animation policy");
+                native.setAnimationBehavior(animation);
+            }
             let failed = (|| -> std::io::Result<()> {
                 let _hidden = jiffshot_capture::visibility::hide()?;
                 Err(std::io::Error::other("synthetic capture failure"))
@@ -651,9 +666,24 @@ fn script() -> Script {
             assert!(editor.get_is_visible().unwrap(), "failed capture did not restore the editor");
             assert!(shown.get_is_visible().unwrap(), "failed capture did not restore another window");
             assert!(!hidden.get_is_visible().unwrap());
+            let dismissed = Instant::now();
+            for window in scope.windows() {
+                if window.get_is_visible().unwrap() {
+                    super::capture_visibility::hide_window(&window).expect("dismiss a window before capture");
+                }
+            }
+            let capture = jiffshot_capture::visibility::hide().expect("capture after dismissing windows");
+            assert!(capture.hidden_since().expect("dismissed windows lost their settling deadline")
+                >= dismissed + Duration::from_millis(150),
+                "the safe frame timestamp predates compositor settling");
+            assert!(dismissed.elapsed() >= Duration::from_millis(150),
+                "capture did not wait for already-dismissed windows");
+            drop(capture);
+            assert!(!editor.get_is_visible().unwrap(), "capture reopened a dismissed window");
+            editor.show().expect("restore the editor after dismissal test");
             shown.close().expect("close the visible test window");
             hidden.close().expect("close the hidden test window");
-            test.line("capture visibility: all windows hidden, nested guards balanced, originals restored on success and failure");
+            test.line("capture visibility: non-animated hides, safe frame cutoff, nested guards, restoration, and already-dismissed windows checked");
             100
         });
         let (send, receive) = std::sync::mpsc::channel();
@@ -2082,15 +2112,28 @@ fn capture_visibility_pixel_steps(script: &mut Script) {
             "the screenshot marker is not visibly magenta: {baseline}");
         test.line(format!("capture visibility baseline: {baseline}"));
         std::thread::spawn(move || {
-            let result = jiffshot_capture::screen::grab(Rect::new(x, y, 4, 4))
-                .map(|frame| frame.rgb(0, 0));
+            let result = (|| -> std::io::Result<_> {
+                let expected = {
+                    let _hidden = jiffshot_capture::visibility::hide()?;
+                    std::thread::sleep(Duration::from_millis(500));
+                    jiffshot_capture::screen::grab(Rect::new(x, y, 4, 4))?.rgb(0, 0)
+                };
+                std::thread::sleep(Duration::from_millis(500));
+                let actual = jiffshot_capture::screen::grab(Rect::new(x, y, 4, 4))?.rgb(0, 0);
+                Ok((expected, actual))
+            })();
             let _ = send.send(result);
         });
-        3000
+        5000
     });
     script.step(move |test| {
-        let pixel = receive.try_recv().expect("the real screenshot did not finish")
-            .expect("the real screenshot failed").expect("the screenshot is empty");
+        let (expected, pixel) = receive.try_recv().expect("the real screenshot did not finish")
+            .expect("the real screenshot failed");
+        let expected = expected.expect("the reference screenshot is empty");
+        let pixel = pixel.expect("the screenshot is empty");
+        assert!(pixel.0.abs_diff(expected.0) <= 4 && pixel.1.abs_diff(expected.1) <= 4
+            && pixel.2.abs_diff(expected.2) <= 4,
+            "capture contains a fade remnant: expected {expected:?}, got {pixel:?}");
         assert!(!(pixel.0 >= 180 && pixel.1 <= 40 && pixel.2 >= 180),
             "Jiffshot appeared in its own screenshot: {pixel:?}");
         let window = marker.borrow_mut().take().unwrap();
