@@ -11,7 +11,7 @@ pub mod canvas_view;
 #[path = "../../ui/capture_visibility.rs"]
 pub(crate) mod capture_visibility;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
-mod capture_view;
+pub(crate) mod capture_view;
 mod dark_blue;
 #[cfg(windows)]
 mod editor_placement;

@@ -975,6 +975,14 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         if run_capture {
             let recording_scope = scope.clone();
             let hooks = jiffshot_workflow::Hooks {
+                image_finished: Box::new(|path, problem| {
+                    let path = path.map(std::path::Path::to_path_buf);
+                    app::post(move |app| {
+                        if crate::ui::capture_view::image_finished(path, problem) {
+                            app.show_capture_window();
+                        }
+                    });
+                }),
                 open_in_editor: Box::new(|path| {
                     let path = path.to_path_buf();
                     #[cfg(target_os = "macos")]

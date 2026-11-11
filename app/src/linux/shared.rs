@@ -7,17 +7,78 @@ use crate::winutil::{self, CaptureRequest};
 use std::path::PathBuf;
 
 fn open_in_editor(path: PathBuf) {
-    let copy = super::settings::copy_capture_to_clipboard().unwrap_or(false);
+    deliver_capture(path, false);
+}
+
+fn deliver_capture(path: PathBuf, background: bool) {
+    if path.extension().is_none_or(|ext| ext != "png") {
+        let copy = match super::settings::copy_capture_to_clipboard() {
+            Ok(copy) => copy,
+            Err(error) => {
+                report(format!("Could not read the clipboard preference: {error}"));
+                false
+            }
+        };
+        return app::post(move |app| {
+            app.incoming(path);
+            if copy {
+                app.copy_image();
+            }
+        });
+    }
+    let preferences = super::settings::open_in_editor()
+        .and_then(|open| super::settings::copy_capture_to_clipboard().map(|copy| (open, copy)));
+    let (open, copy) = match preferences {
+        Ok(preferences) => preferences,
+        Err(error) => return app::post(move |app| {
+            let message = format!("Capture saved, but delivery settings could not be read: {error}");
+            if !background && crate::ui::capture_view::image_finished(Some(path), true) {
+                super::capture_window::show();
+                super::capture_window::problem(message.clone());
+            }
+            app.set_status(message);
+        }),
+    };
+    let copy_error = if copy {
+        jiffshot_doc::io::load_image(&path)
+            .map_err(|error| error.to_string())
+            .and_then(super::clipboard::copy_pixmap)
+            .err()
+    } else {
+        None
+    };
     app::post(move |app| {
-        app.incoming(path);
-        if copy {
-            app.copy_image();
+        let returned = if open {
+            app.incoming(path);
+            false
+        } else {
+            app.set_status(format!("Capture saved to {}", path.display()));
+            if !background && crate::ui::capture_view::image_finished(Some(path), copy_error.is_some()) {
+                super::capture_window::show();
+                true
+            } else {
+                false
+            }
+        };
+        if let Some(error) = copy_error {
+            let message = format!("Capture saved, but clipboard delivery failed: {error}");
+            app.set_status(message.clone());
+            if returned {
+                super::capture_window::problem(message);
+            }
         }
     });
 }
 
 pub(super) fn report(message: String) {
-    app::post(move |app| app.set_status(message));
+    app::post(move |app| {
+        if (message == "Capture cancelled" || message.starts_with("Capture failed:"))
+            && crate::ui::capture_view::image_finished(None, message != "Capture cancelled")
+        {
+            super::capture_window::show();
+        }
+        app.set_status(message);
+    });
 }
 
 /// Takes a portal screenshot, saves it to the library and opens it.
@@ -27,6 +88,10 @@ pub(crate) fn capture_image() {
 
 /// Like [`capture_image`], waiting `delay` seconds after the desktop dialog.
 pub(crate) fn capture_image_with(cursor: bool, delay: u64) {
+    capture_image_with_delivery(cursor, delay, false);
+}
+
+fn capture_image_with_delivery(cursor: bool, delay: u64, background: bool) {
     report("Choose a screen or window in the desktop dialog…".into());
     std::thread::spawn(move || {
         let cursor = super::capture::CaptureCursor::from_included(cursor);
@@ -47,8 +112,10 @@ pub(crate) fn capture_image_with(cursor: bool, delay: u64) {
             Some(document) => super::capture::save_capture(&document).map(Some),
             None => Ok(None),
         }) {
-            Ok(Some(path)) => open_in_editor(path),
+            Ok(Some(path)) => deliver_capture(path, background),
+            Ok(None) if background => app::post(|app| app.set_status("Capture cancelled".into())),
             Ok(None) => report("Capture cancelled".into()),
+            Err(error) if background => app::post(move |app| app.set_status(format!("Scheduled capture failed: {error}"))),
             Err(error) => report(format!("Capture failed: {error}")),
         }
     });
@@ -121,7 +188,7 @@ pub fn start_schedule() {
         if schedule.should_fire(now)
             && matches!(super::settings::mark_schedule_fired(preferences.time, now.day()), Ok(ScheduleClaim::Claimed))
         {
-            capture_image();
+            capture_image_with_delivery(true, 0, true);
         }
     });
 }
@@ -369,7 +436,7 @@ pub(crate) fn capture_desktop() {
 fn finish_single(result: Result<Option<PathBuf>, String>) {
     match result {
         Ok(Some(path)) => {
-            app::post(move |app| app.incoming(path));
+            open_in_editor(path);
         }
         Ok(None) => report("Capture cancelled".into()),
         Err(error) => report(format!("Capture failed: {error}")),
@@ -470,7 +537,7 @@ pub(crate) fn capture_interval(seconds: u32, cursor: bool) {
             |progress| match progress {
                 Progress::Saved { count, path } => {
                     report(format!("Interval capture saved {count} image(s)"));
-                    open_in_editor(path);
+                    deliver_capture(path, true);
                 }
                 Progress::Skipped { count } => {
                     report(format!("Interval capture skipped {count} unchanged frame(s)"));

@@ -29,7 +29,7 @@ pub enum CaptureTiming {
     Schedule,
 }
 use rustolonia::{
-    AppScope, AsControl, Border, Button, Color, Control, Dock, DockPanel, Effect, El, Flyout, FontWeight, Grid, HorizontalAlignment, Key, MenuFlyout,
+    AppScope, AsControl, Border, Button, CheckBox, Color, Control, Dock, DockPanel, Effect, El, Flyout, FontWeight, Grid, HorizontalAlignment, Key, MenuFlyout,
     MenuItem, MenuItemToggleType, NodeRef, Orientation, PlacementMode, Result, ScrollViewer, Separator, Signal, StackPanel, TextAlignment, TextBlock, TextWrapping, Upcast,
     VerticalAlignment, Window, WindowStartupLocation,
 };
@@ -104,6 +104,8 @@ fn palette(dark: Signal<bool>) -> &'static Palette {
 /// What the window shows for the current tab (`panel::View`).
 #[derive(Deserialize)]
 struct View {
+    #[serde(default = "enabled")]
+    open_in_editor: bool,
     tab: usize,
     #[serde(default)]
     recording: bool,
@@ -213,6 +215,11 @@ struct MenuButton {
 
 /// The window and what its callbacks need. UI thread only.
 struct Ui {
+    open_in_editor: Signal<bool>,
+    confirmation: Signal<String>,
+    captured_path: Option<std::path::PathBuf>,
+    capture_pending: bool,
+    confirmation_revision: u64,
     scope: AppScope,
     window: NodeRef<Window>,
     dark: Signal<bool>,
@@ -256,6 +263,56 @@ fn run(action: String) {
     super::capture().model.run(|m| m.run(action));
 }
 
+/// Marks only one-shot image requests made here, not hotkeys or background timers.
+pub(crate) fn starting_capture(editor_free_image: bool) {
+    with_ui(|ui| {
+        ui.capture_pending = editor_free_image;
+        ui.confirmation_revision = ui.confirmation_revision.wrapping_add(1);
+        ui.confirmation.set(String::new());
+        ui.captured_path = None;
+    });
+}
+
+pub(crate) fn clear_pending_capture() {
+    with_ui(|ui| ui.capture_pending = false);
+}
+
+pub(crate) fn edit_last_capture() {
+    if let Some(path) = with_ui(|ui| ui.captured_path.clone()).flatten() {
+        crate::app::post(move |app| app.incoming(path));
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub(super) fn workflow_state_for_selftest() -> Option<(bool, String, Option<std::path::PathBuf>)> {
+    with_ui(|ui| (ui.open_in_editor.get_untracked(), ui.confirmation.get_untracked(), ui.captured_path.clone()))
+}
+
+/// Presents the most recently completed Capture-window image without loading the editor.
+pub(crate) fn image_finished(path: Option<std::path::PathBuf>, problem: bool) -> bool {
+    let Some((scope, revision)) = with_ui(|ui| {
+        if !std::mem::take(&mut ui.capture_pending) {
+            return None;
+        }
+        let saved = path.is_some();
+        ui.captured_path = path;
+        ui.confirmation.set(if !saved { "" } else if problem { "Saved with problems" } else { "Capture saved" }.into());
+        ui.confirmation_revision = ui.confirmation_revision.wrapping_add(1);
+        Some((ui.scope.clone(), ui.confirmation_revision))
+    }).flatten() else {
+        return false;
+    };
+    parts::after(&scope, std::time::Duration::from_secs(8), move || {
+        with_ui(|ui| {
+            if ui.confirmation_revision == revision {
+                ui.confirmation.set(String::new());
+                ui.captured_path = None;
+            }
+        });
+    });
+    true
+}
+
 /// Asks the model for a menu or panel (`verb` is "menu" or "panel"), to open
 /// under `anchor`.
 fn request(verb: &str, which: &str, anchor: Control) {
@@ -289,6 +346,8 @@ fn popup_target() -> Option<(AppScope, Window, Control, Subscriptions)> {
 
 /// Builds the Capture window for `binding` (not yet shown).
 pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
+    let open_in_editor = scope.signal(true);
+    let confirmation = scope.signal(String::new());
     let dark = scope.signal(parts::dark_theme(scope));
     let tab = scope.signal(0_usize);
     let recording = scope.signal(false);
@@ -455,7 +514,19 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         .horizontal_alignment(HorizontalAlignment::Center)
         .child(mode_capsule)
         .child(capture_button.margin((0.0, 12.0, 0.0, 0.0)))
-        .child(detail.margin((0.0, 6.0, 0.0, 0.0)));
+        .child(detail.margin((0.0, 6.0, 0.0, 0.0)))
+        .child(on_click(
+            CheckBox::el()
+                .name("capture-auto-editor")
+                .checked(move || Some(open_in_editor.get()))
+                .visible(move || tab.get() != 2)
+                .padding((4.0, 3.0))
+                .tool_tip_tip("Open each capture in the editor automatically")
+                .content("Auto-open editor")
+                .font_size(12.0),
+            &subs,
+            |_| run("switch:preview".into()),
+        ));
     let stop_interval = status_button(dark, &subs, "Stop", "Stop interval capture", "stop-interval");
     let cancel_schedule = status_button(dark, &subs, "Cancel", "Cancel daily scheduled capture", "cancel-schedule");
     let show_recording_controls = status_button(
@@ -580,6 +651,16 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         .grid_row(2)
         .margin((8.0, 0.0, 8.0, 0.0))
         .child(editor)
+        .child(
+            StackPanel::el()
+                .dock_panel_dock(Dock::Right)
+                .orientation(Orientation::Horizontal)
+                .spacing(4.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .visible(move || !confirmation.get().is_empty())
+                .child(TextBlock::el().text(confirmation).font_size(12.0).vertical_alignment(VerticalAlignment::Center))
+                .child(on_click(flat(dark).name("capture-edit-last").content("Edit"), &subs, |_| edit_last_capture())),
+        )
         .child(StackPanel::el().orientation(Orientation::Horizontal).spacing(2.0).vertical_alignment(VerticalAlignment::Center).child(presets).child(new_preset));
 
     let theme_scope = scope.clone();
@@ -609,7 +690,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
                 .set_extend_client_area_to_decorations_hint(false)
                 .and_then(|_| window.set_window_decorations(WindowDecorations::Full))
                 .and_then(|_| window.set_title(TITLE))
-                .and_then(|_| window.set_height(350.0));
+                .and_then(|_| window.set_height(374.0));
             if let Err(error) = fallback {
                 eprintln!("Capture window native title bar: {error:?}");
             }
@@ -618,7 +699,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
     let window = window
         .icon(super::icon_file())
         .width(if cfg!(target_os = "linux") { 660.0 } else { 560.0 })
-        .height(if cfg!(target_os = "linux") { 400.0 } else { 320.0 })
+        .height(if cfg!(target_os = "linux") { 424.0 } else { 344.0 })
         .can_resize(false)
         .can_maximize(false);
     #[cfg(windows)]
@@ -659,6 +740,11 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
 
     UI.with(|ui| {
         *ui.borrow_mut() = Some(Ui {
+            open_in_editor,
+            confirmation,
+            captured_path: None,
+            capture_pending: false,
+            confirmation_revision: 0,
             scope: scope.clone(),
             window: window_ref,
             dark,
@@ -837,6 +923,7 @@ fn glyph(text: &str, size: f64) -> El<TextBlock> {
 
 fn apply_view(json: &str) -> Result<()> {
     let Ok(view) = serde_json::from_str::<View>(json) else { return Ok(()) };
+    with_ui(|ui| ui.open_in_editor.set_if_changed(view.open_in_editor));
     #[cfg(target_os = "macos")]
     with_ui(|ui| ui.native_menu.update(&view.menus)).transpose()?;
     let Some((scope, dark, fields, rows, (tab, recording, timing, interval_running, active_schedule, action))) =

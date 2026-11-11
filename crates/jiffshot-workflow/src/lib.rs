@@ -85,6 +85,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
 /// What the capture side asks of the app it runs in.
 pub struct Hooks {
+    /// An editor-free image after delivery, or an image attempt that ended without a file.
+    pub image_finished: Box<dyn Fn(Option<&Path>, bool) + Send + Sync>,
     /// Opens a saved capture in the editor; false when it could not.
     pub open_in_editor: Box<dyn Fn(&Path) -> bool + Send + Sync>,
     /// Shows the editor window (its library when nothing is open).

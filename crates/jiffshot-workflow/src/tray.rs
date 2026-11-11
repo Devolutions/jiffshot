@@ -708,6 +708,21 @@ fn cursor_pos() -> (i32, i32) {
     sys::cursor_pos()
 }
 
+#[derive(Default)]
+struct ImageAttempt {
+    delivering: bool,
+}
+
+impl Drop for ImageAttempt {
+    fn drop(&mut self) {
+        if !self.delivering {
+            if let Some(hooks) = crate::hooks() {
+                (hooks.image_finished)(None, false);
+            }
+        }
+    }
+}
+
 fn spawn_finish(capture: Capture, settings: Settings, owner: HWND) {
     let owner = owner as isize;
     #[cfg(target_os = "macos")]
@@ -737,6 +752,9 @@ fn spawn_finish_after(
 ) {
     crate::shutdown_macos::spawn(move || {
         if let Err(error) = before() {
+            if let Some(hooks) = crate::hooks() {
+                (hooks.image_finished)(None, true);
+            }
             notify(owner as HWND, "Capture finalization failed", &error, true);
             return Some(error);
         }
@@ -859,6 +877,7 @@ fn capture_interactive(mode: usize) {
     .flatten() else {
         return;
     };
+    let mut image_attempt = ImageAttempt::default();
 
     let _hidden = match jiffshot_capture::visibility::hide() {
         Ok(hidden) => hidden,
@@ -1142,6 +1161,7 @@ fn capture_interactive(mode: usize) {
     match mode {
         // These run until done, so they stay busy until then.
         MODE_SCROLLING => {
+            image_attempt.delivering = true;
             return spawn_scrolling(
                 modes::scrolling_in_layout,
                 rect,
@@ -1151,6 +1171,7 @@ fn capture_interactive(mode: usize) {
             )
         }
         MODE_SCROLL_BOTH => {
+            image_attempt.delivering = true;
             return spawn_scrolling(
                 modes::scrolling_both_in_layout,
                 rect,
@@ -1160,6 +1181,7 @@ fn capture_interactive(mode: usize) {
             )
         }
         MODE_SCROLL_H => {
+            image_attempt.delivering = true;
             return spawn_scrolling(
                 modes::scrolling_horizontal_in_layout,
                 rect,
@@ -1169,11 +1191,14 @@ fn capture_interactive(mode: usize) {
             )
         }
         MODE_PANORAMIC => match modes::panoramic_in_layout(rect, &capture_layout) {
-            Ok(Some(frame)) => spawn_finish(
-                workflow::from_frame(CaptureKind::Panoramic, rect, frame),
-                settings,
-                hwnd,
-            ),
+            Ok(Some(frame)) => {
+                image_attempt.delivering = true;
+                spawn_finish(
+                    workflow::from_frame(CaptureKind::Panoramic, rect, frame),
+                    settings,
+                    hwnd,
+                );
+            }
             Ok(None) => {}
             Err(error) => notify(hwnd, "Panoramic capture failed", &error.to_string(), true),
         },
@@ -1186,7 +1211,10 @@ fn capture_interactive(mode: usize) {
                 notify(hwnd, "Recording failed", &error, true);
             }
         },
-        _ => spawn_finish(capture, settings, hwnd),
+        _ => {
+            image_attempt.delivering = true;
+            spawn_finish(capture, settings, hwnd);
+        }
     }
     with_app(|app| app.busy = false);
 }
@@ -1229,6 +1257,9 @@ fn spawn_scrolling(
                 )
             }
             Err(error) => {
+                if let Some(hooks) = crate::hooks() {
+                    (hooks.image_finished)(None, true);
+                }
                 let message = error.to_string();
                 notify(owner as HWND, "Scrolling capture failed", &message, true);
                 Some(format!("Scrolling capture failed: {message}"))
@@ -1256,7 +1287,12 @@ fn spawn_scrolling(
                         hwnd,
                     );
                 }
-                Err(error) => notify(hwnd, "Scrolling capture failed", &error.to_string(), true),
+                Err(error) => {
+                    if let Some(hooks) = crate::hooks() {
+                        (hooks.image_finished)(None, true);
+                    }
+                    notify(hwnd, "Scrolling capture failed", &error.to_string(), true);
+                }
             }
         });
     });
@@ -1315,6 +1351,11 @@ fn finish_step_guide(
         }
         outcome
     };
+    if !settings.open_in_editor {
+        if let Some(hooks) = crate::hooks() {
+            (hooks.image_finished)(Some(path), outcome.is_error);
+        }
+    }
     outcome
 }
 
@@ -1330,6 +1371,7 @@ fn capture_steps() {
     .flatten() else {
         return;
     };
+    let mut image_attempt = ImageAttempt::default();
     let steps = crate::stepcap::record();
     with_app(|app| app.busy = false);
     let steps = match steps {
@@ -1365,8 +1407,14 @@ fn capture_steps() {
                 opened_editor: false,
             },
         };
+        if outcome.is_error {
+            if let Some(hooks) = crate::hooks() {
+                (hooks.image_finished)(None, true);
+            }
+        }
         outcome
     };
+    image_attempt.delivering = true;
     #[cfg(target_os = "macos")]
     crate::shutdown_macos::spawn(move || report_finished_capture(owner as HWND, finish()));
     #[cfg(not(target_os = "macos"))]
@@ -1386,6 +1434,7 @@ fn capture_steps() {
 /// Takes the image on the clipboard (or an image file copied there) as a
 /// capture.
 fn capture_from_clipboard() {
+    let mut image_attempt = ImageAttempt::default();
     let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else {
         return;
     };
@@ -1417,6 +1466,7 @@ fn capture_from_clipboard() {
     let frame: Result<Option<jiffshot_capture::Frame>, String> = Ok(frame);
     match frame {
         Ok(Some(frame)) => {
+            image_attempt.delivering = true;
             let rect = Rect::new(0, 0, frame.width as i32, frame.height as i32);
             spawn_finish(
                 workflow::from_frame(CaptureKind::Region, rect, frame),
@@ -1551,6 +1601,9 @@ fn capture_from_file() {
             match choose_images() {
                 Ok(files) => import_files(files, settings, hwnd),
                 Err(error) => {
+                    if let Some(hooks) = crate::hooks() {
+                        (hooks.image_finished)(None, true);
+                    }
                     let message = error.to_string();
                     notify(hwnd, "Capture from file", &message, true);
                     Some(format!("Capture from file failed: {message}"))
@@ -1561,11 +1614,13 @@ fn capture_from_file() {
 }
 
 fn import_files(files: Vec<std::path::PathBuf>, settings: Settings, hwnd: HWND) -> Option<String> {
+    let mut image_attempt = ImageAttempt::default();
     #[cfg(target_os = "macos")]
     let mut errors = Vec::new();
     for (i, path) in files.iter().enumerate() {
         match jiffshot_doc::io::load_image(path) {
             Ok(pm) => {
+                image_attempt.delivering = true;
                 let frame = workflow::frame_from_pixmap(&pm);
                 let rect = Rect::new(0, 0, frame.width as i32, frame.height as i32);
                 let mut s = settings.clone();
@@ -1895,7 +1950,8 @@ fn capture_scheduled_checked(
     #[cfg(windows)]
     let capture = scheduled_capture(&settings);
     match capture {
-        Ok(capture) => {
+        Ok(mut capture) => {
+            capture.background = true;
             let mut quiet = settings;
             quiet.open_in_editor = false;
             quiet.copy_to_clipboard = false;
@@ -2057,7 +2113,7 @@ fn timelapse_tick() {
     else {
         return;
     };
-    let capture = match workflow::immediate_in_layout(
+    let mut capture = match workflow::immediate_in_layout(
         CaptureKind::Region,
         timelapse.region.rect,
         false,
@@ -2097,6 +2153,7 @@ fn timelapse_tick() {
     let mut quiet = settings;
     quiet.open_in_editor = false;
     quiet.copy_to_clipboard = false;
+    capture.background = true;
     spawn_finish(capture, quiet, hwnd);
 }
 
@@ -2953,8 +3010,12 @@ fn run_pending_mode() {
         Some(PendingMode::Record(rect)) => return record_rect(rect),
         None => return,
     };
+    let mut image_attempt = ImageAttempt::default();
     match capture {
-        Ok(capture) => spawn_finish(capture, settings, hwnd),
+        Ok(capture) => {
+            image_attempt.delivering = true;
+            spawn_finish(capture, settings, hwnd);
+        }
         Err(error) => notify(hwnd, "Capture failed", &error.to_string(), true),
     }
 }
@@ -3046,11 +3107,13 @@ fn register_preset_hotkeys(hwnd: HWND, presets: &[crate::settings::Preset]) -> V
 
 /// Captures the menus open right now.
 fn capture_menus() {
+    let mut image_attempt = ImageAttempt::default();
     let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else {
         return;
     };
     match modes::menus() {
         Ok(Some(frame)) => {
+            image_attempt.delivering = true;
             let rect = Rect::new(0, 0, frame.width as i32, frame.height as i32);
             spawn_finish(
                 workflow::from_frame(CaptureKind::Menu, rect, frame),
@@ -3078,6 +3141,7 @@ fn start_menu_capture() {
 
 /// Captures a rectangle without the overlay.
 fn capture_now(kind: CaptureKind, region: CaptureRegion) {
+    let mut image_attempt = ImageAttempt::default();
     let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else {
         return;
     };
@@ -3094,6 +3158,7 @@ fn capture_now(kind: CaptureKind, region: CaptureRegion) {
         workflow::immediate_in_layout(kind, region.rect, settings.include_cursor, &region.layout);
     match capture {
         Ok(capture) => {
+            image_attempt.delivering = true;
             with_app(|app| app.last_region = Some(region));
             spawn_finish(capture, settings, hwnd);
         }
@@ -3102,6 +3167,7 @@ fn capture_now(kind: CaptureKind, region: CaptureRegion) {
 }
 
 fn capture_screen_under_cursor() {
+    let mut image_attempt = ImageAttempt::default();
     let Some(hwnd) = with_app(|app| app.hwnd) else {
         return;
     };
@@ -3114,13 +3180,16 @@ fn capture_screen_under_cursor() {
     };
     match layout.monitor_under_cursor() {
         Ok(Some(monitor)) => match layout.with_monitor(&monitor) {
-            Ok(layout) => capture_now(
-                CaptureKind::Monitor,
-                CaptureRegion {
-                    rect: monitor.rect,
-                    layout,
-                },
-            ),
+            Ok(layout) => {
+                image_attempt.delivering = true;
+                capture_now(
+                    CaptureKind::Monitor,
+                    CaptureRegion {
+                        rect: monitor.rect,
+                        layout,
+                    },
+                );
+            }
             Err(error) => notify(hwnd, "Capture failed", &error.to_string(), true),
         },
         Ok(None) => {}
@@ -3986,8 +4055,16 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let reopened = events.clone();
         let notified = events.clone();
+        let completed = Arc::new(Mutex::new(Vec::new()));
+        let observed = completed.clone();
         assert!(crate::HOOKS
             .set(crate::Hooks {
+                image_finished: Box::new(move |path, problem| {
+                    if let Some(path) = path {
+                        assert!(path.is_file(), "confirmation preceded the saved image");
+                    }
+                    observed.lock().unwrap().push((path.map(std::path::Path::to_path_buf), problem));
+                }),
                 open_in_editor: Box::new(|_| panic!("capture must not reach the editor")),
                 show_editor: Box::new(|| panic!("capture must not show the editor")),
                 quit: Box::new(|| panic!("capture must not quit")),
@@ -4078,6 +4155,41 @@ mod tests {
             );
             events.lock().unwrap().clear();
         }
+        completed.lock().unwrap().clear();
+        let root = std::env::temp_dir().join(format!("jiffshot-editor-free-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::env::set_var("JIFFSHOT_LIBRARY", &root);
+        let settings = Settings {
+            open_in_editor: false,
+            copy_to_clipboard: false,
+            share: "none".into(),
+            ..Settings::default()
+        };
+        let make_capture = || workflow::from_frame(
+            CaptureKind::Region,
+            Rect::new(0, 0, 12, 8),
+            jiffshot_capture::Frame::new(12, 8),
+        );
+        let outcome = workflow::finish(make_capture(), &settings, 0);
+        assert!(!outcome.is_error && !outcome.opened_editor);
+        let saved = completed.lock().unwrap().pop().unwrap();
+        assert!(!saved.1);
+        let path = saved.0.expect("the confirmation must identify the saved image");
+        assert!(path.starts_with(&root));
+        let image = jiffshot_doc::io::load_image(&path).unwrap();
+        assert_eq!((image.width(), image.height()), (12, 8));
+        let mut background = make_capture();
+        background.background = true;
+        let outcome = workflow::finish(background, &settings, 0);
+        assert!(!outcome.is_error && !outcome.opened_editor);
+        assert!(completed.lock().unwrap().is_empty(), "a timer-driven image consumed a foreground request");
+        let blocked = root.join("not-a-directory");
+        std::fs::write(&blocked, b"blocked").unwrap();
+        std::env::set_var("JIFFSHOT_LIBRARY", &blocked);
+        let outcome = workflow::finish(make_capture(), &settings, 0);
+        assert!(outcome.is_error && !outcome.opened_editor);
+        assert_eq!(completed.lock().unwrap().pop(), Some((None, true)));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

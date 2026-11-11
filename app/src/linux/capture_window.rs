@@ -120,6 +120,7 @@ pub fn refresh() {
 
 /// Shows the window in front.
 pub fn show() {
+    crate::ui::capture_view::clear_pending_capture();
     publish_view();
     if let Some(window) = with(|s| s.window.clone()) {
         let _ = window.show();
@@ -197,6 +198,10 @@ fn view_json() -> String {
             ]
         };
         json!({
+            "open_in_editor": super::settings::open_in_editor().unwrap_or_else(|error| {
+                eprintln!("jiffshot: could not read the editor preference: {error}");
+                true
+            }),
             "tab": s.tab,
             "timing": "manual",
             "interval_running": false,
@@ -231,6 +236,10 @@ fn send(set: impl Fn(&CaptureViewModelSink, String) -> Result<()>, text: String)
     if let Some(sink) = sink {
         let _ = set(&sink, format!("{serial}\u{1f}{text}"));
     }
+}
+
+pub(crate) fn problem(text: String) {
+    send(|sink, value| sink.set_problem(value), text);
 }
 
 fn menu(items: Vec<Value>) {
@@ -381,6 +390,15 @@ fn pick(id: &str) {
 }
 
 fn act(action: &str) {
+    if action == "switch:preview" {
+        let result = super::settings::open_in_editor()
+            .and_then(|enabled| super::settings::set_open_in_editor(!enabled));
+        if let Err(error) = result {
+            send(|sink, value| sink.set_problem(value), format!("Could not save the editor preference: {error}"));
+        }
+        publish_view();
+        return;
+    }
     let (verb, arg) = action.split_once(':').unwrap_or((action, ""));
     match verb {
         "tab" => {
@@ -405,6 +423,16 @@ fn act(action: &str) {
             let (video, cursor, delay, audio, area, interval, webcam) =
                 with(|s| (s.tab == 2, s.cursor, s.delay, audio_name(s), s.area.clone(), s.interval, s.webcam));
             let long_running = !video && (area.contains("scrolling") || area == "panoramic" || (area.ends_with("screen") && interval > 0));
+            let open_editor = match super::settings::open_in_editor() {
+                Ok(enabled) => enabled,
+                Err(error) => {
+                    send(|sink, value| sink.set_problem(value), format!("Could not read the editor preference: {error}"));
+                    return;
+                }
+            };
+            crate::ui::capture_view::starting_capture(
+                !open_editor && !video && area != "text" && !(area.ends_with("screen") && interval > 0),
+            );
             if !long_running {
                 hide();
             }

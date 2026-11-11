@@ -121,6 +121,7 @@ pub(crate) fn window() -> Option<rustolonia::Window> {
 
 /// Shows the window with the capture side's current settings, in front.
 pub fn show(scope: &AppScope) {
+    crate::ui::capture_view::clear_pending_capture();
     with(|s| {
         #[cfg(target_os = "macos")]
         {
@@ -220,6 +221,7 @@ fn send(set: impl Fn(&CaptureViewModelSink, String) -> Result<()>, json: String)
 }
 
 fn problem(text: &str) {
+    crate::ui::capture_view::clear_pending_capture();
     send(|k, v| k.set_problem(v), text.to_owned());
 }
 
@@ -776,6 +778,12 @@ fn act(action: &str) {
         "select-image-region" | "select-video-region" => select_fixed_region(verb == "select-video-region", arg),
         "capture" => {
             let (settings, running) = with(|s| (capture_settings(&s.settings, arg), s.timelapse));
+            crate::ui::capture_view::starting_capture(
+                !settings.open_in_editor && settings.capture_window.tab != 2
+                    && interval_action(&settings, running).is_none()
+                    && schedule_action(&settings).is_none()
+                    && panel::mode_of(&settings, settings.capture_window.tab) != "text",
+            );
             #[cfg(target_os = "macos")]
             {
                 let posted = if let Some(action) = interval_action(&settings, running) {

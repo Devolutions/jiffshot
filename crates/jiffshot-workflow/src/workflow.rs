@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub struct Capture {
+    /// Timer-driven captures must not consume a foreground Capture-window request.
+    pub background: bool,
     pub frame: Frame,
     pub meta: CaptureMeta,
     /// The pointer as its own image and where it goes (capture pixels),
@@ -513,6 +515,7 @@ pub fn from_overlay(
         window = Some(top.hwnd);
     }
     Ok(Some(Capture {
+        background: false,
         frame,
         meta,
         cursor: separate,
@@ -524,6 +527,7 @@ pub fn from_overlay(
 pub fn from_frame(kind: CaptureKind, rect: Rect, frame: Frame) -> Capture {
     let meta = meta(kind, rect, &frame, false);
     Capture {
+        background: false,
         frame,
         meta,
         cursor: None,
@@ -572,6 +576,7 @@ pub(crate) fn immediate_in_layout_with_cursor(
     )?;
     let meta = meta(kind, rect, &frame, cursor_included);
     Ok(Capture {
+        background: false,
         frame,
         meta,
         cursor: separate,
@@ -756,6 +761,11 @@ fn finish_in_library_with(
     ) {
         Ok(saved) => saved,
         Err(error) => {
+            if !settings.open_in_editor && !capture.background {
+                if let Some(hooks) = crate::hooks() {
+                    (hooks.image_finished)(None, true);
+                }
+            }
             return Outcome {
                 message: format!("Could not save the capture: {error}"),
                 is_error: true,
@@ -863,6 +873,11 @@ fn finish_in_library_with(
     let mut message = format!("{w} × {h} saved as {file}");
     if !notes.is_empty() {
         message = format!("{message}; {}", notes.join("; "));
+    }
+    if !settings.open_in_editor && !capture.background {
+        if let Some(hooks) = crate::hooks() {
+            (hooks.image_finished)(Some(&path), is_error);
+        }
     }
     crate::log(&format!(
         "capture {w}x{h} saved in {:.0} ms, finished in {:.0} ms: {message}",
