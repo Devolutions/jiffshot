@@ -25,7 +25,8 @@ pub struct HiddenWindows {
 }
 
 impl HiddenWindows {
-    /// Streaming screenshot backends must replace buffered frames when windows were hidden.
+    /// Earliest safe frame timestamp, after window hiding and compositor settling.
+    /// Streaming screenshot backends must discard buffered frames older than this.
     pub fn hidden_since(&self) -> Option<Instant> {
         self.hidden_since
     }

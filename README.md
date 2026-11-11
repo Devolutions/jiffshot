@@ -103,6 +103,9 @@ On Windows, macOS, and Linux, screenshots and recordings automatically hide
 Jiffshot's visible windows, including the editor and preferences. Windows that
 were visible are restored afterward, including after cancellation or failure;
 hidden and minimized windows stay that way. No preference needs to be enabled.
+Capture hides suppress native window fade animations on Windows and macOS and
+wait for the compositor before taking the screenshot, including when the Capture
+window was just dismissed. Buffered screenshot streams discard pre-settle frames.
 The `JIFFSHOT_UITEST_CAPTURE_VISIBILITY=1` UI self-test checks hiding and
 restoration, including nested captures, failures, and capture-worker dispatch.
 On macOS, also set `JIFFSHOT_UITEST_CAPTURE_VISIBILITY_SCREEN=1` to verify actual
