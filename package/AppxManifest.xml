@@ -4,9 +4,10 @@
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
   xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:uap13="http://schemas.microsoft.com/appx/manifest/uap/windows10/13"
   xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap uap3 uap10 desktop rescap">
+  IgnorableNamespaces="uap uap3 uap10 uap13 desktop rescap">
   <Identity
     Name="Devolutions.Jiffshot"
     Publisher="CN=Devolutions Jiffshot"
@@ -16,6 +17,10 @@
     <DisplayName>Devolutions Jiffshot</DisplayName>
     <PublisherDisplayName>Devolutions Inc.</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
+    <!-- CI generates and embeds Update.appinstaller, which points at the latest GitHub release. -->
+    <uap13:AutoUpdate>
+      <uap13:AppInstaller File="Update.appinstaller" />
+    </uap13:AutoUpdate>
   </Properties>
   <Dependencies>
     <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />

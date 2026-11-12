@@ -1137,6 +1137,10 @@ jobs:
         shell: pwsh
         run: ./package/test-msix-publisher.ps1
 
+      - name: Test MSIX App Installer feed
+        shell: pwsh
+        run: ./package/test-msix-appinstaller.ps1
+
       - name: Azure login for test MSIX publisher
         if: inputs.signing_environment == 'publish-test'
         uses: azure/login@v3
@@ -1210,6 +1214,13 @@ jobs:
           $identity.SetAttribute('ProcessorArchitecture', $env:PACKAGE_ARCHITECTURE)
           $identity.SetAttribute('Publisher', $publisher)
           $manifest.Save((Join-Path $stage 'AppxManifest.xml'))
+          # The package embeds the same feed that the release publishes, so Windows App
+          # Installer can follow the latest GitHub release to update the MSIX.
+          . ./package/MsixAppInstaller.ps1
+          $feed = Join-Path 'msix' (Get-MsixAppInstallerName -Architecture $env:PACKAGE_ARCHITECTURE)
+          New-MsixAppInstaller -ManifestPath (Join-Path $stage 'AppxManifest.xml') `
+            -Repository $env:GITHUB_REPOSITORY -OutputPath (Join-Path $stage 'Update.appinstaller')
+          Copy-Item -LiteralPath (Join-Path $stage 'Update.appinstaller') -Destination $feed
           $sdkBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
           $makeAppx = Get-ChildItem -LiteralPath $sdkBin -Directory |
             Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'x64\makeappx.exe') } |
@@ -1220,7 +1231,9 @@ jobs:
           $output = "msix\Devolutions.Jiffshot-$env:PACKAGE_ARCHITECTURE-$expectedVersion.msix"
           & $makeAppx pack /d $stage /p $output /o
           if ($LASTEXITCODE -ne 0) { throw "MakeAppx failed with exit code $LASTEXITCODE" }
-          Get-Item -LiteralPath $output | Format-Table Name, Length
+          Test-MsixAppInstallerPackage -PackagePath $output -AppInstallerPath $feed -Repository $env:GITHUB_REPOSITORY `
+            -PublishedPackageName (Get-MsixReleasePackageName -Architecture $env:PACKAGE_ARCHITECTURE -Version $expectedVersion)
+          Get-Item -LiteralPath $output, $feed | Format-Table Name, Length
 
       - name: Sign MSIX
         if: github.event_name != 'pull_request' && inputs.signing_environment != ''
@@ -1322,6 +1335,13 @@ jobs:
             if ($tasks.Count -ne 1 -or $tasks[0].TaskId -ne 'JiffshotStartup' -or $tasks[0].Enabled -ne 'false') {
               throw 'The installed MSIX startup task does not match the first-launch opt-out policy'
             }
+            $manifestNs.AddNamespace('uap13', 'http://schemas.microsoft.com/appx/manifest/uap/windows10/13')
+            $autoUpdate = $installedManifest.SelectSingleNode(
+              '/appx:Package/appx:Properties/uap13:AutoUpdate/uap13:AppInstaller', $manifestNs)
+            if ($null -eq $autoUpdate -or $autoUpdate.File -ne 'Update.appinstaller' -or
+                -not (Test-Path -LiteralPath (Join-Path $installed.InstallLocation 'Update.appinstaller') -PathType Leaf)) {
+              throw 'The installed MSIX does not declare its embedded App Installer update feed'
+            }
             $cli = Join-Path $installed.InstallLocation 'jiffshot-cli.exe'
             $alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\jiffshot-cli.exe'
             foreach ($cliPath in @($cli, $alias)) {
@@ -1354,5 +1374,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: jiffshot-${{ matrix.rid }}-msix
-          path: msix/*.msix
+          path: |
+            msix/*.msix
+            msix/*.appinstaller
           if-no-files-found: error
