@@ -3,7 +3,7 @@ resolver = "2"
 members = ["app", "crates/jiffshot-capture", "crates/jiffshot-cli", "crates/jiffshot-control", "crates/jiffshot-doc", "crates/jiffshot-video", "crates/jiffshot-workflow"]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 publish = false
 license = "MIT OR Apache-2.0"
