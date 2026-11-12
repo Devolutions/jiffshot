@@ -776,6 +776,12 @@ fn act(action: &str) {
         "select-image-region" | "select-video-region" => select_fixed_region(verb == "select-video-region", arg),
         "capture" => {
             let (settings, running) = with(|s| (capture_settings(&s.settings, arg), s.timelapse));
+            let request_id = crate::ui::capture_view::starting_capture(
+                !settings.open_in_editor && settings.capture_window.tab != 2
+                    && interval_action(&settings, running).is_none()
+                    && schedule_action(&settings).is_none()
+                    && panel::mode_of(&settings, settings.capture_window.tab) != "text",
+            );
             #[cfg(target_os = "macos")]
             {
                 let posted = if let Some(action) = interval_action(&settings, running) {
@@ -783,11 +789,12 @@ fn act(action: &str) {
                 } else if let Some(action) = schedule_action(&settings) {
                     capture::set_schedule_current(action)
                 } else {
-                    capture::start_current(settings.capture_window.tab)
+                    capture::start_current(settings.capture_window.tab, request_id)
                 };
                 if posted {
                     hide();
                 } else {
+                    crate::ui::capture_view::cancel_pending_capture(request_id);
                     problem("The capture service is unavailable.");
                 }
             }
@@ -799,7 +806,7 @@ fn act(action: &str) {
                 } else if let Some(action) = schedule_action(&settings) {
                     capture::set_schedule(settings, action);
                 } else {
-                    capture::start(settings);
+                    capture::start(settings, request_id);
                 }
             }
         }
@@ -908,9 +915,9 @@ mod tests {
         settings.capture_window.selection = "window".into();
         settings.capture_window.video_selection = "window".into();
         let expected = [
-            ("Select", vec!["area", "send", "image:effects"], 5, "Then choose"),
-            ("Capture", vec!["area", "send", "image:effects"], 2, ""),
-            ("Record", vec!["video:selection", "send"], 4, ""),
+            ("Select", vec!["area", "send", "image:effects"], 6, "Then choose"),
+            ("Capture", vec!["area", "send", "image:effects"], 3, ""),
+            ("Record", vec!["video:selection", "send"], 5, ""),
         ];
         for (tab, (verb, fields, toggles, detail)) in expected.into_iter().enumerate() {
             settings.capture_window.tab = tab;
@@ -935,9 +942,9 @@ mod tests {
     #[test]
     fn mode_actions_switch_tabs_and_update_the_view() {
         let expected = [
-            ("Select", vec!["area", "send", "image:effects"], 5),
-            ("Capture", vec!["area", "send", "image:effects"], 2),
-            ("Record", vec!["video:selection", "send"], 4),
+            ("Select", vec!["area", "send", "image:effects"], 6),
+            ("Capture", vec!["area", "send", "image:effects"], 3),
+            ("Record", vec!["video:selection", "send"], 5),
         ];
         for previous in 0..=2 {
             for (target, (verb, fields, toggles)) in expected.iter().enumerate() {

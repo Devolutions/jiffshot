@@ -975,6 +975,18 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         if run_capture {
             let recording_scope = scope.clone();
             let hooks = jiffshot_workflow::Hooks {
+                image_finished: Box::new(|request_id, path, problem, reopen| {
+                    let path = path.map(std::path::Path::to_path_buf);
+                    app::post(move |app| {
+                        let saved = path.is_some();
+                        if crate::ui::capture_view::image_finished(request_id, path, problem, reopen) {
+                            app.show_capture_window();
+                        }
+                        if saved {
+                            app.refresh_library();
+                        }
+                    });
+                }),
                 open_in_editor: Box::new(|path| {
                     let path = path.to_path_buf();
                     #[cfg(target_os = "macos")]
@@ -1018,7 +1030,11 @@ pub(crate) fn run() -> rustolonia::Result<()> {
                 }),
                 notify: Box::new(|title, text, problem| {
                     let (title, text) = (title.to_owned(), text.to_owned());
-                    app::post(move |app| app.toast(&title, &text, problem));
+                    app::post(move |app| {
+                        if !crate::ui::capture_view::take_suppressed_save_toast(&title, problem) {
+                            app.toast(&title, &text, problem);
+                        }
+                    });
                 }),
                 #[cfg(windows)]
                 startup_notice: Box::new(|title, text, problem| {

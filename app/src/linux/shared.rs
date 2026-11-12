@@ -6,12 +6,157 @@ use crate::app;
 use crate::winutil::{self, CaptureRequest};
 use std::path::PathBuf;
 
-fn open_in_editor(path: PathBuf) {
-    let copy = super::settings::copy_capture_to_clipboard().unwrap_or(false);
+#[derive(Clone)]
+pub(super) struct Delivery {
+    open_in_editor: bool,
+    copy_to_clipboard: bool,
+    settings_error: Option<String>,
+    background: bool,
+    request_id: Option<u64>,
+}
+
+impl Delivery {
+    pub(super) fn for_capture_window(open_in_editor: bool, request_id: Option<u64>) -> Self {
+        let (copy_to_clipboard, settings_error) = match super::settings::copy_capture_to_clipboard() {
+            Ok(copy) => (copy, None),
+            Err(error) => (false, Some(format!("could not read the clipboard preference: {error}"))),
+        };
+        Self {
+            open_in_editor,
+            copy_to_clipboard,
+            settings_error,
+            background: false,
+            request_id,
+        }
+    }
+
+    fn from_settings(background: bool) -> Self {
+        let mut errors = Vec::new();
+        let open_in_editor = if background {
+            false
+        } else {
+            match super::settings::open_in_editor() {
+                Ok(open) => open,
+                Err(error) => {
+                    errors.push(format!("editor preference: {error}"));
+                    true
+                }
+            }
+        };
+        let copy_to_clipboard = if background {
+            false
+        } else {
+            match super::settings::copy_capture_to_clipboard() {
+                Ok(copy) => copy,
+                Err(error) => {
+                    errors.push(format!("clipboard preference: {error}"));
+                    false
+                }
+            }
+        };
+        let settings_error = (!errors.is_empty())
+            .then(|| format!("could not read delivery settings ({})", errors.join("; ")));
+        Self {
+            open_in_editor,
+            copy_to_clipboard,
+            settings_error,
+            background,
+            request_id: None,
+        }
+    }
+}
+
+static RECORDING_OPEN_IN_EDITOR: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+
+fn deliver_image(path: PathBuf, delivery: Delivery) {
+    let copy_error = if delivery.copy_to_clipboard {
+        jiffshot_doc::io::load_image(&path)
+            .map_err(|error| error.to_string())
+            .and_then(super::clipboard::copy_pixmap)
+            .err()
+            .map(|error| format!("clipboard delivery failed: {error}"))
+    } else {
+        None
+    };
+    let problem_note = match (delivery.settings_error, copy_error) {
+        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    let open = delivery.open_in_editor;
+    let request_id = delivery.request_id;
     app::post(move |app| {
-        app.incoming(path);
-        if copy {
-            app.copy_image();
+        let reopened = if open {
+            app.incoming(path);
+            false
+        } else {
+            app.refresh_library();
+            app.set_status(format!("Capture saved to {}", path.display()));
+            request_id.is_some_and(|id| {
+                let reopen = crate::ui::capture_view::image_finished(
+                    id,
+                    Some(path),
+                    problem_note.is_some(),
+                    true,
+                );
+                if reopen {
+                    super::capture_window::show();
+                }
+                reopen
+            })
+        };
+        if let Some(problem) = problem_note {
+            let message = format!("Capture saved, but {problem}");
+            app.set_status(message.clone());
+            if reopened {
+                super::capture_window::problem(message);
+            } else {
+                super::notification::send(
+                    "Capture saved with problems",
+                    message,
+                    super::notification::Urgency::Critical,
+                );
+            }
+        }
+    });
+}
+
+fn cancel_capture(delivery: &Delivery) {
+    let request_id = delivery.request_id;
+    app::post(move |app| {
+        if let Some(id) = request_id {
+            if crate::ui::capture_view::image_finished(id, None, false, true) {
+                super::capture_window::show();
+            }
+        }
+        app.set_status("Capture cancelled");
+    });
+}
+
+fn fail_capture(delivery: &Delivery, error: impl std::fmt::Display) {
+    let request_id = delivery.request_id;
+    let message = if delivery.background {
+        format!("Scheduled capture failed: {error}")
+    } else {
+        format!("Capture failed: {error}")
+    };
+    app::post(move |app| {
+        app.set_status(message.clone());
+        let reopened = request_id.is_some_and(|id| {
+            let reopen = crate::ui::capture_view::image_finished(id, None, true, true);
+            if reopen {
+                super::capture_window::show();
+                super::capture_window::problem(message.clone());
+            }
+            reopen
+        });
+        if !reopened {
+            super::notification::send(
+                "Capture failed",
+                message,
+                super::notification::Urgency::Critical,
+            );
         }
     });
 }
@@ -20,13 +165,13 @@ pub(super) fn report(message: String) {
     app::post(move |app| app.set_status(message));
 }
 
-/// Takes a portal screenshot, saves it to the library and opens it.
-pub(crate) fn capture_image() {
-    capture_image_with(true, 0);
+/// Takes a portal screenshot, saves it to the library and delivers it, waiting `delay` seconds
+/// after the desktop dialog when non-zero.
+fn capture_image_with(cursor: bool, delay: u64) {
+    capture_image_with_delivery(cursor, delay, Delivery::from_settings(false));
 }
 
-/// Like [`capture_image`], waiting `delay` seconds after the desktop dialog.
-pub(crate) fn capture_image_with(cursor: bool, delay: u64) {
+pub(super) fn capture_image_with_delivery(cursor: bool, delay: u64, delivery: Delivery) {
     report("Choose a screen or window in the desktop dialog…".into());
     std::thread::spawn(move || {
         let cursor = super::capture::CaptureCursor::from_included(cursor);
@@ -47,31 +192,74 @@ pub(crate) fn capture_image_with(cursor: bool, delay: u64) {
             Some(document) => super::capture::save_capture(&document).map(Some),
             None => Ok(None),
         }) {
-            Ok(Some(path)) => open_in_editor(path),
-            Ok(None) => report("Capture cancelled".into()),
-            Err(error) => report(format!("Capture failed: {error}")),
+            Ok(Some(path)) => deliver_image(path, delivery),
+            Ok(None) => cancel_capture(&delivery),
+            Err(error) => fail_capture(&delivery, error),
         }
     });
 }
 
-/// Starts a recording, or stops the running one and opens the video.
+/// Starts a recording, or stops the running one and delivers the video.
 pub(crate) fn toggle_recording() {
-    toggle_recording_with("none", true, false);
+    toggle_recording_with("none", true, false, None);
 }
 
-pub(crate) fn toggle_recording_with(audio: &'static str, cursor: bool, webcam: bool) {
+pub(crate) fn toggle_recording_with(
+    audio: &'static str,
+    cursor: bool,
+    webcam: bool,
+    open_in_editor: Option<bool>,
+) {
     std::thread::spawn(move || {
         if control::recording_active() {
+            let open = RECORDING_OPEN_IN_EDITOR
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .take()
+                .unwrap_or_else(|| super::settings::open_in_editor().unwrap_or(true));
             match control::stop_recording() {
-                Ok(Some(path)) => open_in_editor(path),
+                Ok(Some(path)) if open => app::post(move |app| app.incoming(path)),
+                Ok(Some(path)) => app::post(move |app| {
+                    app.refresh_library();
+                    let message = format!("Recording saved to {}", path.display());
+                    app.set_status(message.clone());
+                    super::notification::send(
+                        "Recording saved",
+                        message,
+                        super::notification::Urgency::Normal,
+                    );
+                }),
                 Ok(None) => report("Recording cancelled".into()),
-                Err(error) => report(format!("Could not stop the recording: {error}")),
+                Err(error) => {
+                    let message = format!("Could not stop the recording: {error}");
+                    report(message.clone());
+                    super::notification::send(
+                        "Recording failed",
+                        message,
+                        super::notification::Urgency::Critical,
+                    );
+                }
             }
         } else {
+            let open = open_in_editor
+                .unwrap_or_else(|| super::settings::open_in_editor().unwrap_or(true));
             report("Choose a screen in the desktop dialog…".into());
             match control::start_recording_with(audio, cursor, webcam) {
-                Ok(()) => report("Recording… press Record again to stop".into()),
-                Err(error) => report(format!("Could not start recording: {error}")),
+                Ok(()) => {
+                    *RECORDING_OPEN_IN_EDITOR
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner()) = Some(open);
+                    report("Recording… press Record again to stop".into());
+                }
+                Err(error) => {
+                    let message = format!("Could not start recording: {error}");
+                    report(message.clone());
+                    super::notification::send(
+                        "Recording failed",
+                        message,
+                        super::notification::Urgency::Critical,
+                    );
+                }
             }
         }
     });
@@ -83,7 +271,7 @@ pub fn install_capture_handler() {
         CaptureRequest::Video => toggle_recording(),
         CaptureRequest::CaptureWindow => app::post(|_| super::capture_window::show()),
     });
-    control::set_open_handler(open_in_editor);
+    control::set_open_handler(|path| app::post(move |app| app.incoming(path)));
 }
 
 /// Starts the status-notifier tray when it is enabled. Capture opens the
@@ -121,7 +309,7 @@ pub fn start_schedule() {
         if schedule.should_fire(now)
             && matches!(super::settings::mark_schedule_fired(preferences.time, now.day()), Ok(ScheduleClaim::Claimed))
         {
-            capture_image();
+            capture_image_with_delivery(true, 0, Delivery::from_settings(true));
         }
     });
 }
@@ -152,7 +340,7 @@ pub fn start_shortcuts() {
                 match action {
                     ShortcutAction::Capture => app::post(|_| super::capture_window::show()),
                     ShortcutAction::ToggleRecording => match start.audio() {
-                        Some(audio) => toggle_recording_with(audio_name(audio), true, false),
+                        Some(audio) => toggle_recording_with(audio_name(audio), true, false, None),
                         None => report("The recording start shortcut is disabled.".into()),
                     },
                     ShortcutAction::PauseRecording => {
@@ -162,7 +350,7 @@ pub fn start_shortcuts() {
                     }
                     ShortcutAction::StopRecording => {
                         if control::recording_active() {
-                            toggle_recording_with("none", true, false);
+                            toggle_recording_with("none", true, false, None);
                         }
                     }
                     ShortcutAction::Preset(index) => {
@@ -286,56 +474,74 @@ fn save_frame(frame: &jiffshot_capture::Frame) -> Result<PathBuf, String> {
 }
 
 /// Grabs the desktop, lets the user select on it with the overlay (like the Windows and macOS
-/// one), then saves and opens the selected part. `repeat` skips the overlay and takes the last
+/// one), then saves and delivers the selected part. `repeat` skips the overlay and takes the last
 /// area again. Falls back to the desktop's own dialog when the grab or the overlay fails.
 pub(crate) fn capture_overlay(mode: super::overlay::Mode, repeat: bool, delay: u64) {
+    capture_overlay_with(mode, repeat, delay, Delivery::from_settings(false));
+}
+
+pub(super) fn capture_overlay_with(
+    mode: super::overlay::Mode,
+    repeat: bool,
+    delay: u64,
+    delivery: Delivery,
+) {
     report(if delay == 0 { "Preparing the selection…".into() } else { format!("Capturing in {delay} s…") });
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(400 + delay * 1000));
         let frame = match futures_lite::future::block_on(super::screenshot::capture_full_screen()) {
             Ok(Some(document)) => frame_from_pixmap(&document.flatten()),
-            Ok(None) => return report("Capture cancelled".into()),
+            Ok(None) => return cancel_capture(&delivery),
             Err(error) => {
                 eprintln!("jiffshot: {error}; using the desktop dialog");
-                return capture_desktop();
+                return capture_desktop_with(delivery);
             }
         };
         let last = *LAST_AREA.lock().unwrap();
         if let (true, Some(area)) = (repeat, last) {
-            return finish_selection(Some(super::overlay::Selection::Region(area)), frame);
+            return finish_selection(Some(super::overlay::Selection::Region(area)), frame, delivery);
         }
-        let Some(scope) = app::scope() else { return report("The editor is not running".into()) };
+        let Some(scope) = app::scope() else {
+            return fail_capture(&delivery, "The editor is not running");
+        };
+        let fallback_delivery = delivery.clone();
         let posted = scope.clone().post(move || {
-            let shown = crate::ui::overlay::select(&scope, frame, mode, |selection, frame| {
-                std::thread::spawn(move || finish_selection(selection, frame));
+            let select_delivery = delivery.clone();
+            let shown = crate::ui::overlay::select(&scope, frame, mode, move |selection, frame| {
+                let finish_delivery = select_delivery.clone();
+                std::thread::spawn(move || finish_selection(selection, frame, finish_delivery));
             });
             if let Err(error) = shown {
                 eprintln!("jiffshot: the selection overlay failed: {error}; using the desktop dialog");
-                capture_desktop();
+                capture_desktop_with(delivery);
             }
         });
         if posted.is_err() {
-            report("The editor is not running".into());
+            fail_capture(&fallback_delivery, "The editor is not running");
         }
     });
 }
 
-fn finish_selection(selection: Option<super::overlay::Selection>, frame: jiffshot_capture::Frame) {
-    let Some(selection) = selection else { return report("Capture cancelled".into()) };
+fn finish_selection(
+    selection: Option<super::overlay::Selection>,
+    frame: jiffshot_capture::Frame,
+    delivery: Delivery,
+) {
+    let Some(selection) = selection else { return cancel_capture(&delivery) };
     *LAST_AREA.lock().unwrap() = Some(selection.rect());
     let result = super::overlay::crop(&frame, &selection)
         .ok_or_else(|| "the selection is empty".to_owned())
         .and_then(|cropped| save_frame(&cropped));
     match result {
-        Ok(path) => open_in_editor(path),
-        Err(error) => report(format!("Capture failed: {error}")),
+        Ok(path) => deliver_image(path, delivery),
+        Err(error) => fail_capture(&delivery, error),
     }
 }
 
 /// The desktop's own screenshot dialog, which offers region and window choices.
 /// Captures the whole desktop after `delay` seconds without a chooser; falls back to the
 /// screen-sharing chooser when the desktop refuses.
-pub(crate) fn capture_full_screen(cursor: bool, delay: u64) {
+pub(super) fn capture_full_screen_with(cursor: bool, delay: u64, delivery: Delivery) {
     report(if delay == 0 { "Capturing the screen…".into() } else { format!("Capturing in {delay} s…") });
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(400 + delay * 1000));
@@ -347,14 +553,18 @@ pub(crate) fn capture_full_screen(cursor: bool, delay: u64) {
         match result {
             Err(error) => {
                 eprintln!("jiffshot: {error}; using the screen-sharing chooser");
-                capture_image_with(cursor, 0);
+                capture_image_with_delivery(cursor, 0, delivery);
             }
-            other => finish_single(other),
+            other => finish_single(other, delivery),
         }
     });
 }
 
 pub(crate) fn capture_desktop() {
+    capture_desktop_with(Delivery::from_settings(false));
+}
+
+fn capture_desktop_with(delivery: Delivery) {
     report("Choose what to capture in the desktop dialog…".into());
     std::thread::spawn(move || {
         let result = futures_lite::future::block_on(super::screenshot::capture_interactive())
@@ -362,17 +572,15 @@ pub(crate) fn capture_desktop() {
                 Some(document) => super::capture::save_capture(&document).map(Some),
                 None => Ok(None),
             });
-        finish_single(result);
+        finish_single(result, delivery);
     });
 }
 
-fn finish_single(result: Result<Option<PathBuf>, String>) {
+fn finish_single(result: Result<Option<PathBuf>, String>, delivery: Delivery) {
     match result {
-        Ok(Some(path)) => {
-            app::post(move |app| app.incoming(path));
-        }
-        Ok(None) => report("Capture cancelled".into()),
-        Err(error) => report(format!("Capture failed: {error}")),
+        Ok(Some(path)) => deliver_image(path, delivery),
+        Ok(None) => cancel_capture(&delivery),
+        Err(error) => fail_capture(&delivery, error),
     }
 }
 
@@ -389,6 +597,10 @@ pub(crate) fn capture_text() {
 
 /// Starts a scrolling or panoramic capture; call [`finish_active`] to end it.
 pub(super) fn capture_scrolling(mode: super::scroll::Mode) {
+    capture_scrolling_with(mode, Delivery::from_settings(false));
+}
+
+pub(super) fn capture_scrolling_with(mode: super::scroll::Mode, delivery: Delivery) {
     use super::scroll::{Direction, Mode, Progress};
     let (stop, receiver) = async_channel::bounded(2);
     {
@@ -433,10 +645,10 @@ pub(super) fn capture_scrolling(mode: super::scroll::Mode) {
                     report("Capture limit reached; saved what was captured".into());
                 }
                 let saved = super::capture::save_capture(&captured.document);
-                finish_single(saved.map(Some));
+                finish_single(saved.map(Some), delivery);
             }
-            Ok(None) => report("Capture cancelled".into()),
-            Err(error) => report(format!("Capture failed: {error}")),
+            Ok(None) => cancel_capture(&delivery),
+            Err(error) => fail_capture(&delivery, error),
         }
     });
 }
@@ -460,6 +672,7 @@ pub(crate) fn capture_interval(seconds: u32, cursor: bool) {
             return report(error);
         }
     };
+    let delivery = Delivery::from_settings(true);
     report("Choose a screen or window for interval capture…".into());
     std::thread::spawn(move || {
         let cursor = super::capture::CaptureCursor::from_included(cursor);
@@ -470,7 +683,7 @@ pub(crate) fn capture_interval(seconds: u32, cursor: bool) {
             |progress| match progress {
                 Progress::Saved { count, path } => {
                     report(format!("Interval capture saved {count} image(s)"));
-                    open_in_editor(path);
+                    deliver_image(path, delivery.clone());
                 }
                 Progress::Skipped { count } => {
                     report(format!("Interval capture skipped {count} unchanged frame(s)"));

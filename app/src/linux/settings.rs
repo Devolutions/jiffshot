@@ -20,6 +20,7 @@ const GLOBAL_RECORDING_START_KEY: &str = "linux_global_recording_start";
 const GLOBAL_SHORTCUTS_ENABLED_KEY: &str = "linux_global_shortcuts_enabled";
 const TRAY_ENABLED_KEY: &str = "linux_tray_enabled";
 const COPY_CAPTURE_TO_CLIPBOARD_KEY: &str = "copy_to_clipboard";
+const OPEN_IN_EDITOR_KEY: &str = "open_in_editor";
 const AUTOMATIC_COPY_DIRECTORY_KEY: &str = "linux_auto_copy_directory";
 const EXTERNAL_PROGRAM_KEY: &str = "linux_external_program";
 const CAPTURE_DELAY_SECONDS_KEY: &str = "capture_delay_seconds";
@@ -134,6 +135,29 @@ pub fn copy_capture_to_clipboard() -> Result<bool, String> {
 
 pub fn set_copy_capture_to_clipboard(enabled: bool) -> Result<(), String> {
     set_copy_capture_to_clipboard_in(&settings_path()?, enabled)
+}
+
+pub(super) fn open_in_editor() -> Result<bool, String> {
+    open_in_editor_from(&settings_path()?)
+}
+
+pub(super) fn set_open_in_editor(enabled: bool) -> Result<(), String> {
+    set_open_in_editor_in(&settings_path()?, enabled)
+}
+
+fn open_in_editor_from(path: &Path) -> Result<bool, String> {
+    match read_settings(path)?.get(OPEN_IN_EDITOR_KEY) {
+        None => Ok(true),
+        Some(value) => value.as_bool()
+            .ok_or_else(|| "the open-in-editor preference must be a boolean".to_owned()),
+    }
+}
+
+fn set_open_in_editor_in(path: &Path, enabled: bool) -> Result<(), String> {
+    let _lock = lock_settings(path)?;
+    let mut settings = read_settings(path)?;
+    settings.insert(OPEN_IN_EDITOR_KEY.into(), Value::Bool(enabled));
+    write_settings(path, &settings)
 }
 
 pub(super) fn automatic_copy_directory() -> Result<Option<PathBuf>, String> {
@@ -1105,6 +1129,23 @@ fn write_settings(path: &Path, settings: &Map<String, Value>) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_preference_defaults_on_and_preserves_other_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(SETTINGS_FILE);
+        assert!(open_in_editor_from(&path).unwrap());
+        assert!(!path.exists());
+        std::fs::write(&path, br#"{"copy_to_clipboard":false,"theme":"Dark"}"#).unwrap();
+        set_open_in_editor_in(&path, false).unwrap();
+        assert!(!open_in_editor_from(&path).unwrap());
+        assert!(!copy_capture_to_clipboard_from(&path).unwrap());
+        assert_eq!(read_settings(&path).unwrap()["theme"], "Dark");
+        set_open_in_editor_in(&path, true).unwrap();
+        assert!(open_in_editor_from(&path).unwrap());
+        std::fs::write(&path, br#"{"open_in_editor":"false"}"#).unwrap();
+        assert!(open_in_editor_from(&path).is_err());
+    }
 
     #[test]
     fn screen_capture_presets_default_empty_without_writing_settings() {

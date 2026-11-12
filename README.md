@@ -668,6 +668,16 @@ On macOS, Preferences refuses to replace unreadable or malformed settings. If it
 
 The capture service applies Capture window and Preferences capture changes in order and reports settings-save failures. Fixed and scheduled-area confirmations are not installed unless their settings are saved. Other capture settings, presets and hotkeys can take effect only for the current session after a failed save; a later successful settings write may persist them. Editor and Share changes are saved separately.
 
+The Capture window's pencil toggle (**Open captures in the editor**) in the
+quick-options row beside the Capture button uses the same preference as
+**Preview in Editor** (enabled by default). Turn it off to save images and
+deliver them to the clipboard or configured destination without opening the
+editor. After a one-shot image capture from this window, Capture returns ready
+for another shot, with a brief **Capture saved** confirmation pill and an
+**Edit** action for that image. Interval and scheduled captures do not reopen
+the Capture window after each image. On Linux, images are saved in the
+configured capture directory and copied when **Send to → Clipboard** is enabled.
+
 macOS recordings are staged in the library and published without replacing an existing recording. If publication fails, the error identifies the temporary location for recovery.
 
 ### Windows on ARM
@@ -810,6 +820,10 @@ timings and asserts that unchanged refreshes rebuild no tiles and capture delive
 creates only one.
 
 The editor drives its own UI when `JIFFSHOT_UITEST=DIR` is set (with `JIFFSHOT_UITEST_IMAGE`, `JIFFSHOT_UITEST_VIDEO`, an isolated `JIFFSHOT_LIBRARY` and, to leave your settings alone, scratch `APPDATA` and `LOCALAPPDATA`), writing screenshots of every window and `ui-log.txt` to `DIR`. Set `JIFFSHOT_UITEST_CAPTURE_ONLY=1` to check just the Capture window and chooser, or `JIFFSHOT_UITEST_HUD_ONLY=1` to check the recording toolbar, including restoring hidden controls. Set `JIFFSHOT_UITEST_KEEP=1` to leave the Capture window open for inspection. To exercise library edits, set `JIFFSHOT_LIBRARY` to an existing folder inside `DIR`; otherwise those steps are skipped to protect the normal library. `cargo run -p jiffshot-doc --example synthetic -- OUT.png` writes the test image its coordinates assume.
+Set `JIFFSHOT_UITEST_CAPTURE_WORKFLOW=1` with an empty isolated library inside
+`JIFFSHOT_UITEST` to check the auto-open control, editor-free image confirmation,
+repeated captures, cancellation, confirmation expiry and the Edit action using
+synthetic saved images, without capturing the screen or changing the clipboard.
 Set `JIFFSHOT_UITEST_CANVAS=1` to check all canvas handle cursors and view-coordinate crop and expansion at fit and zoom, without moving the system pointer.
 On macOS, set `JIFFSHOT_UITEST_CANVAS_KEYS=1` to check Backspace, Cmd+Backspace, forward Delete, undo, protected selections and text editing with keyboard events sent only to the fixture application. Use isolated settings, cache and library paths.
 Set `JIFFSHOT_UITEST_SELECTION=1` to check full-image and Select-region selection, Alt-drag routing, background-fill controls, rectangular Copy/Cut, clipboard failure reporting and undo without changing the system clipboard.

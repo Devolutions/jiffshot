@@ -519,6 +519,7 @@ pub struct FieldRow {
 /// What the window shows for the current tab.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct View {
+    pub open_in_editor: bool,
     pub tab: usize,
     pub recording: bool,
     pub timing: CaptureTiming,
@@ -555,6 +556,7 @@ pub fn view(s: &Settings, capture_key: &str, timelapse_running: bool) -> View {
     let tab = s.capture_window.tab.min(2);
     let timing = capture_timing(s, tab);
     View {
+        open_in_editor: s.open_in_editor,
         tab,
         recording: false,
         timing,
@@ -639,6 +641,12 @@ pub fn unified_view(
             Toggle { id: "video:switch:webcam", label: "Show webcam in recordings", on: s.webcam.is_some(), enabled: true },
         ]);
     }
+    view.toggles.push(Toggle {
+        id: "switch:preview",
+        label: if mode == 2 { "Open recordings in the editor" } else { "Open captures in the editor" },
+        on: s.open_in_editor,
+        enabled: manual,
+    });
     view
 }
 
@@ -2016,9 +2024,9 @@ mod tests {
     #[test]
     fn unified_mode_picks_switch_tabs_and_update_the_view() {
         let expected = [
-            ("Select", vec!["area", "send", "image:effects"], 5),
-            ("Capture", vec!["area", "send", "image:effects"], 2),
-            ("Record", vec!["video:selection", "send"], 4),
+            ("Select", vec!["area", "send", "image:effects"], 6),
+            ("Capture", vec!["area", "send", "image:effects"], 3),
+            ("Record", vec!["video:selection", "send"], 5),
         ];
         for previous in 0..=2 {
             for (target, (verb, fields, toggles)) in expected.iter().enumerate() {
@@ -2463,8 +2471,16 @@ mod tests {
         let mut s = settings();
         s.capture_window.tab = 0;
         assert!(s.open_in_editor, "captures open in the editor by default");
+        assert!(unified_view(&s, "", false, false).open_in_editor);
         assert_eq!(pick(&mut s, "switch:preview"), Pick::Changed);
         assert!(!s.open_in_editor);
+        for tab in 0..3 {
+            s.capture_window.tab = tab;
+            assert!(!unified_view(&s, "", false, false).open_in_editor);
+        }
+        let persisted = serde_json::to_vec(&s).unwrap();
+        let restored: Settings = serde_json::from_slice(&persisted).unwrap();
+        assert!(!unified_view(&restored, "", false, false).open_in_editor);
         assert_eq!(pick(&mut s, "switch:preview"), Pick::Changed);
         assert!(s.open_in_editor);
         assert_eq!(pick(&mut s, "switch:unknown"), Pick::Nothing);

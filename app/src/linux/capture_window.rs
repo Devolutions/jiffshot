@@ -186,17 +186,26 @@ fn view_json() -> String {
         } else {
             ("Record", "Screen through the desktop dialog".to_owned())
         };
+        let open_in_editor = super::settings::open_in_editor().unwrap_or_else(|error| {
+            eprintln!("jiffshot: could not read the editor preference: {error}");
+            true
+        });
         let toggles = if image {
-            vec![toggle("image:switch:cursor", "Include the cursor", s.cursor)]
+            vec![
+                toggle("image:switch:cursor", "Include the cursor", s.cursor),
+                toggle("switch:preview", "Open captures in the editor", open_in_editor),
+            ]
         } else {
             vec![
                 toggle("video:switch:record-cursor", "Record the cursor", s.cursor),
                 toggle("video:switch:system-audio", "System audio", s.system_audio),
                 toggle("video:switch:webcam", "Webcam", s.webcam),
                 toggle("video:switch:microphone", "Microphone", s.microphone),
+                toggle("switch:preview", "Open recordings in the editor", open_in_editor),
             ]
         };
         json!({
+            "open_in_editor": open_in_editor,
             "tab": s.tab,
             "timing": "manual",
             "interval_running": false,
@@ -231,6 +240,10 @@ fn send(set: impl Fn(&CaptureViewModelSink, String) -> Result<()>, text: String)
     if let Some(sink) = sink {
         let _ = set(&sink, format!("{serial}\u{1f}{text}"));
     }
+}
+
+pub(crate) fn problem(text: String) {
+    send(|sink, value| sink.set_problem(value), text);
 }
 
 fn menu(items: Vec<Value>) {
@@ -317,6 +330,13 @@ fn pick(id: &str) {
         "video:switch:system-audio" => with(|s| s.system_audio = !s.system_audio),
         "video:switch:webcam" => with(|s| s.webcam = !s.webcam),
         "video:switch:microphone" => with(|s| s.microphone = !s.microphone),
+        "switch:preview" => {
+            let result = super::settings::open_in_editor()
+                .and_then(|enabled| super::settings::set_open_in_editor(!enabled));
+            if let Err(error) = result {
+                send(|sink, value| sink.set_problem(value), format!("Could not save the editor preference: {error}"));
+            }
+        }
         "open-editor" => crate::app::post(|app| app.show_editor()),
         "close" => hide(),
         "cancel" => super::shared::finish_active(true),
@@ -381,6 +401,10 @@ fn pick(id: &str) {
 }
 
 fn act(action: &str) {
+    if action == "switch:preview" {
+        pick("switch:preview");
+        return;
+    }
     let (verb, arg) = action.split_once(':').unwrap_or((action, ""));
     match verb {
         "tab" => {
@@ -405,28 +429,39 @@ fn act(action: &str) {
             let (video, cursor, delay, audio, area, interval, webcam) =
                 with(|s| (s.tab == 2, s.cursor, s.delay, audio_name(s), s.area.clone(), s.interval, s.webcam));
             let long_running = !video && (area.contains("scrolling") || area == "panoramic" || (area.ends_with("screen") && interval > 0));
+            let open_editor = match super::settings::open_in_editor() {
+                Ok(enabled) => enabled,
+                Err(error) => {
+                    send(|sink, value| sink.set_problem(value), format!("Could not read the editor preference: {error}"));
+                    return;
+                }
+            };
+            let request_id = crate::ui::capture_view::starting_capture(
+                !open_editor && !video && area != "text" && !(area.ends_with("screen") && interval > 0),
+            );
             if !long_running {
                 hide();
             }
             if video {
-                super::shared::toggle_recording_with(audio, cursor, webcam);
+                super::shared::toggle_recording_with(audio, cursor, webcam, Some(open_editor));
                 return;
             }
+            let delivery = super::shared::Delivery::for_capture_window(open_editor, request_id);
             use super::overlay::Mode;
             use super::scroll::{Direction, Mode as ScrollMode};
             match area.as_str() {
-                "region" => super::shared::capture_overlay(Mode::Normal, false, delay),
-                "freehand" => super::shared::capture_overlay(Mode::Freehand, false, delay),
-                "multi" => super::shared::capture_overlay(Mode::MultiArea, false, delay),
-                "fixed" => super::shared::capture_overlay(Mode::Fixed(1280, 720), false, delay),
-                "repeat" => super::shared::capture_overlay(Mode::Normal, true, delay),
+                "region" => super::shared::capture_overlay_with(Mode::Normal, false, delay, delivery),
+                "freehand" => super::shared::capture_overlay_with(Mode::Freehand, false, delay, delivery),
+                "multi" => super::shared::capture_overlay_with(Mode::MultiArea, false, delay, delivery),
+                "fixed" => super::shared::capture_overlay_with(Mode::Fixed(1280, 720), false, delay, delivery),
+                "repeat" => super::shared::capture_overlay_with(Mode::Normal, true, delay, delivery),
                 "text" => super::shared::capture_text(),
-                "scrolling" => super::shared::capture_scrolling(ScrollMode::Scrolling(Direction::Vertical)),
-                "scrolling-h" => super::shared::capture_scrolling(ScrollMode::Scrolling(Direction::Horizontal)),
-                "panoramic" => super::shared::capture_scrolling(ScrollMode::Panoramic),
-                "fullscreen" if interval == 0 => super::shared::capture_full_screen(cursor, delay),
+                "scrolling" => super::shared::capture_scrolling_with(ScrollMode::Scrolling(Direction::Vertical), delivery),
+                "scrolling-h" => super::shared::capture_scrolling_with(ScrollMode::Scrolling(Direction::Horizontal), delivery),
+                "panoramic" => super::shared::capture_scrolling_with(ScrollMode::Panoramic, delivery),
+                "fullscreen" if interval == 0 => super::shared::capture_full_screen_with(cursor, delay, delivery),
                 _ if interval > 0 => super::shared::capture_interval(interval, cursor),
-                _ => super::shared::capture_image_with(cursor, delay),
+                _ => super::shared::capture_image_with_delivery(cursor, delay, delivery),
             }
             publish_view();
         }

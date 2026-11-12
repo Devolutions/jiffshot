@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub struct Capture {
+    /// Identifies a foreground Capture-window image request, if any.
+    pub request_id: Option<u64>,
     pub frame: Frame,
     pub meta: CaptureMeta,
     /// The pointer as its own image and where it goes (capture pixels),
@@ -513,6 +515,7 @@ pub fn from_overlay(
         window = Some(top.hwnd);
     }
     Ok(Some(Capture {
+        request_id: None,
         frame,
         meta,
         cursor: separate,
@@ -524,6 +527,7 @@ pub fn from_overlay(
 pub fn from_frame(kind: CaptureKind, rect: Rect, frame: Frame) -> Capture {
     let meta = meta(kind, rect, &frame, false);
     Capture {
+        request_id: None,
         frame,
         meta,
         cursor: None,
@@ -572,6 +576,7 @@ pub(crate) fn immediate_in_layout_with_cursor(
     )?;
     let meta = meta(kind, rect, &frame, cursor_included);
     Ok(Capture {
+        request_id: None,
         frame,
         meta,
         cursor: separate,
@@ -693,6 +698,7 @@ pub struct Outcome {
     pub is_error: bool,
     /// True when the editor took over, so no notification is needed.
     pub opened_editor: bool,
+    pub saved_path: Option<PathBuf>,
 }
 
 /// Saves, copies and opens a capture according to `settings`.
@@ -756,10 +762,16 @@ fn finish_in_library_with(
     ) {
         Ok(saved) => saved,
         Err(error) => {
+            if !settings.open_in_editor {
+                if let (Some(id), Some(hooks)) = (capture.request_id, crate::hooks()) {
+                    (hooks.image_finished)(id, None, true, true);
+                }
+            }
             return Outcome {
                 message: format!("Could not save the capture: {error}"),
                 is_error: true,
                 opened_editor: false,
+                saved_path: None,
             }
         }
     };
@@ -864,6 +876,11 @@ fn finish_in_library_with(
     if !notes.is_empty() {
         message = format!("{message}; {}", notes.join("; "));
     }
+    if !settings.open_in_editor {
+        if let (Some(id), Some(hooks)) = (capture.request_id, crate::hooks()) {
+            (hooks.image_finished)(id, Some(&path), is_error, true);
+        }
+    }
     crate::log(&format!(
         "capture {w}x{h} saved in {:.0} ms, finished in {:.0} ms: {message}",
         saved.as_secs_f64() * 1000.0,
@@ -873,6 +890,7 @@ fn finish_in_library_with(
         message,
         is_error,
         opened_editor,
+        saved_path: Some(path),
     }
 }
 
@@ -923,6 +941,7 @@ pub fn finish_video(path: &Path, _rect: Rect, settings: &Settings, owner: isize)
         message,
         is_error,
         opened_editor,
+        saved_path: Some(path.to_path_buf()),
     }
 }
 

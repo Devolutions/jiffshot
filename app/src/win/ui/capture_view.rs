@@ -90,6 +90,10 @@ const MODE_GLYPHS: [&str; 3] = ["\u{E8B3}", "\u{E722}", "\u{E714}"];
 const WHITE: Color = parts::rgb(0xFFFFFF);
 const SELECTED_MODE_DARK: Color = parts::rgb(dark_blue::windows_or(dark_blue::SELECTION, 0x284662));
 const SELECTED_MODE_ICON_DARK: Color = parts::rgb(dark_blue::windows_or(dark_blue::ACCENT_TEXT, 0x73BAFF));
+const SAVED_DARK: Color = parts::rgb(0x3FB950);
+const SAVED_LIGHT: Color = parts::rgb(0x1A7F37);
+const PROBLEM_DARK: Color = parts::rgb(0xFF6B63);
+const PROBLEM_LIGHT: Color = parts::rgb(0xC42B1C);
 const CAPTURE_RED: Color = parts::rgb(0xD13438);
 const CAPTURE_RED_HOVER: Color = parts::rgb(0xB82B2F);
 const CAPTURE_RING: Color = parts::rgb(0xF5B0A8);
@@ -104,6 +108,8 @@ fn palette(dark: Signal<bool>) -> &'static Palette {
 /// What the window shows for the current tab (`panel::View`).
 #[derive(Deserialize)]
 struct View {
+    #[serde(default = "enabled")]
+    open_in_editor: bool,
     tab: usize,
     #[serde(default)]
     recording: bool,
@@ -213,6 +219,16 @@ struct MenuButton {
 
 /// The window and what its callbacks need. UI thread only.
 struct Ui {
+    open_in_editor: Signal<bool>,
+    confirmation: Signal<String>,
+    confirmation_problem: Signal<bool>,
+    edit_last_hover: Signal<bool>,
+    captured_path: Option<std::path::PathBuf>,
+    next_capture_request: u64,
+    pending_capture_request: Option<u64>,
+    #[cfg(any(windows, target_os = "macos"))]
+    suppressed_save_toasts: usize,
+    confirmation_revision: u64,
     scope: AppScope,
     window: NodeRef<Window>,
     dark: Signal<bool>,
@@ -256,6 +272,121 @@ fn run(action: String) {
     super::capture().model.run(|m| m.run(action));
 }
 
+/// Marks only one-shot image requests made here, returning the request ID to complete.
+pub(crate) fn starting_capture(editor_free_image: bool) -> Option<u64> {
+    with_ui(|ui| {
+        let request_id = editor_free_image.then(|| {
+            ui.next_capture_request = ui.next_capture_request.wrapping_add(1).max(1);
+            ui.next_capture_request
+        });
+        ui.pending_capture_request = request_id;
+        ui.confirmation_revision = ui.confirmation_revision.wrapping_add(1);
+        ui.confirmation.set(String::new());
+        ui.confirmation_problem.set(false);
+        ui.edit_last_hover.set_if_changed(false);
+        ui.captured_path = None;
+        request_id
+    })
+    .flatten()
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn cancel_pending_capture(request_id: Option<u64>) {
+    if let Some(id) = request_id {
+        with_ui(|ui| {
+            if ui.pending_capture_request == Some(id) {
+                ui.pending_capture_request = None;
+            }
+        });
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn take_suppressed_save_toast(title: &str, problem: bool) -> bool {
+    !problem
+        && title == "Capture saved"
+        && with_ui(|ui| {
+            if ui.suppressed_save_toasts > 0 {
+                ui.suppressed_save_toasts -= 1;
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn edit_last_capture() {
+    let path = with_ui(|ui| {
+        let path = ui.captured_path.take()?;
+        ui.confirmation_revision = ui.confirmation_revision.wrapping_add(1);
+        ui.confirmation.set(String::new());
+        ui.confirmation_problem.set(false);
+        ui.edit_last_hover.set_if_changed(false);
+        Some(path)
+    })
+    .flatten();
+    if let Some(path) = path {
+        crate::app::post(move |app| app.incoming(path));
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub(super) fn workflow_state_for_selftest() -> Option<(bool, String, Option<std::path::PathBuf>)> {
+    with_ui(|ui| (ui.open_in_editor.get_untracked(), ui.confirmation.get_untracked(), ui.captured_path.clone()))
+}
+
+/// Presents the most recently completed Capture-window image without loading the editor.
+pub(crate) fn image_finished(
+    request_id: u64,
+    path: Option<std::path::PathBuf>,
+    problem: bool,
+    reopen: bool,
+) -> bool {
+    let Some((should_reopen, schedule)) = with_ui(|ui| {
+        if ui.pending_capture_request != Some(request_id) {
+            return None;
+        }
+        ui.pending_capture_request = None;
+        let saved = path.is_some();
+        ui.captured_path = if reopen { path } else { None };
+        #[cfg(any(windows, target_os = "macos"))]
+        if saved && !problem && reopen {
+            ui.suppressed_save_toasts += 1;
+        }
+        ui.confirmation_problem.set(saved && problem && reopen);
+        ui.confirmation.set(
+            if !saved || !reopen {
+                ""
+            } else if problem {
+                "Saved with problems"
+            } else {
+                "Capture saved"
+            }
+            .into(),
+        );
+        ui.confirmation_revision = ui.confirmation_revision.wrapping_add(1);
+        let schedule = (saved && reopen).then_some((ui.scope.clone(), ui.confirmation_revision));
+        Some((reopen, schedule))
+    })
+    .flatten() else {
+        return false;
+    };
+    if let Some((scope, revision)) = schedule {
+        parts::after(&scope, std::time::Duration::from_secs(8), move || {
+            with_ui(|ui| {
+                if ui.confirmation_revision == revision {
+                    ui.confirmation.set(String::new());
+                    ui.confirmation_problem.set(false);
+                    ui.edit_last_hover.set_if_changed(false);
+                    ui.captured_path = None;
+                }
+            });
+        });
+    }
+    should_reopen
+}
+
 /// Asks the model for a menu or panel (`verb` is "menu" or "panel"), to open
 /// under `anchor`.
 fn request(verb: &str, which: &str, anchor: Control) {
@@ -289,6 +420,10 @@ fn popup_target() -> Option<(AppScope, Window, Control, Subscriptions)> {
 
 /// Builds the Capture window for `binding` (not yet shown).
 pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
+    let open_in_editor = scope.signal(true);
+    let confirmation = scope.signal(String::new());
+    let confirmation_problem = scope.signal(false);
+    let edit_last_hover = scope.signal(false);
     let dark = scope.signal(parts::dark_theme(scope));
     let tab = scope.signal(0_usize);
     let recording = scope.signal(false);
@@ -548,7 +683,7 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         );
 
     let editor = on_click(
-        flat(dark).dock_panel_dock(Dock::Right).vertical_alignment(VerticalAlignment::Center).content(
+        flat(dark).grid_column(2).vertical_alignment(VerticalAlignment::Center).content(
             StackPanel::el()
                 .orientation(Orientation::Horizontal)
                 .spacing(8.0)
@@ -576,11 +711,83 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
         &subs,
         |button: &Button| request("menu", "new-preset", button.upcast()),
     );
-    let bottom_bar = DockPanel::el()
+    let confirmation_pill = Border::el()
+        .grid_column(1)
+        .height(28.0)
+        .padding((11.0, 0.0, 4.0, 0.0))
+        .corner_radius(7.0)
+        .horizontal_alignment(HorizontalAlignment::Center)
+        .vertical_alignment(VerticalAlignment::Center)
+        .background(move || palette(dark).card)
+        .border_brush(move || palette(dark).edge)
+        .border_thickness(1.0)
+        .visible(move || !confirmation.get().is_empty())
+        .child(
+            StackPanel::el()
+                .orientation(Orientation::Horizontal)
+                .spacing(0.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .child(
+                    TextBlock::el()
+                        .text(move || if confirmation_problem.get() { "!".to_owned() } else { "\u{2713}".to_owned() })
+                        .font_size(12.0)
+                        .font_weight(FontWeight::Bold)
+                        .margin((0.0, 0.0, 6.0, 0.0))
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .foreground(move || match (dark.get(), confirmation_problem.get()) {
+                            (true, false) => SAVED_DARK,
+                            (false, false) => SAVED_LIGHT,
+                            (true, true) => PROBLEM_DARK,
+                            (false, true) => PROBLEM_LIGHT,
+                        }),
+                )
+                .child(
+                    TextBlock::el()
+                        .text(confirmation)
+                        .font_size(12.0)
+                        .margin((0.0, 0.0, 10.0, 0.0))
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .foreground(move || palette(dark).text),
+                )
+                .child(
+                    Border::el()
+                        .width(1.0)
+                        .height(13.0)
+                        .margin((0.0, 0.0, 3.0, 0.0))
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .background(move || palette(dark).edge),
+                )
+                .child(on_click(
+                    Button::el()
+                        .name("capture-edit-last")
+                        .height(22.0)
+                        .padding((7.0, 0.0))
+                        .corner_radius(5.0)
+                        .border_thickness(0.0)
+                        .horizontal_content_alignment(HorizontalAlignment::Center)
+                        .vertical_content_alignment(VerticalAlignment::Center)
+                        .background(move || if edit_last_hover.get() { palette(dark).track } else { parts::TRANSPARENT })
+                        .on_pointer_entered(move |_| edit_last_hover.set(true))
+                        .on_pointer_exited(move |_| edit_last_hover.set(false))
+                        .tool_tip_tip("Open this capture in the editor")
+                        .content(
+                            TextBlock::el()
+                                .text("Edit")
+                                .font_size(12.0)
+                                .font_weight(FontWeight::DemiBold)
+                                .foreground(move || if dark.get() { SELECTED_MODE_ICON_DARK } else { palette(dark).accent }),
+                        ),
+                    &subs,
+                    |_| edit_last_capture(),
+                )),
+        );
+    let bottom_bar = Grid::el()
         .grid_row(2)
+        .column_definitions("Auto,*,Auto")
         .margin((8.0, 0.0, 8.0, 0.0))
-        .child(editor)
-        .child(StackPanel::el().orientation(Orientation::Horizontal).spacing(2.0).vertical_alignment(VerticalAlignment::Center).child(presets).child(new_preset));
+        .child(StackPanel::el().orientation(Orientation::Horizontal).spacing(2.0).vertical_alignment(VerticalAlignment::Center).child(presets).child(new_preset))
+        .child(confirmation_pill)
+        .child(editor);
 
     let theme_scope = scope.clone();
     let closing_scope = scope.clone();
@@ -659,6 +866,16 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
 
     UI.with(|ui| {
         *ui.borrow_mut() = Some(Ui {
+            open_in_editor,
+            confirmation,
+            confirmation_problem,
+            edit_last_hover,
+            captured_path: None,
+            next_capture_request: 0,
+            pending_capture_request: None,
+            #[cfg(any(windows, target_os = "macos"))]
+            suppressed_save_toasts: 0,
+            confirmation_revision: 0,
             scope: scope.clone(),
             window: window_ref,
             dark,
@@ -837,6 +1054,7 @@ fn glyph(text: &str, size: f64) -> El<TextBlock> {
 
 fn apply_view(json: &str) -> Result<()> {
     let Ok(view) = serde_json::from_str::<View>(json) else { return Ok(()) };
+    with_ui(|ui| ui.open_in_editor.set_if_changed(view.open_in_editor));
     #[cfg(target_os = "macos")]
     with_ui(|ui| ui.native_menu.update(&view.menus)).transpose()?;
     let Some((scope, dark, fields, rows, (tab, recording, timing, interval_running, active_schedule, action))) =
@@ -865,14 +1083,13 @@ fn apply_view(json: &str) -> Result<()> {
     Ok(())
 }
 
-/// The quick switches (cursor and copy for images; microphone, system audio
-/// and webcam for video) and the more-options menu.
+/// The quick switches (cursor, copy and editor preview for images; microphone,
+/// system audio, webcam and editor preview for video) and the more-options menu.
 fn toggle_row(dark: Signal<bool>, subs: &Subscriptions, toggles: &[Toggle]) -> El<Grid> {
-    let chips = StackPanel::el().orientation(Orientation::Horizontal).spacing(4.0).children_iter(toggles.iter().enumerate().map(|(i, toggle)| {
-        // A gap between the image switches and the video ones in Select mode.
-        let gap = if i == 2 && toggles.len() == 5 { 10.0 } else { 0.0 };
-        toggle_chip(dark, subs, toggle).margin((gap, 0.0, 0.0, 0.0))
-    }));
+    let chips = StackPanel::el()
+        .orientation(Orientation::Horizontal)
+        .spacing(6.0)
+        .children_iter(toggles.iter().map(|toggle| toggle_chip(dark, subs, toggle)));
     Grid::el()
         .column_definitions("*,Auto")
         .height(34.0)
@@ -900,6 +1117,7 @@ fn toggle_chip(dark: Signal<bool>, subs: &Subscriptions, toggle: &Toggle) -> El<
     let icon = match toggle.id.as_str() {
         "cursor-both" | "image:switch:cursor" | "video:switch:record-cursor" => "\u{E962}",
         "image:switch:clipboard" => "\u{E8C8}",
+        "switch:preview" => "\u{E70F}",
         "video:switch:microphone" => "\u{E720}",
         "video:switch:system-audio" => "\u{E767}",
         "video:switch:webcam" => "\u{E8B8}",
@@ -908,21 +1126,23 @@ fn toggle_chip(dark: Signal<bool>, subs: &Subscriptions, toggle: &Toggle) -> El<
     let on = toggle.on;
     let id = toggle.id.clone();
     let state = if on { "on" } else { "off" };
+    let button = Button::el()
+        .width(34.0)
+        .height(32.0)
+        .padding(0.0)
+        .corner_radius(6.0)
+        .enabled(toggle.enabled)
+        .opacity(if toggle.enabled { 1.0 } else { 0.45 })
+        .horizontal_content_alignment(HorizontalAlignment::Center)
+        .vertical_content_alignment(VerticalAlignment::Center)
+        .background(move || if on { palette(dark).accent } else { parts::TRANSPARENT })
+        .border_brush(move || if on { palette(dark).accent } else { palette(dark).frame })
+        .border_thickness(1.0)
+        .tool_tip_tip(format!("{}: {state}", toggle.label))
+        .content(glyph(icon, 16.0).foreground(move || if on { WHITE } else { palette(dark).text }));
+    let button = if id == "switch:preview" { button.name("capture-auto-editor") } else { button };
     on_click(
-        Button::el()
-            .width(34.0)
-            .height(32.0)
-            .padding(0.0)
-            .corner_radius(6.0)
-            .enabled(toggle.enabled)
-            .opacity(if toggle.enabled { 1.0 } else { 0.45 })
-            .horizontal_content_alignment(HorizontalAlignment::Center)
-            .vertical_content_alignment(VerticalAlignment::Center)
-            .background(move || if on { palette(dark).accent } else { parts::TRANSPARENT })
-            .border_brush(move || if on { palette(dark).accent } else { palette(dark).frame })
-            .border_thickness(1.0)
-            .tool_tip_tip(format!("{}: {state}", toggle.label))
-            .content(glyph(icon, 16.0).foreground(move || if on { WHITE } else { palette(dark).text })),
+        button,
         subs,
         move |_| run(format!("pick:{id}")),
     )
@@ -1703,6 +1923,12 @@ mod tests {
         }
         let ratio = contrast(SELECTED_MODE_ICON_DARK, SELECTED_MODE_DARK);
         assert!(ratio >= 4.5, "dark selected mode contrast {ratio:.2} is below 4.5:1");
+        assert!(contrast(SELECTED_MODE_ICON_DARK, DARK.card) >= 4.5, "dark confirmation Edit contrast is below 4.5:1");
+        assert!(contrast(LIGHT.accent, LIGHT.card) >= 4.5, "light confirmation Edit contrast is below 4.5:1");
+        assert!(contrast(SAVED_DARK, DARK.card) >= 4.5, "dark saved badge contrast is below 4.5:1");
+        assert!(contrast(SAVED_LIGHT, LIGHT.card) >= 4.5, "light saved badge contrast is below 4.5:1");
+        assert!(contrast(PROBLEM_DARK, DARK.card) >= 4.5, "dark problem badge contrast is below 4.5:1");
+        assert!(contrast(PROBLEM_LIGHT, LIGHT.card) >= 4.5, "light problem badge contrast is below 4.5:1");
     }
 
     #[test]

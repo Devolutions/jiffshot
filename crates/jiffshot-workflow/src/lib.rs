@@ -85,6 +85,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
 /// What the capture side asks of the app it runs in.
 pub struct Hooks {
+    /// Completes a Capture-window image request (`id`): `path` is `Some` when saved,
+    /// `problem` indicates save/delivery problems, and `reopen` indicates whether
+    /// Capture should reopen (`false` when the user switched to Video or Text).
+    pub image_finished: Box<dyn Fn(u64, Option<&Path>, bool, bool) + Send + Sync>,
     /// Opens a saved capture in the editor; false when it could not.
     pub open_in_editor: Box<dyn Fn(&Path) -> bool + Send + Sync>,
     /// Shows the editor window (its library when nothing is open).
@@ -384,14 +388,14 @@ pub mod capture {
 
     /// Saves the settings and starts the window's capture (see
     /// `tray::start_from_panel`).
-    pub fn start(s: Settings) {
-        on_capture_thread(move || tray::start_from_panel(s));
+    pub fn start(s: Settings, request_id: Option<u64>) {
+        on_capture_thread(move || tray::start_from_panel(s, request_id));
     }
 
     /// Starts with the capture thread's committed settings, rather than a UI snapshot.
     #[cfg(target_os = "macos")]
-    pub fn start_current(tab: usize) -> bool {
-        super::post_capture_thread(move || tray::start_from_current_panel(tab))
+    pub fn start_current(tab: usize, request_id: Option<u64>) -> bool {
+        super::post_capture_thread(move || tray::start_from_current_panel(tab, request_id))
     }
 
     #[cfg(target_os = "macos")]
@@ -449,7 +453,7 @@ pub mod capture {
     }
 
     pub fn step_capture() {
-        on_capture_thread(|| tray::start_mode_after_delay("steps"));
+        on_capture_thread(|| tray::start_mode_after_delay("steps", tray::ImageAttempt::none()));
     }
 
     /// Moves a daily schedule that is on to `at`.

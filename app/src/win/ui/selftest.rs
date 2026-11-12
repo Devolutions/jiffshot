@@ -785,6 +785,9 @@ fn canvas_keys_script() -> Script {
 
 /// The whole walk, in order.
 fn script() -> Script {
+    if env("JIFFSHOT_UITEST_CAPTURE_WORKFLOW").is_some() {
+        return capture_workflow_script();
+    }
     if env("JIFFSHOT_UITEST_SELECTION").is_some() {
         return selection_clipboard_script();
     }
@@ -8751,6 +8754,137 @@ fn capture_window_steps(s: &mut Script) {
         }
         200
     });
+}
+
+fn capture_workflow_script() -> Script {
+    use super::capture_view;
+    let shot_capture_window = |test: &mut Test, name: &str| {
+        let scope = super::scope().unwrap();
+        let window = crate::capture_window::window().unwrap();
+        if let Ok(handle) = scope.platform_handle(&window) {
+            #[cfg(target_os = "macos")]
+            let handle = crate::mac_window::window(handle).unwrap().windowNumber() as isize;
+            test.shot_of(handle, name);
+        }
+    };
+    let mut script = Script(VecDeque::new());
+    script.wait(800).step(|test| {
+        let library = empty_scratch_library(test);
+        for (name, width) in [("first-shot.png", 41), ("second-shot.png", 63)] {
+            let mut image = jiffshot_doc::Pixmap::new(width, 31).unwrap();
+            image.fill(tiny_skia::Color::from_rgba8(30, 90, 160, 255));
+            image.save_png(library.join(name)).unwrap();
+        }
+        run("theme:Dark");
+        crate::app::act(|app| app.show_capture_window()).unwrap();
+        capture_window_selftest_action("tab:1".into());
+        350
+    });
+    script.step(move |test| {
+        assert!(capture_view::workflow_state_for_selftest().unwrap().0);
+        shot_capture_window(test, "capture-default-on.png");
+        capture_window_selftest_action("switch:preview".into());
+        let mut settings = jiffshot_workflow::settings::Settings::load();
+        settings.open_in_editor = false;
+        settings.save();
+        assert!(!jiffshot_workflow::settings::Settings::load().open_in_editor);
+        300
+    });
+    script.step(|test| {
+        assert!(!capture_view::workflow_state_for_selftest().unwrap().0);
+        let scope = super::scope().unwrap();
+        scope.main_window().unwrap().hide().unwrap();
+        let title = sink().title.get_untracked();
+        let first_id = capture_view::starting_capture(true).expect("request ID");
+        crate::capture_window::window().unwrap().hide().unwrap();
+        // Reopening Capture or finishing an unrelated request ID must not drop the in-flight request.
+        crate::app::act(|app| app.show_capture_window()).unwrap();
+        crate::capture_window::window().unwrap().hide().unwrap();
+        assert!(!capture_view::image_finished(first_id + 99, Some(test.dir.join("hotkey.png")), false, true));
+        let path = PathBuf::from(std::env::var_os("JIFFSHOT_LIBRARY").unwrap()).join("first-shot.png");
+        assert!(capture_view::image_finished(first_id, Some(path.clone()), false, true));
+        crate::app::act(|app| app.show_capture_window()).unwrap();
+        // Toast suppression must survive showing the Capture window.
+        assert!(capture_view::take_suppressed_save_toast("Capture saved", false));
+        assert!(!capture_view::take_suppressed_save_toast("Capture saved", false));
+        assert!(!scope.main_window().unwrap().is_visible().unwrap(), "saving opened the editor");
+        assert_eq!(sink().title.get_untracked(), title, "saving replaced the editor document");
+        assert!(crate::capture_window::window().unwrap().is_visible().unwrap());
+        let (_, confirmation, last) = capture_view::workflow_state_for_selftest().unwrap();
+        assert_eq!(confirmation, "Capture saved");
+        assert_eq!(last, Some(path));
+        assert!(!capture_view::image_finished(first_id, Some(test.dir.join("background-shot.png")), false, true), "a duplicate completion took over the confirmation");
+        test.line("editor-free capture returned to Capture, preserved toast suppression, and ignored unrelated completions");
+        4000
+    });
+    script.step(|test| {
+        let cancel_id = capture_view::starting_capture(true).expect("cancel request ID");
+        assert!(capture_view::image_finished(cancel_id, None, false, true), "cancellation did not finish the request");
+        assert!(!capture_view::image_finished(cancel_id, Some(test.dir.join("unrelated.png")), false, true), "a cancelled request consumed a later capture");
+        let non_image_id = capture_view::starting_capture(true).expect("Select->Video request ID");
+        assert!(!capture_view::image_finished(non_image_id, None, false, false), "Select->Video reopened Capture");
+        assert!(!capture_view::take_suppressed_save_toast("Capture saved", false));
+        let second_id = capture_view::starting_capture(true).expect("second request ID");
+        let path = PathBuf::from(std::env::var_os("JIFFSHOT_LIBRARY").unwrap()).join("second-shot.png");
+        assert!(capture_view::image_finished(second_id, Some(path.clone()), false, true));
+        assert!(capture_view::take_suppressed_save_toast("Capture saved", false));
+        assert_eq!(capture_view::workflow_state_for_selftest().unwrap().2, Some(path));
+        4500
+    });
+    script.step(move |test| {
+        let (_, confirmation, path) = capture_view::workflow_state_for_selftest().unwrap();
+        assert_eq!(confirmation, "Capture saved", "the previous timer dismissed the newer capture");
+        assert!(path.unwrap().ends_with("second-shot.png"));
+        shot_capture_window(test, "capture-without-editor.png");
+        run("theme:Light");
+        300
+    });
+    script.step(move |test| {
+        shot_capture_window(test, "capture-without-editor-light.png");
+        run("theme:Dark");
+        capture_window_selftest_action("tab:0".into());
+        300
+    });
+    script.step(move |test| {
+        shot_capture_window(test, "capture-select-tab.png");
+        capture_window_selftest_action("tab:2".into());
+        300
+    });
+    script.step(move |test| {
+        shot_capture_window(test, "capture-video-tab.png");
+        capture_window_selftest_action("tab:1".into());
+        3200
+    });
+    script.step(|_| {
+        let (_, confirmation, path) = capture_view::workflow_state_for_selftest().unwrap();
+        assert!(confirmation.is_empty() && path.is_none(), "the confirmation did not expire");
+        let edit_id = capture_view::starting_capture(true).expect("edit request ID");
+        let path = PathBuf::from(std::env::var_os("JIFFSHOT_LIBRARY").unwrap()).join("second-shot.png");
+        assert!(capture_view::image_finished(edit_id, Some(path), false, true));
+        assert!(capture_view::take_suppressed_save_toast("Capture saved", false));
+        capture_view::edit_last_capture();
+        assert!(capture_view::workflow_state_for_selftest().unwrap().1.is_empty(), "Edit did not clear the confirmation");
+        500
+    });
+    script.step(|_| {
+        assert!(super::scope().unwrap().main_window().unwrap().is_visible().unwrap());
+        assert!(sink().title.get_untracked().contains("second-shot"), "Edit did not open the most recent image");
+        capture_window_selftest_action("switch:preview".into());
+        let mut settings = jiffshot_workflow::settings::Settings::load();
+        settings.open_in_editor = true;
+        settings.save();
+        crate::app::act(|app| app.show_capture_window()).unwrap();
+        300
+    });
+    script.step(|test| {
+        let (open, confirmation, path) = capture_view::workflow_state_for_selftest().unwrap();
+        assert!(open, "the auto-open default could not be restored");
+        assert!(confirmation.is_empty() && path.is_none());
+        assert!(capture_view::starting_capture(false).is_none());
+        test.line("capture workflow confirmation expired, Edit dismissed and opened the image, and interval captures stayed in the background");
+        0
+    });
+    script
 }
 
 // ---- running ------------------------------------------------------------------
