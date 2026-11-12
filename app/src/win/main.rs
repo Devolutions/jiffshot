@@ -742,6 +742,7 @@ pub(crate) fn run() -> rustolonia::Result<()> {
     #[cfg(target_os = "macos")]
     let test_capture_engine = !tray
         && (std::env::var_os("JIFFSHOT_UITEST_SAVED_AREAS_ENGINE").is_some()
+            || std::env::var_os("JIFFSHOT_UITEST_CAPTURE_EDITOR").is_some()
             || std::env::var_os("JIFFSHOT_UITEST_SETTINGS_HANDOFF").is_some()
             || std::env::var_os("JIFFSHOT_UITEST_STARTUP").is_some()
             || std::env::var_os("JIFFSHOT_UITEST_RECORDING_SHUTDOWN").is_some()
@@ -979,7 +980,9 @@ pub(crate) fn run() -> rustolonia::Result<()> {
                     let path = path.map(std::path::Path::to_path_buf);
                     app::post(move |app| {
                         let saved = path.is_some();
-                        if crate::ui::capture_view::image_finished(request_id, path, problem, reopen) {
+                        if request_id.is_some_and(|id| {
+                            crate::ui::capture_view::image_finished(id, path, problem, reopen)
+                        }) {
                             app.show_capture_window();
                         }
                         if saved {
@@ -1004,6 +1007,10 @@ pub(crate) fn run() -> rustolonia::Result<()> {
                         app::post(move |app| app.incoming(path));
                         true
                     }
+                }),
+                select_in_editor: Box::new(|path| {
+                    let path = path.to_path_buf();
+                    app::post(move |app| app.select_saved_capture(path));
                 }),
                 show_editor: Box::new(|| app::post(|app| app.show_editor())),
                 quit: Box::new(move || {

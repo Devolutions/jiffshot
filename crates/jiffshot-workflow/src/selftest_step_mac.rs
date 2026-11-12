@@ -359,6 +359,7 @@ pub fn run(dir: &Path) -> io::Result<()> {
     crate::HOOKS.set(crate::Hooks {
         image_finished: Box::new(|_, _, _, _| {}),
         open_in_editor: Box::new(|_| false),
+        select_in_editor: Box::new(|_| {}),
         show_editor: Box::new(|| {}),
         quit: Box::new(|| {}),
         notify: Box::new(|_, _, _| {}),

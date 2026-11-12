@@ -115,6 +115,13 @@ restoration, including nested captures, failures, and capture-worker dispatch.
 On macOS, also set `JIFFSHOT_UITEST_CAPTURE_VISIBILITY_SCREEN=1` to verify actual
 screenshot pixels against a visible test window; this requires Screen Recording permission.
 
+New screenshots appear in **Recent Captures** even when **Preview in Editor** is
+disabled. With that option off on Windows and macOS, an editor that is already
+showing selects each new screenshot and keeps the open image's edits (if they
+cannot be saved, the open image stays and the status line says so). A hidden
+editor stays hidden, and scheduled or time-lapse screenshots only update Recent
+Captures. Enable **Preview in Editor** to open the editor on every new screenshot.
+
 ---
 
 ## Features
@@ -672,7 +679,8 @@ The Capture window's pencil toggle (**Open captures in the editor**) in the
 quick-options row beside the Capture button uses the same preference as
 **Preview in Editor** (enabled by default). Turn it off to save images and
 deliver them to the clipboard or configured destination without opening the
-editor. After a one-shot image capture from this window, Capture returns ready
+editor; an editor that is already showing still selects the new image. After a
+one-shot image capture from this window, Capture returns ready
 for another shot, with a brief **Capture saved** confirmation pill and an
 **Edit** action for that image. Interval and scheduled captures do not reopen
 the Capture window after each image. On Linux, images are saved in the
@@ -824,6 +832,14 @@ Set `JIFFSHOT_UITEST_CAPTURE_WORKFLOW=1` with an empty isolated library inside
 `JIFFSHOT_UITEST` to check the auto-open control, editor-free image confirmation,
 repeated captures, cancellation, confirmation expiry and the Edit action using
 synthetic saved images, without capturing the screen or changing the clipboard.
+On macOS, `JIFFSHOT_UITEST_CAPTURE_EDITOR=1` checks live capture-to-editor delivery,
+same-size image replacement, and, with auto-open disabled, that a showing editor
+(with or without an image open) saves its edits and selects the new capture while a
+hidden editor, a background capture and unsaveable edits only update Recent Captures,
+without reopening hidden windows or consuming a foreground request.
+Use an empty isolated `JIFFSHOT_LIBRARY` inside `JIFFSHOT_UITEST`, plus scratch
+`JIFFSHOT_CONFIG_DIR` and `JIFFSHOT_LOCAL_DIR`. It saves synthetic captures and
+checks the rendered editor pixels (Screen Recording permission is required).
 Set `JIFFSHOT_UITEST_CANVAS=1` to check all canvas handle cursors and view-coordinate crop and expansion at fit and zoom, without moving the system pointer.
 On macOS, set `JIFFSHOT_UITEST_CANVAS_KEYS=1` to check Backspace, Cmd+Backspace, forward Delete, undo, protected selections and text editing with keyboard events sent only to the fixture application. Use isolated settings, cache and library paths.
 Set `JIFFSHOT_UITEST_SELECTION=1` to check full-image and Select-region selection, Alt-drag routing, background-fill controls, rectangular Copy/Cut, clipboard failure reporting and undo without changing the system clipboard.
