@@ -120,7 +120,6 @@ pub fn refresh() {
 
 /// Shows the window in front.
 pub fn show() {
-    crate::ui::capture_view::clear_pending_capture();
     publish_view();
     if let Some(window) = with(|s| s.window.clone()) {
         let _ = window.show();
@@ -437,31 +436,32 @@ fn act(action: &str) {
                     return;
                 }
             };
-            crate::ui::capture_view::starting_capture(
+            let request_id = crate::ui::capture_view::starting_capture(
                 !open_editor && !video && area != "text" && !(area.ends_with("screen") && interval > 0),
             );
             if !long_running {
                 hide();
             }
             if video {
-                super::shared::toggle_recording_with(audio, cursor, webcam);
+                super::shared::toggle_recording_with(audio, cursor, webcam, Some(open_editor));
                 return;
             }
+            let delivery = super::shared::Delivery::for_capture_window(open_editor, request_id);
             use super::overlay::Mode;
             use super::scroll::{Direction, Mode as ScrollMode};
             match area.as_str() {
-                "region" => super::shared::capture_overlay(Mode::Normal, false, delay),
-                "freehand" => super::shared::capture_overlay(Mode::Freehand, false, delay),
-                "multi" => super::shared::capture_overlay(Mode::MultiArea, false, delay),
-                "fixed" => super::shared::capture_overlay(Mode::Fixed(1280, 720), false, delay),
-                "repeat" => super::shared::capture_overlay(Mode::Normal, true, delay),
+                "region" => super::shared::capture_overlay_with(Mode::Normal, false, delay, delivery),
+                "freehand" => super::shared::capture_overlay_with(Mode::Freehand, false, delay, delivery),
+                "multi" => super::shared::capture_overlay_with(Mode::MultiArea, false, delay, delivery),
+                "fixed" => super::shared::capture_overlay_with(Mode::Fixed(1280, 720), false, delay, delivery),
+                "repeat" => super::shared::capture_overlay_with(Mode::Normal, true, delay, delivery),
                 "text" => super::shared::capture_text(),
-                "scrolling" => super::shared::capture_scrolling(ScrollMode::Scrolling(Direction::Vertical)),
-                "scrolling-h" => super::shared::capture_scrolling(ScrollMode::Scrolling(Direction::Horizontal)),
-                "panoramic" => super::shared::capture_scrolling(ScrollMode::Panoramic),
-                "fullscreen" if interval == 0 => super::shared::capture_full_screen(cursor, delay),
+                "scrolling" => super::shared::capture_scrolling_with(ScrollMode::Scrolling(Direction::Vertical), delivery),
+                "scrolling-h" => super::shared::capture_scrolling_with(ScrollMode::Scrolling(Direction::Horizontal), delivery),
+                "panoramic" => super::shared::capture_scrolling_with(ScrollMode::Panoramic, delivery),
+                "fullscreen" if interval == 0 => super::shared::capture_full_screen_with(cursor, delay, delivery),
                 _ if interval > 0 => super::shared::capture_interval(interval, cursor),
-                _ => super::shared::capture_image_with(cursor, delay),
+                _ => super::shared::capture_image_with_delivery(cursor, delay, delivery),
             }
             publish_view();
         }

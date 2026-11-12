@@ -975,11 +975,15 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         if run_capture {
             let recording_scope = scope.clone();
             let hooks = jiffshot_workflow::Hooks {
-                image_finished: Box::new(|path, problem| {
+                image_finished: Box::new(|request_id, path, problem, reopen| {
                     let path = path.map(std::path::Path::to_path_buf);
                     app::post(move |app| {
-                        if crate::ui::capture_view::image_finished(path, problem) {
+                        let saved = path.is_some();
+                        if crate::ui::capture_view::image_finished(request_id, path, problem, reopen) {
                             app.show_capture_window();
+                        }
+                        if saved {
+                            app.refresh_library();
                         }
                     });
                 }),

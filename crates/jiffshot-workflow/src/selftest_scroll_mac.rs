@@ -1751,7 +1751,7 @@ fn record_shutdown_fixture(dir: &Path, rect: Rect) -> Result<(), String> {
     let observed_errors = hud_errors.clone();
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let hooks = crate::Hooks {
-        image_finished: Box::new(|_, _| {}),
+        image_finished: Box::new(|_, _, _, _| {}),
         open_in_editor: Box::new(|_| false),
         show_editor: Box::new(|| {}),
         quit: Box::new(|| {}),
@@ -1875,7 +1875,7 @@ fn record_workflow_fixture(dir: &Path, rect: Rect) -> Result<(), String> {
     let hud_library = library.clone();
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let hooks = crate::Hooks {
-        image_finished: Box::new(|_, _| {}),
+        image_finished: Box::new(|_, _, _, _| {}),
         open_in_editor: Box::new(|_| false),
         show_editor: Box::new(|| {}),
         quit: Box::new(|| {}),

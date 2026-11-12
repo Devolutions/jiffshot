@@ -357,7 +357,7 @@ pub fn run(dir: &Path) -> io::Result<()> {
     let fixture_rect = screen::rect_from_points(jiffshot_capture::macos::ffi::rect(work.origin.x + 40.0, work.origin.y + 40.0, 320.0, 200.0));
     let (hud_tx, hud_rx) = mpsc::channel();
     crate::HOOKS.set(crate::Hooks {
-        image_finished: Box::new(|_, _| {}),
+        image_finished: Box::new(|_, _, _, _| {}),
         open_in_editor: Box::new(|_| false),
         show_editor: Box::new(|| {}),
         quit: Box::new(|| {}),

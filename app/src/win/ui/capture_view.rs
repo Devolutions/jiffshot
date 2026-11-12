@@ -224,8 +224,10 @@ struct Ui {
     confirmation_problem: Signal<bool>,
     edit_last_hover: Signal<bool>,
     captured_path: Option<std::path::PathBuf>,
-    capture_pending: bool,
-    suppress_save_toast: bool,
+    next_capture_request: u64,
+    pending_capture_request: Option<u64>,
+    #[cfg(any(windows, target_os = "macos"))]
+    suppressed_save_toasts: usize,
     confirmation_revision: u64,
     scope: AppScope,
     window: NodeRef<Window>,
@@ -270,30 +272,48 @@ fn run(action: String) {
     super::capture().model.run(|m| m.run(action));
 }
 
-/// Marks only one-shot image requests made here, not hotkeys or background timers.
-pub(crate) fn starting_capture(editor_free_image: bool) {
+/// Marks only one-shot image requests made here, returning the request ID to complete.
+pub(crate) fn starting_capture(editor_free_image: bool) -> Option<u64> {
     with_ui(|ui| {
-        ui.capture_pending = editor_free_image;
-        ui.suppress_save_toast = false;
+        let request_id = editor_free_image.then(|| {
+            ui.next_capture_request = ui.next_capture_request.wrapping_add(1).max(1);
+            ui.next_capture_request
+        });
+        ui.pending_capture_request = request_id;
         ui.confirmation_revision = ui.confirmation_revision.wrapping_add(1);
         ui.confirmation.set(String::new());
         ui.confirmation_problem.set(false);
         ui.edit_last_hover.set_if_changed(false);
         ui.captured_path = None;
-    });
+        request_id
+    })
+    .flatten()
 }
 
-pub(crate) fn clear_pending_capture() {
-    with_ui(|ui| {
-        ui.capture_pending = false;
-        ui.suppress_save_toast = false;
-    });
+#[cfg(target_os = "macos")]
+pub(crate) fn cancel_pending_capture(request_id: Option<u64>) {
+    if let Some(id) = request_id {
+        with_ui(|ui| {
+            if ui.pending_capture_request == Some(id) {
+                ui.pending_capture_request = None;
+            }
+        });
+    }
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) fn take_suppressed_save_toast(title: &str, problem: bool) -> bool {
     !problem
         && title == "Capture saved"
-        && with_ui(|ui| std::mem::replace(&mut ui.suppress_save_toast, false)).unwrap_or(false)
+        && with_ui(|ui| {
+            if ui.suppressed_save_toasts > 0 {
+                ui.suppressed_save_toasts -= 1;
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) fn edit_last_capture() {
@@ -317,32 +337,54 @@ pub(super) fn workflow_state_for_selftest() -> Option<(bool, String, Option<std:
 }
 
 /// Presents the most recently completed Capture-window image without loading the editor.
-pub(crate) fn image_finished(path: Option<std::path::PathBuf>, problem: bool) -> bool {
-    let Some((scope, revision)) = with_ui(|ui| {
-        if !std::mem::take(&mut ui.capture_pending) {
+pub(crate) fn image_finished(
+    request_id: u64,
+    path: Option<std::path::PathBuf>,
+    problem: bool,
+    reopen: bool,
+) -> bool {
+    let Some((should_reopen, schedule)) = with_ui(|ui| {
+        if ui.pending_capture_request != Some(request_id) {
             return None;
         }
+        ui.pending_capture_request = None;
         let saved = path.is_some();
-        ui.captured_path = path;
-        ui.suppress_save_toast = saved && !problem;
-        ui.confirmation_problem.set(saved && problem);
-        ui.confirmation.set(if !saved { "" } else if problem { "Saved with problems" } else { "Capture saved" }.into());
+        ui.captured_path = if reopen { path } else { None };
+        #[cfg(any(windows, target_os = "macos"))]
+        if saved && !problem && reopen {
+            ui.suppressed_save_toasts += 1;
+        }
+        ui.confirmation_problem.set(saved && problem && reopen);
+        ui.confirmation.set(
+            if !saved || !reopen {
+                ""
+            } else if problem {
+                "Saved with problems"
+            } else {
+                "Capture saved"
+            }
+            .into(),
+        );
         ui.confirmation_revision = ui.confirmation_revision.wrapping_add(1);
-        Some((ui.scope.clone(), ui.confirmation_revision))
-    }).flatten() else {
+        let schedule = (saved && reopen).then_some((ui.scope.clone(), ui.confirmation_revision));
+        Some((reopen, schedule))
+    })
+    .flatten() else {
         return false;
     };
-    parts::after(&scope, std::time::Duration::from_secs(8), move || {
-        with_ui(|ui| {
-            if ui.confirmation_revision == revision {
-                ui.confirmation.set(String::new());
-                ui.confirmation_problem.set(false);
-                ui.edit_last_hover.set_if_changed(false);
-                ui.captured_path = None;
-            }
+    if let Some((scope, revision)) = schedule {
+        parts::after(&scope, std::time::Duration::from_secs(8), move || {
+            with_ui(|ui| {
+                if ui.confirmation_revision == revision {
+                    ui.confirmation.set(String::new());
+                    ui.confirmation_problem.set(false);
+                    ui.edit_last_hover.set_if_changed(false);
+                    ui.captured_path = None;
+                }
+            });
         });
-    });
-    true
+    }
+    should_reopen
 }
 
 /// Asks the model for a menu or panel (`verb` is "menu" or "panel"), to open
@@ -829,8 +871,10 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
             confirmation_problem,
             edit_last_hover,
             captured_path: None,
-            capture_pending: false,
-            suppress_save_toast: false,
+            next_capture_request: 0,
+            pending_capture_request: None,
+            #[cfg(any(windows, target_os = "macos"))]
+            suppressed_save_toasts: 0,
             confirmation_revision: 0,
             scope: scope.clone(),
             window: window_ref,
