@@ -81,12 +81,8 @@ pub(super) fn report(message: String) {
     });
 }
 
-/// Takes a portal screenshot, saves it to the library and opens it.
-pub(crate) fn capture_image() {
-    capture_image_with(true, 0);
-}
-
-/// Like [`capture_image`], waiting `delay` seconds after the desktop dialog.
+/// Takes a portal screenshot, saves it to the library and delivers it, waiting `delay` seconds
+/// after the desktop dialog when non-zero.
 pub(crate) fn capture_image_with(cursor: bool, delay: u64) {
     capture_image_with_delivery(cursor, delay, false);
 }
