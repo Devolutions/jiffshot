@@ -8802,9 +8802,9 @@ fn capture_workflow_script() -> Script {
         assert!(capture_view::take_suppressed_save_toast("Capture saved", false));
         assert!(!capture_view::take_suppressed_save_toast("Capture saved", false));
         crate::app::act(|app| app.show_capture_window()).unwrap();
-        assert!(!scope.main_window().unwrap().get_is_visible().unwrap(), "saving opened the editor");
+        assert!(!scope.main_window().unwrap().is_visible().unwrap(), "saving opened the editor");
         assert_eq!(sink().title.get_untracked(), title, "saving replaced the editor document");
-        assert!(crate::capture_window::window().unwrap().get_is_visible().unwrap());
+        assert!(crate::capture_window::window().unwrap().is_visible().unwrap());
         let (_, confirmation, last) = capture_view::workflow_state_for_selftest().unwrap();
         assert_eq!(confirmation, "Capture saved");
         assert_eq!(last, Some(path));
@@ -8857,7 +8857,7 @@ fn capture_workflow_script() -> Script {
         500
     });
     script.step(|_| {
-        assert!(super::scope().unwrap().main_window().unwrap().get_is_visible().unwrap());
+        assert!(super::scope().unwrap().main_window().unwrap().is_visible().unwrap());
         assert!(sink().title.get_untracked().contains("second-shot"), "Edit did not open the most recent image");
         capture_window_selftest_action("switch:preview".into());
         let mut settings = jiffshot_workflow::settings::Settings::load();

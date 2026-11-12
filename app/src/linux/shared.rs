@@ -113,7 +113,7 @@ fn capture_image_with_delivery(cursor: bool, delay: u64, background: bool) {
             None => Ok(None),
         }) {
             Ok(Some(path)) => deliver_capture(path, background),
-            Ok(None) if background => app::post(|app| app.set_status("Capture cancelled".into())),
+            Ok(None) if background => app::post(|app| app.set_status("Capture cancelled")),
             Ok(None) => report("Capture cancelled".into()),
             Err(error) if background => app::post(move |app| app.set_status(format!("Scheduled capture failed: {error}"))),
             Err(error) => report(format!("Capture failed: {error}")),
