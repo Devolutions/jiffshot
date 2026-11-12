@@ -123,11 +123,11 @@ fn change(scope: &AppScope, hide: bool) -> io::Result<(Duration, Option<Instant>
         if state.depth == 0 {
             let result = (|| {
                 for window in scope.windows() {
-                    if window.get_is_visible().map_err(io::Error::other)?
-                        && window.get_window_state().map_err(io::Error::other)?
+                    if window.is_visible().map_err(io::Error::other)?
+                        && window.window_state().map_err(io::Error::other)?
                             != WindowState::Minimized
                     {
-                        let activated = window.get_show_activated().map_err(io::Error::other)?;
+                        let activated = window.show_activated().map_err(io::Error::other)?;
                         hide_without_animation(scope, &window)?;
                         state.windows.push((window, activated));
                     }

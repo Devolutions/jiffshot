@@ -74,15 +74,21 @@ jobs:
           key: ${{ matrix.rid }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ matrix.rid }}-
 
+      - uses: ./.github/actions/use-rustolonia
+        with:
+          rid: ${{ matrix.rid }}
+
       - name: Build
         env:
           JIFFSHOT_VERSION: ${{ inputs.version }}
+          RUSTOLONIA_HOST_DIR: ${{ env.RUSTOLONIA_STATIC_HOST_DIR }}
         run: cargo build --release --locked -p jiffshot -p jiffshot-cli --features jiffshot/static-host --target ${{ matrix.target }}
 
       - name: Build Windows static host
         timeout-minutes: 20
         env:
           JIFFSHOT_VERSION: ${{ inputs.version }}
+          RUSTOLONIA_HOST_DIR: ${{ env.RUSTOLONIA_STATIC_HOST_DIR }}
         run: cargo build --release --locked -p jiffshot --features static-host --target ${{ matrix.target }} --target-dir target/static-host
 
       - name: Test
@@ -269,6 +275,10 @@ jobs:
           key: ubuntu2404-linux-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ubuntu2404-linux-${{ matrix.arch }}-
 
+      - uses: ./.github/actions/use-rustolonia
+        with:
+          rid: linux-${{ matrix.arch }}
+
       - name: Test
         run: cargo test --release --locked --workspace
 
@@ -282,6 +292,8 @@ jobs:
         run: cargo clippy --locked --no-deps -p jiffshot --all-targets -- -D warnings
 
       - name: Build Linux app
+        env:
+          RUSTOLONIA_HOST_DIR: ${{ env.RUSTOLONIA_STATIC_HOST_DIR }}
         run: cargo build --release --locked -p jiffshot --features static-host
 
       - name: Test Linux editor selection
@@ -289,9 +301,17 @@ jobs:
           dbus-run-session -- pwsh -NoProfile -File app/tests/linux_selection_e2e.ps1 \
             -Binary target/release/jiffshot -RuntimeDir target/release
 
+      - name: Test Linux tray lifecycle
+        timeout-minutes: 10
+        run: |
+          dbus-run-session -- pwsh -NoProfile -File app/tests/linux_tray_e2e.ps1 \
+            -Binary target/release/jiffshot -RuntimeDir target/release
+
       - name: Test Linux static host
         timeout-minutes: 20
         shell: bash
+        env:
+          RUSTOLONIA_HOST_DIR: ${{ env.RUSTOLONIA_STATIC_HOST_DIR }}
         run: |
           set -euo pipefail
           cargo build --release --locked -p jiffshot --features static-host --target-dir target/static-host
@@ -406,10 +426,16 @@ jobs:
           key: fedora43-linux-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: fedora43-linux-${{ matrix.arch }}-
 
+      - uses: ./.github/actions/use-rustolonia
+        with:
+          rid: linux-${{ matrix.arch }}
+
       - name: Test against native Fedora runtime libraries
         run: cargo test --release --locked --workspace
 
       - name: Build against Fedora runtime libraries
+        env:
+          RUSTOLONIA_HOST_DIR: ${{ env.RUSTOLONIA_STATIC_HOST_DIR }}
         run: cargo build --release --locked -p jiffshot --features static-host
 
       - name: Package native Fedora RPM
@@ -527,8 +553,10 @@ jobs:
         include:
           - arch: arm64
             target: aarch64-apple-darwin
+            rid: osx-arm64
           - arch: x86_64
             target: x86_64-apple-darwin
+            rid: osx-x64
     env:
       CARGO_TERM_COLOR: always
       MACOSX_DEPLOYMENT_TARGET: '13.0'
@@ -571,7 +599,13 @@ jobs:
           key: macos-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: macos-${{ matrix.arch }}-
 
+      - uses: ./.github/actions/use-rustolonia
+        with:
+          rid: ${{ matrix.rid }}
+
       - name: Build
+        env:
+          RUSTOLONIA_HOST_DIR: ${{ env.RUSTOLONIA_STATIC_HOST_DIR }}
         run: cargo build --release --locked -p jiffshot -p jiffshot-cli --features jiffshot/static-host --target ${{ matrix.target }}
 
       - name: Test
@@ -593,6 +627,22 @@ jobs:
             JIFFSHOT_LOCAL_DIR="$root/local" APPDATA="$root/config" LOCALAPPDATA="$root/local" \
             "target/${{ matrix.target }}/release/jiffshot"
           grep -Fx 'grab text: editor undo and redo history remained intact' "$root/ui-log.txt"
+          if grep -q '^FAILED:' "$root/ui-log.txt"; then exit 1; fi
+
+      - name: Test macOS canvas deletion shortcuts
+        if: matrix.arch == 'arm64'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/jiffshot-canvas-keys"
+          mkdir -p "$root"/{library,config,local}
+          trap 'if [[ -f "$root/ui-log.txt" ]]; then cat "$root/ui-log.txt"; fi' EXIT
+          JIFFSHOT_UITEST="$root" JIFFSHOT_UITEST_CANVAS_KEYS=1 \
+            JIFFSHOT_LIBRARY="$root/library" JIFFSHOT_CONFIG_DIR="$root/config" \
+            JIFFSHOT_LOCAL_DIR="$root/local" APPDATA="$root/config" LOCALAPPDATA="$root/local" \
+            "target/${{ matrix.target }}/release/jiffshot"
+          grep -Fx 'canvas keys: Backspace and Command+Backspace keep normal text editing' "$root/ui-log.txt"
           if grep -q '^FAILED:' "$root/ui-log.txt"; then exit 1; fi
 
       - name: Test macOS PowerShell scripts
@@ -618,6 +668,8 @@ jobs:
       - name: Test macOS static host
         timeout-minutes: 20
         shell: bash
+        env:
+          RUSTOLONIA_HOST_DIR: ${{ env.RUSTOLONIA_STATIC_HOST_DIR }}
         run: |
           set -euo pipefail
           cargo build --release --locked -p jiffshot --features static-host \

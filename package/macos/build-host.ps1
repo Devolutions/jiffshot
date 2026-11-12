@@ -22,6 +22,12 @@ function Invoke-HostBuild {
 }
 
 $sourcePath = (Resolve-Path -LiteralPath $Source).Path
+Import-Module (Join-Path $PSScriptRoot '../RustoloniaHost.psm1')
+$revision = Get-JiffshotRustoloniaRevision -Manifest (Join-Path $PSScriptRoot '../../Cargo.toml')
+$sourceRevision = & git -C $sourcePath rev-parse HEAD
+if ($LASTEXITCODE -ne 0 -or $sourceRevision -cne $revision) {
+    throw "Rustolonia source must be at the Cargo-pinned revision $revision"
+}
 $rid = if ($Arch -eq 'arm64') { 'osx-arm64' } else { 'osx-x64' }
 $artifacts = Join-Path $sourcePath "rust/target/ci-host-$rid"
 $hostDirectory = Join-Path $artifacts "publish/Avalonia.Host/release_$rid"

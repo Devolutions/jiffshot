@@ -296,6 +296,7 @@ Save the current document as a `.jsd` first if its edits cannot be autosaved.
 | `Ctrl+P` / `Ctrl+W` | Print / Close current capture |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / Redo |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / Cut / Paste selected objects or image regions |
+| `Delete` | Delete the selection; on the macOS canvas, `Backspace` and `Cmd+Backspace` also work |
 | `Ctrl+A` / `Ctrl+D` / `Ctrl+Shift+I` | Select the whole image (in any tool) / Deselect / Invert selection (with nothing selected, selects every annotation) |
 | `Ctrl+Shift+G` / `Ctrl+Shift+U` | Group / Ungroup selected objects |
 | `Ctrl+Shift+F` / `Ctrl+Shift+B` | Bring forward / Send backward |
@@ -435,11 +436,29 @@ workflow engine remains in `jiffshot-workflow`; Linux workflows live under
 
 ### Compiling
 
-Jiffshot requires **Rust 1.88+** and uses Rustolonia's `v12.1.6` release: the first build downloads the platform's prebuilt host, verified against the checksums pinned at the tag. No .NET SDK or Rustolonia checkout is required for that build.
+Jiffshot requires **Rust 1.88+** and pins the published Rustolonia `v12.1.7`
+release. Cargo downloads the matching shared host automatically for local
+development; release builds use the version-matched static host. CI verifies
+the upstream release `SHA256SUMS` and the host archive's version, target,
+linkage and ABI manifest before staging either host.
+
+To build a host from the exact Cargo.lock-resolved release source instead of
+using the official prebuilt archives, use PowerShell 7.4+, .NET 10 and the
+platform's native compiler (Xcode on macOS, Visual Studio C++ tools on Windows,
+Clang on Linux):
 
 ```powershell
-cargo run --release -p jiffshot
+pwsh ./package/build-rustolonia.ps1 -Rid osx-arm64 -OutputDirectory target/host-archives
 ```
+
+Use `osx-x64`, `win-x64`, `win-arm64`, `linux-x64` or `linux-arm64` for the
+other targets. The script creates a disposable versioned checkout under `target`,
+verifies the exact source revision and patched producer, and packages both shared
+and static hosts with checksums, source manifests and notices. `-Source <checkout>`
+must name a **disposable** checkout, not another active development session; the
+script builds and patches inside it. Linux static graphics must first be built
+using that revision's `rust/build-linux-static-graphics.sh` on native Ubuntu
+22.04; export its output as `RUSTOLONIA_LINUX_STATIC_GRAPHICS_DIR`.
 
 The release packages use the static Rustolonia host, so the executable needs no companion host DLLs. A regular local build uses the shared host and stages its libraries beside the executable.
 
@@ -573,7 +592,13 @@ MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --release --locked -p jiffshot -p jiff
 pwsh -NoLogo -NoProfile -File package/macos/build.ps1 -Binary target/release/jiffshot -Output macos-package -Arch arm64
 ```
 
-CI uses the release host for each target and records checksums of the staged dylibs. Both macOS CI jobs use ARM `macos-15` runners; the Intel target is cross-built and tested with Rosetta, not an Intel runner. This does not replace testing on physical Intel hardware. To build a matching host from source instead, use `package/macos/build-host.ps1 -Source <checkout> -Arch arm64` (or `x86_64`) with a checkout of the matching Rustolonia release, recursive submodules, the .NET 10 SDK, and Xcode tools; set `RUSTOLONIA_HOST_DIR` to its output before building Jiffshot.
+CI fetches both host linkages from the pinned release, verifies the release's
+`SHA256SUMS`, and checks archive version, ABI metadata, RID and linkage before
+building the application. Both macOS CI jobs use ARM `macos-15` runners; the Intel
+target is cross-built and tested with Rosetta, not an Intel runner. This does not
+replace testing on physical Intel hardware. For shared-host debugging only,
+`package/macos/build-host.ps1 -Source <disposable-checkout> -Arch arm64` (or
+`x86_64`) builds a host from the exact Cargo.lock-resolved release source.
 
 Use `-Arch x86_64` on an Intel Mac. The output contains `Jiffshot.app` and a DMG; the Rustolonia host and its companion libraries are kept together in the app's `Contents/Frameworks` directory, and `jiffshot-cli` is in `Contents/MacOS`. Packaging requires both executables and rejects any selected-architecture component whose deployment target is newer than macOS 13; this check does not substitute for testing on macOS 13. By default, the output is ad-hoc signed for local testing, not notarized for distribution. For local distribution builds, pass `-Identity` with a Developer ID Application identity and `-NotaryProfile` with an existing `xcrun notarytool` keychain profile. Release CI can also prepare an app for external notarization and build its disk image after the app's ticket has been stapled.
 
@@ -660,7 +685,15 @@ rustup target add aarch64-pc-windows-msvc
 cargo build --release -p jiffshot --target aarch64-pc-windows-msvc
 ```
 
-CI (`.github/workflows/ci.yml`) builds and tests Windows x64 and cross-builds Windows ARM64. Linux uses native `ubuntu-24.04` (x64) and `ubuntu-24.04-arm` (ARM64) hosted runners: each runs workspace tests, app Clippy, package-content tests, and portable smoke tests. The exhaustive Linux GUI suites are not run in CI; their scripts remain available under `app/tests` for local runs. Portable and installed-package startup smoke tests remain enabled in CI. Fedora 43 containers on each native runner separately compile and test the Fedora build and RPM. Windows artifacts include portable ZIP, MSI, and MSIX packages for both architectures (`jiffshot-win-x64`, `jiffshot-win-arm64`, and their `-msi` / `-msix` variants). Linux artifacts contain Ubuntu 24.04 tar.gz/DEB packages (`jiffshot-linux-x64`, `jiffshot-linux-arm64`) and separately compiled Fedora 43 RPMs (`jiffshot-linux-x64-rpm`, `jiffshot-linux-arm64-rpm`), with architecture/distro-specific caches. Clean Ubuntu/Fedora containers on both native architectures verify package and installed ELF architecture, checksums, dependency resolution, desktop/MIME registration, isolated graphical startup, and removal without deleting user settings. Release assembly requires all six Linux packages and verifies their builder checksums before collecting them, per-architecture Linux checksums, and `SHA256SUMS.txt`; Windows packages are signed, while Linux packages are currently unsigned. Rustolonia [v12.1.6](https://github.com/Devolutions/rustolonia/releases/tag/v12.1.6) publishes both Linux x64 and ARM64 runtime host assets; this availability alone does not establish a successful native Jiffshot ARM64 build or smoke test. To move to a newer Rustolonia, change the tag on the two lines in `Cargo.toml`'s `[workspace.dependencies]`, run `cargo update -p rustolonia`, and commit the manifest and lockfile together.
+CI (`.github/workflows/ci.yml`) builds and tests Windows x64 and cross-builds Windows ARM64. Linux uses native `ubuntu-24.04` (x64) and `ubuntu-24.04-arm` (ARM64) hosted runners: each runs workspace tests, app Clippy, package-content tests, and portable smoke tests. The exhaustive Linux GUI suites are not run in CI; their scripts remain available under `app/tests` for local runs. Portable and installed-package startup smoke tests remain enabled in CI. Fedora 43 containers on each native runner separately compile and test the Fedora build and RPM. Windows artifacts include portable ZIP, MSI, and MSIX packages for both architectures (`jiffshot-win-x64`, `jiffshot-win-arm64`, and their `-msi` / `-msix` variants). Linux artifacts contain Ubuntu 24.04 tar.gz/DEB packages (`jiffshot-linux-x64`, `jiffshot-linux-arm64`) and separately compiled Fedora 43 RPMs (`jiffshot-linux-x64-rpm`, `jiffshot-linux-arm64-rpm`), with architecture/distro-specific caches. Clean Ubuntu/Fedora containers on both native architectures verify package and installed ELF architecture, checksums, dependency resolution, desktop/MIME registration, isolated graphical startup, and removal without deleting user settings. Release assembly requires all six Linux packages and verifies their builder checksums before collecting them, per-architecture Linux checksums, and `SHA256SUMS.txt`; Windows packages are signed, while Linux packages are currently unsigned.
+
+CI uses the release's matching host archives for all six targets. Availability of
+a host archive alone does not establish a successful native Jiffshot ARM64 build
+or smoke test. To update Rustolonia, change both tag values in `Cargo.toml`'s
+`[workspace.dependencies]`, run `cargo update -p rustolonia`, and commit the
+manifest and lockfile together. The git crates include the projection generated
+for that release; Jiffshot has no application AXAML or separate bindgen/compiler
+generation step to update.
 
 ### Building and Installing Linux Packages
 
@@ -786,6 +819,7 @@ Set `JIFFSHOT_UITEST_CAPTURE_WORKFLOW=1` with an empty isolated library inside
 repeated captures, cancellation, confirmation expiry and the Edit action using
 synthetic saved images, without capturing the screen or changing the clipboard.
 Set `JIFFSHOT_UITEST_CANVAS=1` to check all canvas handle cursors and view-coordinate crop and expansion at fit and zoom, without moving the system pointer.
+On macOS, set `JIFFSHOT_UITEST_CANVAS_KEYS=1` to check Backspace, Cmd+Backspace, forward Delete, undo, protected selections and text editing with keyboard events sent only to the fixture application. Use isolated settings, cache and library paths.
 Set `JIFFSHOT_UITEST_SELECTION=1` to check full-image and Select-region selection, Alt-drag routing, background-fill controls, rectangular Copy/Cut, clipboard failure reporting and undo without changing the system clipboard.
 Set `JIFFSHOT_UITEST_NEW_FROM_CLIPBOARD=1` to check clipboard imports and unsaved-document protection with synthetic data, without changing the system clipboard.
 On Linux, `dbus-run-session -- pwsh -File app/tests/linux_selection_e2e.ps1 -Binary target/release/jiffshot -RuntimeDir target/release` checks selection, clipboard shortcuts and Select-to-Arrow transitions in the classic editor, plus the shared editor's responsive toolbar and clipboard File-menu command. It requires Xvfb, xclip, xwininfo and libXtst, and uses a private X11 display and clipboard.

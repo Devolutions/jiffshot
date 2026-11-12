@@ -17,7 +17,7 @@ pub(in crate::ui) mod native;
 use hud_toolbar::RecordingToolbar;
 use jiffshot_capture::Rect;
 use rustolonia::{
-    size_to_content, AppScope, Arc as ArcShape, Border, Brush, Button, Color, Effect, Ellipse, EventSubscription, FontWeight, Grid, HorizontalAlignment, Orientation,
+    SizeToContent, AppScope, Arc as ArcShape, Border, Brush, Button, Color, Effect, Ellipse, EventSubscription, FontWeight, Grid, HorizontalAlignment, Orientation,
     PenLineCap, Result, StackPanel, TextAlignment, TextBlock, TextWrapping, ThemeVariantScope, VerticalAlignment, Window, WindowDecorations,
 };
 use serde_json::Value;
@@ -322,12 +322,15 @@ fn place_beside(_scope: &AppScope, window: &Window, area: Rect, size: (f64, f64)
 
 /// A borderless, topmost window that does not take the focus.
 fn hud_window() -> Result<Window> {
-    Window::new()?
-        .title("Jiffshot")?
-        .window_decorations(WindowDecorations::None)?
-        .show_activated(false)?
-        .show_in_taskbar(false)?
-        .can_resize(false)
+    {
+        let control = Window::new()?;
+        control.set_title("Jiffshot")?;
+        control.set_window_decorations(WindowDecorations::None)?;
+        control.set_show_activated(false)?;
+        control.set_show_in_taskbar(false)?;
+        control.set_can_resize(false)?;
+        Ok(control)
+    }
 }
 
 /// A capture panel: the status (live) and its buttons, the first one
@@ -346,55 +349,82 @@ impl HudPanel {
     const GAP: f64 = 11.0;
 
     fn new(scope: &AppScope, id: u64, area: Rect, buttons: &[String], status: &str) -> HudResult<Self> {
-        let text = TextBlock::new()?
-            .text(status)?
-            .font_size(13.5)?
-            .font_weight(FontWeight::DemiBold)?
-            .text_wrapping(TextWrapping::Wrap)?
-            .foreground(Brush::solid(Color::rgb(0xE8, 0xEA, 0xED)))?;
+        let text = {
+            let control = TextBlock::new()?;
+            control.set_text(status)?;
+            control.set_font_size(13.5)?;
+            control.set_font_weight(FontWeight::DemiBold)?;
+            control.set_text_wrapping(TextWrapping::Wrap)?;
+            control.set_foreground(Brush::solid(Color::rgb(0xE8, 0xEA, 0xED)))?;
+            control
+        };
         let mut subscriptions = Vec::new();
-        let rows = StackPanel::new()?.spacing(8.0)?;
+        let rows = {
+            let control = StackPanel::new()?;
+            control.set_spacing(8.0)?;
+            control
+        };
         let columns = if buttons.len() > 4 { 2 } else { buttons.len().max(1) };
         for (row_index, labels) in buttons.chunks(columns).enumerate() {
-            let row = StackPanel::new()?
-                .orientation(Orientation::Horizontal)?
-                .spacing(8.0)?
-                .horizontal_alignment(HorizontalAlignment::Right)?;
+            let row = {
+                let control = StackPanel::new()?;
+                control.set_orientation(Orientation::Horizontal)?;
+                control.set_spacing(8.0)?;
+                control.set_horizontal_alignment(HorizontalAlignment::Right)?;
+                control
+            };
             for (column, label) in labels.iter().enumerate() {
                 let index = row_index * columns + column;
-                let mut button = Button::new()?
-                    .content_text(label)?
-                    .min_width(76.0)?
-                    .height(30.0)?
-                    .padding((12.0, 0.0))?
-                    .corner_radius(6.0)?
-                    .horizontal_content_alignment(HorizontalAlignment::Center)?
-                    .vertical_content_alignment(VerticalAlignment::Center)?
-                    .foreground(Brush::solid(Color::rgb(255, 255, 255)))?
-                    .background(Brush::solid(if index == 0 {
+                let button = {
+                    let control = Button::new()?;
+                    control.set_content_text(label)?;
+                    control.set_min_width(76.0)?;
+                    control.set_height(30.0)?;
+                    control.set_padding((12.0, 0.0))?;
+                    control.set_corner_radius(6.0)?;
+                    control.set_horizontal_content_alignment(HorizontalAlignment::Center)?;
+                    control.set_vertical_content_alignment(VerticalAlignment::Center)?;
+                    control.set_foreground(Brush::solid(Color::rgb(255, 255, 255)))?;
+                    control.set_background(Brush::solid(if index == 0 {
                         Color::rgb(0x2F, 0x5D, 0xA8)
                     } else {
                         Color::rgb(0x3A, 0x3C, 0x42)
                     }))?;
+                    control
+                };
                 if buttons.len() > 4 && labels.len() > 1 {
-                    button = button.width(156.0)?;
+                    button.set_width(156.0)?;
                 }
                 subscriptions.push(button.subscribe_click(move |_| run(format!("hud:{id}:{index}")))?);
                 row.children()?.add(&button)?;
             }
             rows.children()?.add(&row)?;
         }
-        let content = Border::new()?
-            .border_brush(Brush::solid(Color::rgb(0x3A, 0x3C, 0x42)))?
-            .border_thickness(1.0)?
-            .padding((12.0, 9.0, 12.0, 10.0))?
-            .child(Some(&StackPanel::new()?.spacing(10.0)?.child(&text)?.child(&rows)?))?;
-        let themed = ThemeVariantScope::new()?.requested_theme_variant("Dark")?.child(Some(&content))?;
-        let window = hud_window()?
-            .width(360.0)?
-            .size_to_content(size_to_content::HEIGHT)?
-            .background(Brush::solid(Color::rgb(0x23, 0x24, 0x28)))?
-            .content(Some(&themed))?;
+        let content = {
+            let control = Border::new()?;
+            control.set_border_brush(Brush::solid(Color::rgb(0x3A, 0x3C, 0x42)))?;
+            control.set_border_thickness(1.0)?;
+            control.set_padding((12.0, 9.0, 12.0, 10.0))?;
+            control.set_child(&{
+                let control = StackPanel::new()?;
+                control.set_spacing(10.0)?;
+                control.children()?.add(&text)?;
+                control.children()?.add(&rows)?;
+                control
+            })?;
+            control
+        };
+        let themed = {
+            let control = ThemeVariantScope::new()?;
+            control.set_requested_theme_variant("Dark")?;
+            control.set_child(&content)?;
+            control
+        };
+        let window = hud_window()?;
+        window.set_width(360.0)?;
+        window.set_size_to_content(SizeToContent::HEIGHT)?;
+        window.set_background(Brush::solid(Color::rgb(0x23, 0x24, 0x28)))?;
+        window.set_content(&themed)?;
         #[cfg(target_os = "macos")]
         scope.set_transparent(&window, true)?;
         scope.set_topmost(&window, true)?;
@@ -478,15 +508,18 @@ impl HudBorder {
     fn new(scope: &AppScope, area: Rect) -> HudResult<Self> {
         let outer = area.inflate(Self::WEIGHT);
         let (_, scale) = native::screen_of(outer);
-        let frame = Border::new()?
-            .border_brush(Brush::new(Color::rgb(0xE5, 0x39, 0x35), 220.0 / 255.0))?
-            .border_thickness(Self::WEIGHT as f64 / scale)?;
-        let window = hud_window()?
-            .width(outer.width as f64 / scale)?
-            .height(outer.height as f64 / scale)?
-            .position((outer.x, outer.y))?
-            .background(Brush::solid(Color::new(0, 0, 0, 0)))?
-            .content(Some(&frame))?;
+        let frame = {
+            let control = Border::new()?;
+            control.set_border_brush(Brush::new(Color::rgb(0xE5, 0x39, 0x35), 220.0 / 255.0))?;
+            control.set_border_thickness(Self::WEIGHT as f64 / scale)?;
+            control
+        };
+        let window = hud_window()?;
+        window.set_width(outer.width as f64 / scale)?;
+        window.set_height(outer.height as f64 / scale)?;
+        window.set_position((outer.x, outer.y))?;
+        window.set_background(Brush::solid(Color::new(0, 0, 0, 0)))?;
+        window.set_content(&frame)?;
         scope.set_transparent(&window, true)?;
         scope.set_topmost(&window, true)?;
         #[cfg(windows)]
@@ -536,58 +569,88 @@ impl HudCountdown {
     const STROKE: f64 = 7.0;
 
     fn new(scope: &AppScope, area: Rect, title: &str, seconds: u64, progress: f64) -> HudResult<Self> {
-        let track = Ellipse::new()?
-            .width(Self::RING)?
-            .height(Self::RING)?
-            .stroke(Brush::solid(Color::rgb(0x3A, 0x3C, 0x42)))?
-            .stroke_thickness(Self::STROKE)?;
-        let ring = ArcShape::new()?
-            .width(Self::RING)?
-            .height(Self::RING)?
-            .stroke(Brush::solid(Self::ring_color(seconds)))?
-            .stroke_thickness(Self::STROKE)?
-            .stroke_line_cap(PenLineCap::Round)?
-            .start_angle(-90.0)?
-            .sweep_angle(Self::sweep(progress))?;
-        let number = TextBlock::new()?
-            .text(seconds.to_string())?
-            .font_size(50.0)?
-            .font_weight(FontWeight::Bold)?
-            .foreground(Brush::solid(Color::rgb(255, 255, 255)))?
-            .horizontal_alignment(HorizontalAlignment::Center)?
-            .vertical_alignment(VerticalAlignment::Center)?;
-        let dial = Grid::new()?
-            .width(Self::RING)?
-            .height(Self::RING)?
-            .horizontal_alignment(HorizontalAlignment::Center)?
-            .child(&track)?
-            .child(&ring)?
-            .child(&number)?;
-        let caption = TextBlock::new()?
-            .text(title)?
-            .font_size(14.0)?
-            .font_weight(FontWeight::DemiBold)?
-            .text_wrapping(TextWrapping::Wrap)?
-            .text_alignment(TextAlignment::Center)?
-            .foreground(Brush::solid(Color::rgb(0xE8, 0xEA, 0xED)))?;
-        let hint = TextBlock::new()?
-            .text("Esc to cancel")?
-            .font_size(12.0)?
-            .text_alignment(TextAlignment::Center)?
-            .foreground(Brush::solid(Color::rgb(0x9A, 0xA0, 0xA6)))?;
-        let card = Border::new()?
-            .background(Brush::new(Color::rgb(0x23, 0x24, 0x28), 0.94))?
-            .border_brush(Brush::solid(Color::rgb(0x3A, 0x3C, 0x42)))?
-            .border_thickness(1.0)?
-            .corner_radius(18.0)?
-            .padding((16.0, 18.0, 16.0, 14.0))?
-            .child(Some(&StackPanel::new()?.spacing(10.0)?.child(&dial)?.child(&caption)?.child(&hint)?))?;
-        let themed = ThemeVariantScope::new()?.requested_theme_variant("Dark")?.child(Some(&card))?;
-        let window = hud_window()?
-            .width(Self::WIDTH)?
-            .size_to_content(size_to_content::HEIGHT)?
-            .background(Brush::solid(Color::new(0, 0, 0, 0)))?
-            .content(Some(&themed))?;
+        let track = {
+            let control = Ellipse::new()?;
+            control.set_width(Self::RING)?;
+            control.set_height(Self::RING)?;
+            control.set_stroke(Brush::solid(Color::rgb(0x3A, 0x3C, 0x42)))?;
+            control.set_stroke_thickness(Self::STROKE)?;
+            control
+        };
+        let ring = ArcShape::new()?;
+        ring.set_width(Self::RING)?;
+        ring.set_height(Self::RING)?;
+        ring.set_stroke(Brush::solid(Self::ring_color(seconds)))?;
+        ring.set_stroke_thickness(Self::STROKE)?;
+        ring.set_stroke_line_cap(PenLineCap::Round)?;
+        ring.set_start_angle(-90.0)?;
+        ring.set_sweep_angle(Self::sweep(progress))?;
+        let number = {
+            let control = TextBlock::new()?;
+            control.set_text(seconds.to_string())?;
+            control.set_font_size(50.0)?;
+            control.set_font_weight(FontWeight::Bold)?;
+            control.set_foreground(Brush::solid(Color::rgb(255, 255, 255)))?;
+            control.set_horizontal_alignment(HorizontalAlignment::Center)?;
+            control.set_vertical_alignment(VerticalAlignment::Center)?;
+            control
+        };
+        let dial = {
+            let control = Grid::new()?;
+            control.set_width(Self::RING)?;
+            control.set_height(Self::RING)?;
+            control.set_horizontal_alignment(HorizontalAlignment::Center)?;
+            control.children()?.add(&track)?;
+            control.children()?.add(&ring)?;
+            control.children()?.add(&number)?;
+            control
+        };
+        let caption = {
+            let control = TextBlock::new()?;
+            control.set_text(title)?;
+            control.set_font_size(14.0)?;
+            control.set_font_weight(FontWeight::DemiBold)?;
+            control.set_text_wrapping(TextWrapping::Wrap)?;
+            control.set_text_alignment(TextAlignment::Center)?;
+            control.set_foreground(Brush::solid(Color::rgb(0xE8, 0xEA, 0xED)))?;
+            control
+        };
+        let hint = {
+            let control = TextBlock::new()?;
+            control.set_text("Esc to cancel")?;
+            control.set_font_size(12.0)?;
+            control.set_text_alignment(TextAlignment::Center)?;
+            control.set_foreground(Brush::solid(Color::rgb(0x9A, 0xA0, 0xA6)))?;
+            control
+        };
+        let card = {
+            let control = Border::new()?;
+            control.set_background(Brush::new(Color::rgb(0x23, 0x24, 0x28), 0.94))?;
+            control.set_border_brush(Brush::solid(Color::rgb(0x3A, 0x3C, 0x42)))?;
+            control.set_border_thickness(1.0)?;
+            control.set_corner_radius(18.0)?;
+            control.set_padding((16.0, 18.0, 16.0, 14.0))?;
+            control.set_child(&{
+                let control = StackPanel::new()?;
+                control.set_spacing(10.0)?;
+                control.children()?.add(&dial)?;
+                control.children()?.add(&caption)?;
+                control.children()?.add(&hint)?;
+                control
+            })?;
+            control
+        };
+        let themed = {
+            let control = ThemeVariantScope::new()?;
+            control.set_requested_theme_variant("Dark")?;
+            control.set_child(&card)?;
+            control
+        };
+        let window = hud_window()?;
+        window.set_width(Self::WIDTH)?;
+        window.set_size_to_content(SizeToContent::HEIGHT)?;
+        window.set_background(Brush::solid(Color::new(0, 0, 0, 0)))?;
+        window.set_content(&themed)?;
         scope.set_transparent(&window, true)?;
         scope.set_topmost(&window, true)?;
         let mut subscriptions = Vec::new();

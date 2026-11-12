@@ -98,27 +98,27 @@ fn file_menu(ctx: &Ctx) -> MenuEntry {
     submenu(
         "_File",
         vec![
-            cmd("New _capture", s.new_capture_enabled, |m| m.new_capture(), Some("Ctrl+Shift+N")),
-            cmd("Capture _window…", s.open_capture_window_enabled, |m| m.open_capture_window(), None),
-            cmd("_Record video", s.record_video_enabled, |m| m.record_video(), None),
-            cmd("_New image", s.new_image_enabled, |m| m.new_image(), Some("Ctrl+N")),
-            cmd("New from clip_board", s.new_from_clipboard_enabled, |m| m.new_from_clipboard(), Some("Ctrl+Shift+V")),
-            cmd("_Open…", s.open_enabled, |m| m.open(), Some("Ctrl+O")),
+            cmd("New _capture", s.new_capture_enabled.local(), |m| m.new_capture(), Some("Ctrl+Shift+N")),
+            cmd("Capture _window…", s.open_capture_window_enabled.local(), |m| m.open_capture_window(), None),
+            cmd("_Record video", s.record_video_enabled.local(), |m| m.record_video(), None),
+            cmd("_New image", s.new_image_enabled.local(), |m| m.new_image(), Some("Ctrl+N")),
+            cmd("New from clip_board", s.new_from_clipboard_enabled.local(), |m| m.new_from_clipboard(), Some("Ctrl+Shift+V")),
+            cmd("_Open…", s.open_enabled.local(), |m| m.open(), Some("Ctrl+O")),
             open_recent(s),
-            cmd("Co_mbine images…", s.combine_images_enabled, |m| m.combine_images(), None),
+            cmd("Co_mbine images…", s.combine_images_enabled.local(), |m| m.combine_images(), None),
             sep(),
-            cmd("_Save", s.save_enabled, |m| m.save(), Some("Ctrl+S")),
-            cmd("Save _as…", s.save_as_enabled, |m| m.save_as(), Some("Ctrl+Shift+S")),
-            cmd("_Export image…", s.export_enabled, |m| m.export(), Some("Ctrl+E")),
-            cmd("Copy _all", s.copy_image_enabled, |m| m.copy_image(), Some("Ctrl+Shift+C")),
-            cmd("_Print…", s.print_enabled, |m| m.print(), Some("Ctrl+P")),
-            cmd("D_uplicate file", s.duplicate_file_enabled, |m| m.duplicate_file(), Some("Ctrl+Shift+D")),
-            cmd("_Close", s.close_file_enabled, |m| m.close_file(), Some("Ctrl+W")),
-            cmd("Delete _file", s.delete_file_enabled, |m| m.delete_file(), Some("Ctrl+Delete")),
+            cmd("_Save", s.save_enabled.local(), |m| m.save(), Some("Ctrl+S")),
+            cmd("Save _as…", s.save_as_enabled.local(), |m| m.save_as(), Some("Ctrl+Shift+S")),
+            cmd("_Export image…", s.export_enabled.local(), |m| m.export(), Some("Ctrl+E")),
+            cmd("Copy _all", s.copy_image_enabled.local(), |m| m.copy_image(), Some("Ctrl+Shift+C")),
+            cmd("_Print…", s.print_enabled.local(), |m| m.print(), Some("Ctrl+P")),
+            cmd("D_uplicate file", s.duplicate_file_enabled.local(), |m| m.duplicate_file(), Some("Ctrl+Shift+D")),
+            cmd("_Close", s.close_file_enabled.local(), |m| m.close_file(), Some("Ctrl+W")),
+            cmd("Delete _file", s.delete_file_enabled.local(), |m| m.delete_file(), Some("Ctrl+Delete")),
             sep(),
-            cmd("Open _library folder", s.open_library_folder_enabled, |m| m.open_library_folder(), None),
+            cmd("Open _library folder", s.open_library_folder_enabled.local(), |m| m.open_library_folder(), None),
             #[cfg(not(target_os = "macos"))]
-            cmd("E_xit", s.exit_enabled, |m| m.exit(), Some("Ctrl+Q")),
+            cmd("E_xit", s.exit_enabled.local(), |m| m.exit(), Some("Ctrl+Q")),
         ],
     )
 }
@@ -142,7 +142,7 @@ fn open_recent(sink: MainViewModelSink) -> MenuEntry {
                     Ok(())
                 };
                 let command = Command::with_can_execute(enabled, open.clone()).unwrap_or_else(|_| Command::new(open));
-                MenuEntry::action(&name, command, None).enabled(enabled)
+                MenuEntry::action(&name, command, None).enabled(enabled.local())
             })
             .collect()
     })
@@ -153,27 +153,27 @@ fn edit_menu(ctx: &Ctx) -> MenuEntry {
     submenu(
         "_Edit",
         vec![
-            cmd("_Undo", s.undo_enabled, |m| m.undo(), Some("Ctrl+Z")),
-            cmd("_Redo", s.redo_enabled, |m| m.redo(), Some("Ctrl+Y")),
+            cmd("_Undo", s.undo_enabled.local(), |m| m.undo(), Some("Ctrl+Z")),
+            cmd("_Redo", s.redo_enabled.local(), |m| m.redo(), Some("Ctrl+Y")),
             sep(),
-            cmd("Cu_t", s.cut_enabled, |m| m.cut(), Some("Ctrl+X")),
-            cmd("_Copy", s.copy_enabled, |m| m.copy(), Some("Ctrl+C")),
-            cmd("_Paste", s.paste_enabled, |m| m.paste(), Some("Ctrl+V")),
-            cmd("_Duplicate", s.duplicate_enabled, |m| m.duplicate(), None),
-            cmd("De_lete", s.delete_enabled, |m| m.delete(), Some("Delete")),
+            cmd("Cu_t", s.cut_enabled.local(), |m| m.cut(), Some("Ctrl+X")),
+            cmd("_Copy", s.copy_enabled.local(), |m| m.copy(), Some("Ctrl+C")),
+            cmd("_Paste", s.paste_enabled.local(), |m| m.paste(), Some("Ctrl+V")),
+            cmd("_Duplicate", s.duplicate_enabled.local(), |m| m.duplicate(), None),
+            cmd("De_lete", s.delete_enabled.local(), |m| m.delete(), Some("Delete")),
             sep(),
-            cmd("Select _all", s.select_all_enabled, |m| m.select_all(), Some("Ctrl+A")),
-            cmd("Dese_lect all", s.deselect_all_enabled, |m| m.deselect_all(), Some("Ctrl+D")),
-            cmd("_Invert selection", s.invert_selection_enabled, |m| m.invert_selection(), Some("Ctrl+Shift+I")),
-            cmd("_Group", s.group_enabled, |m| m.group(), Some("Ctrl+Shift+G")),
-            cmd("U_ngroup", s.ungroup_enabled, |m| m.ungroup(), Some("Ctrl+Shift+U")),
+            cmd("Select _all", s.select_all_enabled.local(), |m| m.select_all(), Some("Ctrl+A")),
+            cmd("Dese_lect all", s.deselect_all_enabled.local(), |m| m.deselect_all(), Some("Ctrl+D")),
+            cmd("_Invert selection", s.invert_selection_enabled.local(), |m| m.invert_selection(), Some("Ctrl+Shift+I")),
+            cmd("_Group", s.group_enabled.local(), |m| m.group(), Some("Ctrl+Shift+G")),
+            cmd("U_ngroup", s.ungroup_enabled.local(), |m| m.ungroup(), Some("Ctrl+Shift+U")),
             sep(),
-            cmd("Bring to _front", s.bring_to_front_enabled, |m| m.bring_to_front(), Some("Ctrl+Shift+OemCloseBrackets")),
-            cmd("Bring _forward", s.bring_forward_enabled, |m| m.bring_forward(), Some("Ctrl+Shift+F")),
-            cmd("Send _backward", s.send_backward_enabled, |m| m.send_backward(), Some("Ctrl+Shift+B")),
-            cmd("Send to bac_k", s.send_to_back_enabled, |m| m.send_to_back(), Some("Ctrl+Shift+OemOpenBrackets")),
+            cmd("Bring to _front", s.bring_to_front_enabled.local(), |m| m.bring_to_front(), Some("Ctrl+Shift+OemCloseBrackets")),
+            cmd("Bring _forward", s.bring_forward_enabled.local(), |m| m.bring_forward(), Some("Ctrl+Shift+F")),
+            cmd("Send _backward", s.send_backward_enabled.local(), |m| m.send_backward(), Some("Ctrl+Shift+B")),
+            cmd("Send to bac_k", s.send_to_back_enabled.local(), |m| m.send_to_back(), Some("Ctrl+Shift+OemOpenBrackets")),
             sep(),
-            cmd("Save as _quick style", s.save_quick_style_enabled, |m| m.save_quick_style(), None),
+            cmd("Save as _quick style", s.save_quick_style_enabled.local(), |m| m.save_quick_style(), None),
             #[cfg(not(target_os = "macos"))]
             sep(),
             #[cfg(not(target_os = "macos"))]
@@ -202,25 +202,25 @@ fn image_menu(ctx: &Ctx) -> MenuEntry {
     submenu(
         "_Image",
         vec![
-            cmd("_Crop", s.tool_crop_menu_enabled, |m| m.tool_crop_menu(), None),
-            cmd("_Auto trim", s.auto_trim_enabled, |m| m.auto_trim(), None),
+            cmd("_Crop", s.tool_crop_menu_enabled.local(), |m| m.tool_crop_menu(), None),
+            cmd("_Auto trim", s.auto_trim_enabled.local(), |m| m.auto_trim(), None),
             item("_Trim…", act(move || ask_trim(&trim_scope, s)), None),
             item("Resize _image…", act(move || ask_resize(&scope, s)), Some("Ctrl+Shift+R")),
             sep(),
-            cmd("Rotate _left", s.rotate_left_enabled, |m| m.rotate_left(), None),
-            cmd("Rotate _right", s.rotate_right_enabled, |m| m.rotate_right(), None),
-            cmd("Flip _horizontal", s.flip_horizontal_enabled, |m| m.flip_horizontal(), None),
-            cmd("Flip _vertical", s.flip_vertical_enabled, |m| m.flip_vertical(), None),
+            cmd("Rotate _left", s.rotate_left_enabled.local(), |m| m.rotate_left(), None),
+            cmd("Rotate _right", s.rotate_right_enabled.local(), |m| m.rotate_right(), None),
+            cmd("Flip _horizontal", s.flip_horizontal_enabled.local(), |m| m.flip_horizontal(), None),
+            cmd("Flip _vertical", s.flip_vertical_enabled.local(), |m| m.flip_vertical(), None),
             sep(),
-            cmd("Resize to _50%", s.resize50_enabled, |m| m.resize50(), None),
-            cmd("Resize to _200%", s.resize200_enabled, |m| m.resize200(), None),
-            cmd("E_xpand canvas to fit objects", s.expand_canvas_enabled, |m| m.expand_canvas(), None),
-            cmd("_Flatten selected", s.flatten_selected_enabled, |m| m.flatten_selected(), Some("Ctrl+T")),
-            cmd("Flatten a_ll", s.flatten_enabled, |m| m.flatten(), Some("Ctrl+Shift+T")),
-            cmd("Smart _redact", s.smart_redact_enabled, |m| m.smart_redact(), None),
+            cmd("Resize to _50%", s.resize50_enabled.local(), |m| m.resize50(), None),
+            cmd("Resize to _200%", s.resize200_enabled.local(), |m| m.resize200(), None),
+            cmd("E_xpand canvas to fit objects", s.expand_canvas_enabled.local(), |m| m.expand_canvas(), None),
+            cmd("_Flatten selected", s.flatten_selected_enabled.local(), |m| m.flatten_selected(), Some("Ctrl+T")),
+            cmd("Flatten a_ll", s.flatten_enabled.local(), |m| m.flatten(), Some("Ctrl+Shift+T")),
+            cmd("Smart _redact", s.smart_redact_enabled.local(), |m| m.smart_redact(), None),
             sep(),
-            cmd("_Grab text", s.grab_text_enabled, |m| m.grab_text(), None),
-            cmd("_Simplify", s.simplify_enabled, |m| m.simplify(), None),
+            cmd("_Grab text", s.grab_text_enabled.local(), |m| m.grab_text(), None),
+            cmd("_Simplify", s.simplify_enabled.local(), |m| m.simplify(), None),
             sep(),
             submenu("Canvas c_olor", colors),
             effects,
@@ -234,9 +234,9 @@ fn share_menu(ctx: &Ctx) -> MenuEntry {
     MenuEntry::dynamic("_Share", move || s.shares.get(), move |shares| {
         let mut items = share_items(shares);
         items.push(sep());
-        items.push(cmd("Copy all", s.copy_image_enabled, |m| m.copy_image(), None));
-        items.push(cmd("Export…", s.export_enabled, |m| m.export(), None));
-        items.push(cmd("Print…", s.print_enabled, |m| m.print(), None));
+        items.push(cmd("Copy all", s.copy_image_enabled.local(), |m| m.copy_image(), None));
+        items.push(cmd("Export…", s.export_enabled.local(), |m| m.export(), None));
+        items.push(cmd("Print…", s.print_enabled.local(), |m| m.print(), None));
         items
     })
 }
@@ -249,29 +249,29 @@ fn share_items(shares: &[String]) -> Vec<MenuEntry> {
 fn tools_menu(ctx: &Ctx) -> MenuEntry {
     let s = ctx.sink;
     let tools: [(&str, Signal<bool>, Call); 23] = [
-        ("Select _region", s.tool_select_enabled, |m| m.tool_select()),
-        ("_Move", s.tool_move_enabled, |m| m.tool_move()),
-        ("_Arrow", s.tool_arrow_enabled, |m| m.tool_arrow()),
-        ("_Line", s.tool_line_enabled, |m| m.tool_line()),
-        ("_Shape", s.tool_shape_enabled, |m| m.tool_shape()),
-        ("_Text", s.tool_text_enabled, |m| m.tool_text()),
-        ("_Callout", s.tool_callout_enabled, |m| m.tool_callout()),
-        ("S_tep", s.tool_step_enabled, |m| m.tool_step()),
-        ("_Pen", s.tool_pen_enabled, |m| m.tool_pen()),
-        ("_Highlight", s.tool_highlight_enabled, |m| m.tool_highlight()),
-        ("_Blur", s.tool_blur_enabled, |m| m.tool_blur()),
-        ("_Magnify", s.tool_magnify_enabled, |m| m.tool_magnify()),
-        ("Spotlig_ht", s.tool_spotlight_enabled, |m| m.tool_spotlight()),
-        ("Stam_p", s.tool_stamp_enabled, |m| m.tool_stamp()),
-        ("_Fill", s.tool_fill_enabled, |m| m.tool_fill()),
-        ("_Crop", s.tool_crop_enabled, |m| m.tool_crop()),
-        ("Cut _Out", s.tool_cut_out_enabled, |m| m.tool_cut_out()),
-        ("Se_lection", s.tool_selection_enabled, |m| m.tool_selection()),
-        ("_Eyedropper", s.tool_eyedropper_enabled, |m| m.tool_eyedropper()),
-        ("Smart _Move", s.tool_smart_move_enabled, |m| m.tool_smart_move()),
-        ("Text _Replace", s.tool_text_replace_enabled, |m| m.tool_text_replace()),
-        ("Magic _Wand", s.tool_magic_wand_enabled, |m| m.tool_magic_wand()),
-        ("Era_ser", s.tool_eraser_enabled, |m| m.tool_eraser()),
+        ("Select _region", s.tool_select_enabled.local(), |m| m.tool_select()),
+        ("_Move", s.tool_move_enabled.local(), |m| m.tool_move()),
+        ("_Arrow", s.tool_arrow_enabled.local(), |m| m.tool_arrow()),
+        ("_Line", s.tool_line_enabled.local(), |m| m.tool_line()),
+        ("_Shape", s.tool_shape_enabled.local(), |m| m.tool_shape()),
+        ("_Text", s.tool_text_enabled.local(), |m| m.tool_text()),
+        ("_Callout", s.tool_callout_enabled.local(), |m| m.tool_callout()),
+        ("S_tep", s.tool_step_enabled.local(), |m| m.tool_step()),
+        ("_Pen", s.tool_pen_enabled.local(), |m| m.tool_pen()),
+        ("_Highlight", s.tool_highlight_enabled.local(), |m| m.tool_highlight()),
+        ("_Blur", s.tool_blur_enabled.local(), |m| m.tool_blur()),
+        ("_Magnify", s.tool_magnify_enabled.local(), |m| m.tool_magnify()),
+        ("Spotlig_ht", s.tool_spotlight_enabled.local(), |m| m.tool_spotlight()),
+        ("Stam_p", s.tool_stamp_enabled.local(), |m| m.tool_stamp()),
+        ("_Fill", s.tool_fill_enabled.local(), |m| m.tool_fill()),
+        ("_Crop", s.tool_crop_enabled.local(), |m| m.tool_crop()),
+        ("Cut _Out", s.tool_cut_out_enabled.local(), |m| m.tool_cut_out()),
+        ("Se_lection", s.tool_selection_enabled.local(), |m| m.tool_selection()),
+        ("_Eyedropper", s.tool_eyedropper_enabled.local(), |m| m.tool_eyedropper()),
+        ("Smart _Move", s.tool_smart_move_enabled.local(), |m| m.tool_smart_move()),
+        ("Text _Replace", s.tool_text_replace_enabled.local(), |m| m.tool_text_replace()),
+        ("Magic _Wand", s.tool_magic_wand_enabled.local(), |m| m.tool_magic_wand()),
+        ("Era_ser", s.tool_eraser_enabled.local(), |m| m.tool_eraser()),
     ];
     const GESTURES: [&str; 9] = ["Ctrl+D1", "Ctrl+D2", "Ctrl+D3", "Ctrl+D4", "Ctrl+D5", "Ctrl+D6", "Ctrl+D7", "Ctrl+D8", "Ctrl+D9"];
     let items = tools.into_iter().enumerate().map(|(i, (text, enabled, f))| cmd(text, enabled, f, GESTURES.get(i).copied())).collect();
@@ -294,21 +294,21 @@ fn view_menu(ctx: &Ctx) -> MenuEntry {
     submenu(
         "_View",
         vec![
-            cmd("Zoom _in", s.zoom_in_enabled, |m| m.zoom_in(), Some("Ctrl+OemPlus")),
-            cmd("Zoom _out", s.zoom_out_enabled, |m| m.zoom_out(), Some("Ctrl+OemMinus")),
-            cmd("_Fit", s.zoom_fit_enabled, |m| m.zoom_fit(), Some("Ctrl+Alt+D0")),
-            cmd("_Actual size", s.zoom_actual_enabled, |m| m.zoom_actual(), Some("Ctrl+D0")),
+            cmd("Zoom _in", s.zoom_in_enabled.local(), |m| m.zoom_in(), Some("Ctrl+OemPlus")),
+            cmd("Zoom _out", s.zoom_out_enabled.local(), |m| m.zoom_out(), Some("Ctrl+OemMinus")),
+            cmd("_Fit", s.zoom_fit_enabled.local(), |m| m.zoom_fit(), Some("Ctrl+Alt+D0")),
+            cmd("_Actual size", s.zoom_actual_enabled.local(), |m| m.zoom_actual(), Some("Ctrl+D0")),
             pixel_grid,
             sep(),
-            cmd("_Library view", s.toggle_library_view_enabled, |m| m.toggle_library_view(), Some("Ctrl+L")),
-            cmd("Show captures _closed from the tray", s.show_closed_enabled, |m| m.show_closed(), None),
+            cmd("_Library view", s.toggle_library_view_enabled.local(), |m| m.toggle_library_view(), Some("Ctrl+L")),
+            cmd("Show captures _closed from the tray", s.show_closed_enabled.local(), |m| m.show_closed(), None),
             sep(),
-            toggle("Side _bar", s.show_side_bar),
-            toggle("_Effects panel", s.show_effects),
-            toggle("Recent captures _tray", s.show_tray),
-            toggle("Toolbar labe_ls", s.tool_labels),
-            cmd("Show _all tools in their usual order", s.reset_toolbar_enabled, |m| m.reset_toolbar(), None),
-            cmd("_Theme: dark / light / system", s.cycle_theme_enabled, |m| m.cycle_theme(), None),
+            toggle("Side _bar", s.show_side_bar.local()),
+            toggle("_Effects panel", s.show_effects.local()),
+            toggle("Recent captures _tray", s.show_tray.local()),
+            toggle("Toolbar labe_ls", s.tool_labels.local()),
+            cmd("Show _all tools in their usual order", s.reset_toolbar_enabled.local(), |m| m.reset_toolbar(), None),
+            cmd("_Theme: dark / light / system", s.cycle_theme_enabled.local(), |m| m.cycle_theme(), None),
         ],
     )
 }
@@ -318,23 +318,23 @@ fn video_menu(ctx: &Ctx) -> MenuEntry {
     submenu(
         "Vi_deo",
         vec![
-            cmd("_Play / pause", s.play_pause_enabled, |m| m.play_pause(), None),
-            cmd("Mark selection _start", s.set_trim_start_enabled, |m| m.set_trim_start(), None),
-            cmd("Mark selection _end", s.set_trim_end_enabled, |m| m.set_trim_end(), None),
+            cmd("_Play / pause", s.play_pause_enabled.local(), |m| m.play_pause(), None),
+            cmd("Mark selection _start", s.set_trim_start_enabled.local(), |m| m.set_trim_start(), None),
+            cmd("Mark selection _end", s.set_trim_end_enabled.local(), |m| m.set_trim_end(), None),
             sep(),
-            cmd("P_revious frame", s.prev_frame_enabled, |m| m.prev_frame(), None),
-            cmd("_Next frame", s.next_frame_enabled, |m| m.next_frame(), None),
-            cmd("_Mute", s.toggle_mute_enabled, |m| m.toggle_mute(), None),
+            cmd("P_revious frame", s.prev_frame_enabled.local(), |m| m.prev_frame(), None),
+            cmd("_Next frame", s.next_frame_enabled.local(), |m| m.next_frame(), None),
+            cmd("_Mute", s.toggle_mute_enabled.local(), |m| m.toggle_mute(), None),
             sep(),
-            cmd("Save _selection as MP4…", s.export_video_enabled, |m| m.export_video(), None),
-            cmd("_Cut selection", s.cut_selection_enabled, |m| m.cut_selection(), None),
-            cmd("Save edited _video", s.save_enabled, |m| m.save(), None),
-            cmd("Save a si_lent copy…", s.silent_copy_enabled, |m| m.silent_copy(), None),
-            cmd("Export _GIF…", s.export_gif_enabled, |m| m.export_gif(), None),
-            cmd("C_ombine videos…", s.combine_videos_enabled, |m| m.combine_videos(), None),
-            cmd("Video from _images…", s.video_from_images_enabled, |m| m.video_from_images(), None),
-            cmd("Narrated video from images…", s.narrate_images_enabled, |m| m.narrate_images(), None),
-            cmd("Edit _frame as image", s.frame_to_image_enabled, |m| m.frame_to_image(), None),
+            cmd("Save _selection as MP4…", s.export_video_enabled.local(), |m| m.export_video(), None),
+            cmd("_Cut selection", s.cut_selection_enabled.local(), |m| m.cut_selection(), None),
+            cmd("Save edited _video", s.save_enabled.local(), |m| m.save(), None),
+            cmd("Save a si_lent copy…", s.silent_copy_enabled.local(), |m| m.silent_copy(), None),
+            cmd("Export _GIF…", s.export_gif_enabled.local(), |m| m.export_gif(), None),
+            cmd("C_ombine videos…", s.combine_videos_enabled.local(), |m| m.combine_videos(), None),
+            cmd("Video from _images…", s.video_from_images_enabled.local(), |m| m.video_from_images(), None),
+            cmd("Narrated video from images…", s.narrate_images_enabled.local(), |m| m.narrate_images(), None),
+            cmd("Edit _frame as image", s.frame_to_image_enabled.local(), |m| m.frame_to_image(), None),
         ],
     )
 }
@@ -359,7 +359,7 @@ fn help_menu(ctx: &Ctx) -> MenuEntry {
 fn with_owner(scope: &AppScope, show: fn(&AppScope, &Window) -> Result<()>) {
     if let Some(owner) = scope.main_window() {
         #[cfg(target_os = "macos")]
-        let result = owner.get_is_visible().and_then(|visible| {
+        let result = owner.is_visible().and_then(|visible| {
             if !visible {
                 owner.show()?;
             }
@@ -426,7 +426,7 @@ pub fn create_flyout(ctx: &Ctx) -> El<MenuFlyout> {
         .with_op(move |scope, text_box| {
             let reader = text_box.clone();
             text_box.clone().on_lost_focus(scope, move |_| {
-                if let Ok(text) = reader.get_text() {
+                if let Ok(text) = reader.text() {
                     s.template_footer.set_if_changed(text.unwrap_or_default());
                 }
             })?;
@@ -435,16 +435,16 @@ pub fn create_flyout(ctx: &Ctx) -> El<MenuFlyout> {
     MenuFlyout::el()
         .item(templates)
         .item(themes)
-        .item(AnyEl::from(toggle("Captions under images", s.template_captions)))
-        .item(AnyEl::from(toggle("Number images", s.template_numbers)))
+        .item(AnyEl::from(toggle("Captions under images", s.template_captions.local())))
+        .item(AnyEl::from(toggle("Number images", s.template_numbers.local())))
         .item(MenuItem::el().header("Footer").item(MenuItem::el().header(footer).stays_open_on_click(true)))
         .item(Separator::el())
-        .item(AnyEl::from(cmd("Combine images…", s.combine_images_enabled, |m| m.combine_images(), None)))
-        .item(AnyEl::from(cmd("Combine the picked captures", s.combine_selected_enabled, |m| m.combine_selected(), None)))
+        .item(AnyEl::from(cmd("Combine images…", s.combine_images_enabled.local(), |m| m.combine_images(), None)))
+        .item(AnyEl::from(cmd("Combine the picked captures", s.combine_selected_enabled.local(), |m| m.combine_selected(), None)))
         .item(Separator::el())
-        .item(AnyEl::from(cmd("Video from images…", s.video_from_images_enabled, |m| m.video_from_images(), None)))
-        .item(AnyEl::from(cmd("Narrated video from images…", s.narrate_images_enabled, |m| m.narrate_images(), None)))
-        .item(AnyEl::from(cmd("Combine videos…", s.combine_videos_enabled, |m| m.combine_videos(), None)))
+        .item(AnyEl::from(cmd("Video from images…", s.video_from_images_enabled.local(), |m| m.video_from_images(), None)))
+        .item(AnyEl::from(cmd("Narrated video from images…", s.narrate_images_enabled.local(), |m| m.narrate_images(), None)))
+        .item(AnyEl::from(cmd("Combine videos…", s.combine_videos_enabled.local(), |m| m.combine_videos(), None)))
 }
 
 /// Share ▾: the share destinations, Export and Print.
@@ -453,8 +453,8 @@ pub fn share_flyout(ctx: &Ctx) -> El<MenuFlyout> {
     reactive_items(MenuFlyout::el(), MenuFlyout::items, move || s.shares.get(), move |shares: &Vec<String>| {
         let mut items = share_items(shares);
         items.push(sep());
-        items.push(cmd("Export…", s.export_enabled, |m| m.export(), None));
-        items.push(cmd("Print…", s.print_enabled, |m| m.print(), None));
+        items.push(cmd("Export…", s.export_enabled.local(), |m| m.export(), None));
+        items.push(cmd("Print…", s.print_enabled.local(), |m| m.print(), None));
         items.into_iter().map(AnyEl::from).collect()
     })
 }

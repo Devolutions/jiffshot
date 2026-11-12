@@ -30,7 +30,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 pub const GLYPHS: &str = super::super::icons::FONT;
 
 /// Avalonia's `SizeToContent.WidthAndHeight`.
-pub const SIZE_TO_CONTENT: i32 = 3;
+pub const SIZE_TO_CONTENT: rustolonia::SizeToContent = rustolonia::SizeToContent::WIDTH_AND_HEIGHT;
 
 pub const TRANSPARENT: Color = Color::new(0, 0, 0, 0);
 
@@ -53,13 +53,15 @@ pub fn payload(value: &str) -> Option<&str> {
 
 /// Whether a window's Closing is the application or Windows ending, which
 /// must not be cancelled (other closes just hide the window for next time).
-pub fn closing_for_good(close_reason: i32) -> bool {
-    matches!(WindowCloseReason::try_from(close_reason), Ok(WindowCloseReason::ApplicationShutdown | WindowCloseReason::OSShutdown))
+pub fn closing_for_good(close_reason: WindowCloseReason) -> bool {
+    matches!(close_reason, WindowCloseReason::ApplicationShutdown | WindowCloseReason::OSShutdown)
 }
 
 /// Runs `f` on the UI thread after what is running now, logging its error.
-pub fn post(scope: &AppScope, what: &'static str, f: impl FnOnce() -> Result<()> + Send + 'static) {
+pub fn post(scope: &AppScope, what: &'static str, f: impl FnOnce() -> Result<()> + 'static) {
+    let callback = crate::ui_only::UiOnly::new(RefCell::new(Some(f)));
     let posted = scope.post(move || {
+        let f = callback.get().borrow_mut().take().expect("posted callback runs once");
         if let Err(error) = f() {
             eprintln!("{what}: {error:?}");
         }
@@ -70,9 +72,9 @@ pub fn post(scope: &AppScope, what: &'static str, f: impl FnOnce() -> Result<()>
 }
 
 /// Runs `f` on the UI thread once `delay` has passed.
-pub fn after(scope: &AppScope, delay: Duration, f: impl FnOnce() + Send + 'static) {
+pub fn after(scope: &AppScope, delay: Duration, f: impl FnOnce() + 'static) {
     let started = scope.delay(delay).and_then(|wait| {
-        scope.spawn(async move {
+        scope.spawn_local(async move {
             if wait.await.is_ok() {
                 f();
             }
@@ -105,9 +107,9 @@ impl Subscriptions {
 
 /// Like `on_click`, with the subscription kept in `subs`. `f` gets the
 /// button, for a menu or panel to open under it.
-pub fn on_click<T>(el: El<T>, subs: &Subscriptions, mut f: impl FnMut(&T) + Send + 'static) -> El<T>
+pub fn on_click<T>(el: El<T>, subs: &Subscriptions, mut f: impl FnMut(&T) + 'static) -> El<T>
 where
-    T: Upcast<Button> + Clone + Send + 'static,
+    T: Upcast<Button> + Clone + 'static,
 {
     let subs = subs.clone();
     el.with_op(move |_, control| {
@@ -206,12 +208,12 @@ impl Input {
     pub fn value(&self) -> Value {
         match self {
             Input::Number(control) => {
-                let number = control.get_value().ok().flatten().and_then(|text| text.trim().parse::<f64>().ok()).unwrap_or(0.0);
+                let number = control.value().ok().flatten().map(|value| value.to_f64()).unwrap_or(0.0);
                 Value::from(number.round() as i64)
             }
-            Input::Check(control) => Value::from(control.get_is_checked().ok().flatten() == Some(true)),
-            Input::Choice(control) => Value::from(control.get_selected_index().unwrap_or(0).max(0)),
-            Input::Text(control) => Value::from(control.get_text().ok().flatten().unwrap_or_default()),
+            Input::Check(control) => Value::from(control.is_checked().ok().flatten() == Some(true)),
+            Input::Choice(control) => Value::from(control.selected_index().unwrap_or(0).max(0)),
+            Input::Text(control) => Value::from(control.text().ok().flatten().unwrap_or_default()),
             Input::Hotkey(value) => Value::from(value.lock().map(|v| v.clone()).unwrap_or_default()),
             Input::Nothing => Value::Null,
         }
@@ -230,10 +232,10 @@ pub fn row(scope: &AppScope, form: Form, row: &Row, owner: NodeRef<Window>, inpu
     let control = match row {
         Row::Number { label, value, min, max } => {
             let el = NumericUpDown::el()
-                .value(value.to_string())
-                .minimum(min.to_string())
-                .maximum(max.to_string())
-                .increment("1")
+                .value(rustolonia::Decimal::from(*value))
+                .minimum(rustolonia::Decimal::from(*min))
+                .maximum(rustolonia::Decimal::from(*max))
+                .increment(rustolonia::Decimal::ONE)
                 .format_string("0")
                 .grid_column(1);
             let el = if wide { el.width(140.0).horizontal_alignment(HorizontalAlignment::Left) } else { el.min_width(130.0) };
@@ -330,10 +332,10 @@ fn hotkey_field(scope: &AppScope, value: &str, placeholder: &str, inputs: &mut V
             if e.handled {
                 return;
             }
-            let Ok(key) = Key::try_from(e.key) else { return };
+            let key = e.key;
             match key {
                 Key::Tab | Key::Escape | Key::Return => return,
-                Key::Back | Key::Delete if e.key_modifiers == 0 => set(String::new(), true),
+                Key::Back | Key::Delete if e.key_modifiers.is_empty() => set(String::new(), true),
                 _ => match hotkey_text(e.key, e.key_modifiers) {
                     Some(text) => set(text, true),
                     None => set(current(), true),
@@ -346,7 +348,7 @@ fn hotkey_field(scope: &AppScope, value: &str, placeholder: &str, inputs: &mut V
         // Windows reports Print Screen only when it is released.
         let set = set.clone();
         subs.keep(control.subscribe_key_up(move |e| {
-            if !e.handled && e.key == Key::Snapshot as i32 {
+            if !e.handled && e.key == Key::Snapshot {
                 if let Some(text) = hotkey_text(e.key, e.key_modifiers) {
                     set(text, true);
                 }
@@ -388,8 +390,9 @@ fn hotkey_caption(value: &str, placeholder: &str, recording: bool) -> String {
 /// Jiffshot stores hotkeys ("Ctrl+Shift+1", "Ctrl+PrtScn"). Letters and
 /// digits need Ctrl, Alt or the Windows (Command) key, so typing is not
 /// taken over; function keys and Print Screen may stand alone.
-pub fn hotkey_text(key: i32, modifiers: i32) -> Option<String> {
-    use rustolonia::key_modifiers::{ALT, CONTROL, META, SHIFT};
+pub fn hotkey_text(key: Key, modifiers: rustolonia::KeyModifiers) -> Option<String> {
+    use rustolonia::KeyModifiers;
+    let key = key as i32;
     let d0 = Key::D0 as i32;
     let a = Key::A as i32;
     let f1 = Key::F1 as i32;
@@ -400,12 +403,12 @@ pub fn hotkey_text(key: i32, modifiers: i32) -> Option<String> {
         k if (f1..=f1 + 23).contains(&k) => (format!("F{}", k - f1 + 1), true),
         _ => return None,
     };
-    if !bare && modifiers & (CONTROL | ALT | META) == 0 {
+    if !bare && (modifiers & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::META)).is_empty() {
         return None;
     }
     let mut text = String::new();
-    for (bit, label) in [(CONTROL, "Ctrl"), (ALT, "Alt"), (SHIFT, "Shift"), (META, if cfg!(target_os = "macos") { "Cmd" } else { "Win" })] {
-        if modifiers & bit != 0 {
+    for (bit, label) in [(KeyModifiers::CONTROL, "Ctrl"), (KeyModifiers::ALT, "Alt"), (KeyModifiers::SHIFT, "Shift"), (KeyModifiers::META, if cfg!(target_os = "macos") { "Cmd" } else { "Win" })] {
+        if modifiers.contains(bit) {
             text.push_str(label);
             text.push('+');
         }
@@ -568,19 +571,19 @@ pub fn set_native_title(hwnd: isize, title: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustolonia::key_modifiers::{ALT, CONTROL, META, SHIFT};
+    use rustolonia::KeyModifiers;
 
     #[test]
     fn hotkey_text_records_supported_keys() {
         let win = if cfg!(target_os = "macos") { "Cmd" } else { "Win" };
-        assert_eq!(hotkey_text(Key::Snapshot as i32, CONTROL).as_deref(), Some("Ctrl+PrtScn"));
-        assert_eq!(hotkey_text(Key::Snapshot as i32, 0).as_deref(), Some("PrtScn"));
-        assert_eq!(hotkey_text(Key::D1 as i32, CONTROL | SHIFT).as_deref(), Some("Ctrl+Shift+1"));
-        assert_eq!(hotkey_text(Key::S as i32, SHIFT | ALT | META).as_deref(), Some(format!("Alt+Shift+{win}+S").as_str()));
-        assert_eq!(hotkey_text(Key::F12 as i32, 0).as_deref(), Some("F12"));
-        assert_eq!(hotkey_text(Key::A as i32, 0), None);
-        assert_eq!(hotkey_text(Key::A as i32, SHIFT), None);
-        assert_eq!(hotkey_text(Key::LeftCtrl as i32, CONTROL), None);
+        assert_eq!(hotkey_text(Key::Snapshot, KeyModifiers::CONTROL).as_deref(), Some("Ctrl+PrtScn"));
+        assert_eq!(hotkey_text(Key::Snapshot, KeyModifiers::NONE).as_deref(), Some("PrtScn"));
+        assert_eq!(hotkey_text(Key::D1, KeyModifiers::CONTROL | KeyModifiers::SHIFT).as_deref(), Some("Ctrl+Shift+1"));
+        assert_eq!(hotkey_text(Key::S, KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::META).as_deref(), Some(format!("Alt+Shift+{win}+S").as_str()));
+        assert_eq!(hotkey_text(Key::F12, KeyModifiers::NONE).as_deref(), Some("F12"));
+        assert_eq!(hotkey_text(Key::A, KeyModifiers::NONE), None);
+        assert_eq!(hotkey_text(Key::A, KeyModifiers::SHIFT), None);
+        assert_eq!(hotkey_text(Key::LeftCtrl, KeyModifiers::CONTROL), None);
     }
 
     #[test]

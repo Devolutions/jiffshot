@@ -62,13 +62,13 @@ pub fn modifiers(m: Modifiers) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustolonia::key_modifiers::{CONTROL, META, SHIFT};
+    use rustolonia::KeyModifiers;
 
     #[test]
     fn selection_uses_the_platform_command_modifier() {
-        let command = if cfg!(target_os = "macos") { META } else { CONTROL };
-        let other = if cfg!(target_os = "macos") { CONTROL } else { META };
-        assert_eq!(modifiers(Modifiers(command | SHIFT)), MOD_CTRL | MOD_SHIFT);
-        assert_eq!(modifiers(Modifiers(other)), 0);
+        let command = if cfg!(target_os = "macos") { KeyModifiers::META } else { KeyModifiers::CONTROL };
+        let other = if cfg!(target_os = "macos") { KeyModifiers::CONTROL } else { KeyModifiers::META };
+        assert_eq!(modifiers(Modifiers((command | KeyModifiers::SHIFT).bits())), MOD_CTRL | MOD_SHIFT);
+        assert_eq!(modifiers(Modifiers(other.bits())), 0);
     }
 }

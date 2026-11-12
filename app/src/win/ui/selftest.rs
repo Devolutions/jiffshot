@@ -8,6 +8,7 @@
 //! `JIFFSHOT_UITEST_CAPTURE_ONLY` checks the Capture window and chooser
 //! without running the editor and overlay walk.
 //! `JIFFSHOT_UITEST_CANVAS` checks canvas handles through view-coordinate input.
+//! On macOS, `JIFFSHOT_UITEST_CANVAS_KEYS` checks canvas deletion shortcuts.
 //! `JIFFSHOT_UITEST_SELECTION` checks selecting, copying and cutting image pixels.
 //! `JIFFSHOT_UITEST_NEW_FROM_CLIPBOARD` checks creating images without touching the system clipboard.
 //! `JIFFSHOT_UITEST_CAPTURE_MENUS` checks menu switching and DarkBlue popups.
@@ -591,6 +592,197 @@ fn canvas_handle_script() -> Script {
     s
 }
 
+#[cfg(target_os = "macos")]
+fn canvas_keys_script() -> Script {
+    use jiffshot_doc::object::{Kind, ShapeKind, Style};
+    use jiffshot_doc::{Box2, Document, Rgba};
+    use objc2_core_graphics::CGEventFlags;
+    use rustolonia::{KeyModifiers, NavigationMethod};
+
+    fn select_first_two() {
+        crate::app::act(|_| {
+            crate::canvas::with_editor(|editor| {
+                let ids = editor.document().objects.iter().take(2).map(|object| object.id).collect();
+                editor.set_selection(ids);
+            })
+            .expect("the editor is unavailable");
+        })
+        .expect("select annotations");
+    }
+
+    let mut script = Script(VecDeque::new());
+    script.wait(500).step(|_| {
+        let handle = super::main_window_handle().expect("the editor is unavailable");
+        crate::mac_window::activate(handle).expect("activate the keyboard fixture");
+        crate::app::act(|app| {
+            app.load(Document::blank(180, 90, Rgba::WHITE), None, None);
+            crate::canvas::with_editor(|editor| {
+                let ids = [10.0, 60.0, 110.0].map(|x| {
+                    editor.add_object(
+                        "Annotation",
+                        Kind::Shape {
+                            rect: Box2::new(x, 10.0, x + 30.0, 50.0),
+                            shape: ShapeKind::Rectangle,
+                        },
+                        Style::default(),
+                    )
+                });
+                editor.set_selection(ids[..2].to_vec());
+            })
+            .expect("the editor is unavailable");
+        })
+        .expect("load the keyboard fixture");
+        300
+    });
+    script.step(|test| {
+        assert!(sink().delete_enabled.get_untracked(), "selected annotations must be deletable");
+        test.note = crate::canvas::with_editor(|editor| editor.document().objects[2].id.to_string())
+            .expect("the editor is unavailable");
+        super::canvas()
+            .expect("the canvas is unavailable")
+            .control()
+            .focus_with_navigation_method_and_key_modifiers(NavigationMethod::Unspecified, KeyModifiers::NONE)
+            .expect("focus the canvas");
+        platform::press_native_key("\u{7f}", 51, CGEventFlags::empty()).expect("send Backspace");
+        150
+    });
+    script.step(|test| {
+        let kept: u64 = test.note.parse().expect("the unselected annotation ID");
+        crate::canvas::with_editor(|editor| {
+            let remaining: Vec<_> = editor.document().objects.iter().map(|object| object.id).collect();
+            assert_eq!(remaining, [kept], "Backspace must delete only the selected annotations");
+            assert!(editor.selected_ids().is_empty());
+        })
+        .unwrap();
+        test.line("canvas keys: Backspace deletes the selected annotations");
+        call(|model| model.undo());
+        150
+    });
+    script.step(|_| {
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(3), "Undo restores both annotations");
+        select_first_two();
+        150
+    });
+    script.step(|_| {
+        platform::press_native_key("\u{7f}", 51, CGEventFlags::MaskCommand).expect("send Command+Backspace");
+        150
+    });
+    script.step(|test| {
+        let kept: u64 = test.note.parse().expect("the unselected annotation ID");
+        assert_eq!(
+            crate::canvas::with_editor(|editor| editor.document().objects.iter().map(|object| object.id).collect::<Vec<_>>()),
+            Some(vec![kept]),
+            "Command+Backspace must delete only the selected annotations"
+        );
+        assert!(!sink().status.get_untracked().contains("Only library captures"), "Command+Backspace must not invoke Delete file");
+        test.line("canvas keys: Undo restores annotations and Command+Backspace deletes them");
+        platform::press_native_key("\u{7f}", 51, CGEventFlags::empty()).expect("send Backspace without a selection");
+        platform::press_native_key("\u{7f}", 51, CGEventFlags::MaskCommand).expect("send Command+Backspace without a selection");
+        150
+    });
+    script.step(|_| {
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(1), "Backspace without a selection must do nothing");
+        assert!(!sink().status.get_untracked().contains("Only library captures"), "Command+Backspace must not invoke Delete file");
+        call(|model| model.undo());
+        150
+    });
+    script.step(|_| {
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(3));
+        select_first_two();
+        150
+    });
+    script.step(|_| {
+        for modifiers in [
+            CGEventFlags::MaskShift,
+            CGEventFlags::MaskAlternate,
+            CGEventFlags::MaskControl,
+            CGEventFlags::MaskCommand | CGEventFlags::MaskShift,
+        ] {
+            platform::press_native_key("\u{7f}", 51, modifiers).expect("send a modified Backspace");
+        }
+        150
+    });
+    script.step(|test| {
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(3), "unrelated Backspace combinations must not delete");
+        platform::press_native_key("\u{f728}", 117, CGEventFlags::empty()).expect("send forward Delete");
+        test.line("canvas keys: empty and unrelated modified Backspace leave the document unchanged");
+        150
+    });
+    script.step(|test| {
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(1), "forward Delete must still work");
+        test.line("canvas keys: forward Delete still deletes selected annotations");
+        crate::app::act(|app| {
+            app.load(Document::blank(180, 90, Rgba::WHITE), None, None);
+            crate::canvas::with_editor(|editor| {
+                editor.add_object(
+                    "Annotation",
+                    Kind::Shape {
+                        rect: Box2::new(16.0, 16.0, 40.0, 40.0),
+                        shape: ShapeKind::Rectangle,
+                    },
+                    Style::default(),
+                );
+                editor.set_tool(jiffshot_doc::editor::Tool::Select);
+                editor.mark_saved();
+            })
+            .unwrap();
+            crate::canvas::pointer(POINTER_PRESSED, 10.0, 10.0, 0, 1.0);
+            crate::canvas::pointer(POINTER_MOVED, 30.0, 30.0, 0, 1.0);
+            crate::canvas::pointer(POINTER_RELEASED, 30.0, 30.0, 0, 1.0);
+            app.sync();
+        })
+        .unwrap();
+        150
+    });
+    script.step(|_| {
+        assert!(!sink().delete_enabled.get_untracked(), "an overlapping image region must not be deletable");
+        platform::press_native_key("\u{7f}", 51, CGEventFlags::empty()).expect("send Backspace to the protected region");
+        platform::press_native_key("\u{7f}", 51, CGEventFlags::MaskCommand).expect("send Command+Backspace to the protected region");
+        150
+    });
+    script.step(|test| {
+        crate::canvas::with_editor(|editor| {
+            assert_eq!(editor.document().objects.len(), 1);
+            assert_eq!(editor.selected_region(), Some(jiffshot_doc::IRect::new(10, 10, 20, 20)));
+            assert!(!editor.is_modified(), "a protected image region must not be deleted");
+        })
+        .unwrap();
+        assert!(!sink().status.get_untracked().contains("Only library captures"), "Command+Backspace must not invoke Delete file");
+        test.line("canvas keys: a protected overlapping image region remains unchanged");
+        crate::app::act(|app| app.load(Document::blank(180, 90, Rgba::WHITE), None, None)).unwrap();
+        run("tool:Text");
+        canvas_feed(POINTER_PRESSED, 20.0, 20.0);
+        canvas_feed(POINTER_RELEASED, 20.0, 20.0);
+        300
+    });
+    script.step(|_| {
+        for (text, key_code) in [("a", 0), ("b", 11), ("c", 8)] {
+            platform::press_native_key(text, key_code, CGEventFlags::empty()).expect("type in the annotation text field");
+        }
+        150
+    });
+    script.step(|_| {
+        assert_eq!(sink().text.get_untracked(), "abc", "typing must reach the text field");
+        platform::press_native_key("\u{7f}", 51, CGEventFlags::empty()).expect("send Backspace to the text field");
+        150
+    });
+    script.step(|_| {
+        assert_eq!(sink().text.get_untracked(), "ab", "Backspace must edit text");
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(1));
+        platform::press_native_key("\u{7f}", 51, CGEventFlags::MaskCommand).expect("send Command+Backspace to the text field");
+        150
+    });
+    script.step(|test| {
+        let text = sink().text.get_untracked();
+        assert!(text.len() < 2, "Command+Backspace must edit text: {text:?}");
+        assert_eq!(crate::canvas::with_editor(|editor| editor.document().objects.len()), Some(1), "text editing must not delete the annotation");
+        crate::canvas::with_editor(|editor| editor.mark_saved()).unwrap();
+        test.line("canvas keys: Backspace and Command+Backspace keep normal text editing");
+        0
+    });
+    script
+}
+
 /// The whole walk, in order.
 fn script() -> Script {
     if env("JIFFSHOT_UITEST_CAPTURE_WORKFLOW").is_some() {
@@ -605,6 +797,10 @@ fn script() -> Script {
     let mut s = Script(VecDeque::new());
     if env("JIFFSHOT_UITEST_CANVAS").is_some() {
         return canvas_handle_script();
+    }
+    #[cfg(target_os = "macos")]
+    if env("JIFFSHOT_UITEST_CANVAS_KEYS").is_some() {
+        return canvas_keys_script();
     }
     if env("JIFFSHOT_UITEST_GRAB_TEXT").is_some() {
         return grab_text_script();
@@ -633,7 +829,7 @@ fn script() -> Script {
             scope.mount_hidden(hidden.clone()).expect("mount the hidden test window");
             let shown = rustolonia::Window::new().expect("create a visible test window");
             scope.mount(shown.clone()).expect("mount the visible test window");
-            let activated = editor.get_show_activated().unwrap();
+            let activated = editor.show_activated().unwrap();
             #[cfg(target_os = "macos")]
             let native = crate::mac_window::window(scope.platform_handle(&editor).unwrap()).unwrap();
             #[cfg(target_os = "macos")]
@@ -643,18 +839,21 @@ fn script() -> Script {
             let first = jiffshot_capture::visibility::hide().expect("hide application windows");
             let ready = first.hidden_since().expect("hiding did not publish a safe frame timestamp");
             assert!(ready <= Instant::now(), "capture returned before the compositor settled");
-            assert!(scope.windows().iter().all(|window| !window.get_is_visible().unwrap()),
+            assert!(scope.windows().iter().all(|window| !window.is_visible().unwrap()),
                 "a Jiffshot window remained visible");
             let second = jiffshot_capture::visibility::hide().expect("nest window hiding");
             assert_eq!(second.hidden_since(), Some(ready), "nested capture changed the frame cutoff");
             drop(first);
-            assert!(!editor.get_is_visible().unwrap(), "nested capture restored the editor too early");
+            assert!(!editor.is_visible().unwrap(), "nested capture restored the editor too early");
             drop(second);
-            assert!(editor.get_is_visible().unwrap(), "capture did not restore the editor");
-            assert!(shown.get_is_visible().unwrap(), "capture did not restore another visible window");
-            assert!(!hidden.get_is_visible().unwrap(), "capture opened a previously hidden window");
-            assert_eq!(editor.get_show_activated().unwrap(), activated,
-                "capture changed the editor's activation policy");
+            assert!(editor.is_visible().unwrap(), "capture did not restore the editor");
+            assert!(shown.is_visible().unwrap(), "capture did not restore another visible window");
+            assert!(!hidden.is_visible().unwrap(), "capture opened a previously hidden window");
+            assert_eq!(
+                editor.show_activated().unwrap(),
+                activated,
+                "capture changed the editor's activation policy"
+            );
             #[cfg(target_os = "macos")]
             {
                 assert_eq!(native.animationBehavior(), objc2_app_kit::NSWindowAnimationBehavior::DocumentWindow,
@@ -666,12 +865,12 @@ fn script() -> Script {
                 Err(std::io::Error::other("synthetic capture failure"))
             })();
             assert!(failed.is_err());
-            assert!(editor.get_is_visible().unwrap(), "failed capture did not restore the editor");
-            assert!(shown.get_is_visible().unwrap(), "failed capture did not restore another window");
-            assert!(!hidden.get_is_visible().unwrap());
+            assert!(editor.is_visible().unwrap(), "failed capture did not restore the editor");
+            assert!(shown.is_visible().unwrap(), "failed capture did not restore another window");
+            assert!(!hidden.is_visible().unwrap());
             let dismissed = Instant::now();
             for window in scope.windows() {
-                if window.get_is_visible().unwrap() {
+                if window.is_visible().unwrap() {
                     super::capture_visibility::hide_window(&window).expect("dismiss a window before capture");
                 }
             }
@@ -682,7 +881,7 @@ fn script() -> Script {
             assert!(dismissed.elapsed() >= Duration::from_millis(150),
                 "capture did not wait for already-dismissed windows");
             drop(capture);
-            assert!(!editor.get_is_visible().unwrap(), "capture reopened a dismissed window");
+            assert!(!editor.is_visible().unwrap(), "capture reopened a dismissed window");
             editor.show().expect("restore the editor after dismissal test");
             shown.close().expect("close the visible test window");
             hidden.close().expect("close the hidden test window");
@@ -698,7 +897,7 @@ fn script() -> Script {
                     let target = scope.clone();
                     let (send, receive) = std::sync::mpsc::channel();
                     scope.post(move || {
-                        let hidden = target.windows().iter().all(|window| window.get_is_visible().is_ok_and(|visible| !visible));
+                        let hidden = target.windows().iter().all(|window| window.is_visible().is_ok_and(|visible| !visible));
                         let _ = send.send(hidden);
                     }).map_err(|error| error.to_string())?;
                     if !receive.recv_timeout(Duration::from_secs(5)).map_err(|error| error.to_string())? {
@@ -714,7 +913,7 @@ fn script() -> Script {
         s.step(move |test| {
             receive.try_recv().expect("the worker capture did not finish")
                 .expect("worker capture visibility failed");
-            assert!(super::main_window().unwrap().get_is_visible().unwrap(),
+            assert!(super::main_window().unwrap().is_visible().unwrap(),
                 "the worker capture did not restore the editor");
             test.line("capture visibility: worker-thread hiding acknowledged before capture and restored afterward");
             0
@@ -890,21 +1089,21 @@ fn script() -> Script {
     s.drag("Arrow", (0.08, 0.12), (0.30, 0.30), 12)
         .drag("Shape", (0.35, 0.10), (0.55, 0.30), 12)
         .step(move |_| {
-            set(k.variant, "Rounded".into());
-            set(k.stroke_color, "#FF1E88E5".into());
+            set(k.variant.local(), "Rounded".into());
+            set(k.stroke_color.local(), "#FF1E88E5".into());
             120
         })
         .drag("Text", (0.60, 0.08), (0.92, 0.18), 12)
         .step(move |_| {
-            set(k.text, "Jiffshot text".into());
+            set(k.text.local(), "Jiffshot text".into());
             120
         })
         .drag("Callout", (0.06, 0.42), (0.30, 0.58), 12)
         .step(move |_| {
-            set(k.text, "A callout with a tail".into());
-            set(k.fill2, "#FF8E24AA".into());
-            set(k.underline, true);
-            set(k.v_align, "Middle".into());
+            set(k.text.local(), "A callout with a tail".into());
+            set(k.fill2.local(), "#FF8E24AA".into());
+            set(k.underline.local(), true);
+            set(k.v_align.local(), "Middle".into());
             120
         })
         .click("Step", (0.40, 0.45))
@@ -917,14 +1116,14 @@ fn script() -> Script {
         .click("Stamp", (0.52, 0.78))
         .drag("Line", (0.60, 0.80), (0.90, 0.92), 12)
         .step(move |_| {
-            set(k.shadow, true);
-            set(k.shadow_distance, 10.0);
-            set(k.end_cap, "Diamond".into());
+            set(k.shadow.local(), true);
+            set(k.shadow_distance.local(), 10.0);
+            set(k.end_cap.local(), "Diamond".into());
             120
         })
         .step(move |_| {
             run("tool:Shape");
-            set(k.variant, "Polygon".into());
+            set(k.variant.local(), "Polygon".into());
             120
         })
         .step(|t| {
@@ -937,7 +1136,7 @@ fn script() -> Script {
         })
         .log(move |_| format!("polygon: selection={} {}", k.selection.get_untracked(), k.document_info.get_untracked()))
         .step(move |_| {
-            set(k.variant, "Rectangle".into());
+            set(k.variant.local(), "Rectangle".into());
             0
         })
         .shot("ui-1-annotated.png")
@@ -956,7 +1155,7 @@ fn script() -> Script {
         // Select, move and restyle the first arrow; undo and redo.
         .drag("Select", (0.19, 0.21), (0.24, 0.26), 12)
         .step(move |_| {
-            set(k.stroke_width, 14.0);
+            set(k.stroke_width.local(), 14.0);
             120
         })
         .step(|_| {
@@ -1433,7 +1632,7 @@ fn selection_clipboard_script() -> Script {
             let end = view
                 .selftest_view_point(55.0, 45.0)
                 .expect("the canvas view is busy");
-            let alt = Modifiers(rustolonia::key_modifiers::ALT);
+            let alt = Modifiers(rustolonia::KeyModifiers::ALT.bits());
             for (kind, point) in [
                 (PointerKind::Pressed, start),
                 (PointerKind::Moved, end),
@@ -1710,7 +1909,7 @@ fn native_menu_script() -> Script {
         platform::native_menu_item(&["File", "Open recent", "native_menu_fixture.png"]).expect("dynamic recent file");
         let grid = super::canvas().expect("the canvas is unavailable").show_pixel_grid();
         test.note = grid.to_string();
-        platform::press_native_menu_key("g", 5).expect("send Command+G to the fixture");
+        platform::press_native_key("g", 5, objc2_core_graphics::CGEventFlags::MaskCommand).expect("send Command+G to the fixture");
         200
     }).step(|test| {
         let original: bool = test.note.parse().expect("saved pixel grid state");
@@ -1744,8 +1943,8 @@ fn native_menu_script() -> Script {
         let window = crate::capture_window::window().expect("the Capture window is unavailable");
         crate::mac_window::activate(scope.platform_handle(&window).expect("the Capture window has no native handle")).expect("activate the Capture window");
         assert!(scope.is_native_menu_exported(&window).expect("query Capture native menu export"));
-        assert_eq!(window.get_title().expect("Capture window title").as_deref(), Some("Jiffshot Capture"));
-        assert!(!window.get_extend_client_area_to_decorations_hint().expect("Capture title bar mode"),
+        assert_eq!(window.title().expect("Capture window title").as_deref(), Some("Jiffshot Capture"));
+        assert!(!window.extend_client_area_to_decorations_hint().expect("Capture title bar mode"),
             "the Capture window must use the native macOS title bar");
         assert_eq!(super::capture_view::native_menu_layout_for_selftest().expect("Capture menu layout"), (0, 0.0),
             "the Capture window must not contain an in-window menu bar or reserve space for one");
@@ -1991,7 +2190,7 @@ fn grab_text_script() -> Script {
                 return 0;
             }
             if let Some((window, _)) = super::extras::grab_text_for_selftest() {
-                if window.get_is_visible().expect("inspect the result window") {
+                if window.is_visible().expect("inspect the result window") {
                     shown.set(true);
                     return 0;
                 }
@@ -2004,8 +2203,8 @@ fn grab_text_script() -> Script {
     script.step(move |test| {
         assert!(result_shown.get(), "the Grab Text result window did not appear: {}", sink().toast.get_untracked());
         let (window, text) = super::extras::grab_text_for_selftest().expect("the result window is unavailable");
-        assert!(window.get_is_visible().expect("inspect the result window"));
-        let text = text.get_text().expect("read the result window").expect("the result has no text");
+        assert!(window.is_visible().expect("inspect the result window"));
+        let text = text.text().expect("read the result window").expect("the result has no text");
         let recognized = text.to_ascii_lowercase();
         assert!(recognized.contains("jiffshot") && recognized.contains("fixture"), "the screen text was not recognized: {text:?}");
         #[cfg(windows)]
@@ -2140,7 +2339,7 @@ fn capture_visibility_pixel_steps(script: &mut Script) {
         assert!(!(pixel.0 >= 180 && pixel.1 <= 40 && pixel.2 >= 180),
             "Jiffshot appeared in its own screenshot: {pixel:?}");
         let window = marker.borrow_mut().take().unwrap();
-        assert!(window.get_is_visible().unwrap(), "the screenshot did not restore its marker");
+        assert!(window.is_visible().unwrap(), "the screenshot did not restore its marker");
         window.close().expect("close the screenshot marker");
         test.line(format!("capture visibility: real screenshot excluded the visible magenta window (pixel {pixel:?}) and restored it"));
         0
@@ -3408,8 +3607,8 @@ fn permissions_script() -> Script {
             let windows = windows_for_selftest();
             assert_eq!(windows.len(), index + 1, "duplicate denials must reuse the guidance window");
             let window = &windows.iter().find(|(kind, _)| *kind == permission).expect("guidance window").1;
-            assert!(window.get_is_visible().unwrap(), "guidance must show with the editor hidden");
-            assert_eq!(window.get_title().unwrap().unwrap(), format!("Jiffshot needs {} access", permission.name()));
+            assert!(window.is_visible().unwrap(), "guidance must show with the editor hidden");
+            assert_eq!(window.title().unwrap().unwrap(), format!("Jiffshot needs {} access", permission.name()));
             window.close().expect("dismiss guidance using its close control");
             test.line(format!("{} denial showed one guidance window with the editor hidden", permission.name()));
             150
@@ -3417,7 +3616,7 @@ fn permissions_script() -> Script {
         script.step(move |_| {
             let windows = windows_for_selftest();
             let window = &windows.iter().find(|(kind, _)| *kind == permission).unwrap().1;
-            assert!(!window.get_is_visible().unwrap(), "dismissal must not keep the guidance visible");
+            assert!(!window.is_visible().unwrap(), "dismissal must not keep the guidance visible");
             let _ = permission.denied();
             150
         });
@@ -3425,7 +3624,7 @@ fn permissions_script() -> Script {
             let windows = windows_for_selftest();
             assert_eq!(windows.len(), index + 1, "retry must not leak windows or subscriptions");
             let window = &windows.iter().find(|(kind, _)| *kind == permission).unwrap().1;
-            assert!(window.get_is_visible().unwrap(), "a later denial must reopen guidance");
+            assert!(window.is_visible().unwrap(), "a later denial must reopen guidance");
             window.close().unwrap();
             test.line(format!("{} guidance dismissed and reopened on a later denied attempt", permission.name()));
             150
@@ -3815,7 +4014,7 @@ fn library_script() -> Script {
         let items = sink().library.get_untracked();
         assert_eq!(items.first().expect("pinned item").fields.get_untracked().path, second.to_str().unwrap());
         assert!(items.first().unwrap().fields.get_untracked().is_pinned);
-        set(sink().library_filter, "Tag: docs".into());
+        set(sink().library_filter.local(), "Tag: docs".into());
         test.line("tags and pins persisted; pinned item sorted first");
         400
     });
@@ -3824,16 +4023,16 @@ fn library_script() -> Script {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].fields.get_untracked().path, library_fixture_path(FIRST).to_str().unwrap());
         assert_eq!(crate::settings::Settings::load().library_view.filter, "Tag: docs");
-        set(sink().library_filter, "All".into());
-        set(sink().library_search, "100%".into());
+        set(sink().library_filter.local(), "All".into());
+        set(sink().library_search.local(), "100%".into());
         400
     });
     script.step(|test| {
         let items = sink().library.get_untracked();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].fields.get_untracked().path, library_fixture_path(SECOND).to_str().unwrap());
-        set(sink().library_search, String::new());
-        set(sink().library_sort, "Name".into());
+        set(sink().library_search.local(), String::new());
+        set(sink().library_sort.local(), "Name".into());
         test.line("tag filtering, persisted filter and filename search worked");
         400
     });
@@ -3910,7 +4109,7 @@ fn library_script() -> Script {
         let renamed = library_fixture_path(RENAMED);
         assert_eq!(sink().library.get_untracked().len(), 1);
         assert!(crate::settings::Settings::load().library_view.closed.contains(&renamed));
-        set(sink().library_expanded, true);
+        set(sink().library_expanded.local(), true);
         400
     });
     script.step(|test| {
@@ -3927,7 +4126,7 @@ fn library_script() -> Script {
         assert!(!old.exists() && renamed.exists());
         assert!(!settings.library_view.closed.contains(&old) && settings.library_view.closed.contains(&renamed));
         assert_eq!(settings.recent.first(), Some(&renamed));
-        set(sink().library_expanded, false);
+        set(sink().library_expanded.local(), false);
         400
     });
     script.step(|_| {
@@ -4291,7 +4490,7 @@ fn saved_areas_script() -> Script {
     });
     script.step(move |test| {
         let (scroll, flyout, _) = panel_view.borrow_mut().take().expect("the Time delay panel is unavailable");
-        assert!(scroll.get_offset().expect("could not read the panel offset").y > 0.0, "the Time delay panel did not scroll");
+        assert!(scroll.offset().expect("could not read the panel offset").y > 0.0, "the Time delay panel did not scroll");
         let popup = test.new_windows().into_iter().find(|number| !window_rect(*number).is_empty())
             .expect("the Time delay flyout has no visible native window");
         let bounds = window_rect(popup);
@@ -4863,7 +5062,7 @@ fn add_saved_area_engine_steps(script: &mut Script) {
         assert!(!json.is_empty(), "could not start the full-display Screen Draw fixture");
         test.note = json.clone();
         test.remember_windows();
-        set(sink().screen_draw, json);
+        set(sink().screen_draw.local(), json);
         1000
     });
     script.step(move |test| {
@@ -4872,7 +5071,7 @@ fn add_saved_area_engine_steps(script: &mut Script) {
         assert_eq!(windows.len(), 1, "the full-display Screen Draw window was not shown");
         assert_screen_draw_window(id, windows[0], primary_screen_draw_area(false));
         api::draw_end();
-        set(sink().screen_draw, String::new());
+        set(sink().screen_draw.local(), String::new());
         test.line("full-display Screen Draw: protected frame and input surface cover the display");
         250
     });
@@ -4883,7 +5082,7 @@ fn add_saved_area_engine_steps(script: &mut Script) {
         assert!(!json.is_empty(), "could not start the menu-bar-edge Screen Draw fixture");
         test.note = json.clone();
         test.remember_windows();
-        set(sink().screen_draw, json);
+        set(sink().screen_draw.local(), json);
         1000
     });
     script.step(move |test| {
@@ -4892,7 +5091,7 @@ fn add_saved_area_engine_steps(script: &mut Script) {
         assert_eq!(windows.len(), 1, "the menu-bar-edge Screen Draw window was not shown");
         assert_screen_draw_window(id, windows[0], primary_screen_draw_area(true));
         api::draw_end();
-        set(sink().screen_draw, String::new());
+        set(sink().screen_draw.local(), String::new());
         test.line("menu-bar-edge Screen Draw: protected frame and input surface match the selection");
         250
     });
@@ -4978,7 +5177,7 @@ fn image_tools(s: &mut Script, fresh: String) {
     .drag("Text Replace", (0.26, 0.15), (0.84, 0.205), 12)
     .log(move |_| format!("text replace: selection={} text={}", k.selection.get_untracked(), k.text.get_untracked()))
     .step(move |_| {
-        set(k.text, "Text Replace made this line editable.".into());
+        set(k.text.local(), "Text Replace made this line editable.".into());
         300
     })
     .drag("Smart Move", (0.58, 0.54), (0.745, 0.88), 12)
@@ -5001,7 +5200,7 @@ fn image_tools(s: &mut Script, fresh: String) {
     .step(|_| {
         call(|m| m.undo());
         run("tool:Cut Out");
-        set(sink().variant, "Horizontal".into());
+        set(sink().variant.local(), "Horizontal".into());
         0
     })
     .drag("Cut Out", (0.3, 0.33), (0.3, 0.40), 12)
@@ -5178,12 +5377,12 @@ fn video_steps(s: &mut Script, video: String) {
     })
     .log(move |_| format!("video: mode={} duration={:.2} info={}", k.mode.get_untracked(), k.video_duration.get_untracked(), k.video_info.get_untracked()))
     .step(move |_| {
-        set(k.video_position, k.video_duration.get_untracked() * 0.25);
+        set(k.video_position.local(), k.video_duration.get_untracked() * 0.25);
         400
     })
     .step(move |_| {
         call(|m| m.set_trim_start());
-        set(k.video_position, k.video_duration.get_untracked() * 0.75);
+        set(k.video_position.local(), k.video_duration.get_untracked() * 0.75);
         400
     })
     .step(|_| {
@@ -5192,7 +5391,7 @@ fn video_steps(s: &mut Script, video: String) {
     })
     .log(move |_| format!("trim {:.2}..{:.2}; status {}", k.trim_start.get_untracked(), k.trim_end.get_untracked(), k.status.get_untracked()))
     .step(move |_| {
-        set(k.video_position, k.video_duration.get_untracked() * 0.3);
+        set(k.video_position.local(), k.video_duration.get_untracked() * 0.3);
         300
     })
     .step(|_| {
@@ -5213,16 +5412,16 @@ fn video_steps(s: &mut Script, video: String) {
     })
     .log(move |t| format!("frame step: {} -> {:.3}", t.note, k.video_position.get_untracked()))
     .step(move |_| {
-        set(k.gif_preset, "High motion".into());
-        set(k.gif_fade, true);
+        set(k.gif_preset.local(), "High motion".into());
+        set(k.gif_fade.local(), true);
         call(|m| m.toggle_mute());
         200
     })
     .log(move |_| format!("gif {} fade={} muted={}", k.gif_preset.get_untracked(), k.gif_fade.get_untracked(), k.muted.get_untracked()))
     .step(move |_| {
         call(|m| m.toggle_mute());
-        set(k.gif_preset, "Screen recording".into());
-        set(k.gif_fade, false);
+        set(k.gif_preset.local(), "Screen recording".into());
+        set(k.gif_fade.local(), false);
         200
     })
     .shot("ui-8b-video-options.png")
@@ -5310,7 +5509,7 @@ fn library_steps(s: &mut Script) {
         let f = |i: usize| items.get(i).map(|e| e.fields.get_untracked()).unwrap_or_default();
         let (first, second) = (f(0), f(1));
         t.line(format!("library: {}; first={} pinned={} tags=[{}{}]", k.library_info.get_untracked(), first.label, first.is_pinned, second.tags, first.tags));
-        set(k.library_filter, "Tag: uitest".into());
+        set(k.library_filter.local(), "Tag: uitest".into());
         300
     })
     .step(move |t| {
@@ -5318,8 +5517,8 @@ fn library_steps(s: &mut Script) {
             return 0;
         }
         t.line(format!("filter Tag: uitest -> {} item(s); filters: {}", k.library.get_untracked().len(), k.library_filters.get_untracked().join(" | ")));
-        set(k.library_filter, "All".into());
-        set(k.library_search, "zzz-nothing".into());
+        set(k.library_filter.local(), "All".into());
+        set(k.library_search.local(), "zzz-nothing".into());
         300
     })
     .step(move |t| {
@@ -5327,7 +5526,7 @@ fn library_steps(s: &mut Script) {
             return 0;
         }
         t.line(format!("search zzz -> {}", k.library.get_untracked().len()));
-        set(k.library_search, String::new());
+        set(k.library_search.local(), String::new());
         200
     })
     .step(move |t| {
@@ -5346,8 +5545,8 @@ fn library_steps(s: &mut Script) {
             return 0;
         }
         t.line(format!("picked {}", k.library_selected.get_untracked()));
-        set(k.library_expanded, true);
-        set(k.thumb_size, 180.0);
+        set(k.library_expanded.local(), true);
+        set(k.thumb_size.local(), 180.0);
         600
     })
     .step(move |t| {
@@ -5377,8 +5576,8 @@ fn library_steps(s: &mut Script) {
                 }
             }
         }
-        set(k.thumb_size, 120.0);
-        set(k.library_expanded, false);
+        set(k.thumb_size.local(), 120.0);
+        set(k.library_expanded.local(), false);
         300
     })
     .log(move |t| if t.note == "0" || t.note == "1" { String::new() } else { format!("library restored: {}", k.library_info.get_untracked()) });
@@ -5390,10 +5589,10 @@ fn library_steps(s: &mut Script) {
 fn windows_steps(s: &mut Script, drop: String) {
     let k = sink();
     s.step(move |_| {
-        set(k.template_theme, "Ocean".into());
-        set(k.template_numbers, true);
-        set(k.template_captions, true);
-        set(k.template_footer, "Made with Jiffshot".into());
+        set(k.template_theme.local(), "Ocean".into());
+        set(k.template_numbers.local(), true);
+        set(k.template_captions.local(), true);
+        set(k.template_footer.local(), "Made with Jiffshot".into());
         200
     })
     .step(|_| {
@@ -5432,23 +5631,23 @@ fn windows_steps(s: &mut Script, drop: String) {
     // The layout switches: the Effects panel, an icon-only toolbar, and the
     // side bar and tray hidden.
     .step(move |_| {
-        set(k.show_effects, true);
+        set(k.show_effects.local(), true);
         300
     })
     .shot("ui-12-effects-panel.png")
     .step(move |_| {
-        set(k.show_effects, false);
-        set(k.tool_labels, false);
-        set(k.show_side_bar, false);
-        set(k.show_tray, false);
+        set(k.show_effects.local(), false);
+        set(k.tool_labels.local(), false);
+        set(k.show_side_bar.local(), false);
+        set(k.show_tray.local(), false);
         300
     })
     .log(move |_| format!("layout: labels={} side={} tray={}", k.tool_labels.get_untracked(), k.show_side_bar.get_untracked(), k.show_tray.get_untracked()))
     .shot("ui-13-compact.png")
     .step(move |t| {
-        set(k.tool_labels, true);
-        set(k.show_side_bar, true);
-        set(k.show_tray, true);
+        set(k.tool_labels.local(), true);
+        set(k.show_side_bar.local(), true);
+        set(k.show_tray.local(), true);
         t.note = k.document_info.get_untracked();
         run("resize:800,500");
         300
@@ -5482,8 +5681,8 @@ fn windows_steps(s: &mut Script, drop: String) {
             let _ = super::dialogs::keyboard_shortcuts(&scope, &owner);
         }
     })
-    .shot_new_windows("ui-17-toast.png", move |_| set(k.toast, "9001\u{1f}Capture saved\u{1f}Copied to the clipboard; opened in the editor\u{1f}0".into()))
-    .shot_new_windows("ui-17b-toast-problem.png", move |_| set(k.toast, "9002\u{1f}Recording failed\u{1f}The microphone is in use by another app\u{1f}1".into()));
+    .shot_new_windows("ui-17-toast.png", move |_| set(k.toast.local(), "9001\u{1f}Capture saved\u{1f}Copied to the clipboard; opened in the editor\u{1f}0".into()))
+    .shot_new_windows("ui-17b-toast-problem.png", move |_| set(k.toast.local(), "9002\u{1f}Recording failed\u{1f}The microphone is in use by another app\u{1f}1".into()));
     hud_steps(s);
     overlay_steps(s);
     capture_window_steps(s);
@@ -5515,10 +5714,10 @@ fn windows_steps(s: &mut Script, drop: String) {
     })
     .log(move |_| format!("toolbar reset: [{}], styles reset: {}", k.tool_order.get_untracked(), k.quick_styles.get_untracked().len()))
     .step(move |_| {
-        set(k.template_theme, "Light".into());
-        set(k.template_numbers, false);
-        set(k.template_captions, false);
-        set(k.template_footer, String::new());
+        set(k.template_theme.local(), "Light".into());
+        set(k.template_numbers.local(), false);
+        set(k.template_captions.local(), false);
+        set(k.template_footer.local(), String::new());
         200
     });
 }
@@ -5536,7 +5735,7 @@ fn show_capture_tab_fixture(t: &mut Test, tab: usize, timing: &str, running: boo
     settings.schedule = schedule.map(str::to_owned);
     let view = jiffshot_workflow::panel::unified_view(&settings, "PrtScn", running, false);
     match serde_json::to_string(&view) {
-        Ok(json) => set(super::capture().sink.view, json),
+        Ok(json) => set(super::capture().sink.view.local(), json),
         Err(error) => t.line(format!("capture fixture: {error}")),
     }
 }
@@ -5551,6 +5750,13 @@ fn show_capture_scheduled_fixture(t: &mut Test, timing: &str, running: bool) {
 
 #[cfg(windows)]
 fn capture_menus_script() -> Script {
+    #[cfg(windows)]
+    fn solid_color(paint: rustolonia::Paint) -> rustolonia::Color {
+        match paint {
+            rustolonia::Paint::Solid(brush) => brush.color,
+            _ => panic!("expected a solid menu brush"),
+        }
+    }
     use super::capture_view::{menu_for_selftest, request_menu_for_selftest};
     use rustolonia::TemplatedControl;
 
@@ -5584,18 +5790,18 @@ fn capture_menus_script() -> Script {
         let previous = previous.clone();
         script.step(move |test| {
             if let Some(previous) = previous.borrow().as_ref() {
-                assert!(!previous.get_is_open().expect("read the previous menu state"), "hover left two menus open");
+                assert!(!previous.is_open().expect("read the previous menu state"), "hover left two menus open");
             }
             let (active, menu) = menu_for_selftest().expect("a Capture menu is open");
             assert_eq!(active, which, "hover did not switch the active heading");
-            assert!(menu.get_is_open().expect("read the menu state"));
-            let presenter = menu.popup().expect("the menu popup").get_child().expect("the menu presenter")
+            assert!(menu.is_open().expect("read the menu state"));
+            let presenter = menu.popup().expect("the menu popup").child().expect("the menu presenter")
                 .expect("the menu presenter exists").cast::<TemplatedControl>().expect("a templated presenter");
-            assert_eq!(presenter.get_background().expect("read menu background").expect("menu background").color,
+            assert_eq!(solid_color(presenter.background().expect("read menu background").expect("menu background")),
                 rustolonia::Color::from(0xFF161B26), "the menu is not RDM DarkBlue");
-            assert_eq!(presenter.get_border_brush().expect("read menu border").expect("menu border").color,
+            assert_eq!(solid_color(presenter.border_brush().expect("read menu border").expect("menu border")),
                 rustolonia::Color::from(0xFF2F3441), "the menu border is not RDM DarkBlue");
-            assert!(menu.get_overlay_input_pass_through_element().expect("read overlay pass-through").is_some(),
+            assert!(menu.overlay_input_pass_through_element().expect("read overlay pass-through").is_some(),
                 "the popup overlay blocks the adjacent headings");
             for (index, hwnd) in test.new_windows().iter().enumerate() {
                 test.shot_of(*hwnd, &format!("capture-menu-{which}-{index}.png"));
@@ -5635,7 +5841,7 @@ fn capture_menus_script() -> Script {
     });
     script.step(|_| {
         assert!(menu_for_selftest().is_none(), "dismissal left a stale active heading");
-        assert!(crate::capture_window::window().expect("the Capture fixture").get_is_visible().expect("read Capture visibility"),
+        assert!(crate::capture_window::window().expect("the Capture fixture").is_visible().expect("read Capture visibility"),
             "Escape closed the owner instead of its menu");
         request_menu_for_selftest("file", false);
         200
@@ -5651,9 +5857,9 @@ fn capture_menus_script() -> Script {
     });
     script.step(|test| {
         let (_, menu) = menu_for_selftest().expect("the light File menu is open");
-        let presenter = menu.popup().expect("the menu popup").get_child().expect("the menu presenter")
+        let presenter = menu.popup().expect("the menu popup").child().expect("the menu presenter")
             .expect("the menu presenter exists").cast::<TemplatedControl>().expect("a templated presenter");
-        assert_ne!(presenter.get_background().expect("read light menu background").expect("light menu background").color,
+        assert_ne!(solid_color(presenter.background().expect("read light menu background").expect("light menu background")),
             rustolonia::Color::from(0xFF161B26), "DarkBlue leaked into the light theme");
         menu.hide().expect("dismiss the light menu");
         test.line("capture_menu_dismissal_and_theme_switch: light palette preserved");
@@ -5817,7 +6023,7 @@ fn capture_ux_steps(s: &mut Script) {
             }],
             "borders": [],
         });
-        set(k.hud, chooser.to_string());
+        set(k.hud.local(), chooser.to_string());
         500
     })
     .step(move |t| {
@@ -5828,7 +6034,7 @@ fn capture_ux_steps(s: &mut Script) {
         for hwnd in windows {
             t.shot_of(hwnd, "capture-chooser.png");
         }
-        set(k.hud, r#"{"panels":[],"borders":[]}"#.into());
+        set(k.hud.local(), r#"{"panels":[],"borders":[]}"#.into());
         200
     })
     .step(move |t| {
@@ -5838,7 +6044,7 @@ fn capture_ux_steps(s: &mut Script) {
             "borders": [],
             "countdowns": [{ "id": 9005, "area": [200, 200, 640, 360], "title": "Get ready to capture", "seconds": 3, "progress": 0.72 }],
         });
-        set(k.hud, countdown.to_string());
+        set(k.hud.local(), countdown.to_string());
         500
     })
     .step(move |t| {
@@ -5849,7 +6055,7 @@ fn capture_ux_steps(s: &mut Script) {
         for hwnd in windows {
             t.shot_of(hwnd, "capture-countdown.png");
         }
-        set(k.hud, r#"{"panels":[],"borders":[],"countdowns":[]}"#.into());
+        set(k.hud.local(), r#"{"panels":[],"borders":[],"countdowns":[]}"#.into());
         200
     })
     .step(|t| {
@@ -5876,7 +6082,7 @@ fn hud_steps(s: &mut Script) {
     let k = sink();
     s.step(move |t| {
         t.remember_windows();
-        set(k.hud, HUD_PANEL.into());
+        set(k.hud.local(), HUD_PANEL.into());
         400
     })
     .step(|t| {
@@ -5900,7 +6106,7 @@ fn hud_steps(s: &mut Script) {
     })
     .step(move |t| {
         t.remember_windows();
-        set(k.hud, format!(r#"{{"panels":[{HUD_RECORDING}],"borders":[]}}"#));
+        set(k.hud.local(), format!(r#"{{"panels":[{HUD_RECORDING}],"borders":[]}}"#));
         500
     })
     .step(|t| {
@@ -5919,7 +6125,7 @@ fn hud_steps(s: &mut Script) {
             .replace("\"microphone\":true", "\"microphone\":false")
             .replace("\"millis\":29000", "\"millis\":3725000")
             .replace("\"note\":null", "\"note\":\"no microphone: the device is in use\"");
-        set(k.hud, format!(r#"{{"panels":[{paused}],"borders":[]}}"#));
+        set(k.hud.local(), format!(r#"{{"panels":[{paused}],"borders":[]}}"#));
         400
     })
     .step(|t| {
@@ -5951,7 +6157,7 @@ fn hud_steps(s: &mut Script) {
         let mut settings = jiffshot_workflow::settings::Settings::default();
         settings.capture_window.tab = 2;
         let view = jiffshot_workflow::panel::unified_view(&settings, "PrtScn", false, true);
-        set(super::capture().sink.view, serde_json::to_string(&view).expect("recording Capture view"));
+        set(super::capture().sink.view.local(), serde_json::to_string(&view).expect("recording Capture view"));
         let window = crate::capture_window::window().expect("Capture window");
         window.set_show_activated(false).expect("non-activating Capture fixture");
         window.show().expect("show recording Capture fixture");
@@ -5966,7 +6172,7 @@ fn hud_steps(s: &mut Script) {
         200
     })
     .step(move |_| {
-        set(k.hud, r#"{"panels":[],"borders":[]}"#.into());
+        set(k.hud.local(), r#"{"panels":[],"borders":[]}"#.into());
         200
     })
     .log(|t| format!("hud after clear: {} new windows still shown", t.new_windows().len()))
@@ -6016,7 +6222,7 @@ fn overlay_steps(s: &mut Script) {
         let json = api::demo(mode);
         t.note = session_of(&json).to_string();
         t.remember_windows();
-        set(k.overlay, json);
+        set(k.overlay.local(), json);
         600
     };
     let session = |t: &Test| t.note.parse::<u64>().unwrap_or(0);
@@ -6030,7 +6236,7 @@ fn overlay_steps(s: &mut Script) {
         }
     };
     let end = move |t: &mut Test| -> u64 {
-        set(k.overlay, String::new());
+        set(k.overlay.local(), String::new());
         api::end_demo(t.note.parse().unwrap_or(0));
         200
     };
@@ -6137,7 +6343,7 @@ fn overlay_steps(s: &mut Script) {
             let json = api::draw_demo(Rect::new(120, 120, 420, 260));
             t.note = serde_json::from_str::<serde_json::Value>(&json).ok().and_then(|v| v["id"].as_u64()).unwrap_or(0).to_string();
             t.remember_windows();
-            set(k.screen_draw, json);
+            set(k.screen_draw.local(), json);
             400
         })
         .step(move |_| {
@@ -6163,7 +6369,7 @@ fn overlay_steps(s: &mut Script) {
                 t.shot_of(hwnd, "ui-26-screen-draw.png");
             }
             api::draw_end();
-            set(k.screen_draw, String::new());
+            set(k.screen_draw.local(), String::new());
             200
         });
 }
@@ -6207,7 +6413,7 @@ fn video_guides_script() -> Script {
         let json = api::demo(3);
         t.note = session_of(&json).to_string();
         t.remember_windows();
-        set(k.overlay, json);
+        set(k.overlay.local(), json);
         500
     })
     .step(|t| {
@@ -6291,7 +6497,7 @@ fn overlay_script() -> Script {
         let json = announcement.to_string();
         t.note = json.clone();
         t.remember_windows();
-        set(k.overlay, json);
+        set(k.overlay.local(), json);
         600
     })
     .step(move |t| {
@@ -6348,12 +6554,12 @@ fn overlay_script() -> Script {
         assert_eq!(state.cursor, [400, 300]);
         assert_eq!(state.lit_kind, 1);
         assert!(platform::close_owned_window(windows[0]), "could not close the synthetic selection window");
-        set(k.overlay, String::new());
+        set(k.overlay.local(), String::new());
         t.line(format!("overlay {id}: selection windows shown; closed one native window"));
         200
     })
     .step(move |t| {
-        set(k.overlay, t.note.clone());
+        set(k.overlay.local(), t.note.clone());
         600
     })
     .step(move |t| {
@@ -6364,7 +6570,7 @@ fn overlay_script() -> Script {
         assert_eq!((state.lit().width, state.lit().height), (520, 520), "a constrained selection must remain square at the desktop edge");
         let state = super::overlay::feed(api::RELEASE, 760.0, 460.0, 0, api::MOD_SHIFT).expect("the restored overlay stopped");
         assert!(state.has(api::FLAG_DONE), "the restored overlay did not finish selection");
-        set(k.overlay, String::new());
+        set(k.overlay.local(), String::new());
         api::end_demo(id);
         t.line("overlay recovery: recreated the closed window and completed a selection");
         200
@@ -6381,7 +6587,7 @@ fn overlay_script() -> Script {
         root["bounds"] = serde_json::json!([120.25, 120.25, 540.25, 380.25]);
         t.note = root["id"].as_u64().expect("Screen Draw session ID").to_string();
         t.remember_windows();
-        set(k.screen_draw, root.to_string());
+        set(k.screen_draw.local(), root.to_string());
         400
     })
     .step(move |t| {
@@ -6417,7 +6623,7 @@ fn overlay_script() -> Script {
             t.line("screen draw pixels: the mapped mark is visible on the desktop");
         }
         api::draw_end();
-        set(k.screen_draw, String::new());
+        set(k.screen_draw.local(), String::new());
         200
     })
     .step(|t| {
@@ -6514,8 +6720,16 @@ fn assert_popup_pixels(test: &mut Test, popup: (i64, u32)) {
 fn editor_menu_for_selftest(open: bool) -> rustolonia::Result<()> {
     if open {
         let owner = super::main_window().ok_or(rustolonia::Error::NoUiContext)?;
-        let menu = rustolonia::MenuFlyout::new()?.placement(rustolonia::PlacementMode::Center)?;
-        menu.items()?.add(rustolonia::MenuItem::new()?.header_text("Normal editor menu")?)?;
+        let menu = {
+            let control = rustolonia::MenuFlyout::new()?;
+            control.set_placement(rustolonia::PlacementMode::Center)?;
+            control
+        };
+        menu.items()?.add({
+            let control = rustolonia::MenuItem::new()?;
+            control.set_header_text("Normal editor menu")?;
+            control
+        })?;
         menu.show_at_with_control(&owner)?;
         EDITOR_TEST_MENU.with(|slot| *slot.borrow_mut() = Some(menu));
     } else {
@@ -6561,7 +6775,7 @@ fn assert_editor_popup_pixels(test: &mut Test, number: u32) {
     }
     let visible = samples.iter().filter(|&&offset| !green_pixel(&still, offset)).count();
     assert_eq!(visible, 0, "the normal editor popup remained in the still capture: {visible} of {} samples", samples.len());
-    assert!(super::main_window().expect("the editor window is unavailable").get_is_visible().expect("could not inspect the editor"),
+    assert!(super::main_window().expect("the editor window is unavailable").is_visible().expect("could not inspect the editor"),
         "the editor was not restored after still capture");
     test.line(format!("normal editor popup captured in {} recording frames ({} visible samples) and hidden with its editor for still captures",
         visible_frames.len(), samples.len()));
@@ -6592,7 +6806,7 @@ fn multistream_exclusion_script() -> Script {
         let reply = platform::exclusion_reply().expect("the first recording did not start");
         assert!(matches!(reply, platform::ProbeReply::Ready), "unexpected first recording reply: {reply:?}");
         t.remember_windows();
-        set(k.widget, true);
+        set(k.widget.local(), true);
         500
     })
     .step(|t| {
@@ -6703,7 +6917,7 @@ fn multistream_exclusion_script() -> Script {
         }
         super::extras::widget_tooltip_for_selftest(false).expect("could not close the Capture Widget tooltip");
         assert_popup_closed(popup);
-        set(k.widget, false);
+        set(k.widget.local(), false);
         t.note = popup.1.to_string();
         t.line(format!("popup remained hidden until both recordings acknowledged it and stayed excluded in {} and {} frames ({} visible samples)",
             first.len(), second.len(), samples.len()));
@@ -6786,7 +7000,7 @@ fn transparency_script() -> Script {
         assert!(green_pixel(&background, center), "the transparency background is not green");
         let outline = Rect::new(area.x + 20, area.y + 20, area.width - 40, area.height - 40);
         t.remember_windows();
-        set(k.hud, serde_json::json!({
+        set(k.hud.local(), serde_json::json!({
             "panels": [],
             "borders": [{ "id": 9002, "area": [outline.x, outline.y, outline.width, outline.height] }]
         }).to_string());
@@ -6822,7 +7036,7 @@ fn transparency_script() -> Script {
     })
     .step(move |t| {
         assert_transparency_pixels(t, "capture outline", (105, 65));
-        set(k.hud, r#"{"panels":[],"borders":[]}"#.to_owned());
+        set(k.hud.local(), r#"{"panels":[],"borders":[]}"#.to_owned());
         500
     })
     .step(move |t| {
@@ -6831,7 +7045,7 @@ fn transparency_script() -> Script {
         let json = api::draw_demo_sized(area, 210, 130);
         assert!(!json.is_empty(), "could not start Screen Draw");
         t.remember_windows();
-        set(k.screen_draw, json);
+        set(k.screen_draw.local(), json);
         500
     })
     .step(|t| {
@@ -6873,14 +7087,14 @@ fn transparency_script() -> Script {
     .step(move |t| {
         assert_transparency_pixels(t, "Screen Draw", (12, 112));
         api::draw_end();
-        set(k.screen_draw, String::new());
+        set(k.screen_draw.local(), String::new());
         500
     })
     .step(move |t| {
         assert!(t.new_windows().is_empty(), "the Screen Draw window did not close");
         let area = t.probe_area.expect("the probe area is unavailable");
         t.remember_windows();
-        set(k.hud, serde_json::json!({
+        set(k.hud.local(), serde_json::json!({
             "panels": [],
             "borders": [],
             "countdowns": [{
@@ -6925,7 +7139,7 @@ fn transparency_script() -> Script {
     })
     .step(move |t| {
         assert_card_transparency(t, "capture countdown");
-        set(k.hud, r#"{"panels":[],"borders":[],"countdowns":[]}"#.to_owned());
+        set(k.hud.local(), r#"{"panels":[],"borders":[],"countdowns":[]}"#.to_owned());
         500
     })
     .step(|t| {
@@ -6937,7 +7151,7 @@ fn transparency_script() -> Script {
     for attempt in 1..=2 {
         let first_notice = first_notice.clone();
         s.step(move |_| {
-            set(k.toast, format!("{attempt}\u{1f}Recording notice\u{1f}Synthetic notification\u{1f}0"));
+            set(k.toast.local(), format!("{attempt}\u{1f}Recording notice\u{1f}Synthetic notification\u{1f}0"));
             500
         })
         .step(move |t| {
@@ -7015,7 +7229,7 @@ fn exclusion_script() -> Script {
         assert!(!json.is_empty(), "could not start Screen Draw");
         t.note = json.clone();
         t.remember_windows();
-        set(k.screen_draw, json);
+        set(k.screen_draw.local(), json);
         400
     })
     .step(|t| {
@@ -7085,7 +7299,7 @@ fn exclusion_script() -> Script {
     .step(move |_| {
         assert!(matches!(platform::exclusion_reply(), Ok(platform::ProbeReply::Watching)), "the close probe did not start");
         api::draw_end();
-        set(k.screen_draw, String::new());
+        set(k.screen_draw.local(), String::new());
         1500
     })
     .step(|t| {
@@ -7105,7 +7319,7 @@ fn exclusion_script() -> Script {
     .step(move |t| {
         assert!(t.new_windows().is_empty(), "the Screen Draw window did not close");
         t.remember_windows();
-        set(k.toast, "9101\u{1f}Recording notice\u{1f}Synthetic notification\u{1f}0".into());
+        set(k.toast.local(), "9101\u{1f}Recording notice\u{1f}Synthetic notification\u{1f}0".into());
         500
     })
     .step(|t| {
@@ -7124,7 +7338,7 @@ fn exclusion_script() -> Script {
         assert_eq!(windows.len(), 1);
         assert_eq!(platform::exclusion_window_alpha(windows[0]), Some(1.0), "the notification was not revealed");
         assert!(jiffshot_capture::screen::virtual_screen().intersect(window_rect(windows[0])).is_some(), "the notification was not placed on a display");
-        set(k.toast, "9102\u{1f}Replacement notice\u{1f}Still excluded\u{1f}0".into());
+        set(k.toast.local(), "9102\u{1f}Replacement notice\u{1f}Still excluded\u{1f}0".into());
         500
     })
     .step(|t| {
@@ -7142,7 +7356,7 @@ fn exclusion_script() -> Script {
     .step(move |t| {
         assert!(matches!(platform::exclusion_reply(), Ok(platform::ProbeReply::Fresh)), "a hidden notification prevented a new recording");
         t.remember_windows();
-        set(k.widget, true);
+        set(k.widget.local(), true);
         500
     })
     .step(|t| {
@@ -7191,13 +7405,13 @@ fn exclusion_script() -> Script {
         assert_popup_pixels(t, popup);
         super::extras::widget_tooltip_for_selftest(false).expect("could not close the Capture Widget tooltip");
         assert_popup_closed(popup);
-        set(k.widget, false);
+        set(k.widget.local(), false);
         t.line("Capture Widget tooltip stays hidden until exclusion and safely closes and recreates");
         300
     })
     .step(move |t| {
         assert!(t.new_windows().is_empty(), "the Capture Widget did not hide");
-        set(k.widget, true);
+        set(k.widget.local(), true);
         500
     })
     .step(|t| {
@@ -7228,7 +7442,7 @@ fn exclusion_script() -> Script {
         assert_popup_visible(popup);
         super::extras::widget_tooltip_for_selftest(false).expect("could not close the reopened Capture Widget tooltip");
         assert_popup_closed(popup);
-        set(k.widget, false);
+        set(k.widget.local(), false);
         t.line("Capture Widget and its reopened tooltip wait for exclusion acknowledgment");
         300
     })
@@ -7249,7 +7463,7 @@ fn exclusion_script() -> Script {
         let mut hud: serde_json::Value = serde_json::from_str(HUD_PANEL).expect("capture controls fixture");
         hud["panels"].as_array_mut().expect("capture panels").push(toolbar);
         t.remember_windows();
-        set(k.hud, hud.to_string());
+        set(k.hud.local(), hud.to_string());
         500
     })
     .step(|t| {
@@ -7356,7 +7570,7 @@ fn exclusion_script() -> Script {
         let number = t.note.parse::<u32>().expect("the closed toolbar menu number");
         assert!(jiffshot_capture::screen::is_excluded_window(number), "the closed popup was not retained while recording");
         assert!(!jiffshot_capture::screen::exclusion_ready(number), "the closed popup still has a live exclusion owner");
-        set(k.hud, r#"{"panels":[],"borders":[]}"#.to_owned());
+        set(k.hud.local(), r#"{"panels":[],"borders":[]}"#.to_owned());
         t.line(format!("toolbar menu stayed excluded in {frames} frames while closing"));
         t.line("capture panel, outline, toolbar tooltip and native menu wait for exclusion acknowledgment");
         500
@@ -7425,7 +7639,7 @@ fn exclusion_script() -> Script {
             else { panic!("unexpected editor frozen desktop probe reply") };
         let visible = t.popup_samples.iter().filter(|&&offset| !green_pixel(&frozen, offset)).count();
         assert_eq!(visible, 0, "the normal editor popup remained in the frozen desktop: {visible} of {} samples", t.popup_samples.len());
-        assert!(super::main_window().expect("the editor window is unavailable").get_is_visible().expect("could not inspect the editor"),
+        assert!(super::main_window().expect("the editor window is unavailable").is_visible().expect("could not inspect the editor"),
             "the editor was not restored after freezing");
         editor_menu_for_selftest(false).expect("could not close the reopened editor menu");
         t.popup = None;
@@ -7928,11 +8142,11 @@ fn tray_termination_script() -> Script {
             app.resize_to(12, 9);
         }).expect("edit the synthetic capture");
         for window in scope.windows() {
-            if window.get_is_visible().expect("inspect a window") {
+            if window.is_visible().expect("inspect a window") {
                 window.hide().expect("hide a window");
             }
         }
-        assert!(scope.windows().iter().all(|window| !window.get_is_visible().expect("inspect a window")),
+        assert!(scope.windows().iter().all(|window| !window.is_visible().expect("inspect a window")),
             "a window remained visible");
         assert!(crate::capture_engine_macos::running().expect("inspect the capture engine"));
         platform::watch_application_termination().expect("observe AppKit termination");
@@ -8234,10 +8448,10 @@ fn popup_shutdown_script(case: &str) -> Script {
             assert!(!image.with_extension("jsd").exists(), "the fixture was saved before termination");
         }
         if widget {
-            set(k.widget, true);
+            set(k.widget.local(), true);
         } else {
             let toolbar: serde_json::Value = serde_json::from_str(HUD_RECORDING).expect("recording toolbar fixture");
-            set(k.hud, serde_json::json!({ "panels": [toolbar], "borders": [] }).to_string());
+            set(k.hud.local(), serde_json::json!({ "panels": [toolbar], "borders": [] }).to_string());
         }
         600
     });
@@ -8991,7 +9205,7 @@ pub(super) fn before_native_termination() -> std::result::Result<(), String> {
         }
     } else if env("JIFFSHOT_UITEST_TERMINATION_TRAY_ONLY").is_some() {
         let scope = super::scope().ok_or("the application scope is unavailable")?;
-        if scope.windows().iter().any(|window| window.get_is_visible().unwrap_or(true)) {
+        if scope.windows().iter().any(|window| window.is_visible().unwrap_or(true)) {
             return Err("a window became visible before tray-only termination".into());
         }
         if !matches!(crate::capture_engine_macos::result(), Ok(Some(Ok(())))) {

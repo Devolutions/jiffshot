@@ -48,14 +48,14 @@ pub fn library_panel(ctx: &Ctx) -> El<Border> {
                         .vertical_content_alignment(VerticalAlignment::Center),
                 )
                 .child(
-                    choice_box(theme, move || s.library_filters.get(), s.library_filter)
+                    choice_box(theme, move || s.library_filters.get(), s.library_filter.local())
                         .min_width(120.0)
                         .font_size(11.0)
                         .vertical_alignment(VerticalAlignment::Center)
                         .tool_tip_tip("Show only"),
                 )
                 .child(
-                    choice_box(theme, move || s.library_sorts.get(), s.library_sort)
+                    choice_box(theme, move || s.library_sorts.get(), s.library_sort.local())
                         .min_width(90.0)
                         .font_size(11.0)
                         .vertical_alignment(VerticalAlignment::Center)
@@ -72,7 +72,7 @@ pub fn library_panel(ctx: &Ctx) -> El<Border> {
                 )
                 .child(
                     small(Button::el().content("Combine"))
-                        .command(command(s.combine_selected_enabled, |m| {
+                        .command(command(s.combine_selected_enabled.local(), |m| {
                             m.combine_selected()
                         }))
                         .tool_tip_tip(crate::ui::shortcut(
@@ -90,7 +90,7 @@ pub fn library_panel(ctx: &Ctx) -> El<Border> {
                 )
                 .child(
                     small(Button::el().content("Open folder"))
-                        .command(command(s.open_library_folder_enabled, |m| {
+                        .command(command(s.open_library_folder_enabled.local(), |m| {
                             m.open_library_folder()
                         })),
                 ),
@@ -300,7 +300,7 @@ pub(super) fn tile(s: MainViewModelSink, theme: Theme, key: u64) -> AnyEl {
         .on_pointer_entered(move |_| fields.with(|f| crate::drag_out::hover(&f.path_identity)))
         .on_pointer_exited(move |_| fields.with(|f| crate::drag_out::leave(&f.path_identity)))
         .on_tapped(move |args| {
-            if args.key_modifiers & crate::ui::COMMAND_MODIFIER != 0 {
+            if args.key_modifiers.contains(crate::ui::COMMAND_MODIFIER) {
                 on_item(s, key, |m| m.toggle_select());
             } else {
                 on_item(s, key, |m| m.open());
@@ -319,7 +319,7 @@ pub(super) fn tile(s: MainViewModelSink, theme: Theme, key: u64) -> AnyEl {
                 if tap_state.load(Ordering::Acquire) != 0 {
                     return;
                 }
-                if args.key_modifiers & crate::ui::COMMAND_MODIFIER != 0 {
+                if args.key_modifiers.contains(crate::ui::COMMAND_MODIFIER) {
                     on_item(s, key, |m| m.toggle_select());
                 } else {
                     on_item(s, key, |m| m.open());
@@ -404,7 +404,7 @@ fn edit_row(
         .child(Button::el().content(label.to_owned()).command(act(move || {
             let text = field
                 .get()
-                .and_then(|f| f.get_text().ok().flatten())
+                .and_then(|f| f.text().ok().flatten())
                 .unwrap_or_default();
             on_item(s, key, |m| send(m, text));
         })));

@@ -52,14 +52,14 @@ pub fn status_bar(ctx: &Ctx, zoom: ZoomView) -> El<Border> {
         .spacing(2.0)
         .vertical_alignment(VerticalAlignment::Center)
         .visible(move || !s.library_expanded.get())
-        .child(bar(s.document_info).tool_tip_tip("Image size; click to fit it in the window").command(command(s.zoom_fit_enabled, |m| m.zoom_fit())))
+        .child(bar(s.document_info.local()).tool_tip_tip("Image size; click to fit it in the window").command(command(s.zoom_fit_enabled.local(), |m| m.zoom_fit())))
         .child(rule(theme, (6.0, 4.0)))
-        .child(bar("−").tool_tip_tip(crate::ui::shortcut("Zoom out (Ctrl+−)")).command(command(s.zoom_out_enabled, |m| m.zoom_out())))
+        .child(bar("−").tool_tip_tip(crate::ui::shortcut("Zoom out (Ctrl+−)")).command(command(s.zoom_out_enabled.local(), |m| m.zoom_out())))
         .child(zoom_slider)
-        .child(bar("+").tool_tip_tip(crate::ui::shortcut("Zoom in (Ctrl++)")).command(command(s.zoom_in_enabled, |m| m.zoom_in())))
+        .child(bar("+").tool_tip_tip(crate::ui::shortcut("Zoom in (Ctrl++)")).command(command(s.zoom_in_enabled.local(), |m| m.zoom_in())))
         .child(TextBlock::el().text(zoom.text).vertical_alignment(VerticalAlignment::Center).width(44.0).text_alignment(TextAlignment::Center).font_size(12.0))
-        .child(bar("Fit").tool_tip_tip(crate::ui::shortcut("Fit to window (Ctrl+Alt+0)")).command(command(s.zoom_fit_enabled, |m| m.zoom_fit())))
-        .child(bar("Actual size").tool_tip_tip(crate::ui::shortcut("100% (Ctrl+0)")).command(command(s.zoom_actual_enabled, |m| m.zoom_actual())))
+        .child(bar("Fit").tool_tip_tip(crate::ui::shortcut("Fit to window (Ctrl+Alt+0)")).command(command(s.zoom_fit_enabled.local(), |m| m.zoom_fit())))
+        .child(bar("Actual size").tool_tip_tip(crate::ui::shortcut("100% (Ctrl+0)")).command(command(s.zoom_actual_enabled.local(), |m| m.zoom_actual())))
         .child(rule(theme, (6.0, 4.0)))
         .child(
             ToggleButton::el()
@@ -75,8 +75,8 @@ pub fn status_bar(ctx: &Ctx, zoom: ZoomView) -> El<Border> {
         .orientation(Orientation::Horizontal)
         .spacing(2.0)
         .vertical_alignment(VerticalAlignment::Center)
-        .child(bar("↶").font_size(14.0).tool_tip_tip(crate::ui::shortcut("Undo (Ctrl+Z)")).command(command(s.undo_enabled, |m| m.undo())))
-        .child(bar("↷").font_size(14.0).tool_tip_tip(crate::ui::shortcut("Redo (Ctrl+Y)")).command(command(s.redo_enabled, |m| m.redo())));
+        .child(bar("↶").font_size(14.0).tool_tip_tip(crate::ui::shortcut("Undo (Ctrl+Z)")).command(command(s.undo_enabled.local(), |m| m.undo())))
+        .child(bar("↷").font_size(14.0).tool_tip_tip(crate::ui::shortcut("Redo (Ctrl+Y)")).command(command(s.redo_enabled.local(), |m| m.redo())));
     Border::el()
         .dock_panel_dock(Dock::Bottom)
         .background(theme.brush(Tone::Panel))
@@ -98,8 +98,8 @@ pub fn narration_bar(sink: MainViewModelSink) -> El<Border> {
             .orientation(Orientation::Horizontal)
             .spacing(10.0)
             .child(TextBlock::el().text("● Narration").foreground(solid(WHITE)).font_weight(FontWeight::DemiBold).vertical_alignment(VerticalAlignment::Center))
-            .child(Button::el().content("Next picture ▶").command(command(sink.narrate_next_enabled, |m| m.narrate_next())))
-            .child(Button::el().content("Finish").command(command(sink.narrate_finish_enabled, |m| m.narrate_finish()))),
+            .child(Button::el().content("Next picture ▶").command(command(sink.narrate_next_enabled.local(), |m| m.narrate_next())))
+            .child(Button::el().content("Finish").command(command(sink.narrate_finish_enabled.local(), |m| m.narrate_finish()))),
     )
 }
 
@@ -113,9 +113,9 @@ pub fn video_bar(ctx: &Ctx) -> El<Border> {
         .spacing(8.0)
         .margin((0.0, 6.0, 0.0, 0.0))
         .child(TextBlock::el().text("GIF").vertical_alignment(VerticalAlignment::Center).foreground(theme.brush(Tone::Muted)))
-        .child(Button::el().content("Export GIF…").command(command(s.export_gif_enabled, |m| m.export_gif())))
+        .child(Button::el().content("Export GIF…").command(command(s.export_gif_enabled.local(), |m| m.export_gif())))
         .child(
-            choice_box(theme, || ["Screen recording", "High motion", "Small file", "Custom"].map(String::from).to_vec(), s.gif_preset)
+            choice_box(theme, || ["Screen recording", "High motion", "Small file", "Custom"].map(String::from).to_vec(), s.gif_preset.local())
                 .vertical_alignment(VerticalAlignment::Center)
                 .min_width(150.0)
                 .tool_tip_tip("GIF frame rate and size"),
@@ -130,20 +130,20 @@ pub fn video_bar(ctx: &Ctx) -> El<Border> {
         .dock_panel_dock(Dock::Left)
         .orientation(Orientation::Horizontal)
         .spacing(6.0)
-        .child(Button::el().content("◀|").tool_tip_tip("Previous frame").command(command(s.prev_frame_enabled, |m| m.prev_frame())))
-        .child(Button::el().width(40.0).content(TextBlock::el().text(move || if s.playing.get() { "⏸" } else { "▶" })).command(command(s.play_pause_enabled, |m| m.play_pause())))
-        .child(Button::el().content("|▶").tool_tip_tip("Next frame").command(command(s.next_frame_enabled, |m| m.next_frame())))
+        .child(Button::el().content("◀|").tool_tip_tip("Previous frame").command(command(s.prev_frame_enabled.local(), |m| m.prev_frame())))
+        .child(Button::el().width(40.0).content(TextBlock::el().text(move || if s.playing.get() { "⏸" } else { "▶" })).command(command(s.play_pause_enabled.local(), |m| m.play_pause())))
+        .child(Button::el().content("|▶").tool_tip_tip("Next frame").command(command(s.next_frame_enabled.local(), |m| m.next_frame())))
         .child(TextBlock::el().vertical_alignment(VerticalAlignment::Center).text(move || format!("{} / {}", time_text(s.video_position.get()), time_text(s.video_duration.get()))));
     let editing = StackPanel::el()
         .dock_panel_dock(Dock::Right)
         .orientation(Orientation::Horizontal)
         .spacing(6.0)
-        .child(Button::el().content("Mark start").tool_tip_tip("Set the selection start at the playhead").command(command(s.set_trim_start_enabled, |m| m.set_trim_start())))
-        .child(Button::el().content("Mark end").tool_tip_tip("Set the selection end at the playhead").command(command(s.set_trim_end_enabled, |m| m.set_trim_end())))
-        .child(Button::el().content("Cut selection").tool_tip_tip("Remove the selected section immediately (Delete). The original is unchanged.").command(command(s.cut_selection_enabled, |m| m.cut_selection())))
-        .child(Button::el().content("↶").tool_tip_tip(crate::ui::shortcut("Undo cut (Ctrl+Z)")).command(command(s.undo_enabled, |m| m.undo())))
-        .child(Button::el().content("↷").tool_tip_tip(crate::ui::shortcut("Redo cut (Ctrl+Y)")).command(command(s.redo_enabled, |m| m.redo())))
-        .child(Button::el().content(TextBlock::el().text(move || if s.video_saving.get() { "Saving…" } else { "Save video" })).enabled(move || !s.video_saving.get()).tool_tip_tip("Save an edited library copy, keeping the original (Ctrl+S)").command(command(s.save_enabled, |m| m.save())));
+        .child(Button::el().content("Mark start").tool_tip_tip("Set the selection start at the playhead").command(command(s.set_trim_start_enabled.local(), |m| m.set_trim_start())))
+        .child(Button::el().content("Mark end").tool_tip_tip("Set the selection end at the playhead").command(command(s.set_trim_end_enabled.local(), |m| m.set_trim_end())))
+        .child(Button::el().content("Cut selection").tool_tip_tip("Remove the selected section immediately (Delete). The original is unchanged.").command(command(s.cut_selection_enabled.local(), |m| m.cut_selection())))
+        .child(Button::el().content("↶").tool_tip_tip(crate::ui::shortcut("Undo cut (Ctrl+Z)")).command(command(s.undo_enabled.local(), |m| m.undo())))
+        .child(Button::el().content("↷").tool_tip_tip(crate::ui::shortcut("Redo cut (Ctrl+Y)")).command(command(s.redo_enabled.local(), |m| m.redo())))
+        .child(Button::el().content(TextBlock::el().text(move || if s.video_saving.get() { "Saving…" } else { "Save video" })).enabled(move || !s.video_saving.get()).tool_tip_tip("Save an edited library copy, keeping the original (Ctrl+S)").command(command(s.save_enabled.local(), |m| m.save())));
     let timeline = StackPanel::el()
         .child(super::video_timeline::timeline(s, theme))
         .child(TextBlock::el().text(s.video_info).font_size(11.0).foreground(theme.brush(Tone::Muted)));

@@ -3,15 +3,15 @@ resolver = "2"
 members = ["app", "crates/jiffshot-capture", "crates/jiffshot-cli", "crates/jiffshot-control", "crates/jiffshot-doc", "crates/jiffshot-video", "crates/jiffshot-workflow"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 publish = false
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Both crates and their downloaded host must come from the same release.
-rustolonia = { git = "https://github.com/Devolutions/rustolonia", tag = "v12.1.6", default-features = false }
-rustolonia-sys = { git = "https://github.com/Devolutions/rustolonia", tag = "v12.1.6", default-features = false }
+rustolonia = { git = "https://github.com/Devolutions/rustolonia", tag = "v12.1.7", default-features = false }
+rustolonia-sys = { git = "https://github.com/Devolutions/rustolonia", tag = "v12.1.7", default-features = false }
 ab_glyph = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif", "webp"] }
 gif = "0.14"

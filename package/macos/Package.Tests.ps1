@@ -1048,7 +1048,7 @@ Export-ModuleMember -Function Invoke-MacPackage
         $macos = [regex]::Match($workflow, '(?s)\r?\n  macos:\r?\n(.*?)\r?\n  msi:\r?\n').Groups[1].Value
         $macos | Should -Match '(?m)^[ \t]*- arch: arm64\r?\n[ \t]+target: aarch64-apple-darwin\r?$'
         $macos | Should -Match '(?m)^[ \t]*- arch: x86_64\r?\n[ \t]+target: x86_64-apple-darwin\r?$'
-        $build = [regex]::Match($macos, '- name: Build\r?\n\s+run: cargo build --release --locked -p jiffshot -p jiffshot-cli --features jiffshot/static-host --target')
+        $build = [regex]::Match($macos, '- name: Build\r?\n\s+env:\r?\n\s+RUSTOLONIA_HOST_DIR:.*\r?\n\s+run: cargo build --release --locked -p jiffshot -p jiffshot-cli --features jiffshot/static-host --target')
         $test = [regex]::Match($macos, "- name: Test\r?\n\s+if: matrix\.arch == 'arm64'\r?\n\s+run: \|\r?\n\s+cargo test --release --locked --workspace --target")
         $scriptTests = [regex]::Match($macos, "- name: Test macOS PowerShell scripts\r?\n\s+if: matrix\.arch == 'arm64'\r?\n\s+shell: pwsh")
         $build.Success | Should -BeTrue
@@ -1060,7 +1060,9 @@ Export-ModuleMember -Function Invoke-MacPackage
         $macos | Should -Match '-StaticHost'
         $macos | Should -Match 'macos-package/\*\.dmg'
         $macos | Should -Match 'macos-package/signing\.txt'
-        $macos | Should -Not -Match 'build-host\.ps1|RUSTOLONIA_HOST_DIR|\.ci/rustolonia'
+        $macos | Should -Match '\./\.github/actions/use-rustolonia'
+        $macos | Should -Match 'RUSTOLONIA_HOST_DIR: \$\{\{ env\.RUSTOLONIA_STATIC_HOST_DIR \}\}'
+        $macos | Should -Not -Match 'macos/build-host\.ps1|\.ci/rustolonia'
         $macos | Should -Not -Match 'RUSTOLONIA_HOST_LIB:|host-SHA256SUMS\.txt'
     }
 
