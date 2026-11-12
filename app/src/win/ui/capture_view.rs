@@ -220,7 +220,6 @@ struct MenuButton {
 /// The window and what its callbacks need. UI thread only.
 struct Ui {
     open_in_editor: Signal<bool>,
-    editor_toggle_hover: Signal<bool>,
     confirmation: Signal<String>,
     confirmation_problem: Signal<bool>,
     edit_last_hover: Signal<bool>,
@@ -380,7 +379,6 @@ fn popup_target() -> Option<(AppScope, Window, Control, Subscriptions)> {
 /// Builds the Capture window for `binding` (not yet shown).
 pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
     let open_in_editor = scope.signal(true);
-    let editor_toggle_hover = scope.signal(false);
     let confirmation = scope.signal(String::new());
     let confirmation_problem = scope.signal(false);
     let edit_last_hover = scope.signal(false);
@@ -827,7 +825,6 @@ pub fn build(scope: &AppScope, binding: &CaptureBinding) -> Result<Window> {
     UI.with(|ui| {
         *ui.borrow_mut() = Some(Ui {
             open_in_editor,
-            editor_toggle_hover,
             confirmation,
             confirmation_problem,
             edit_last_hover,
@@ -1016,8 +1013,8 @@ fn apply_view(json: &str) -> Result<()> {
     with_ui(|ui| ui.open_in_editor.set_if_changed(view.open_in_editor));
     #[cfg(target_os = "macos")]
     with_ui(|ui| ui.native_menu.update(&view.menus)).transpose()?;
-    let Some((scope, dark, editor_hover, fields, rows, (tab, recording, timing, interval_running, active_schedule, action))) =
-        with_ui(|ui| Some((ui.scope.clone(), ui.dark, ui.editor_toggle_hover, ui.fields.get()?, ui.rows.clone(), (ui.tab, ui.recording, ui.timing, ui.interval_running, ui.active_schedule, ui.action))))
+    let Some((scope, dark, fields, rows, (tab, recording, timing, interval_running, active_schedule, action))) =
+        with_ui(|ui| Some((ui.scope.clone(), ui.dark, ui.fields.get()?, ui.rows.clone(), (ui.tab, ui.recording, ui.timing, ui.interval_running, ui.active_schedule, ui.action))))
             .flatten()
     else {
         return Ok(());
@@ -1029,7 +1026,6 @@ fn apply_view(json: &str) -> Result<()> {
     active_schedule.set_if_changed(view.active_schedule);
     let Action { verb, detail, hint } = view.capture;
     action.set_if_changed((verb, detail, hint));
-    editor_hover.set_if_changed(false);
     rows.clear();
 
     let list = fields.children()?;
@@ -1038,29 +1034,18 @@ fn apply_view(json: &str) -> Result<()> {
         list.add(field_row(dark, &rows, field).build(&scope)?)?;
     }
     if !view.toggles.is_empty() {
-        list.add(toggle_row(dark, editor_hover, &rows, view.tab, &view.toggles, view.open_in_editor).build(&scope)?)?;
+        list.add(toggle_row(dark, &rows, &view.toggles).build(&scope)?)?;
     }
     Ok(())
 }
 
 /// The quick switches (cursor, copy and editor preview for images; microphone,
-/// system audio and webcam for video) and the more-options menu.
-fn toggle_row(dark: Signal<bool>, editor_hover: Signal<bool>, subs: &Subscriptions, tab: usize, toggles: &[Toggle], open_in_editor: bool) -> El<Grid> {
-    let mut items = Vec::with_capacity(toggles.len() + 1);
-    for (i, toggle) in toggles.iter().enumerate() {
-        // Keep image switches grouped before the video switches in Select mode.
-        let gap = if i == 2 && toggles.len() == 5 { 10.0 } else { 0.0 };
-        items.push(toggle_chip(dark, subs, toggle).margin((gap, 0.0, 0.0, 0.0)));
-        if tab == 0 && i == 1 {
-            items.push(editor_toggle_chip(dark, editor_hover, subs, tab, open_in_editor));
-        }
-    }
-    if tab == 1 {
-        items.push(editor_toggle_chip(dark, editor_hover, subs, tab, open_in_editor));
-    } else if tab == 2 {
-        items.push(editor_toggle_chip(dark, editor_hover, subs, tab, open_in_editor).margin((10.0, 0.0, 0.0, 0.0)));
-    }
-    let chips = StackPanel::el().orientation(Orientation::Horizontal).spacing(4.0).children_iter(items);
+/// system audio, webcam and editor preview for video) and the more-options menu.
+fn toggle_row(dark: Signal<bool>, subs: &Subscriptions, toggles: &[Toggle]) -> El<Grid> {
+    let chips = StackPanel::el()
+        .orientation(Orientation::Horizontal)
+        .spacing(6.0)
+        .children_iter(toggles.iter().map(|toggle| toggle_chip(dark, subs, toggle)));
     Grid::el()
         .column_definitions("*,Auto")
         .height(34.0)
@@ -1084,46 +1069,11 @@ fn toggle_row(dark: Signal<bool>, editor_hover: Signal<bool>, subs: &Subscriptio
         )
 }
 
-fn editor_toggle_chip(dark: Signal<bool>, hover: Signal<bool>, subs: &Subscriptions, tab: usize, on: bool) -> El<Button> {
-    let state = if on { "on" } else { "off" };
-    let tip = if tab == 2 {
-        format!("Open recordings in the editor: {state}")
-    } else {
-        format!("Open captures in the editor: {state}")
-    };
-    on_click(
-        Button::el()
-            .name("capture-auto-editor")
-            .width(34.0)
-            .height(32.0)
-            .padding(0.0)
-            .corner_radius(6.0)
-            .border_thickness(1.0)
-            .horizontal_content_alignment(HorizontalAlignment::Center)
-            .vertical_content_alignment(VerticalAlignment::Center)
-            .on_pointer_entered(move |_| hover.set(true))
-            .on_pointer_exited(move |_| hover.set(false))
-            .tool_tip_tip(tip)
-            .background(move || {
-                if on {
-                    palette(dark).accent
-                } else if hover.get() {
-                    palette(dark).track
-                } else {
-                    parts::TRANSPARENT
-                }
-            })
-            .border_brush(move || if on { palette(dark).accent } else { palette(dark).frame })
-            .content(glyph("\u{E70F}", 16.0).foreground(move || if on { WHITE } else { palette(dark).text })),
-        subs,
-        |_| run("switch:preview".into()),
-    )
-}
-
 fn toggle_chip(dark: Signal<bool>, subs: &Subscriptions, toggle: &Toggle) -> El<Button> {
     let icon = match toggle.id.as_str() {
         "cursor-both" | "image:switch:cursor" | "video:switch:record-cursor" => "\u{E962}",
         "image:switch:clipboard" => "\u{E8C8}",
+        "switch:preview" => "\u{E70F}",
         "video:switch:microphone" => "\u{E720}",
         "video:switch:system-audio" => "\u{E767}",
         "video:switch:webcam" => "\u{E8B8}",
@@ -1132,21 +1082,23 @@ fn toggle_chip(dark: Signal<bool>, subs: &Subscriptions, toggle: &Toggle) -> El<
     let on = toggle.on;
     let id = toggle.id.clone();
     let state = if on { "on" } else { "off" };
+    let button = Button::el()
+        .width(34.0)
+        .height(32.0)
+        .padding(0.0)
+        .corner_radius(6.0)
+        .enabled(toggle.enabled)
+        .opacity(if toggle.enabled { 1.0 } else { 0.45 })
+        .horizontal_content_alignment(HorizontalAlignment::Center)
+        .vertical_content_alignment(VerticalAlignment::Center)
+        .background(move || if on { palette(dark).accent } else { parts::TRANSPARENT })
+        .border_brush(move || if on { palette(dark).accent } else { palette(dark).frame })
+        .border_thickness(1.0)
+        .tool_tip_tip(format!("{}: {state}", toggle.label))
+        .content(glyph(icon, 16.0).foreground(move || if on { WHITE } else { palette(dark).text }));
+    let button = if id == "switch:preview" { button.name("capture-auto-editor") } else { button };
     on_click(
-        Button::el()
-            .width(34.0)
-            .height(32.0)
-            .padding(0.0)
-            .corner_radius(6.0)
-            .enabled(toggle.enabled)
-            .opacity(if toggle.enabled { 1.0 } else { 0.45 })
-            .horizontal_content_alignment(HorizontalAlignment::Center)
-            .vertical_content_alignment(VerticalAlignment::Center)
-            .background(move || if on { palette(dark).accent } else { parts::TRANSPARENT })
-            .border_brush(move || if on { palette(dark).accent } else { palette(dark).frame })
-            .border_thickness(1.0)
-            .tool_tip_tip(format!("{}: {state}", toggle.label))
-            .content(glyph(icon, 16.0).foreground(move || if on { WHITE } else { palette(dark).text })),
+        button,
         subs,
         move |_| run(format!("pick:{id}")),
     )

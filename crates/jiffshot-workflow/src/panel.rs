@@ -641,6 +641,12 @@ pub fn unified_view(
             Toggle { id: "video:switch:webcam", label: "Show webcam in recordings", on: s.webcam.is_some(), enabled: true },
         ]);
     }
+    view.toggles.push(Toggle {
+        id: "switch:preview",
+        label: if mode == 2 { "Open recordings in the editor" } else { "Open captures in the editor" },
+        on: s.open_in_editor,
+        enabled: manual,
+    });
     view
 }
 
@@ -2018,9 +2024,9 @@ mod tests {
     #[test]
     fn unified_mode_picks_switch_tabs_and_update_the_view() {
         let expected = [
-            ("Select", vec!["area", "send", "image:effects"], 5),
-            ("Capture", vec!["area", "send", "image:effects"], 2),
-            ("Record", vec!["video:selection", "send"], 4),
+            ("Select", vec!["area", "send", "image:effects"], 6),
+            ("Capture", vec!["area", "send", "image:effects"], 3),
+            ("Record", vec!["video:selection", "send"], 5),
         ];
         for previous in 0..=2 {
             for (target, (verb, fields, toggles)) in expected.iter().enumerate() {

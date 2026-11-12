@@ -8624,8 +8624,13 @@ fn capture_workflow_script() -> Script {
     });
     script.step(move |test| {
         shot_capture_window(test, "capture-select-tab.png");
+        capture_window_selftest_action("tab:2".into());
+        300
+    });
+    script.step(move |test| {
+        shot_capture_window(test, "capture-video-tab.png");
         capture_window_selftest_action("tab:1".into());
-        3500
+        3200
     });
     script.step(|_| {
         let (_, confirmation, path) = capture_view::workflow_state_for_selftest().unwrap();

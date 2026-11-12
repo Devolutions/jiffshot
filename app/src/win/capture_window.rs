@@ -916,9 +916,9 @@ mod tests {
         settings.capture_window.selection = "window".into();
         settings.capture_window.video_selection = "window".into();
         let expected = [
-            ("Select", vec!["area", "send", "image:effects"], 5, "Then choose"),
-            ("Capture", vec!["area", "send", "image:effects"], 2, ""),
-            ("Record", vec!["video:selection", "send"], 4, ""),
+            ("Select", vec!["area", "send", "image:effects"], 6, "Then choose"),
+            ("Capture", vec!["area", "send", "image:effects"], 3, ""),
+            ("Record", vec!["video:selection", "send"], 5, ""),
         ];
         for (tab, (verb, fields, toggles, detail)) in expected.into_iter().enumerate() {
             settings.capture_window.tab = tab;
@@ -943,9 +943,9 @@ mod tests {
     #[test]
     fn mode_actions_switch_tabs_and_update_the_view() {
         let expected = [
-            ("Select", vec!["area", "send", "image:effects"], 5),
-            ("Capture", vec!["area", "send", "image:effects"], 2),
-            ("Record", vec!["video:selection", "send"], 4),
+            ("Select", vec!["area", "send", "image:effects"], 6),
+            ("Capture", vec!["area", "send", "image:effects"], 3),
+            ("Record", vec!["video:selection", "send"], 5),
         ];
         for previous in 0..=2 {
             for (target, (verb, fields, toggles)) in expected.iter().enumerate() {
