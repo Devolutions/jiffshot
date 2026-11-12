@@ -90,8 +90,6 @@ const MODE_GLYPHS: [&str; 3] = ["\u{E8B3}", "\u{E722}", "\u{E714}"];
 const WHITE: Color = parts::rgb(0xFFFFFF);
 const SELECTED_MODE_DARK: Color = parts::rgb(dark_blue::windows_or(dark_blue::SELECTION, 0x284662));
 const SELECTED_MODE_ICON_DARK: Color = parts::rgb(dark_blue::windows_or(dark_blue::ACCENT_TEXT, 0x73BAFF));
-const SELECTED_PILL_LIGHT: Color = parts::rgb(0xE5F1FB);
-const SELECTED_PILL_TEXT_LIGHT: Color = parts::rgb(0x0F4C85);
 const SAVED_DARK: Color = parts::rgb(0x3FB950);
 const SAVED_LIGHT: Color = parts::rgb(0x1A7F37);
 const PROBLEM_DARK: Color = parts::rgb(0xFF6B63);
@@ -1058,7 +1056,7 @@ fn toggle_row(dark: Signal<bool>, editor_hover: Signal<bool>, subs: &Subscriptio
         }
     }
     if tab == 1 {
-        items.push(editor_toggle_chip(dark, editor_hover, subs, tab, open_in_editor).margin((4.0, 0.0, 0.0, 0.0)));
+        items.push(editor_toggle_chip(dark, editor_hover, subs, tab, open_in_editor));
     } else if tab == 2 {
         items.push(editor_toggle_chip(dark, editor_hover, subs, tab, open_in_editor).margin((10.0, 0.0, 0.0, 0.0)));
     }
@@ -1093,64 +1091,19 @@ fn editor_toggle_chip(dark: Signal<bool>, hover: Signal<bool>, subs: &Subscripti
     } else {
         format!("Open captures in the editor: {state}")
     };
-    let button = Button::el()
-        .name("capture-auto-editor")
-        .height(32.0)
-        .corner_radius(6.0)
-        .border_thickness(1.0)
-        .horizontal_content_alignment(HorizontalAlignment::Center)
-        .vertical_content_alignment(VerticalAlignment::Center)
-        .on_pointer_entered(move |_| hover.set(true))
-        .on_pointer_exited(move |_| hover.set(false))
-        .tool_tip_tip(tip);
-    let button = if tab == 1 {
-        button
-            .padding((10.0, 0.0))
-            .background(move || {
-                if on {
-                    if dark.get() { SELECTED_MODE_DARK } else { SELECTED_PILL_LIGHT }
-                } else if hover.get() {
-                    palette(dark).track
-                } else {
-                    parts::TRANSPARENT
-                }
-            })
-            .border_brush(move || if on { palette(dark).accent } else { palette(dark).frame })
-            .content(
-                StackPanel::el()
-                    .orientation(Orientation::Horizontal)
-                    .spacing(6.0)
-                    .vertical_alignment(VerticalAlignment::Center)
-                    .child(glyph("\u{E70F}", 14.0).foreground(move || {
-                        if !on {
-                            palette(dark).muted
-                        } else if dark.get() {
-                            SELECTED_MODE_ICON_DARK
-                        } else {
-                            SELECTED_PILL_TEXT_LIGHT
-                        }
-                    }))
-                    .child(
-                        TextBlock::el()
-                            .text("Open in editor")
-                            .font_size(12.5)
-                            .font_weight(if on { FontWeight::DemiBold } else { FontWeight::Normal })
-                            .vertical_alignment(VerticalAlignment::Center)
-                            .foreground(move || {
-                                if !on {
-                                    if hover.get() { palette(dark).text } else { palette(dark).muted }
-                                } else if dark.get() {
-                                    WHITE
-                                } else {
-                                    SELECTED_PILL_TEXT_LIGHT
-                                }
-                            }),
-                    ),
-            )
-    } else {
-        button
+    on_click(
+        Button::el()
+            .name("capture-auto-editor")
             .width(34.0)
+            .height(32.0)
             .padding(0.0)
+            .corner_radius(6.0)
+            .border_thickness(1.0)
+            .horizontal_content_alignment(HorizontalAlignment::Center)
+            .vertical_content_alignment(VerticalAlignment::Center)
+            .on_pointer_entered(move |_| hover.set(true))
+            .on_pointer_exited(move |_| hover.set(false))
+            .tool_tip_tip(tip)
             .background(move || {
                 if on {
                     palette(dark).accent
@@ -1161,17 +1114,10 @@ fn editor_toggle_chip(dark: Signal<bool>, hover: Signal<bool>, subs: &Subscripti
                 }
             })
             .border_brush(move || if on { palette(dark).accent } else { palette(dark).frame })
-            .content(glyph("\u{E70F}", 16.0).foreground(move || {
-                if on {
-                    WHITE
-                } else if hover.get() {
-                    palette(dark).text
-                } else {
-                    palette(dark).muted
-                }
-            }))
-    };
-    on_click(button, subs, |_| run("switch:preview".into()))
+            .content(glyph("\u{E70F}", 16.0).foreground(move || if on { WHITE } else { palette(dark).text })),
+        subs,
+        |_| run("switch:preview".into()),
+    )
 }
 
 fn toggle_chip(dark: Signal<bool>, subs: &Subscriptions, toggle: &Toggle) -> El<Button> {
@@ -1895,8 +1841,6 @@ mod tests {
         }
         let ratio = contrast(SELECTED_MODE_ICON_DARK, SELECTED_MODE_DARK);
         assert!(ratio >= 4.5, "dark selected mode contrast {ratio:.2} is below 4.5:1");
-        assert!(contrast(WHITE, SELECTED_MODE_DARK) >= 4.5, "dark active pill text contrast is below 4.5:1");
-        assert!(contrast(SELECTED_PILL_TEXT_LIGHT, SELECTED_PILL_LIGHT) >= 4.5, "light active pill text contrast is below 4.5:1");
         assert!(contrast(SELECTED_MODE_ICON_DARK, DARK.card) >= 4.5, "dark confirmation Edit contrast is below 4.5:1");
         assert!(contrast(LIGHT.accent, LIGHT.card) >= 4.5, "light confirmation Edit contrast is below 4.5:1");
         assert!(contrast(SAVED_DARK, DARK.card) >= 4.5, "dark saved badge contrast is below 4.5:1");
