@@ -22,6 +22,7 @@
 //! `JIFFSHOT_UITEST_RECENT` checks recent-file actions with a scratch library.
 //! `JIFFSHOT_UITEST_LIBRARY` checks library actions with synthetic captures.
 //! `JIFFSHOT_UITEST_LIBRARY_LATENCY` checks large-library refresh and capture delivery.
+//! On macOS, `JIFFSHOT_UITEST_CAPTURE_EDITOR` checks captured images in a reopened or already-open editor.
 //! `JIFFSHOT_UITEST_LIBRARY_COPY` checks library copy using a private pasteboard.
 //! `JIFFSHOT_UITEST_LIBRARY_DRAG` checks outgoing library drag gestures.
 //! `JIFFSHOT_UITEST_CONTROL` leaves an isolated control server for an external fixture.
@@ -785,6 +786,10 @@ fn canvas_keys_script() -> Script {
 
 /// The whole walk, in order.
 fn script() -> Script {
+    #[cfg(target_os = "macos")]
+    if env("JIFFSHOT_UITEST_CAPTURE_EDITOR").is_some() {
+        return capture_editor_script();
+    }
     if env("JIFFSHOT_UITEST_CAPTURE_WORKFLOW").is_some() {
         return capture_workflow_script();
     }
@@ -2353,6 +2358,169 @@ fn empty_scratch_library(test: &Test) -> PathBuf {
     assert!(resolved.starts_with(&ui_dir) && resolved != ui_dir, "the library must be inside the test directory");
     assert!(std::fs::read_dir(&resolved).expect("read the scratch library").next().is_none(), "the test library must be empty");
     library
+}
+
+#[cfg(target_os = "macos")]
+fn capture_editor_script() -> Script {
+    use jiffshot_doc::{Document, Rgba};
+
+    /// What the editor is doing when the capture is saved.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Case {
+        /// Preview in Editor is on and the editor is hidden: it reopens on the capture.
+        Reopens,
+        /// Preview in Editor is off and the editor is showing without an image, as
+        /// it does when opened from the menu bar: the new capture is selected.
+        Fresh,
+        /// Preview in Editor is off and the editor has a modified capture open: the
+        /// edits are saved and the new capture is selected.
+        Selects,
+        /// A schedule's or a time-lapse's capture only joins Recent Captures.
+        Background,
+        /// Edits that cannot be saved stay open, and the editor says why.
+        Protected,
+        /// A hidden editor stays hidden and unchanged.
+        Hidden,
+    }
+
+    struct Started {
+        receive: std::sync::mpsc::Receiver<Result<PathBuf, String>>,
+        pending: Option<u64>,
+        at: Instant,
+        title: String,
+        size: (u32, u32),
+    }
+
+    let mut script = Script(VecDeque::new());
+    let finished = Rc::new(RefCell::new(None));
+    let saved = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
+    script.wait(800).step(|test| {
+        empty_scratch_library(test);
+        crate::app::act(|app| app.layout(|layout| layout.tray = false)).unwrap();
+        crate::capture_window::window().unwrap().hide().unwrap();
+        300
+    });
+    for (index, width, height, color, case) in [
+        (0, 640, 360, Rgba::rgb(255, 0, 0), Case::Reopens),
+        (1, 640, 360, Rgba::rgb(0, 0, 255), Case::Reopens),
+        (2, 320, 240, Rgba::rgb(0, 255, 0), Case::Reopens),
+        (3, 280, 210, Rgba::rgb(255, 255, 0), Case::Fresh),
+        (4, 240, 180, Rgba::rgb(255, 0, 0), Case::Selects),
+        (5, 200, 150, Rgba::rgb(0, 0, 255), Case::Background),
+        (6, 160, 120, Rgba::rgb(255, 255, 0), Case::Protected),
+        (7, 120, 90, Rgba::rgb(0, 255, 255), Case::Hidden),
+    ] {
+        script.step(move |_| {
+            match case {
+                Case::Reopens | Case::Hidden => super::scope().unwrap().main_window().unwrap().hide().unwrap(),
+                Case::Fresh => {
+                    crate::app::act(|app| app.load(Document::blank(1280, 720, Rgba::WHITE), None, None)).unwrap();
+                    assert!(super::scope().unwrap().main_window().unwrap().is_visible().unwrap(),
+                        "the editor is not showing");
+                }
+                // Selecting another capture must keep the edits of the one that is open.
+                Case::Selects => crate::app::act(|app| app.resize_to(330, 250)).unwrap(),
+                Case::Protected => crate::app::act(|app| {
+                    app.load(Document::blank(3, 2, Rgba::WHITE), None, None);
+                    app.resize_to(4, 3);
+                }).unwrap(),
+                Case::Background => {}
+            }
+            // Let the editor's title and size reach the view before they are snapshotted.
+            300
+        });
+        let completion = finished.clone();
+        script.step(move |test| {
+            let frame = jiffshot_workflow::frame_from_pixmap(Document::blank(width, height, color).background());
+            let open = case == Case::Reopens;
+            let pending = (!open).then(|| super::capture_view::starting_capture(true).unwrap());
+            let (send, receive) = std::sync::mpsc::channel();
+            *completion.borrow_mut() = Some(Started {
+                receive,
+                pending,
+                at: Instant::now(),
+                title: sink().title.get_untracked(),
+                size: super::canvas().unwrap().document_size(),
+            });
+            let background = case == Case::Background;
+            std::thread::spawn(move || {
+                send.send(jiffshot_workflow::finish_capture_editor_selftest(frame, open, background)).unwrap();
+            });
+            test.line(format!("started capture {index}: {case:?}"));
+            600
+        });
+        let completion = finished.clone();
+        let paths = saved.clone();
+        script.step(move |test| {
+            let Started { receive, pending, at, title, size } = completion.borrow_mut().take().unwrap();
+            let path = receive.try_recv()
+                .expect("the capture did not finish promptly").expect("save the fixture capture");
+            let current = |capture: &Path| sink().library.get_untracked().iter().any(|item| {
+                let fields = item.fields.get_untracked();
+                fields.path_identity == capture && fields.is_current
+            });
+            assert!(sink().library.get_untracked().iter().any(|item| item.fields.get_untracked().path_identity == path),
+                "the saved capture did not appear in Recent Captures without a manual refresh");
+            assert!(at.elapsed() < Duration::from_secs(2), "capture delivery stalled the UI");
+            let scope = super::scope().unwrap();
+            let window = scope.main_window().unwrap();
+            if let Some(pending) = pending {
+                assert!(!crate::capture_window::window().unwrap().is_visible().unwrap(),
+                    "a background completion reopened Capture");
+                assert!(super::capture_view::workflow_state_for_selftest().unwrap().1.is_empty(),
+                    "a background completion replaced the foreground confirmation");
+                assert!(super::capture_view::image_finished(pending, None, false, true),
+                    "a background completion consumed the foreground request");
+            }
+            let previous = paths.borrow().last().cloned();
+            paths.borrow_mut().push(path.clone());
+            if !matches!(case, Case::Reopens | Case::Fresh | Case::Selects) {
+                assert_eq!(window.is_visible().unwrap(), case != Case::Hidden, "saving changed the editor visibility");
+                assert_eq!(sink().title.get_untracked(), title, "saving replaced the editor document");
+                assert_eq!(super::canvas().unwrap().document_size(), size, "saving resized the editor document");
+                assert!(!current(&path), "saving selected the capture in the editor");
+                if case == Case::Background {
+                    assert!(current(previous.as_ref().unwrap()), "saving moved the editor's selection");
+                }
+                if case == Case::Protected {
+                    assert!(sink().status.get_untracked().contains("Capture saved, but not opened"),
+                        "the editor did not say why the capture was not opened");
+                    assert_eq!(crate::canvas::with_editor(|editor| editor.is_modified()), Some(true),
+                        "the unsaved edits were replaced");
+                }
+                test.line(format!("capture {index} appeared in Recent Captures without opening or replacing the editor"));
+                return 200;
+            }
+            assert!(window.is_visible().unwrap(), "the editor is not showing the new capture");
+            assert!(sink().title.get_untracked().contains(path.file_name().unwrap().to_str().unwrap()));
+            assert_eq!(super::canvas().unwrap().document_size(), (width, height));
+            assert_eq!(
+                crate::canvas::with_display(|image| jiffshot_doc::raster::pixel(image, (width / 2) as i32, (height / 2) as i32)),
+                Some(color),
+                "the canvas retained the previous screenshot"
+            );
+            assert!(current(&path), "the new capture is not selected in Recent Captures");
+            if case == Case::Selects {
+                let previous = previous.unwrap();
+                assert!(!current(&previous), "the previous capture is still selected in Recent Captures");
+                let edits = previous.with_extension(jiffshot_capture::library::EDITS_EXT);
+                let kept = jiffshot_doc::io::load_document(&edits).expect("selecting lost the open capture's edits");
+                assert_eq!(kept.size(), (330, 250));
+            }
+            let number = crate::mac_window::number(scope.platform_handle(&window).unwrap()).unwrap();
+            let frame = jiffshot_capture::screen::grab_window(number).expect("capture the fixture editor");
+            frame.save_png(&test.path(&format!("incoming-{index}.png"))).unwrap();
+            let matches = frame.pixels.chunks_exact(4).filter(|pixel| {
+                pixel[2].abs_diff(color.r) <= 4
+                    && pixel[1].abs_diff(color.g) <= 4
+                    && pixel[0].abs_diff(color.b) <= 4
+            }).count();
+            assert!(matches > 10_000, "the new capture is missing from the visible canvas: {matches} matching pixels");
+            test.line(format!("capture {index} appeared in the editor ({matches} pixels)"));
+            200
+        });
+    }
+    script
 }
 
 fn library_latency_script() -> Script {

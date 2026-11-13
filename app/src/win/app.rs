@@ -4772,6 +4772,23 @@ impl App {
         self.show_editor();
     }
 
+    /// Selects a capture saved without opening the editor, when the editor is
+    /// already showing. It never shows or raises the editor, and it keeps the
+    /// open image when its edits cannot be saved.
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn select_saved_capture(&mut self, path: PathBuf) {
+        let showing = self
+            .window()
+            .is_some_and(|window| window.is_visible().unwrap_or(false));
+        if self.exiting || !showing {
+            return;
+        }
+        if let Err(error) = self.autosave_checked() {
+            return self.set_status(format!("Capture saved, but not opened. {error}"));
+        }
+        self.open_path(&path);
+    }
+
     // ---- text recognition -------------------------------------------------
 
     pub fn grab_text(&mut self) {

@@ -1753,6 +1753,7 @@ fn record_shutdown_fixture(dir: &Path, rect: Rect) -> Result<(), String> {
     let hooks = crate::Hooks {
         image_finished: Box::new(|_, _, _, _| {}),
         open_in_editor: Box::new(|_| false),
+        select_in_editor: Box::new(|_| {}),
         show_editor: Box::new(|| {}),
         quit: Box::new(|| {}),
         notify: Box::new(|title, text, problem| {
@@ -1877,6 +1878,7 @@ fn record_workflow_fixture(dir: &Path, rect: Rect) -> Result<(), String> {
     let hooks = crate::Hooks {
         image_finished: Box::new(|_, _, _, _| {}),
         open_in_editor: Box::new(|_| false),
+        select_in_editor: Box::new(|_| {}),
         show_editor: Box::new(|| {}),
         quit: Box::new(|| {}),
         notify: Box::new(|title, text, problem| {

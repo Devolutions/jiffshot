@@ -85,12 +85,18 @@ use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
 /// What the capture side asks of the app it runs in.
 pub struct Hooks {
-    /// Completes a Capture-window image request (`id`): `path` is `Some` when saved,
+    /// Reports an image completion, optionally associated with a Capture-window request:
+    /// `path` is `Some` when saved (including hotkey, CLI and timer captures),
     /// `problem` indicates save/delivery problems, and `reopen` indicates whether
-    /// Capture should reopen (`false` when the user switched to Video or Text).
-    pub image_finished: Box<dyn Fn(u64, Option<&Path>, bool, bool) + Send + Sync>,
+    /// the associated Capture window should reopen (never for an unassociated capture).
+    pub image_finished: Box<dyn Fn(Option<u64>, Option<&Path>, bool, bool) + Send + Sync>,
     /// Opens a saved capture in the editor; false when it could not.
     pub open_in_editor: Box<dyn Fn(&Path) -> bool + Send + Sync>,
+    /// Selects a saved capture in an editor that is already showing. It never
+    /// opens or raises the editor: sent for the captures taken while
+    /// "Preview in Editor" is off, except the ones a schedule or a time-lapse
+    /// takes.
+    pub select_in_editor: Box<dyn Fn(&Path) + Send + Sync>,
     /// Shows the editor window (its library when nothing is open).
     pub show_editor: Box<dyn Fn() + Send + Sync>,
     /// The tray's Exit, or the engine stopping: ends the whole app.
@@ -1215,6 +1221,37 @@ pub fn start_recording_shutdown_selftest(
 }
 
 #[cfg(target_os = "macos")]
+pub fn finish_capture_editor_selftest(
+    frame: Frame,
+    open_in_editor: bool,
+    background: bool,
+) -> Result<std::path::PathBuf, String> {
+    if std::env::var_os("JIFFSHOT_UITEST").is_none()
+        || std::env::var_os("JIFFSHOT_UITEST_CAPTURE_EDITOR").is_none()
+    {
+        return Err("the capture editor self-test is not enabled".into());
+    }
+    let settings = settings::Settings {
+        open_in_editor,
+        copy_to_clipboard: false,
+        share: "none".into(),
+        ..Default::default()
+    };
+    let mut capture = workflow::from_frame(
+        jiffshot_capture::library::CaptureKind::Region,
+        frame.bounds(),
+        frame,
+    );
+    capture.background = background;
+    let outcome = workflow::finish(capture, &settings, 0);
+    if outcome.is_error {
+        Err(outcome.message)
+    } else {
+        outcome.saved_path.ok_or_else(|| "the fixture image was not saved".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
 pub fn start_image_shutdown_selftest() -> Result<
     (
         std::sync::mpsc::Receiver<Result<(), String>>,
@@ -1292,6 +1329,8 @@ pub fn finish_program_share_selftest(video: Option<&Path>) -> Result<String, Str
             frame,
         );
         capture.cursor = Some((cursor, (2, 3)));
+        // This fixture checks sharing, so it leaves the editor's selection alone.
+        capture.background = true;
         workflow::finish(capture, &settings, 0)
     };
     if outcome.is_error {

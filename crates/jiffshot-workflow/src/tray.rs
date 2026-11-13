@@ -746,13 +746,13 @@ impl ImageAttempt {
 
     fn dismiss_without_reopen(&mut self) {
         if let (Some(id), Some(hooks)) = (self.request_id.take(), crate::hooks()) {
-            (hooks.image_finished)(id, None, false, false);
+            (hooks.image_finished)(Some(id), None, false, false);
         }
     }
 
     fn fail(&mut self) {
         if let (Some(id), Some(hooks)) = (self.request_id.take(), crate::hooks()) {
-            (hooks.image_finished)(id, None, true, true);
+            (hooks.image_finished)(Some(id), None, true, true);
         }
     }
 }
@@ -760,7 +760,7 @@ impl ImageAttempt {
 impl Drop for ImageAttempt {
     fn drop(&mut self) {
         if let (Some(id), Some(hooks)) = (self.request_id.take(), crate::hooks()) {
-            (hooks.image_finished)(id, None, false, self.reopen_on_drop);
+            (hooks.image_finished)(Some(id), None, false, self.reopen_on_drop);
         }
     }
 }
@@ -804,7 +804,7 @@ fn spawn_finish_after(
     crate::shutdown_macos::spawn(move || {
         if let Err(error) = before() {
             if let (Some(id), Some(hooks)) = (capture.request_id, crate::hooks()) {
-                (hooks.image_finished)(id, None, true, true);
+                (hooks.image_finished)(Some(id), None, true, true);
             }
             notify(owner as HWND, "Capture finalization failed", &error, true);
             return Some(error);
@@ -1408,8 +1408,11 @@ fn finish_step_guide(
         outcome
     };
     if !settings.open_in_editor {
-       if let (Some(id), Some(hooks)) = (request_id, crate::hooks()) {
-           (hooks.image_finished)(id, Some(path), outcome.is_error, true);
+       if let Some(hooks) = crate::hooks() {
+           (hooks.image_finished)(request_id, Some(path), outcome.is_error, true);
+           if !outcome.is_error {
+               (hooks.select_in_editor)(path);
+           }
         }
     }
     outcome
@@ -1678,10 +1681,13 @@ fn import_files(
                 let frame = workflow::frame_from_pixmap(&pm);
                 let rect = Rect::new(0, 0, frame.width as i32, frame.height as i32);
                 let mut s = settings.clone();
-                // Only the last one opens in the editor.
-                s.open_in_editor &= i + 1 == total;
+                // Only the last one opens in the editor, or selects there.
+                let last = i + 1 == total;
+                s.open_in_editor &= last;
                 s.copy_to_clipboard = false;
-                loaded.push((workflow::from_frame(CaptureKind::Region, rect, frame), s));
+                let mut capture = workflow::from_frame(CaptureKind::Region, rect, frame);
+                capture.background = !last;
+                loaded.push((capture, s));
             }
             Err(error) => {
                 let message = format!("{}: {error}", path.display());
@@ -1724,7 +1730,7 @@ fn import_files(
         }
         if let Some(id) = request_id {
             if let Some(hooks) = crate::hooks() {
-                (hooks.image_finished)(id, last_saved.as_deref(), any_error, true);
+                (hooks.image_finished)(Some(id), last_saved.as_deref(), any_error, true);
             }
             if !any_error {
                 if let Some(outcome) = final_outcome {
@@ -2046,10 +2052,11 @@ fn capture_scheduled_checked(
     #[cfg(windows)]
     let capture = scheduled_capture(&settings);
     match capture {
-        Ok(capture) => {
+        Ok(mut capture) => {
             let mut quiet = settings;
             quiet.open_in_editor = false;
             quiet.copy_to_clipboard = false;
+            capture.background = true;
             spawn_finish(capture, quiet, hwnd);
         }
         Err(error) => {
@@ -2208,7 +2215,7 @@ fn timelapse_tick() {
     else {
         return;
     };
-    let capture = match workflow::immediate_in_layout(
+    let mut capture = match workflow::immediate_in_layout(
         CaptureKind::Region,
         timelapse.region.rect,
         false,
@@ -2248,6 +2255,7 @@ fn timelapse_tick() {
     let mut quiet = settings;
     quiet.open_in_editor = false;
     quiet.copy_to_clipboard = false;
+    capture.background = true;
     spawn_finish(capture, quiet, hwnd);
 }
 
@@ -4202,6 +4210,8 @@ mod tests {
         let notified = events.clone();
         let completed = Arc::new(Mutex::new(Vec::new()));
         let observed = completed.clone();
+        let selected = Arc::new(Mutex::new(Vec::<std::path::PathBuf>::new()));
+        let selecting = selected.clone();
         assert!(crate::HOOKS
             .set(crate::Hooks {
                 image_finished: Box::new(move |id, path, problem, reopen| {
@@ -4211,6 +4221,10 @@ mod tests {
                     observed.lock().unwrap().push((id, path.map(std::path::Path::to_path_buf), problem, reopen));
                 }),
                 open_in_editor: Box::new(|_| panic!("capture must not reach the editor")),
+                select_in_editor: Box::new(move |path| {
+                    assert!(path.is_file(), "selection preceded the saved image");
+                    selecting.lock().unwrap().push(path.to_path_buf());
+                }),
                 show_editor: Box::new(|| panic!("capture must not show the editor")),
                 quit: Box::new(|| panic!("capture must not quit")),
                 notify: Box::new(move |title, text, warning| {
@@ -4308,7 +4322,7 @@ mod tests {
         for (i, mode) in [MODE_TEXT, MODE_VIDEO, MODE_VIDEO_FIXED].into_iter().enumerate() {
             let id = 100 + i as u64;
             capture_interactive(mode, ImageAttempt::new(Some(id)));
-            assert_eq!(completed.lock().unwrap().pop(), Some((id, None, false, false)));
+            assert_eq!(completed.lock().unwrap().pop(), Some((Some(id), None, false, false)));
         }
         completed.lock().unwrap().clear();
         let root = std::env::temp_dir().join(format!("jiffshot-editor-free-{}", std::process::id()));
@@ -4332,15 +4346,28 @@ mod tests {
         let outcome = workflow::finish(make_capture(Some(7)), &settings, 0);
         assert!(!outcome.is_error && !outcome.opened_editor);
         let saved = completed.lock().unwrap().pop().unwrap();
-        assert_eq!((saved.0, saved.2, saved.3), (7, false, true));
+        assert_eq!((saved.0, saved.2, saved.3), (Some(7), false, true));
         let path = saved.1.expect("the confirmation must identify the saved image");
         assert!(path.starts_with(&root));
+        assert_eq!(selected.lock().unwrap().as_slice(), std::slice::from_ref(&path), "a requested capture selects in an open editor");
+        selected.lock().unwrap().clear();
         let image = jiffshot_doc::io::load_image(&path).unwrap();
         assert_eq!((image.width(), image.height()), (12, 8));
-        // Unassociated (hotkey/CLI/timer) captures never emit image_finished.
+        // Unassociated captures refresh the library without consuming a foreground request.
         let outcome = workflow::finish(make_capture(None), &settings, 0);
         assert!(!outcome.is_error && !outcome.opened_editor);
-        assert!(completed.lock().unwrap().is_empty(), "an unassociated capture consumed a foreground request");
+        let unassociated = outcome.saved_path.expect("the capture must be saved");
+        assert_eq!(completed.lock().unwrap().pop(), Some((None, Some(unassociated.clone()), false, true)));
+        assert!(completed.lock().unwrap().is_empty());
+        assert_eq!(*selected.lock().unwrap(), [unassociated], "a hotkey capture selects in an open editor");
+        selected.lock().unwrap().clear();
+        // Scheduled and time-lapse captures join the library without taking the editor's selection.
+        let mut background = make_capture(None);
+        background.background = true;
+        let outcome = workflow::finish(background, &settings, 0);
+        assert!(!outcome.is_error && !outcome.opened_editor);
+        assert_eq!(completed.lock().unwrap().pop(), Some((None, outcome.saved_path, false, true)));
+        assert!(selected.lock().unwrap().is_empty(), "a background capture must not select");
         // Multi-file imports confirm once with the final imported file.
         let first_src = root.join("src-1.png");
         let second_src = root.join("src-2.png");
@@ -4351,12 +4378,20 @@ mod tests {
         });
         assert!(import_files(vec![first_src, second_src], settings.clone(), std::ptr::null_mut(), ImageAttempt::new(Some(8))).is_none());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while completed.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+        while !completed.lock().unwrap().iter().any(|event| event.0 == Some(8)) && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert_eq!(completed.lock().unwrap().len(), 1, "multi-file import must complete once");
+        assert_eq!(completed.lock().unwrap().len(), 3, "each imported file must refresh the library");
         let imported = completed.lock().unwrap().pop().unwrap();
-        assert_eq!((imported.0, imported.2, imported.3), (8, false, true));
+        assert_eq!((imported.0, imported.2, imported.3), (Some(8), false, true));
+        assert_eq!(
+            *selected.lock().unwrap(),
+            [imported.1.clone().unwrap()],
+            "only the last imported file selects in an open editor"
+        );
+        selected.lock().unwrap().clear();
+        assert!(completed.lock().unwrap().drain(..).all(|event| event.0.is_none()),
+            "multi-file import must confirm the foreground request only once");
         let imported_image = jiffshot_doc::io::load_image(&imported.1.unwrap()).unwrap();
         assert_eq!((imported_image.width(), imported_image.height()), (20, 14), "Edit must target the final imported image");
         let blocked = root.join("not-a-directory");
@@ -4364,7 +4399,8 @@ mod tests {
         std::env::set_var("JIFFSHOT_LIBRARY", &blocked);
         let outcome = workflow::finish(make_capture(Some(9)), &settings, 0);
         assert!(outcome.is_error && !outcome.opened_editor);
-        assert_eq!(completed.lock().unwrap().pop(), Some((9, None, true, true)));
+        assert_eq!(completed.lock().unwrap().pop(), Some((Some(9), None, true, true)));
+        assert!(selected.lock().unwrap().is_empty(), "a capture that was not saved must not select");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

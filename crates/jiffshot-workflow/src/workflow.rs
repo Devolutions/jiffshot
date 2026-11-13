@@ -27,6 +27,9 @@ pub struct Capture {
     pub cursor: Option<(Frame, (i32, i32))>,
     /// The top-level window it came from, to look up a browser's address.
     pub window: Option<isize>,
+    /// Taken by a schedule, a time-lapse or as one of several imports: it
+    /// joins the library but does not take the editor's selection.
+    pub background: bool,
 }
 
 fn pixmap_for_frame(frame: &Frame) -> io::Result<tiny_skia::Pixmap> {
@@ -520,6 +523,7 @@ pub fn from_overlay(
         meta,
         cursor: separate,
         window,
+        background: false,
     }))
 }
 
@@ -532,6 +536,7 @@ pub fn from_frame(kind: CaptureKind, rect: Rect, frame: Frame) -> Capture {
         meta,
         cursor: None,
         window: None,
+        background: false,
     }
 }
 
@@ -581,6 +586,7 @@ pub(crate) fn immediate_in_layout_with_cursor(
         meta,
         cursor: separate,
         window: None,
+        background: false,
     })
 }
 
@@ -764,7 +770,7 @@ fn finish_in_library_with(
         Err(error) => {
             if !settings.open_in_editor {
                 if let (Some(id), Some(hooks)) = (capture.request_id, crate::hooks()) {
-                    (hooks.image_finished)(id, None, true, true);
+                    (hooks.image_finished)(Some(id), None, true, true);
                 }
             }
             return Outcome {
@@ -877,8 +883,11 @@ fn finish_in_library_with(
         message = format!("{message}; {}", notes.join("; "));
     }
     if !settings.open_in_editor {
-        if let (Some(id), Some(hooks)) = (capture.request_id, crate::hooks()) {
-            (hooks.image_finished)(id, Some(&path), is_error, true);
+        if let Some(hooks) = crate::hooks() {
+            (hooks.image_finished)(capture.request_id, Some(&path), is_error, true);
+            if cursor_saved && !capture.background {
+                (hooks.select_in_editor)(&path);
+            }
         }
     }
     crate::log(&format!(
