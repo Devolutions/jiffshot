@@ -361,6 +361,46 @@ fn finish_incoming_when_ready(path: PathBuf) {
     }
 }
 
+/// Quits again once the user answered the unsaved-edits question, after the
+/// paused quit (and its macOS termination request) has been cancelled.
+/// `discard` lets edits without a location go.
+#[cfg(target_os = "macos")]
+fn resume_quit_when_ready(discard: bool, attempts: usize) {
+    enum Access {
+        Busy,
+        Finished,
+        Missing,
+    }
+    let state = APP.with(|cell| match cell.try_borrow_mut() {
+        Err(_) => Access::Busy,
+        Ok(mut guard) => match guard.as_mut() {
+            Some(app) if app.exiting => Access::Busy,
+            Some(app) => {
+                app.discard_on_quit = discard;
+                app.exit();
+                Access::Finished
+            }
+            None => Access::Missing,
+        },
+    });
+    match state {
+        Access::Finished => schedule_sync(),
+        Access::Missing => jiffshot_workflow::log("Could not quit: the editor is unavailable."),
+        // The paused quit is normally cancelled within a few turns; give up
+        // rather than retry forever if another quit holds the state.
+        Access::Busy if attempts >= 1200 => {
+            jiffshot_workflow::log("Could not resume quitting: the editor stayed busy.")
+        }
+        Access::Busy => {
+            if let Err(error) = crate::shutdown_ui_macos::retry_named("a resumed quit retry", move || {
+                resume_quit_when_ready(discard, attempts.saturating_add(1))
+            }) {
+                jiffshot_workflow::log(&format!("Could not resume quitting: {error}"));
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn post_exit() -> std::result::Result<(), String> {
     crate::shutdown_ui_macos::post("an exit request", exit_when_ready)
@@ -865,6 +905,10 @@ pub fn install(scope: AppScope, opening: Option<PathBuf>) {
             native_termination: None,
             #[cfg(target_os = "macos")]
             pending_playback_shutdown: Vec::new(),
+            #[cfg(target_os = "macos")]
+            discard_on_quit: false,
+            #[cfg(target_os = "macos")]
+            quit_prompt: None,
             toasts: 0,
             settings,
             frame: 0,
@@ -907,6 +951,13 @@ pub struct App {
     native_termination: Option<i64>,
     #[cfg(target_os = "macos")]
     pending_playback_shutdown: Vec<crate::video::PlaybackShutdown>,
+    /// Set when the user chose Don't Save for a document without a location,
+    /// so quitting discards its edits instead of stopping to ask again.
+    #[cfg(target_os = "macos")]
+    discard_on_quit: bool,
+    /// The unsaved-edits question asked on quitting, while it is showing.
+    #[cfg(target_os = "macos")]
+    quit_prompt: Option<rustolonia::Window>,
     /// Toasts shown so far, so each one is a new value of `Toast`.
     toasts: u64,
     pub(crate) sink: Option<MainViewModelSink>,
@@ -1178,7 +1229,7 @@ impl App {
         {
             // The reactive runtime has already stopped; autosave must not publish to it.
             self.sink = None;
-            if let Err(error) = self.autosave_checked() {
+            if let Err(error) = self.quit_autosave() {
                 jiffshot_workflow::log(&format!("Final editor autosave failed: {error}"));
             }
         }
@@ -1578,14 +1629,7 @@ impl App {
         if !modified {
             return Ok(());
         }
-        let target = match (&self.path, &self.source) {
-            (Some(p), _) => Some(p.clone()),
-            (None, Some(src)) if src.starts_with(&self.library.root) => {
-                Some(src.with_extension(EDITS_EXT))
-            }
-            _ => None,
-        };
-        let Some(path) = target else {
+        let Some(path) = self.autosave_target() else {
             return Err("Save the current document as a Jiffshot document (.jsd) before leaving it.".into());
         };
         if !self.save_to(&path) {
@@ -1596,6 +1640,37 @@ impl App {
             ));
         }
         Ok(())
+    }
+
+    /// Where edits are saved without asking: the open `.jsd`, or the edits
+    /// file next to a library capture.
+    fn autosave_target(&self) -> Option<PathBuf> {
+        match (&self.path, &self.source) {
+            (Some(p), _) => Some(p.clone()),
+            (None, Some(src)) if src.starts_with(&self.library.root) => {
+                Some(src.with_extension(EDITS_EXT))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the image has edits that can only be kept by asking where to
+    /// save them.
+    #[cfg(target_os = "macos")]
+    fn has_unsaved_untitled_edits(&self) -> bool {
+        self.video.is_none()
+            && self.autosave_target().is_none()
+            && with_editor(|e| e.is_modified()).unwrap_or(false)
+    }
+
+    /// The quit-time autosave, which lets edits the user chose not to save
+    /// go.
+    #[cfg(target_os = "macos")]
+    fn quit_autosave(&mut self) -> std::result::Result<(), String> {
+        if self.discard_on_quit && self.has_unsaved_untitled_edits() {
+            return Ok(());
+        }
+        self.autosave_checked()
     }
 
     fn save_to(&mut self, path: &Path) -> bool {
@@ -1926,14 +2001,7 @@ impl App {
         if self.video.is_some() {
             return crate::video::save(self, false);
         }
-        let target = match (&self.path, &self.source) {
-            (Some(p), _) => Some(p.clone()),
-            (None, Some(src)) if src.starts_with(&self.library.root) => {
-                Some(src.with_extension(EDITS_EXT))
-            }
-            _ => None,
-        };
-        match target {
+        match self.autosave_target() {
             Some(path) => {
                 self.save_to(&path);
             }
@@ -2547,7 +2615,11 @@ impl App {
                 self.exit_failed(error, false);
                 return;
             }
-            if let Err(error) = self.autosave_checked() {
+            if !self.discard_on_quit && self.has_unsaved_untitled_edits() {
+                self.ask_to_save_before_quitting();
+                return;
+            }
+            if let Err(error) = self.quit_autosave() {
                 self.exit_failed(error, false);
                 return;
             }
@@ -2645,7 +2717,7 @@ impl App {
         let result = result
             .and_then(|()| self.adopt_pending_termination())
             .and_then(|()| self.quit_ready())
-            .and_then(|()| self.autosave_checked());
+            .and_then(|()| self.quit_autosave());
         if let Err(error) = result {
             self.exit_failed(error, true);
             return;
@@ -2680,6 +2752,14 @@ impl App {
 
     #[cfg(target_os = "macos")]
     fn exit_failed(&mut self, error: String, engine_stopped: bool) {
+        self.abandon_exit(error, engine_stopped, true);
+    }
+
+    /// Stops quitting and cancels a pending macOS termination. `notify`
+    /// reports `error`; problems cancelling are reported regardless.
+    #[cfg(target_os = "macos")]
+    fn abandon_exit(&mut self, error: String, engine_stopped: bool, notify: bool) {
+        self.discard_on_quit = false;
         let error = match crate::file_drag_macos::resume_after_failed_shutdown() {
             Ok(()) => error,
             Err(resume) => format!("{error}; could not restore library dragging: {resume}"),
@@ -2693,13 +2773,16 @@ impl App {
             Err(coordination) if coordination == error => (error, false),
             Err(coordination) => (format!("{error}; {coordination}"), false),
         };
+        let notify = notify || !can_cancel;
         let message = if engine_stopped {
             format!("{error}. If the capture side has stopped, restart Jiffshot before capturing again.")
         } else {
             error
         };
-        jiffshot_workflow::log(&format!("could not shut down Jiffshot: {message}"));
-        self.toast("Could not quit Jiffshot", &message, true);
+        if notify {
+            jiffshot_workflow::log(&format!("could not shut down Jiffshot: {message}"));
+            self.toast("Could not quit Jiffshot", &message, true);
+        }
         if let Err(error) = crate::capture_engine_macos::acknowledge_failure() {
             jiffshot_workflow::log(&format!(
                 "could not acknowledge the capture-engine failure: {error}"
@@ -2723,6 +2806,62 @@ impl App {
             }
         } else {
             self.exiting = false;
+        }
+    }
+
+    /// Pauses quitting to ask whether to save an image that has nowhere to
+    /// be saved automatically; the answer resumes or abandons the quit.
+    #[cfg(target_os = "macos")]
+    fn ask_to_save_before_quitting(&mut self) {
+        self.abandon_exit("Quitting paused to ask about unsaved edits".into(), false, false);
+        self.show_editor();
+        if self.quit_prompt.is_some() {
+            return;
+        }
+        let shown = match self.window() {
+            Some(window) => {
+                let name = self.stem();
+                crate::ui::dialogs::unsaved_changes(&self.scope, &window, &name, |choice| {
+                    post(move |app| app.answer_unsaved_quit(choice))
+                })
+                .map_err(|error| error.to_string())
+            }
+            None => Err("the editor window is unavailable".into()),
+        };
+        match shown {
+            Ok(prompt) => self.quit_prompt = Some(prompt),
+            Err(error) => {
+                let message = format!("Could not ask about unsaved edits ({error}). Save the current document as a Jiffshot document (.jsd), then quit again.");
+                jiffshot_workflow::log(&format!("could not shut down Jiffshot: {message}"));
+                self.toast("Could not quit Jiffshot", &message, true);
+            }
+        }
+    }
+
+    /// The unsaved-edits question asked on quitting, for the self-test.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn quit_prompt(&self) -> Option<rustolonia::Window> {
+        self.quit_prompt.clone()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn answer_unsaved_quit(&mut self, choice: crate::ui::dialogs::UnsavedChoice) {
+        use crate::ui::dialogs::UnsavedChoice;
+        self.quit_prompt = None;
+        match choice {
+            UnsavedChoice::Cancel => {}
+            UnsavedChoice::Discard => resume_quit_when_ready(true, 0),
+            UnsavedChoice::Save => {
+                let name = format!("{}.{EDITS_EXT}", self.stem());
+                self.pick_save("Save", &name, &[("Jiffshot document", EDITS_EXT)], |app, path| {
+                    if app.save_to(&path) && !app.has_unsaved_untitled_edits() {
+                        resume_quit_when_ready(false, 0);
+                    } else {
+                        let status = app.status.clone();
+                        app.toast("Could not quit Jiffshot", &status, true);
+                    }
+                });
+            }
         }
     }
 
