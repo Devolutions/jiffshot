@@ -323,6 +323,108 @@ pub fn keyboard_shortcuts(scope: &AppScope, owner: &Window) -> Result<()> {
     ask(scope, owner, &dialog, |_| ())
 }
 
+/// The answer to the unsaved-edits question asked before quitting.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsavedChoice {
+    Save,
+    Discard,
+    Cancel,
+}
+
+/// What [`unsaved_changes`]'s dialog closes with for Save and Don't Save.
+#[cfg(target_os = "macos")]
+pub(crate) const UNSAVED_SAVE: &str = "save";
+#[cfg(target_os = "macos")]
+pub(crate) const UNSAVED_DISCARD: &str = "discard";
+
+/// Asks over `owner` whether to save `name`'s edits before quitting and
+/// returns the dialog; `done` runs on the UI thread with the answer (Cancel
+/// when the dialog is closed).
+#[cfg(target_os = "macos")]
+pub fn unsaved_changes(scope: &AppScope, owner: &Window, name: &str, done: impl FnOnce(UnsavedChoice) + Send + 'static) -> Result<Window> {
+    let window = {
+        let control = Window::new()?;
+        control.set_title("Quit Jiffshot")?;
+        control.set_size_to_content(SIZE_TO_CONTENT)?;
+        control.set_can_resize(false)?;
+        control.set_show_in_taskbar(false)?;
+        control.set_window_startup_location(WindowStartupLocation::CenterOwner)?;
+        control.set_icon(super::icon_file())?;
+        control
+    };
+    let body = {
+        let control = StackPanel::new()?;
+        control.set_spacing(6.0)?;
+        control.set_max_width(380.0)?;
+        control
+    };
+    body.children()?.add({
+        let control = TextBlock::new()?;
+        control.set_text(format!("Do you want to save the changes made to “{name}”?"))?;
+        control.set_font_weight(FontWeight::DemiBold)?;
+        control.set_text_wrapping(TextWrapping::Wrap)?;
+        control
+    })?;
+    body.children()?.add(note("Your changes will be lost if you don't save them.")?)?;
+    let button = |label: &str, result: Option<&'static str>| -> Result<Button> {
+        let control = Button::new()?;
+        control.set_content_text(label)?;
+        control.set_min_width(80.0)?;
+        control.set_horizontal_content_alignment(HorizontalAlignment::Center)?;
+        let closes = window.clone();
+        control.on_click(scope, move |_| {
+            let _ = match result {
+                Some(result) => closes.close_with_object(result),
+                None => closes.close(),
+            };
+        })?;
+        Ok(control)
+    };
+    let discard = button("Don't Save", Some(UNSAVED_DISCARD))?;
+    discard.set_dock_panel_dock(Dock::Left)?;
+    let cancel = button("Cancel", None)?;
+    cancel.set_cancel(true)?;
+    let save = button("Save…", Some(UNSAVED_SAVE))?;
+    save.set_default(true)?;
+    let right = {
+        let control = StackPanel::new()?;
+        control.set_orientation(Orientation::Horizontal)?;
+        control.set_spacing(8.0)?;
+        control.set_horizontal_alignment(HorizontalAlignment::Right)?;
+        control.set_margin(Thickness::new(24.0, 0.0, 0.0, 0.0))?;
+        control
+    };
+    right.children()?.add(cancel)?;
+    right.children()?.add(save)?;
+    let buttons = {
+        let control = DockPanel::new()?;
+        control.set_margin(Thickness::new(0.0, 16.0, 0.0, 0.0))?;
+        control
+    };
+    buttons.children()?.add(discard)?;
+    buttons.children()?.add(right)?;
+    let root = {
+        let control = DockPanel::new()?;
+        control.set_margin(Thickness::uniform(20.0))?;
+        control
+    };
+    buttons.set_dock_panel_dock(Dock::Bottom)?;
+    root.children()?.add(buttons)?;
+    root.children()?.add(body)?;
+    window.set_content(&root)?;
+    let operation = scope.show_dialog(owner, &window)?;
+    scope.spawn(async move {
+        let choice = match operation.await {
+            Ok(Some(result)) if result == UNSAVED_SAVE => UnsavedChoice::Save,
+            Ok(Some(result)) if result == UNSAVED_DISCARD => UnsavedChoice::Discard,
+            _ => UnsavedChoice::Cancel,
+        };
+        done(choice);
+    })?;
+    Ok(window)
+}
+
 /// Shows the About dialog over `owner`.
 pub fn about(scope: &AppScope, owner: &Window) -> Result<()> {
     let body = {

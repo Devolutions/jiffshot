@@ -8257,6 +8257,7 @@ fn request_external_quit() -> std::result::Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn engine_quit_script() -> Script {
+    let discard = env("JIFFSHOT_UITEST_ENGINE_QUIT").as_deref() == Some("discard");
     let mut script = Script(VecDeque::new());
     script.wait(800);
     script.step(|_| {
@@ -8267,13 +8268,45 @@ fn engine_quit_script() -> Script {
             app.resize_to(12, 9);
         }).expect("edit an untitled document");
         request_external_quit().expect("request external termination");
-        500
+        100
     });
+    static PROMPT_ANSWERED: AtomicBool = AtomicBool::new(false);
+    const ATTEMPTS: usize = 100;
+    for attempt in 0..ATTEMPTS {
+        script.step(move |test| {
+            if PROMPT_ANSWERED.load(Ordering::Acquire) {
+                return 0;
+            }
+            assert!(crate::capture_engine_macos::running().expect("inspect the capture engine"),
+                "external quit stopped the capture engine despite unsaved work");
+            assert_eq!(crate::canvas::with_editor(|editor| editor.is_modified()), Some(true));
+            let Some(prompt) = crate::app::with(|app| app.quit_prompt()).flatten() else {
+                assert!(attempt + 1 < ATTEMPTS, "external quit did not ask about unsaved edits");
+                return 100;
+            };
+            assert_eq!(prompt.title().ok().flatten().as_deref(), Some("Quit Jiffshot"));
+            assert!(prompt.is_visible().unwrap_or(false), "the unsaved-edits prompt is hidden");
+            PROMPT_ANSWERED.store(true, Ordering::Release);
+            test.line("external quit asked about unsaved work and kept the capture engine running");
+            if discard {
+                empty_scratch_library(test);
+                test.line("answered Don't Save");
+                test.flush();
+                prompt.close_with_object(super::dialogs::UNSAVED_DISCARD).expect("answer Don't Save");
+                return 0;
+            }
+            prompt.close().expect("cancel the unsaved-edits prompt");
+            500
+        });
+    }
+    if discard {
+        return script;
+    }
     script.step(|test| {
         assert!(crate::capture_engine_macos::running().expect("inspect the capture engine"),
-            "external quit stopped the capture engine despite unsaved work");
+            "cancelling the unsaved-edits prompt stopped the capture engine");
         assert_eq!(crate::canvas::with_editor(|editor| editor.is_modified()), Some(true));
-        test.line("external quit respected unsaved work and kept the capture engine running");
+        test.line("cancelling the prompt kept the untitled edits and Jiffshot running");
         let library = empty_scratch_library(test);
         let folder = library.join("2026-01");
         std::fs::create_dir(&folder).expect("create the scratch capture folder");
@@ -9588,6 +9621,31 @@ pub(super) fn after_run() {
         }
         FAILED.store(true, Ordering::Release);
         if let Err(error) = append_shutdown_log("FAILED: AppKit termination was not observed after recording cleanup") {
+            eprintln!("ui self-test: {error}");
+        }
+        return;
+    }
+    if env("JIFFSHOT_UITEST_ENGINE_QUIT").as_deref() == Some("discard") {
+        let result = (|| -> std::result::Result<(), String> {
+            if !matches!(crate::capture_engine_macos::result(), Ok(Some(Ok(())))) {
+                return Err("Don't Save did not quit and join the capture engine".into());
+            }
+            let library = PathBuf::from(std::env::var_os("JIFFSHOT_LIBRARY").ok_or("the scratch library is unavailable")?);
+            let entries = std::fs::read_dir(&library).map_err(|error| error.to_string())?.count();
+            if entries != 0 {
+                return Err(format!("Don't Save wrote {entries} item(s) to the library"));
+            }
+            Ok(())
+        })();
+        let line = match result {
+            Ok(()) => "Don't Save discarded the untitled edits and joined the capture engine".to_owned(),
+            Err(error) => {
+                FAILED.store(true, Ordering::Release);
+                format!("FAILED: {error}")
+            }
+        };
+        if let Err(error) = append_shutdown_log(&line) {
+            FAILED.store(true, Ordering::Release);
             eprintln!("ui self-test: {error}");
         }
         return;
