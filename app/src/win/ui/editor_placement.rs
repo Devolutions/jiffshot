@@ -6,14 +6,14 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetWindowPlacement, GetWindowRect, IsIconic, IsWindowVisible, IsZoomed,
     PostMessageW, SetWindowPlacement, SetWindowPos, ShowWindow, MINMAXINFO, SWP_NOACTIVATE,
     SWP_NOZORDER, SW_MAXIMIZE, SW_SHOWMAXIMIZED, WINDOWPLACEMENT, WM_APP, WM_DISPLAYCHANGE,
     WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_MOVE, WM_NCDESTROY,
-    WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SIZE,
+    WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SIZE, WS_OVERLAPPEDWINDOW,
 };
 
 const SECTION: &str = "editor_window";
@@ -176,22 +176,28 @@ fn persist(placement: Placement) -> io::Result<()> {
 }
 
 /// Where and how Avalonia should first show the editor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Startup {
     /// The restored frame's top-left in physical pixels, so the window opens
     /// (and maximizes) on the monitor it was saved on.
     pub x: i32,
     pub y: i32,
+    /// The restored client size in device-independent pixels (Avalonia's
+    /// `Width` and `Height`) at the target monitor's DPI.
+    pub width: f64,
+    pub height: f64,
     pub maximized: bool,
 }
 
 /// The saved placement to apply before the editor is first shown, if any.
 ///
-/// A saved maximized state must reach Avalonia as its own `WindowState`
-/// before `Show`: Avalonia then shows the window maximized itself. `Loaded`
-/// (where `install` runs) is raised before Avalonia shows the window, and the
-/// tray-started editor is not shown at all; `ShowWindow(SW_MAXIMIZE)` there made
-/// the native window visible without Avalonia ever rendering into it.
+/// `Loaded` (where `install` runs) is raised before Avalonia shows the window,
+/// and the tray-started editor is not shown until it is opened. Avalonia's
+/// `Show` then applies its own `Width`, `Height` and `WindowState`, so placement
+/// made natively in `Loaded` is lost (the size) or breaks rendering
+/// (`ShowWindow(SW_MAXIMIZE)` made the window visible without Avalonia ever
+/// rendering into it). Giving Avalonia the saved values before `Show` lets it
+/// show the window where, how large and how maximized it was saved.
 pub(super) fn startup() -> Option<Startup> {
     let saved = load()?;
     let monitors = screen::monitors();
@@ -201,11 +207,35 @@ pub(super) fn startup() -> Option<Startup> {
 
 fn startup_for(saved: Placement, work: Rect, dpi: u32) -> Startup {
     let normal = restored(saved, work, dpi);
+    let (width, height) = client_dips(normal, dpi);
     Startup {
         x: normal.x,
         y: normal.y,
+        width,
+        height,
         maximized: saved.maximized,
     }
+}
+
+/// The client size, in device-independent pixels, of an editor whose outer frame
+/// (including the invisible resize borders `GetWindowRect` reports) is `frame` at `dpi`.
+fn client_dips(frame: Bounds, dpi: u32) -> (f64, f64) {
+    let mut border = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: border is a valid writable RECT; the editor has the standard overlapped frame.
+    unsafe { AdjustWindowRectExForDpi(&mut border, WS_OVERLAPPEDWINDOW, 0, 0, dpi) };
+    let scale = f64::from(dpi) / 96.0;
+    // Half a pixel more, so Avalonia's truncating `(int)(dips * scale)` gives back
+    // exactly this client size instead of one pixel less on every restart.
+    let dips = |frame: i32, border: i32| (f64::from((frame - border).max(1)) + 0.5) / scale;
+    (
+        dips(frame.width, border.right - border.left),
+        dips(frame.height, border.bottom - border.top),
+    )
 }
 
 /// Sets the bounds a maximized window restores to, without changing its state.
@@ -594,11 +624,14 @@ mod tests {
             dpi: 96,
             maximized: true,
         };
+        // At 96 DPI the standard frame adds 16 x 39 pixels around the client area.
         assert_eq!(
             startup_for(saved, Rect::new(0, 0, 3840, 1560), 96),
             Startup {
                 x: 1170,
                 y: 300,
+                width: 1500.5,
+                height: 960.5,
                 maximized: true
             }
         );
@@ -615,9 +648,70 @@ mod tests {
             Startup {
                 x: 404,
                 y: 41,
+                width: 1500.5,
+                height: 960.5,
                 maximized: false
             }
         );
+        // Saved on a 150 % monitor that is gone: the frame is rescaled to the 100 %
+        // monitor that remains and fitted against its right edge.
+        assert_eq!(
+            startup_for(
+                Placement {
+                    normal: Bounds {
+                        x: 3840,
+                        y: 0,
+                        width: 1920,
+                        height: 1020,
+                    },
+                    dpi: 144,
+                    maximized: false,
+                },
+                Rect::new(0, 0, 3840, 1560),
+                96
+            ),
+            Startup {
+                x: 2560,
+                y: 0,
+                width: 1264.5,
+                height: 641.5,
+                maximized: false
+            }
+        );
+    }
+
+    #[test]
+    fn startup_size_round_trips_through_avalonias_truncating_resize() {
+        for dpi in [96, 120, 144, 168, 192, 240] {
+            let mut border = RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            // SAFETY: border is a valid writable RECT.
+            unsafe { AdjustWindowRectExForDpi(&mut border, WS_OVERLAPPEDWINDOW, 0, 0, dpi) };
+            let scale = f64::from(dpi) / 96.0;
+            for (width, height) in [(1516, 999), (1901, 1013), (2275, 1499), (1000, 700), (3853, 2167)] {
+                let frame = Bounds {
+                    x: 0,
+                    y: 0,
+                    width,
+                    height,
+                };
+                let (w, h) = client_dips(frame, dpi);
+                // What Avalonia's WindowImpl.Resize does with them.
+                let client = ((w * scale) as i32, (h * scale) as i32);
+                assert_eq!(
+                    (
+                        client.0 + border.right - border.left,
+                        client.1 + border.bottom - border.top
+                    ),
+                    (width, height),
+                    "the frame must survive Avalonia's resize at {dpi} DPI"
+                );
+            }
+        }
     }
 
     #[test]
