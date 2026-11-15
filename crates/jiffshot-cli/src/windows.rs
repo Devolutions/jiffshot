@@ -727,33 +727,189 @@ fn jiffshot_exe() -> Option<PathBuf> {
     beside.exists().then_some(beside)
 }
 
+/// A detached process started without inheriting any of this process's handles.
+///
+/// `std::process::Command` always lets the child inherit every inheritable handle,
+/// including the stdout/stderr pipes this CLI received from its caller. Jiffshot
+/// keeps running after the CLI exits, so it would hold those pipes open and a caller
+/// reading the CLI's output (`$(jiffshot-cli ...)`, a pipe, `subprocess.run` with
+/// captured output) would wait until Jiffshot quits.
+#[cfg(windows)]
+struct Detached(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+fn resolve_executable(exe: &Path) -> std::io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::SystemInformation::{
+        GetSystemDirectoryW, GetWindowsDirectoryW,
+    };
+
+    fn windows_directory(
+        get_directory: unsafe extern "system" fn(*mut u16, u32) -> u32,
+    ) -> std::io::Result<PathBuf> {
+        let mut buffer = vec![0u16; 260];
+        loop {
+            // SAFETY: the buffer is writable and its length fits in a u32.
+            let len = unsafe { get_directory(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+            if len == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if len < buffer.len() {
+                return Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])));
+            }
+            buffer.resize(len, 0);
+        }
+    }
+
+    fn exists(path: &Path) -> bool {
+        // As with Command, an inaccessible search candidate does not stop PATH lookup.
+        std::fs::symlink_metadata(path).is_ok()
+    }
+
+    let name = exe.as_os_str().as_encoded_bytes();
+    if name.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "program path has no file name",
+        ));
+    }
+    if exe
+        .parent()
+        .is_some_and(|parent| parent.as_os_str().is_empty())
+    {
+        let mut filename = exe.as_os_str().to_os_string();
+        if !name.contains(&b'.') {
+            filename.push(".exe");
+        }
+        let mut directories = vec![
+            std::env::current_exe()?.with_file_name(""),
+            windows_directory(GetSystemDirectoryW)?,
+            windows_directory(GetWindowsDirectoryW)?,
+        ];
+        if let Some(path) = std::env::var_os("PATH") {
+            directories
+                .extend(std::env::split_paths(&path).filter(|dir| !dir.as_os_str().is_empty()));
+        }
+        for dir in directories {
+            let candidate = dir.join(&filename);
+            if exists(&candidate) {
+                return Ok(candidate);
+            }
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "program not found",
+        ));
+    }
+
+    if !name
+        .get(name.len().saturating_sub(4)..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(b".exe"))
+    {
+        let mut with_suffix = exe.as_os_str().to_os_string();
+        with_suffix.push(".exe");
+        let with_suffix = PathBuf::from(with_suffix);
+        if exists(&with_suffix) {
+            return Ok(with_suffix);
+        }
+    }
+    Ok(exe.to_path_buf())
+}
+
+#[cfg(windows)]
+impl Detached {
+    /// Starts `exe` with `args` (each quoted), detached and in its own process group.
+    fn spawn(exe: &Path, args: &[&str]) -> std::io::Result<Self> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            CreateProcessW, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS, PROCESS_INFORMATION,
+            STARTUPINFOW,
+        };
+
+        let wide = |text: &std::ffi::OsStr| text.encode_wide().chain([0]).collect::<Vec<u16>>();
+        let application = wide(resolve_executable(exe)?.as_os_str());
+        let mut line = vec![b'"' as u16];
+        line.extend(exe.as_os_str().encode_wide());
+        line.push(b'"' as u16);
+        for arg in args {
+            line.extend(format!(" \"{arg}\"").encode_utf16());
+        }
+        line.push(0);
+        // SAFETY: plain data; zero is a valid starting value.
+        let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
+        startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        // SAFETY: plain data, filled in by CreateProcessW.
+        let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: both strings are NUL-terminated and outlive the call; the command
+        // line is writable as CreateProcessW requires; bInheritHandles is FALSE.
+        let created = unsafe {
+            CreateProcessW(
+                application.as_ptr(),
+                line.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                std::ptr::null(),
+                std::ptr::null(),
+                &startup,
+                &mut process,
+            )
+        };
+        if created == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: the thread handle was returned to us and is not used.
+        unsafe { CloseHandle(process.hThread) };
+        Ok(Self(process.hProcess))
+    }
+
+    /// How the process ended, once it has.
+    fn exit_status(&self) -> Option<String> {
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+
+        // SAFETY: the process handle is owned by self.
+        if unsafe { WaitForSingleObject(self.0, 0) } != WAIT_OBJECT_0 {
+            return None;
+        }
+        let mut code = 0u32;
+        // SAFETY: as above; code is a valid out pointer.
+        unsafe { GetExitCodeProcess(self.0, &mut code) };
+        Some(format!("exit code: {code}"))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Detached {
+    fn drop(&mut self) {
+        // SAFETY: the process handle is owned by self and closed once.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
 /// Starts Jiffshot in the tray and waits until it answers.
 fn launch() -> Result<(), Error> {
-    #[cfg(windows)]
-    use std::os::windows::process::CommandExt;
-    #[cfg(windows)]
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    #[cfg(windows)]
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-
     let exe = jiffshot_exe().ok_or_else(|| {
         Error::new(ErrorCode::Unavailable, "Jiffshot is not running and its executable was not found beside jiffshot-cli (set JIFFSHOT_EXE)")
     })?;
     eprintln!("jiffshot-cli: starting {}", exe.display());
-    let mut command = std::process::Command::new(&exe);
+    let cannot_start = |e: std::io::Error| {
+        Error::new(
+            ErrorCode::Unavailable,
+            format!("cannot start {}: {e}", exe.display()),
+        )
+    };
     #[cfg(windows)]
-    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    let mut child = command
+    let child = Detached::spawn(&exe, &[]).map_err(cannot_start)?;
+    #[cfg(not(windows))]
+    let mut child = std::process::Command::new(&exe)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| {
-            Error::new(
-                ErrorCode::Unavailable,
-                format!("cannot start {}: {e}", exe.display()),
-            )
-        })?;
+        .map_err(cannot_start)?;
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut exited: Option<Instant> = None;
     loop {
@@ -764,7 +920,15 @@ fn launch() -> Result<(), Error> {
         }
         // An exiting launch may have handed over to an instance that is still
         // starting; give that a moment before giving up.
-        if let Ok(Some(status)) = child.try_wait() {
+        #[cfg(windows)]
+        let ended = child.exit_status();
+        #[cfg(not(windows))]
+        let ended = child
+            .try_wait()
+            .ok()
+            .flatten()
+            .map(|status| status.to_string());
+        if let Some(status) = ended {
             if exited.get_or_insert_with(Instant::now).elapsed() > Duration::from_secs(5) {
                 return Err(Error::new(
                     ErrorCode::Unavailable,
@@ -1136,6 +1300,127 @@ pub(super) fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn detached_spawn_resolves_executable_names_and_paths() {
+        use std::process::Command;
+
+        const MARKER: &str = "JIFFSHOT_CLI_TEST_EXECUTABLE_LOOKUP";
+        if let Some(dir) = std::env::var_os(MARKER) {
+            let dir = PathBuf::from(dir);
+            let paths = [
+                PathBuf::from("lookup-target"),
+                PathBuf::from("lookup-target.exe"),
+                dir.join("lookup-target"),
+            ];
+            for path in paths {
+                let child = Detached::spawn(&path, &["--exact", "no_such_test"])
+                    .unwrap_or_else(|error| panic!("starting {}: {error}", path.display()));
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    if let Some(status) = child.exit_status() {
+                        assert_eq!(status, "exit code: 0", "starting {}", path.display());
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for {}",
+                        path.display()
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            assert!(Detached::spawn(Path::new("missing-lookup-target"), &[]).is_err());
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "jiffshot cli executable lookup {}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).expect("create lookup test directory");
+        let executable = dir.join("lookup-target.exe");
+        let current_dir = dir.join("current directory");
+        std::fs::create_dir(&current_dir).expect("create working directory");
+        let shadow = current_dir.join("lookup-target.exe");
+        std::fs::write(&shadow, b"not an executable").expect("create shadow executable");
+        let current = std::env::current_exe().expect("locate test executable");
+        std::fs::copy(&current, &executable).expect("copy test executable");
+        let output = Command::new(current)
+            .args([
+                "--exact",
+                "desktop::tests::detached_spawn_resolves_executable_names_and_paths",
+                "--nocapture",
+            ])
+            .env("PATH", &dir)
+            .env(MARKER, &dir)
+            .current_dir(&current_dir)
+            .output()
+            .expect("run lookup test subprocess");
+        std::fs::remove_file(executable).expect("remove copied test executable");
+        std::fs::remove_file(shadow).expect("remove shadow executable");
+        std::fs::remove_dir(current_dir).expect("remove working directory");
+        std::fs::remove_dir(dir).expect("remove lookup test directory");
+        assert!(
+            output.status.success(),
+            "lookup subprocess failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// The launched Jiffshot must not keep the caller's output pipe open: with an
+    /// inherited pipe, `$(jiffshot-cli ...)` waits until Jiffshot quits.
+    #[cfg(windows)]
+    #[test]
+    fn launched_process_does_not_inherit_the_callers_pipes() {
+        use std::io::Read;
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, TRUE};
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::System::Pipes::CreatePipe;
+        use windows_sys::Win32::System::Threading::TerminateProcess;
+
+        // An inheritable pipe, like the stdout a caller hands to jiffshot-cli.
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: std::ptr::null_mut(),
+            bInheritHandle: TRUE,
+        };
+        let (mut read, mut write): (HANDLE, HANDLE) = (std::ptr::null_mut(), std::ptr::null_mut());
+        // SAFETY: both out pointers are valid; the attributes outlive the call.
+        assert_ne!(
+            unsafe { CreatePipe(&mut read, &mut write, &attributes, 0) },
+            0
+        );
+
+        // A stand-in for Jiffshot that keeps running.
+        let system = std::env::var_os("SystemRoot").expect("SystemRoot is set");
+        let ping = Path::new(&system).join(r"System32\PING.EXE");
+        let child = Detached::spawn(&ping, &["-n", "30", "127.0.0.1"]).expect("start the stand-in");
+        assert!(
+            child.exit_status().is_none(),
+            "the stand-in must still be running"
+        );
+
+        // SAFETY: this test owns the write handle and closes it once.
+        unsafe { CloseHandle(write) };
+        // SAFETY: this test owns the read handle; File takes it over.
+        let mut reader = unsafe { std::fs::File::from_raw_handle(read as _) };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut rest = Vec::new();
+            let _ = sender.send(reader.read_to_end(&mut rest).map(|_| rest.len()));
+        });
+        let eof = receiver.recv_timeout(Duration::from_secs(5));
+        // SAFETY: the process handle is owned by `child`, which is still alive.
+        unsafe { TerminateProcess(child.0, 1) };
+        assert!(
+            eof.is_ok(),
+            "the launched process inherited the caller's pipe and kept it open"
+        );
+    }
 
     fn words(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_owned).collect()
