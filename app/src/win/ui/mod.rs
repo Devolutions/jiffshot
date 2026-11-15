@@ -35,6 +35,7 @@ mod prefs_window;
 mod permissions_macos;
 #[cfg(any(windows, target_os = "macos"))]
 mod selftest;
+mod theme_kit;
 #[cfg(any(windows, target_os = "macos"))]
 mod toast;
 #[cfg(any(windows, target_os = "macos"))]

@@ -5,8 +5,8 @@
 //! windows in physical pixels without activating them.
 
 use rustolonia::{
-    AnyEl, AppScope, Button, CheckBox, Color, ComboBox, ComboBoxItem, Control, Dock, DockPanel, El, EventSubscription, FolderPickerOptions, Grid,
-    HorizontalAlignment, Key, NodeRef, NumericUpDown, PickerOutcome, Result, TextBlock, TextBox, TextWrapping, ThemeVariant, Upcast, VerticalAlignment,
+    AnyEl, AppScope, Border, Button, CheckBox, Color, ComboBox, ComboBoxItem, Control, Dock, DockPanel, El, EventSubscription, FolderPickerOptions, Grid,
+    HorizontalAlignment, Key, NodeRef, NumericUpDown, PickerOutcome, Result, Signal, StackPanel, TextBlock, TextBox, TextWrapping, ThemeVariant, ToggleSwitch, Upcast, VerticalAlignment,
     Window, WindowCloseReason,
 };
 use serde::Deserialize;
@@ -195,6 +195,7 @@ pub enum Form {
 pub enum Input {
     Number(NumericUpDown),
     Check(CheckBox),
+    Switch(ToggleSwitch),
     Choice(ComboBox),
     Text(TextBox),
     /// A recorded hotkey ("Ctrl+PrtScn"), or empty.
@@ -212,6 +213,7 @@ impl Input {
                 Value::from(number.round() as i64)
             }
             Input::Check(control) => Value::from(control.is_checked().ok().flatten() == Some(true)),
+            Input::Switch(control) => Value::from(control.is_checked().ok().flatten() == Some(true)),
             Input::Choice(control) => Value::from(control.selected_index().unwrap_or(0).max(0)),
             Input::Text(control) => Value::from(control.text().ok().flatten().unwrap_or_default()),
             Input::Hotkey(value) => Value::from(value.lock().map(|v| v.clone()).unwrap_or_default()),
@@ -228,18 +230,21 @@ pub fn values(inputs: &[Input]) -> Value {
 /// Builds `row`, adding its input (if it has one) to `inputs`. A folder
 /// row's Choose… button opens the folder picker over `owner`.
 pub fn row(scope: &AppScope, form: Form, row: &Row, owner: NodeRef<Window>, inputs: &mut Vec<Input>, subs: &Subscriptions) -> Result<Control> {
-    let wide = form == Form::Prefs;
+    if form == Form::Prefs {
+        let dark = scope.signal(dark_theme(scope));
+        return prefs_row(scope, dark, row, None, owner, inputs, subs);
+    }
     let control = match row {
         Row::Number { label, value, min, max } => {
-            let el = NumericUpDown::el()
+            let control = NumericUpDown::el()
                 .value(rustolonia::Decimal::from(*value))
                 .minimum(rustolonia::Decimal::from(*min))
                 .maximum(rustolonia::Decimal::from(*max))
                 .increment(rustolonia::Decimal::ONE)
                 .format_string("0")
-                .grid_column(1);
-            let el = if wide { el.width(140.0).horizontal_alignment(HorizontalAlignment::Left) } else { el.min_width(130.0) };
-            let control = el.build(scope)?;
+                .min_width(130.0)
+                .grid_column(1)
+                .build(scope)?;
             inputs.push(Input::Number(control.clone()));
             labeled(scope, form, label, control.upcast())?
         }
@@ -253,15 +258,14 @@ pub fn row(scope: &AppScope, form: Form, row: &Row, owner: NodeRef<Window>, inpu
             let control = ComboBox::el()
                 .items_iter(items)
                 .selected_index(i32::try_from(*value).unwrap_or(0))
-                .min_width(if wide { 220.0 } else { 130.0 })
+                .min_width(130.0)
                 .grid_column(1)
                 .build(scope)?;
             inputs.push(Input::Choice(control.clone()));
             labeled(scope, form, label, control.upcast())?
         }
         Row::Text { label, value } => {
-            let el = TextBox::el().text(value.clone()).grid_column(1);
-            let control = if wide { el } else { el.min_width(130.0) }.build(scope)?;
+            let control = TextBox::el().text(value.clone()).min_width(130.0).grid_column(1).build(scope)?;
             inputs.push(Input::Text(control.clone()));
             labeled(scope, form, label, control.upcast())?
         }
@@ -278,40 +282,199 @@ pub fn row(scope: &AppScope, form: Form, row: &Row, owner: NodeRef<Window>, inpu
             labeled(scope, form, label, line.upcast())?
         }
         Row::Hotkey { label, value, placeholder } => {
-            let line = hotkey_field(scope, value, placeholder, inputs, subs)?;
+            let line = hotkey_field(scope, None, value, placeholder, inputs, subs)?;
             labeled(scope, form, label, line.upcast())?
         }
+        Row::Note { text } => TextBlock::el().text(text.clone()).text_wrapping(TextWrapping::Wrap).max_width(380.0).font_size(12.5).build(scope)?.upcast(),
+        Row::Unknown => TextBlock::el().build(scope)?.upcast(),
+    };
+    Ok(control)
+}
+
+/// Builds a Preferences card row with a title + optional subtitle on the left
+/// and a right-aligned control on the right, preserving exact 1-to-1 `inputs`
+/// alignment with `Row` entries.
+pub fn prefs_row(
+    scope: &AppScope,
+    dark: Signal<bool>,
+    row: &Row,
+    subtitle: Option<&str>,
+    owner: NodeRef<Window>,
+    inputs: &mut Vec<Input>,
+    subs: &Subscriptions,
+) -> Result<Control> {
+    use crate::ui::theme_kit::{solid, with_role, ButtonRole, Surface};
+
+    let control = match row {
+        Row::Number { label, value, min, max } => {
+            let control = NumericUpDown::el()
+                .value(rustolonia::Decimal::from(*value))
+                .minimum(rustolonia::Decimal::from(*min))
+                .maximum(rustolonia::Decimal::from(*max))
+                .increment(rustolonia::Decimal::ONE)
+                .format_string("0")
+                .width(136.0)
+                .horizontal_alignment(HorizontalAlignment::Right)
+                .vertical_alignment(VerticalAlignment::Center)
+                .build(scope)?;
+            inputs.push(Input::Number(control.clone()));
+            prefs_labeled(scope, dark, label, subtitle, control.upcast())?
+        }
+        Row::Check { label, value } => {
+            let control = ToggleSwitch::el()
+                .checked(Some(*value))
+                .on_content("")
+                .off_content("")
+                .min_width(0.0)
+                .padding(0.0)
+                .margin(0.0)
+                .horizontal_alignment(HorizontalAlignment::Right)
+                .vertical_alignment(VerticalAlignment::Center)
+                .build(scope)?;
+            inputs.push(Input::Switch(control.clone()));
+            prefs_labeled(scope, dark, label, subtitle, control.upcast())?
+        }
+        Row::Choice { label, choices, value } => {
+            let items: Vec<El<ComboBoxItem>> = choices.iter().map(|choice| ComboBoxItem::el().content(choice.clone())).collect();
+            let control = ComboBox::el()
+                .items_iter(items)
+                .selected_index(i32::try_from(*value).unwrap_or(0))
+                .min_width(210.0)
+                .horizontal_alignment(HorizontalAlignment::Right)
+                .vertical_alignment(VerticalAlignment::Center)
+                .build(scope)?;
+            inputs.push(Input::Choice(control.clone()));
+            prefs_labeled(scope, dark, label, subtitle, control.upcast())?
+        }
+        Row::Text { label, value } => {
+            let control = TextBox::el()
+                .text(value.clone())
+                .min_width(210.0)
+                .max_width(280.0)
+                .horizontal_alignment(HorizontalAlignment::Right)
+                .vertical_alignment(VerticalAlignment::Center)
+                .build(scope)?;
+            inputs.push(Input::Text(control.clone()));
+            prefs_labeled(scope, dark, label, subtitle, control.upcast())?
+        }
+        Row::Folder { label, value } => {
+            let path = TextBox::el()
+                .text(value.clone())
+                .read_only(true)
+                .min_width(210.0)
+                .max_width(290.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .vertical_content_alignment(VerticalAlignment::Center)
+                .build(scope)?;
+            let title = label.clone();
+            let target = path.clone();
+            let picker = scope.clone();
+            let choose = on_click(
+                with_role(
+                    Button::el().content("Choose\u{2026}").margin((8.0, 0.0, 0.0, 0.0)).dock_panel_dock(Dock::Right).vertical_alignment(VerticalAlignment::Center),
+                    dark,
+                    ButtonRole::Compact,
+                ),
+                subs,
+                move |_| pick_folder(&picker, owner, &title, &target),
+            );
+            let line = DockPanel::el()
+                .horizontal_alignment(HorizontalAlignment::Right)
+                .vertical_alignment(VerticalAlignment::Center)
+                .child(choose)
+                .child(AnyEl::from_control(path.clone()))
+                .build(scope)?;
+            inputs.push(Input::Text(path));
+            prefs_labeled(scope, dark, label, subtitle, line.upcast())?
+        }
+        Row::Hotkey { label, value, placeholder } => {
+            let line = hotkey_field(scope, Some(dark), value, placeholder, inputs, subs)?;
+            prefs_labeled(scope, dark, label, subtitle, line.upcast())?
+        }
         Row::Note { text } => {
-            if wide {
-                inputs.push(Input::Nothing);
-                TextBlock::el().text(text.clone()).text_wrapping(TextWrapping::Wrap).opacity(0.75).build(scope)?.upcast()
-            } else {
-                TextBlock::el().text(text.clone()).text_wrapping(TextWrapping::Wrap).max_width(380.0).font_size(12.5).build(scope)?.upcast()
-            }
+            inputs.push(Input::Nothing);
+            Border::el()
+                .padding((16.0, 10.0))
+                .child(
+                    TextBlock::el()
+                        .text(text.clone())
+                        .font_size(12.0)
+                        .text_wrapping(TextWrapping::Wrap)
+                        .foreground(move || solid(Surface::for_theme(dark.get()).muted_text)),
+                )
+                .build(scope)?
+                .upcast()
         }
         Row::Unknown => {
-            if wide {
-                inputs.push(Input::Nothing);
-            }
+            inputs.push(Input::Nothing);
             TextBlock::el().build(scope)?.upcast()
         }
     };
     Ok(control)
 }
 
+fn prefs_labeled(
+    scope: &AppScope,
+    dark: Signal<bool>,
+    label: &str,
+    subtitle: Option<&str>,
+    control: Control,
+) -> Result<Control> {
+    use crate::ui::theme_kit::{solid, Surface};
+
+    let labels = StackPanel::el()
+        .spacing(2.0)
+        .vertical_alignment(VerticalAlignment::Center)
+        .margin((0.0, 0.0, 16.0, 0.0))
+        .child(
+            TextBlock::el()
+                .text(label.to_owned())
+                .font_size(13.0)
+                .text_wrapping(TextWrapping::Wrap)
+                .foreground(move || solid(Surface::for_theme(dark.get()).text)),
+        );
+    let labels = match subtitle.filter(|s| !s.is_empty()) {
+        Some(sub) => labels.child(
+            TextBlock::el()
+                .text(sub.to_owned())
+                .font_size(11.5)
+                .text_wrapping(TextWrapping::Wrap)
+                .foreground(move || solid(Surface::for_theme(dark.get()).muted_text)),
+        ),
+        None => labels,
+    };
+    let right = Border::el()
+        .grid_column(1)
+        .horizontal_alignment(HorizontalAlignment::Right)
+        .vertical_alignment(VerticalAlignment::Center)
+        .child(AnyEl::from_control(control));
+    Ok(Border::el()
+        .padding((16.0, 11.0))
+        .child(Grid::el().column_definitions("*,Auto").child(labels).child(right))
+        .build(scope)?
+        .upcast())
+}
+
 /// A box that records the hotkey pressed in it, with a Clear button.
 /// Jiffshot's own global hotkeys are off while it has the focus, so that
 /// pressing one records it instead of starting a capture.
-fn hotkey_field(scope: &AppScope, value: &str, placeholder: &str, inputs: &mut Vec<Input>, subs: &Subscriptions) -> Result<DockPanel> {
+fn hotkey_field(scope: &AppScope, prefs_dark: Option<Signal<bool>>, value: &str, placeholder: &str, inputs: &mut Vec<Input>, subs: &Subscriptions) -> Result<DockPanel> {
+    use crate::ui::theme_kit::{with_role, ButtonRole};
+
     let stored = Arc::new(Mutex::new(value.to_owned()));
     let placeholder = if placeholder.is_empty() { "None".to_owned() } else { placeholder.to_owned() };
     let shown = TextBlock::el().text(hotkey_caption(value, &placeholder, false)).build(scope)?;
-    let field = Button::el()
+    let field_el = Button::el()
         .content(AnyEl::from_control(shown.clone()))
+        .min_width(if prefs_dark.is_some() { 180.0 } else { 0.0 })
         .horizontal_alignment(HorizontalAlignment::Stretch)
         .horizontal_content_alignment(HorizontalAlignment::Left)
-        .tool_tip_tip("Click, then press the keys; Backspace clears")
-        .build(scope)?;
+        .tool_tip_tip("Click, then press the keys; Backspace clears");
+    let field_el = match prefs_dark {
+        Some(dark) => with_role(field_el, dark, ButtonRole::Compact),
+        None => field_el,
+    };
+    let field = field_el.build(scope)?;
     let control: &Control = field.upcast_ref();
     let set = {
         let (stored, shown, placeholder) = (stored.clone(), shown.clone(), placeholder.clone());
@@ -370,9 +533,20 @@ fn hotkey_field(scope: &AppScope, value: &str, placeholder: &str, inputs: &mut V
             pause_hotkeys(false);
         })?);
     }
-    let clear = on_click(Button::el().content("Clear").margin((8.0, 0.0, 0.0, 0.0)).dock_panel_dock(Dock::Right), subs, move |_| set(String::new(), false));
+    let clear_el = Button::el().content("Clear").margin((8.0, 0.0, 0.0, 0.0)).dock_panel_dock(Dock::Right);
+    let clear_el = match prefs_dark {
+        Some(dark) => with_role(clear_el, dark, ButtonRole::Compact),
+        None => clear_el,
+    };
+    let clear = on_click(clear_el, subs, move |_| set(String::new(), false));
     inputs.push(Input::Hotkey(stored));
-    DockPanel::el().grid_column(1).child(clear).child(AnyEl::from_control(field)).build(scope)
+    let dock = DockPanel::el().child(clear).child(AnyEl::from_control(field));
+    let dock = if prefs_dark.is_some() {
+        dock.horizontal_alignment(HorizontalAlignment::Right).vertical_alignment(VerticalAlignment::Center)
+    } else {
+        dock.grid_column(1)
+    };
+    dock.build(scope)
 }
 
 /// What a hotkey box shows: the hotkey, what an empty one does, or a

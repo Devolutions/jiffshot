@@ -2,62 +2,70 @@
 //! order, then More with the rest; right-click a tool to move or hide it)
 //! and the Effects panel.
 
-use super::main_common::{act, action, brand_accent, chip, note, run, section, solid, with_context_menu, Ctx, Tone, TRANSPARENT, WHITE};
+use super::main_common::{act, action, brand_accent, brand_text, chip, note, run, section, solid, with_context_menu, Ctx, Tone, TRANSPARENT, WHITE};
+use super::super::icons::vector as vicons;
 use crate::vm::MainViewModelSink;
 use rustolonia::{
     AnyEl, AppScope, Border, Button, Dock, DockPanel, Effect, El, FontWeight, HorizontalAlignment, MenuFlyout, MenuItem, MenuItemToggleType, Orientation, Panel, Path, ScrollBarVisibility, ScrollViewer, Separator, Signal, StackPanel, TextBlock,
     VerticalAlignment, WrapPanel,
 };
 
-/// A palette tool: its view-model name, icon glyph and caption.
+/// A palette tool: its view-model name, crisp vector path, caption, and tooltip summary.
 pub struct ToolDef {
     pub name: &'static str,
-    icon: ToolIcon,
-    caption: &'static str,
+    pub path: &'static str,
+    pub caption: &'static str,
+    pub description: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ToolIcon {
-    Glyph(&'static str),
-    Region,
+const fn tool(name: &'static str, path: &'static str, caption: &'static str, description: &'static str) -> ToolDef {
+    ToolDef { name, path, caption, description }
 }
 
-const fn tool(name: &'static str, glyph: &'static str, caption: &'static str) -> ToolDef {
-    ToolDef { name, icon: ToolIcon::Glyph(glyph), caption }
-}
-
-/// Every tool, in the usual order.
+/// Every tool, in the usual order, using a unified stroke-vector icon set.
 pub const TOOLS: [ToolDef; 23] = [
-    ToolDef { name: "Select", icon: ToolIcon::Region, caption: "Select Region" },
-    tool("Move", "\u{E7C9}", "Move"),
-    tool("Arrow", "\u{E72A}", "Arrow"),
-    tool("Line", "\u{E738}", "Line"),
-    tool("Shape", "\u{E739}", "Shape"),
-    tool("Text", "\u{E8D2}", "Text"),
-    tool("Callout", "\u{E8BD}", "Callout"),
-    tool("Step", "①", "Step"),
-    tool("Pen", "\u{E70F}", "Pen"),
-    tool("Highlight", "\u{E7E6}", "Highlight"),
-    tool("Blur", "▦", "Blur"),
-    tool("Magnify", "\u{E8A3}", "Magnify"),
-    tool("Spotlight", "\u{E706}", "Spotlight"),
-    tool("Stamp", "\u{E734}", "Stamp"),
-    tool("Fill", "\u{E790}", "Fill"),
-    tool("Crop", "\u{E7A8}", "Crop"),
-    tool("Cut Out", "\u{E8C6}", "Cut Out"),
-    tool("Selection", "\u{E8B3}", "Lift Selection"),
-    tool("Magic Wand", "✨", "Magic Wand"),
-    tool("Eraser", "\u{E75C}", "Eraser"),
-    tool("Eyedropper", "⌖", "Pick color"),
-    tool("Smart Move", "✥", "Smart Move"),
-    tool("Text Replace", "\u{E8AC}", "Text Replace"),
+    tool("Select", vicons::SELECT_REGION, "Select Region", "Select a rectangular area of the image"),
+    tool("Move", vicons::MOVE, "Move", "Select, move, and resize objects"),
+    tool("Arrow", vicons::ARROW, "Arrow", "Draw an arrow annotation"),
+    tool("Line", vicons::LINE, "Line", "Draw a straight line"),
+    tool("Shape", vicons::SHAPE, "Shape", "Draw rectangles, ellipses, and polygons"),
+    tool("Text", vicons::TEXT, "Text", "Add a text label"),
+    tool("Callout", vicons::CALLOUT, "Callout", "Add a speech bubble callout with tails"),
+    tool("Step", vicons::STEP, "Step", "Place numbered step markers"),
+    tool("Pen", vicons::PEN, "Pen", "Draw freehand ink strokes"),
+    tool("Highlight", vicons::HIGHLIGHT, "Highlight", "Highlight areas with translucent marker ink"),
+    tool("Blur", vicons::BLUR, "Blur", "Blur or pixelate sensitive regions"),
+    tool("Magnify", vicons::MAGNIFY, "Magnify", "Zoom into a region with a loupe"),
+    tool("Spotlight", vicons::SPOTLIGHT, "Spotlight", "Dim the surrounding image to focus on an area"),
+    tool("Stamp", vicons::STAMP, "Stamp", "Place stamps and symbols"),
+    tool("Fill", vicons::FILL, "Fill", "Flood-fill an area with a color"),
+    tool("Crop", vicons::CROP, "Crop", "Crop the canvas to a selected rectangle"),
+    tool("Cut Out", vicons::CUT_OUT, "Cut Out", "Remove a horizontal or vertical strip and join the edges"),
+    tool("Selection", vicons::LIFT_SELECTION, "Lift Selection", "Cut out a region into a movable object"),
+    tool("Magic Wand", vicons::MAGIC_WAND, "Magic Wand", "Select connected pixels of a similar color"),
+    tool("Eraser", vicons::ERASER, "Eraser", "Erase parts of annotations or the background"),
+    tool("Eyedropper", vicons::EYEDROPPER, "Pick color", "Sample a color from the canvas"),
+    tool("Smart Move", vicons::SMART_MOVE, "Smart Move", "Detect and move UI elements in screenshots"),
+    tool("Text Replace", vicons::TEXT_REPLACE, "Text Replace", "Detect and edit text inside a screenshot"),
 ];
-
-/// The icon font of the palette's glyphs.
-const ICON_FONT: &str = super::super::icons::FONT;
 
 fn index_of(name: &str) -> Option<usize> {
     TOOLS.iter().position(|t| t.name == name)
+}
+
+/// The 1-based shortcut (`Ctrl+1` … `Ctrl+9`) when `index` is among the first
+/// nine ordered tools.
+fn shortcut_for_tool(order: &str, index: usize) -> Option<String> {
+    let pos = ordered(order).iter().position(|&i| i == index)?;
+    (pos < 9).then(|| crate::ui::shortcut(&format!("Ctrl+{}", pos + 1)))
+}
+
+fn format_tool_tooltip(order: &str, index: usize) -> String {
+    let def = &TOOLS[index];
+    match shortcut_for_tool(order, index) {
+        Some(key) => format!("{} ({key}) — {}", def.caption, def.description),
+        None => format!("{} — {}", def.caption, def.description),
+    }
 }
 
 /// The tools in the user's order (all of them when none is set), as
@@ -73,7 +81,7 @@ fn ordered(order: &str) -> Vec<usize> {
 
 /// How many tools fit beside the More button in `width`.
 fn capacity(width: f64, labels: bool) -> usize {
-    let per = if labels { 64.0 } else { 42.0 };
+    let per = if labels { 72.0 } else { 42.0 };
     if width.is_finite() && width > per {
         ((width - per) / per) as usize
     } else {
@@ -164,32 +172,21 @@ pub fn tool_bar(ctx: &Ctx) -> El<Panel> {
         })
 }
 
-/// A palette button's icon above its caption (hidden without labels).
-fn tool_content(sink: MainViewModelSink, theme: super::main_common::Theme, icon: ToolIcon, caption: &str, active: impl Fn() -> bool + Clone + 'static) -> El<StackPanel> {
+/// A palette button's crisp 18×18 vector icon above its caption (hidden without labels).
+fn tool_content(sink: MainViewModelSink, theme: super::main_common::Theme, path_data: &'static str, caption: &str, active: impl Fn() -> bool + Clone + 'static) -> El<StackPanel> {
     let glyph_active = active.clone();
-    let icon: AnyEl = match icon {
-        ToolIcon::Glyph(glyph) => TextBlock::el()
-            .text(super::super::icons::glyph(glyph).to_owned())
-            .font_family(ICON_FONT)
-            .font_size(18.0)
-            .height(if cfg!(target_os = "linux") { 28.0 } else { f64::NAN })
-            .horizontal_alignment(HorizontalAlignment::Center)
-            .foreground(move || if glyph_active() { solid(WHITE) } else { theme.get(Tone::Text) })
-            .into(),
-        ToolIcon::Region => Border::el()
-            .height(if cfg!(target_os = "linux") { 28.0 } else { 21.0 })
-            .child(
-                Path::el()
-                    .width(18.0)
-                    .height(18.0)
-                    .data("M 2,7 L 2,2 L 7,2 M 11,2 L 16,2 L 16,7 M 16,11 L 16,16 L 11,16 M 7,16 L 2,16 L 2,11")
-                    .stroke(move || Some(if glyph_active() { solid(WHITE) } else { theme.get(Tone::Text) }))
-                    .stroke_thickness(1.5)
-                    .horizontal_alignment(HorizontalAlignment::Center)
-                    .vertical_alignment(VerticalAlignment::Center),
-            )
-            .into(),
-    };
+    let icon = Border::el()
+        .height(if cfg!(target_os = "linux") { 24.0 } else { 21.0 })
+        .child(
+            Path::el()
+                .width(18.0)
+                .height(18.0)
+                .data(path_data)
+                .stroke(move || Some(if glyph_active() { solid(WHITE) } else { theme.get(Tone::Text) }))
+                .stroke_thickness(1.5)
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .vertical_alignment(VerticalAlignment::Center),
+        );
     StackPanel::el()
         .spacing(2.0)
         .child(icon)
@@ -204,20 +201,21 @@ fn tool_content(sink: MainViewModelSink, theme: super::main_common::Theme, icon:
         )
 }
 
-/// Linux fonts have taller line boxes, so the glyph and its caption need more room.
+/// Linux fonts have taller line boxes, so the icon and its caption need more room.
 #[cfg(target_os = "linux")]
-const LABELED_HEIGHT: f64 = 62.0;
+const LABELED_HEIGHT: f64 = 58.0;
 #[cfg(not(target_os = "linux"))]
 const LABELED_HEIGHT: f64 = 48.0;
 
 /// A palette-sized button (`Button.tool`, `compact` without labels).
 fn palette_button(sink: MainViewModelSink) -> El<Button> {
     Button::el()
-        .width(move || if sink.tool_labels.get() { 60.0 } else { 38.0 })
+        .width(move || if sink.tool_labels.get() { 68.0 } else { 38.0 })
         .height(move || if sink.tool_labels.get() { LABELED_HEIGHT } else { 34.0 })
-        .padding(0.0)
+        .padding((2.0, 0.0))
         .margin(2.0)
         .corner_radius(4.0)
+        .border_thickness(1.0)
         .horizontal_content_alignment(HorizontalAlignment::Center)
         .vertical_content_alignment(VerticalAlignment::Center)
 }
@@ -236,8 +234,10 @@ fn tool_button(sink: MainViewModelSink, theme: super::main_common::Theme, index:
     let def = &TOOLS[index];
     let name = def.name;
     let active = move || sink.tool.with(|t| t == name);
+    let border_active = active;
     let button = palette_button(sink)
-        .tool_tip_tip(def.caption)
+        .name(format!("Tool{}", name.replace(' ', "")))
+        .tool_tip_tip(move || sink.tool_order.with(|order| format_tool_tooltip(order, index)))
         .background(move || {
             if active() {
                 solid(if theme.dark.get() && cfg!(windows) { crate::ui::dark_blue::SELECTION } else { brand_accent(theme) })
@@ -245,7 +245,14 @@ fn tool_button(sink: MainViewModelSink, theme: super::main_common::Theme, index:
                 solid(TRANSPARENT)
             }
         })
-        .content(tool_content(sink, theme, def.icon, def.caption, active))
+        .border_brush(move || {
+            if border_active() {
+                solid(brand_text(theme))
+            } else {
+                solid(TRANSPARENT)
+            }
+        })
+        .content(tool_content(sink, theme, def.path, def.caption, active))
         .command(action(format!("tool:{name}")));
     with_context_menu(
         button,
@@ -265,14 +272,16 @@ fn tool_button(sink: MainViewModelSink, theme: super::main_common::Theme, index:
 
 fn more_button(scope: AppScope, sink: MainViewModelSink, theme: super::main_common::Theme, slot: Signal<Slot>, extra: Signal<Option<usize>>) -> AnyEl {
     palette_button(sink)
-        .tool_tip_tip("More tools")
+        .name("ToolMore")
+        .tool_tip_tip("More tools — Choose hidden or overflow annotation tools")
         .background(solid(TRANSPARENT))
-        .content(tool_content(sink, theme, ToolIcon::Glyph("⋯"), "More", || false))
+        .border_brush(solid(TRANSPARENT))
+        .content(tool_content(sink, theme, vicons::MORE, "More", || false))
         .with_op(move |_, button| {
             let target = button.clone();
             button.clone().on_click(&scope.clone(), move |_| {
                 let Slot::More(more) = slot.get_untracked() else { return };
-                if let Err(error) = more_menu(sink, &more, extra).build(&scope).and_then(|flyout| flyout.show_at_with_control(&target)) {
+                if let Err(error) = more_menu(sink, theme, &more, extra).build(&scope).and_then(|flyout| flyout.show_at_with_control(&target)) {
                     eprintln!("could not show More tools: {error}");
                 }
             })?;
@@ -281,21 +290,41 @@ fn more_button(scope: AppScope, sink: MainViewModelSink, theme: super::main_comm
         .into()
 }
 
-/// More's menu: the tools that do not fit, then the label choices.
-fn more_menu(sink: MainViewModelSink, more: &[usize], extra: Signal<Option<usize>>) -> El<MenuFlyout> {
+/// More's menu: the tools that do not fit (with their matching vector icons and
+/// keyboard shortcuts), then the label choices.
+fn more_menu(sink: MainViewModelSink, theme: super::main_common::Theme, more: &[usize], extra: Signal<Option<usize>>) -> El<MenuFlyout> {
+    let order = sink.tool_order.get_untracked();
+    let icon_brush = theme.get(Tone::Text);
     let mut items: Vec<AnyEl> = more
         .iter()
         .map(|&i| {
-            let name = TOOLS[i].name;
-            MenuItem::el()
-                .header(TOOLS[i].caption)
+            let def = &TOOLS[i];
+            let name = def.name;
+            let icon = Border::el().width(18.0).height(18.0).child(
+                Path::el()
+                    .width(16.0)
+                    .height(16.0)
+                    .data(def.path)
+                    .stroke(Some(icon_brush))
+                    .stroke_thickness(1.4)
+                    .horizontal_alignment(HorizontalAlignment::Center)
+                    .vertical_alignment(VerticalAlignment::Center),
+            );
+            let item = MenuItem::el()
+                .header(def.caption)
+                .icon(icon)
+                .tool_tip_tip(def.description)
                 .toggle_type(MenuItemToggleType::Radio)
                 .checked(sink.tool.get_untracked() == name)
                 .command(act(move || {
                     extra.set(Some(i));
                     run(format!("tool:{name}"));
-                }))
-                .into()
+                }));
+            let item = match shortcut_for_tool(&order, i) {
+                Some(gesture) => item.input_gesture(gesture),
+                None => item,
+            };
+            item.into()
         })
         .collect();
     if !items.is_empty() {
@@ -360,13 +389,31 @@ pub fn effects_panel(ctx: &Ctx) -> El<Border> {
         .child(
             DockPanel::el()
                 .child(
-                    DockPanel::el()
+                    Border::el()
                         .dock_panel_dock(Dock::Top)
-                        .margin((14.0, 10.0, 8.0, 0.0))
-                        .child(super::main_common::bar("✕").dock_panel_dock(Dock::Right).tool_tip_tip("Hide the Effects panel").command(act(move || sink.show_effects.set(false))))
-                        .child(TextBlock::el().text("Effects").font_size(16.0).font_weight(FontWeight::DemiBold).vertical_alignment(VerticalAlignment::Center)),
+                        .border_brush(theme.brush(Tone::Border))
+                        .border_thickness((0.0, 0.0, 0.0, 1.0))
+                        .padding((14.0, 8.0, 8.0, 8.0))
+                        .child(
+                            DockPanel::el()
+                                .child(
+                                    super::main_common::bar(
+                                        Path::el()
+                                            .width(12.0)
+                                            .height(12.0)
+                                            .data(vicons::CLOSE)
+                                            .stroke(move || Some(theme.get(Tone::Caption)))
+                                            .stroke_thickness(1.5),
+                                    )
+                                    .name("CloseEffectsPanel")
+                                    .dock_panel_dock(Dock::Right)
+                                    .tool_tip_tip("Hide the Effects panel")
+                                    .command(act(move || sink.show_effects.set(false))),
+                                )
+                                .child(TextBlock::el().text("Effects").font_size(15.0).font_weight(FontWeight::DemiBold).vertical_alignment(VerticalAlignment::Center)),
+                        ),
                 )
-                .child(note(theme, "Applies to the whole image. Undo takes one back off.").dock_panel_dock(Dock::Top).margin((14.0, 4.0, 14.0, 0.0)))
+                .child(note(theme, "Applies to the whole image. Undo takes one back off.").dock_panel_dock(Dock::Top).margin((14.0, 8.0, 14.0, 0.0)))
                 .child(ScrollViewer::el().vertical_scroll_bar_visibility(ScrollBarVisibility::Auto).content(groups)),
         )
 }
@@ -374,13 +421,25 @@ pub fn effects_panel(ctx: &Ctx) -> El<Border> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
-    fn object_and_region_selection_use_distinct_icons() {
-        let move_tool = &TOOLS[index_of("Move").unwrap()];
-        let region_tool = &TOOLS[index_of("Select").unwrap()];
-        assert!(matches!(move_tool.icon, ToolIcon::Glyph(_)));
-        assert_eq!(region_tool.icon, ToolIcon::Region);
+    fn every_tool_uses_a_unique_vector_icon_and_accessible_description() {
+        let mut seen = HashSet::new();
+        for def in &TOOLS {
+            assert!(def.path.starts_with("M "), "invalid SVG geometry for {}", def.name);
+            assert!(!def.description.is_empty(), "missing description for {}", def.name);
+            assert!(seen.insert(def.path), "duplicate icon path on {}", def.name);
+        }
+        assert!(seen.insert(vicons::MORE));
+    }
+
+    #[test]
+    fn tooltips_include_shortcuts_for_first_nine_tools() {
+        let first = format_tool_tooltip("", 0);
+        assert!(first.contains("Select Region") && first.contains("1") && first.contains("Select a rectangular area"));
+        let tenth = format_tool_tooltip("", 9);
+        assert!(tenth.starts_with("Highlight — "));
     }
 
     #[test]

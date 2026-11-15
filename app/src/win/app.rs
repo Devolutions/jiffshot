@@ -4375,6 +4375,11 @@ impl App {
     fn publish_layout(&mut self) {
         let l = self.settings.layout.clone();
         self.put_flag("ShowSideBar", l.side_bar, |k, v| k.set_show_side_bar(v));
+        self.put_num(
+            "SideBarWidth",
+            crate::settings::clamp_side_bar_width(l.side_bar_width),
+            |k, v| k.set_side_bar_width(v),
+        );
         self.put_flag("ShowEffects", l.effects, |k, v| k.set_show_effects(v));
         self.put_flag("ShowTray", l.tray, |k, v| k.set_show_tray(v));
         self.put_flag("ToolLabels", l.labels, |k, v| k.set_tool_labels(v));

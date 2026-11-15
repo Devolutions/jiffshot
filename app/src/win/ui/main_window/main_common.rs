@@ -208,7 +208,7 @@ pub fn file_name(uri: &str) -> String {
 
 /// A panel section's heading (`TextBlock.section`).
 pub fn section(theme: Theme, text: &str) -> El<TextBlock> {
-    TextBlock::el().text(text.to_owned()).font_size(11.0).font_weight(FontWeight::DemiBold).foreground(theme.brush(Tone::Muted)).margin((0.0, 10.0, 0.0, 4.0))
+    TextBlock::el().text(text.to_owned()).font_size(11.0).font_weight(FontWeight::DemiBold).foreground(theme.brush(Tone::Muted)).margin((0.0, 14.0, 0.0, 6.0))
 }
 
 /// Small muted text.

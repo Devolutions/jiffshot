@@ -17,17 +17,18 @@ pub(super) mod menu_entry;
 mod video_timeline;
 
 use super::canvas_view::{CanvasView, FLAG_CHANGED};
+use super::icons::vector as vicons;
 use self::main_bars::{narration_bar, status_bar, video_bar, ZoomView};
-use self::main_common::{call, rule, run, solid, Ctx, Theme, Tone, RED, TRANSPARENT, WHITE};
+use self::main_common::{brand_text, call, rule, run, solid, Ctx, Theme, Tone, RED, TRANSPARENT, WHITE};
 use self::main_library::library_panel;
 use self::main_menu::{create_flyout, share_flyout};
-use self::main_panel::side_bar;
+use self::main_panel::{side_bar, side_bar_splitter};
 use self::main_tools::{effects_panel, tool_bar};
 use super::{shortcut, UiOnly};
 use crate::vm::{MainBinding, MainViewModelSink};
 use rustolonia::{
-    AnyEl, AppScope, Border, Button, Dock, DockPanel, DragDropEffects, Effect, El, FileDropEvent, FlyoutBase, FontWeight, Key, MenuFlyout, NodeRef, Orientation, Result, StackPanel, TextBox, ThemeVariant, ToggleButton, Upcast,
-    VerticalAlignment, Window,
+    AnyEl, AppScope, Border, Button, Dock, DockPanel, DragDropEffects, Effect, El, FileDropEvent, FlyoutBase, FontWeight, HorizontalAlignment, Key,
+    MenuFlyout, NodeRef, Orientation, Path, Result, StackPanel, TextBlock, TextBox, ThemeVariant, ToggleButton, Upcast, VerticalAlignment, Window,
 };
 use std::cell::Cell;
 
@@ -53,6 +54,7 @@ pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
     // The actual variant, which the "System" theme changes with the system.
     canvas.follow_theme(theme.dark)?;
     let window_height = ctx.window_height;
+    let live_side_bar_width = rustolonia::Signal::new(crate::settings::clamp_side_bar_width(sink.side_bar_width.get_untracked()));
     let content = DockPanel::el();
     #[cfg(not(target_os = "macos"))]
     let content = content.child(main_menu::menu_bar(&ctx).dock_panel_dock(Dock::Top));
@@ -72,7 +74,8 @@ pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
                 .child(status_bar(&ctx, zoom))
                 .child(narration_bar(sink))
                 .child(video_bar(&ctx))
-                .child(side_bar(&ctx))
+                .child(side_bar(&ctx, live_side_bar_width))
+                .child(side_bar_splitter(&ctx, live_side_bar_width))
                 .child(effects_panel(&ctx))
                 .child(AnyEl::from_control(canvas.control().clone())),
         )
@@ -126,21 +129,96 @@ pub(super) fn library_tile_for_selftest(scope: &AppScope, key: u64) -> Result<Wi
 }
 
 /// The Editor and Library tabs, capture and creation actions, the tool palette,
-/// the Effects toggle, Copy All and Share ▾.
+/// the Properties and Effects toggles, Copy All and Share ▾.
 fn top_bar(ctx: &Ctx) -> El<Border> {
     let (s, theme) = (ctx.sink, ctx.theme);
     let expanded = s.library_expanded;
     let tab = move |label: &str, library: bool, tip: &str| {
         let on = move || expanded.get() == library;
+        let underline_on = on;
+        let weight_on = on;
         Button::el()
-            .content(label.to_owned())
+            .name(if library { "TabLibrary" } else { "TabEditor" })
             .tool_tip_tip(tip.to_owned())
-            .padding((15.0, 7.0))
-            .corner_radius(0.0)
+            .padding((14.0, 6.0, 14.0, 4.0))
+            .corner_radius(4.0)
             .background(move || if on() { theme.get(Tone::Well) } else { solid(TRANSPARENT) })
-            .font_weight(move || if on() { FontWeight::DemiBold } else { FontWeight::Normal })
+            .content(
+                StackPanel::el()
+                    .spacing(3.0)
+                    .child(
+                        TextBlock::el()
+                            .text(label.to_owned())
+                            .horizontal_alignment(HorizontalAlignment::Center)
+                            .font_weight(move || if weight_on() { FontWeight::DemiBold } else { FontWeight::Normal }),
+                    )
+                    .child(
+                        Border::el()
+                            .height(2.0)
+                            .corner_radius(1.0)
+                            .background(move || if underline_on() { solid(brand_text(theme)) } else { solid(TRANSPARENT) }),
+                    ),
+            )
             .command(main_common::act(move || expanded.set_if_changed(library)))
     };
+    let icon_label = move |path_data: &'static str, label: &str, chevron: bool, active: Option<rustolonia::Signal<bool>>| {
+        let icon = Path::el()
+            .width(14.0)
+            .height(14.0)
+            .data(path_data)
+            .stroke(move || {
+                Some(if active.is_some_and(|on| on.get()) {
+                    solid(WHITE)
+                } else {
+                    theme.get(Tone::Text)
+                })
+            })
+            .stroke_thickness(1.4)
+            .vertical_alignment(VerticalAlignment::Center);
+        let text = TextBlock::el()
+            .text(label.to_owned())
+            .vertical_alignment(VerticalAlignment::Center)
+            .foreground(move || {
+                if active.is_some_and(|on| on.get()) {
+                    solid(WHITE)
+                } else {
+                    theme.get(Tone::Text)
+                }
+            });
+        let row = StackPanel::el()
+            .orientation(Orientation::Horizontal)
+            .spacing(6.0)
+            .vertical_alignment(VerticalAlignment::Center)
+            .child(icon)
+            .child(text);
+        if chevron {
+            row.child(
+                Path::el()
+                    .width(11.0)
+                    .height(11.0)
+                    .data(vicons::CHEVRON_DOWN)
+                    .stroke(move || Some(theme.get(Tone::Caption)))
+                    .stroke_thickness(1.4)
+                    .vertical_alignment(VerticalAlignment::Center),
+            )
+        } else {
+            row
+        }
+    };
+    let capture_content = StackPanel::el()
+        .orientation(Orientation::Horizontal)
+        .spacing(6.0)
+        .vertical_alignment(VerticalAlignment::Center)
+        .child(
+            Path::el()
+                .width(12.0)
+                .height(12.0)
+                .data(vicons::CAPTURE_DOT)
+                .fill(solid(WHITE))
+                .vertical_alignment(VerticalAlignment::Center),
+        )
+        .child(TextBlock::el().text("Capture").foreground(solid(WHITE)).font_weight(FontWeight::DemiBold).vertical_alignment(VerticalAlignment::Center));
+
     let left = StackPanel::el()
         .dock_panel_dock(Dock::Left)
         .orientation(Orientation::Horizontal)
@@ -150,13 +228,26 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
         .child(rule(theme, (4.0, 6.0)))
         .child(
             Button::el()
-                .content("● Capture")
-                .tool_tip_tip("Open the Capture window")
+                .name("OpenCaptureWindow")
+                .content(capture_content)
+                .padding((11.0, 5.0))
+                .corner_radius(4.0)
+                .tool_tip_tip(shortcut("Open the Capture window (Ctrl+Shift+N)"))
                 .background(solid(RED))
                 .foreground(solid(WHITE))
                 .command(main_common::command(s.open_capture_window_enabled.local(), |m| m.open_capture_window())),
         )
-        .child(with_flyout(Button::el().content("Create ▾").tool_tip_tip("An image from a template, combined images, or a video from images"), create_flyout(ctx)))
+        .child(
+            with_flyout(
+                Button::el()
+                    .name("CreateMenu")
+                    .content(icon_label(vicons::CREATE_PLUS, "Create", true, None))
+                    .padding((10.0, 5.0))
+                    .corner_radius(4.0)
+                    .tool_tip_tip("Create an image from a template, combine images, or build a video from images"),
+                create_flyout(ctx),
+            ),
+        )
         .child(rule(theme, (4.0, 6.0)));
     let right = StackPanel::el()
         .dock_panel_dock(Dock::Right)
@@ -166,14 +257,42 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
         .child(rule(theme, (4.0, 6.0)))
         .child(
             ToggleButton::el()
-                .content("Properties")
+                .name("TogglePropertiesPanel")
+                .content(icon_label(vicons::PROPERTIES_SLIDERS, "Properties", false, Some(s.show_side_bar.local())))
                 .checked(s.show_side_bar.two_way())
-                .padding((10.0, 4.0))
+                .padding((10.0, 5.0))
+                .corner_radius(4.0)
                 .tool_tip_tip("Show or hide the Properties panel"),
         )
-        .child(ToggleButton::el().content("✦ Effects").checked(s.show_effects.two_way()).tool_tip_tip("Show or hide the Effects panel"))
-        .child(Button::el().content("Copy All").tool_tip_tip(shortcut("Copy the whole image (Ctrl+Shift+C)")).command(main_common::command(s.copy_image_enabled.local(), |m| m.copy_image())))
-        .child(with_flyout(Button::el().content("Share ▾").tool_tip_tip("Send the capture to another app, a file or a printer"), share_flyout(ctx)));
+        .child(
+            ToggleButton::el()
+                .name("ToggleEffectsPanel")
+                .content(icon_label(vicons::EFFECTS_SPARKLE, "Effects", false, Some(s.show_effects.local())))
+                .checked(s.show_effects.two_way())
+                .padding((10.0, 5.0))
+                .corner_radius(4.0)
+                .tool_tip_tip("Show or hide the Effects panel"),
+        )
+        .child(
+            Button::el()
+                .name("CopyAllImage")
+                .content(icon_label(vicons::COPY_SHEETS, "Copy All", false, None))
+                .padding((10.0, 5.0))
+                .corner_radius(4.0)
+                .tool_tip_tip(shortcut("Copy the whole image (Ctrl+Shift+C)"))
+                .command(main_common::command(s.copy_image_enabled.local(), |m| m.copy_image())),
+        )
+        .child(
+            with_flyout(
+                Button::el()
+                    .name("ShareMenu")
+                    .content(icon_label(vicons::SHARE_NODE, "Share", true, None))
+                    .padding((10.0, 5.0))
+                    .corner_radius(4.0)
+                    .tool_tip_tip("Send the capture to another app, export to a file, or print"),
+                share_flyout(ctx),
+            ),
+        );
     Border::el()
         .dock_panel_dock(Dock::Top)
         .background(theme.brush(Tone::Panel))

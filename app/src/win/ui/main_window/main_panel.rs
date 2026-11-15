@@ -2,10 +2,13 @@
 //! `panel` lists for the current tool or selection, then Arrange (with a
 //! selection) or Canvas color (without).
 
-use super::main_common::{action, action_box, chip, choice_box, color_brush, note, run, section, solid, value_label, with_context_menu, Ctx, Theme, Tone, ORANGE};
+use super::main_common::{act, action, action_box, bar, chip, choice_box, color_brush, note, run, section, solid, value_label, with_context_menu, Ctx, Theme, Tone, ORANGE, TRANSPARENT};
+use super::super::icons::vector as vicons;
+use crate::settings::{clamp_side_bar_width, SIDE_BAR_DEFAULT_WIDTH};
 use crate::vm::{MainViewModelSink, QuickStyleViewModel};
 use rustolonia::{
-    AnyEl, Border, Button, CheckBox, Dock, DockPanel, El, FontStyle, FontWeight, Grid, HorizontalAlignment, MenuItem, Orientation, Panel, Rectangle, ScrollBarVisibility, ScrollViewer, Separator, Signal, Slider, StackPanel, TextBlock, TextBox,
+    AnyEl, Border, Button, CheckBox, Dock, DockPanel, Effect, El, FontStyle, FontWeight, Grid, GridResizeDirection, GridSplitter, HorizontalAlignment,
+    MenuItem, Orientation, Panel, Path, Rectangle, ScrollBarVisibility, ScrollViewer, Separator, Signal, Slider, StackPanel, TextBlock, TextBox,
     TextWrapping, ToggleButton, VerticalAlignment, WrapPanel,
 };
 
@@ -60,17 +63,100 @@ fn slider_row(value: Signal<f64>, min: f64, max: f64) -> El<DockPanel> {
     DockPanel::el().child(value_label(value)).child(Slider::el().minimum(min).maximum(max).value(value.two_way()))
 }
 
-/// A color as `#AARRGGBB` text.
+/// A color as `#AARRGGBB` text, separated slightly from its swatch palette.
 fn hex_box(value: Signal<String>) -> El<TextBox> {
-    TextBox::el().text(value.two_way()).font_family("Consolas")
+    TextBox::el()
+        .text(value.two_way())
+        .font_family("Consolas, Cascadia Mono, monospace")
+        .margin((0.0, 6.0, 0.0, 0.0))
 }
 
-/// The side bar.
-pub fn side_bar(ctx: &Ctx) -> El<Border> {
+/// Subtle horizontal divider between distinct sections of the Properties panel.
+fn panel_divider(theme: Theme) -> El<Border> {
+    Border::el()
+        .height(1.0)
+        .margin((0.0, 14.0, 0.0, 2.0))
+        .background(theme.brush(Tone::Border))
+}
+
+/// Interactive resize handle docked immediately to the left of [`side_bar`].
+/// Dragging adjusts the panel width smoothly (240–520 px) and saves on release;
+/// double-clicking restores the 300 px default.
+pub fn side_bar_splitter(ctx: &Ctx, live_width: Signal<f64>) -> El<Panel> {
     let (s, theme) = (ctx.sink, ctx.theme);
+    let grip = Border::el()
+        .width(2.0)
+        .height(28.0)
+        .corner_radius(1.0)
+        .horizontal_alignment(HorizontalAlignment::Center)
+        .vertical_alignment(VerticalAlignment::Center)
+        .background(theme.brush(Tone::BorderStrong));
+    let edge = Border::el()
+        .width(1.0)
+        .horizontal_alignment(HorizontalAlignment::Right)
+        .background(theme.brush(Tone::Border));
+    let splitter = GridSplitter::el()
+        .name("PropertiesResizeHandle")
+        .resize_direction(GridResizeDirection::Columns)
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .vertical_alignment(VerticalAlignment::Stretch)
+        .background(solid(TRANSPARENT))
+        .tool_tip_tip("Drag to resize the Properties panel; double-click to reset width")
+        .on_drag_delta(move |ev| {
+            let next = clamp_side_bar_width(live_width.get_untracked() - ev.vector.x);
+            live_width.set_if_changed(next);
+        })
+        .on_drag_completed(move |_| {
+            s.side_bar_width.set_if_changed(live_width.get_untracked());
+        })
+        .on_double_tapped(move |_| {
+            live_width.set_if_changed(SIDE_BAR_DEFAULT_WIDTH);
+            s.side_bar_width.set_if_changed(SIDE_BAR_DEFAULT_WIDTH);
+        });
+    Panel::el()
+        .dock_panel_dock(Dock::Right)
+        .width(6.0)
+        .background(theme.brush(Tone::Panel))
+        .visible(s.show_side_bar)
+        .child(edge)
+        .child(grip)
+        .child(splitter)
+}
+
+/// The resizable Properties side bar.
+pub fn side_bar(ctx: &Ctx, live_width: Signal<f64>) -> El<Border> {
+    let (s, theme) = (ctx.sink, ctx.theme);
+    let header = Border::el()
+        .dock_panel_dock(Dock::Top)
+        .border_brush(theme.brush(Tone::Border))
+        .border_thickness((0.0, 0.0, 0.0, 1.0))
+        .padding((16.0, 8.0, 8.0, 8.0))
+        .child(
+            DockPanel::el()
+                .child(
+                    bar(
+                        Path::el()
+                            .width(12.0)
+                            .height(12.0)
+                            .data(vicons::CLOSE)
+                            .stroke(move || Some(theme.get(Tone::Caption)))
+                            .stroke_thickness(1.5),
+                    )
+                    .name("ClosePropertiesPanel")
+                    .dock_panel_dock(Dock::Right)
+                    .tool_tip_tip("Hide the Properties panel")
+                    .command(act(move || s.show_side_bar.set(false))),
+                )
+                .child(
+                    TextBlock::el()
+                        .text(move || if s.selection.with(String::is_empty) { s.tool.get() } else { s.selection.get() })
+                        .font_size(15.0)
+                        .font_weight(FontWeight::DemiBold)
+                        .vertical_alignment(VerticalAlignment::Center),
+                ),
+        );
     let content = StackPanel::el()
-        .margin((14.0, 8.0, 14.0, 16.0))
-        .child(TextBlock::el().text(move || if s.selection.with(String::is_empty) { s.tool.get() } else { s.selection.get() }).font_size(16.0).font_weight(FontWeight::DemiBold).margin((0.0, 4.0, 0.0, 2.0)))
+        .margin((16.0, 4.0, 16.0, 20.0))
         .child(quick_styles(s, theme))
         .child(variant_section(s, theme))
         .child(
@@ -91,7 +177,7 @@ pub fn side_bar(ctx: &Ctx) -> El<Border> {
                     .text(s.text.two_way())
                     .accepts_return(true)
                     .text_wrapping(TextWrapping::Wrap)
-                    .min_height(64.0)
+                    .min_height(68.0)
                     .max_height(220.0)
                     .placeholder_text("Type the text…")
                     .node_ref(ctx.text_editor),
@@ -105,7 +191,8 @@ pub fn side_bar(ctx: &Ctx) -> El<Border> {
         .child(
             part(s, "gradient").child(section(theme, "GRADIENT TO (∅ = SOLID)")).child(swatches(s.fill2.local(), true)).child(
                 DockPanel::el()
-                    .child(CheckBox::el().content("Radial").checked(s.gradient_radial.two_way()).dock_panel_dock(Dock::Right))
+                    .margin((0.0, 4.0, 0.0, 0.0))
+                    .child(CheckBox::el().content("Radial").checked(s.gradient_radial.two_way()).margin((8.0, 0.0, 0.0, 0.0)).dock_panel_dock(Dock::Right))
                     .child(Slider::el().minimum(0.0).maximum(360.0).value(s.gradient_angle.two_way()).tool_tip_tip("Angle of a linear gradient")),
             ),
         )
@@ -120,7 +207,7 @@ pub fn side_bar(ctx: &Ctx) -> El<Border> {
                         .child(choice_box(theme, || strings(&CAPS), s.end_cap.local()).grid_column(2).horizontal_alignment(HorizontalAlignment::Stretch)),
                 )
                 .child(section(theme, "HEAD SIZE"))
-                .child(Slider::el().minimum(0.3).maximum(4.0).value(s.head_size.two_way())),
+                .child(slider_row(s.head_size.local(), 0.3, 4.0)),
         )
         .child(part(s, "dash").child(section(theme, "LINE STYLE")).child(choice_box(theme, || strings(&["Solid", "Dash", "Dot"]), s.dash.local()).horizontal_alignment(HorizontalAlignment::Stretch)))
         .child(amount_section(s, theme))
@@ -131,18 +218,29 @@ pub fn side_bar(ctx: &Ctx) -> El<Border> {
         .child(
             StackPanel::el()
                 .visible(move || s.selection.with(String::is_empty))
+                .child(panel_divider(theme))
                 .child(section(theme, "CANVAS COLOR"))
                 .child(swatches(s.canvas_color.local(), true))
-                .child(chip("Expand canvas to fit objects").command(super::main_common::command(s.expand_canvas_enabled.local(), |m| m.expand_canvas()))),
+                .child(chip("Expand canvas to fit objects").margin((0.0, 6.0, 0.0, 0.0)).command(super::main_common::command(s.expand_canvas_enabled.local(), |m| m.expand_canvas()))),
         );
     Border::el()
+        .name("PropertiesPanel")
         .dock_panel_dock(Dock::Right)
-        .width(300.0)
+        .width(live_width)
         .background(theme.brush(Tone::Panel))
-        .border_brush(theme.brush(Tone::Border))
-        .border_thickness((1.0, 0.0, 0.0, 0.0))
         .visible(s.show_side_bar)
-        .child(ScrollViewer::el().vertical_scroll_bar_visibility(ScrollBarVisibility::Auto).content(content))
+        .with_op(move |_, _| {
+            Effect::new(move || {
+                live_width.set_if_changed(clamp_side_bar_width(s.side_bar_width.get()));
+                Ok(())
+            })?;
+            Ok(())
+        })
+        .child(
+            DockPanel::el()
+                .child(header)
+                .child(ScrollViewer::el().vertical_scroll_bar_visibility(ScrollBarVisibility::Auto).content(content)),
+        )
 }
 
 /// Quick styles: one-click styles for the current tool.
@@ -154,11 +252,12 @@ fn quick_styles(s: MainViewModelSink, theme: Theme) -> El<StackPanel> {
         .child(WrapPanel::el().children_for(keys, |k: &u64| *k, move |key: Signal<u64>| quick_style(s, theme, key.get_untracked())))
         .child(
             WrapPanel::el()
+                .margin((0.0, 4.0, 0.0, 2.0))
                 .child(chip("Save current style").command(super::main_common::command(s.save_quick_style_enabled.local(), |m| m.save_quick_style())))
                 .child(
                     action_box(theme, move || s.template_themes.get(), |name| run(format!("style-theme:{name}")))
                         .placeholder_text("Theme…")
-                        .min_width(90.0)
+                        .min_width(94.0)
                         .font_size(11.0)
                         .tool_tip_tip("Recolor this tool's quick styles with a theme")
                         .margin((0.0, 0.0, 6.0, 6.0)),
@@ -166,6 +265,7 @@ fn quick_styles(s: MainViewModelSink, theme: Theme) -> El<StackPanel> {
                 .child(chip("Reset").tool_tip_tip("Back to the built-in quick styles").command(action("style-theme:reset"))),
         )
         .child(note(theme, "Right-click a style to favorite, move or delete it.").font_size(10.5))
+        .child(panel_divider(theme))
 }
 
 /// Runs `f` on the quick style `key`, when it is still listed.
@@ -338,17 +438,20 @@ fn amount_section(s: MainViewModelSink, theme: Theme) -> El<StackPanel> {
 
 fn shadow_section(s: MainViewModelSink, theme: Theme) -> El<StackPanel> {
     let on = shows(s, "shadow");
-    part(s, "shadow").child(CheckBox::el().content("Drop shadow").checked(s.shadow.two_way()).margin((0.0, 10.0, 0.0, 0.0))).child(
-        StackPanel::el()
-            .visible(move || on() && s.shadow.get())
-            .child(section(theme, "SHADOW DIRECTION"))
-            .child(Slider::el().minimum(0.0).maximum(360.0).value(s.shadow_angle.two_way()))
-            .child(section(theme, "DISTANCE"))
-            .child(Slider::el().minimum(0.0).maximum(40.0).value(s.shadow_distance.two_way()))
-            .child(section(theme, "SOFTNESS"))
-            .child(Slider::el().minimum(0.0).maximum(30.0).value(s.shadow_blur.two_way()))
-            .child(hex_box(s.shadow_color.local()).tool_tip_tip("Shadow color, #AARRGGBB")),
-    )
+    part(s, "shadow")
+        .child(panel_divider(theme))
+        .child(CheckBox::el().content("Drop shadow").checked(s.shadow.two_way()).margin((0.0, 10.0, 0.0, 0.0)))
+        .child(
+            StackPanel::el()
+                .visible(move || on() && s.shadow.get())
+                .child(section(theme, "SHADOW DIRECTION"))
+                .child(slider_row(s.shadow_angle.local(), 0.0, 360.0))
+                .child(section(theme, "DISTANCE"))
+                .child(slider_row(s.shadow_distance.local(), 0.0, 40.0))
+                .child(section(theme, "SOFTNESS"))
+                .child(slider_row(s.shadow_blur.local(), 0.0, 30.0))
+                .child(hex_box(s.shadow_color.local()).tool_tip_tip("Shadow color, #AARRGGBB")),
+        )
 }
 
 fn arrange_section(s: MainViewModelSink, theme: Theme) -> El<StackPanel> {
@@ -356,6 +459,7 @@ fn arrange_section(s: MainViewModelSink, theme: Theme) -> El<StackPanel> {
     let align = |label: &str, tip: &str, how: &str| chip(label).tool_tip_tip(tip.to_owned()).command(action(format!("align:{how}")));
     StackPanel::el()
         .visible(move || s.selection.with(|t| !t.is_empty()))
+        .child(panel_divider(theme))
         .child(section(theme, "ARRANGE"))
         .child(
             WrapPanel::el()
@@ -369,6 +473,7 @@ fn arrange_section(s: MainViewModelSink, theme: Theme) -> El<StackPanel> {
                 .child(chip("Ungroup").command(command(s.ungroup_enabled.local(), |m| m.ungroup())))
                 .child(chip("Flatten").command(command(s.flatten_selected_enabled.local(), |m| m.flatten_selected()))),
         )
+        .child(section(theme, "ALIGNMENT"))
         .child(
             WrapPanel::el()
                 .child(align("⇤", "Align left", "left"))

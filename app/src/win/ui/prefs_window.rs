@@ -7,10 +7,11 @@
 //! per row and tab as `prefs-apply:{"capture":[…],…}`. Each request builds a
 //! new dialog, replacing the one showing.
 
-use super::capture_view::parts::{self, post, Form, Input, Subscriptions};
+use super::capture_view::parts::{self, post, Input, Subscriptions};
+use super::theme_kit::{bind_window_theme, solid, with_role, ButtonRole, Surface};
 use rustolonia::{
-    AnyEl, AppScope, Button, Dock, DockPanel, Effect, HorizontalAlignment, NodeRef, Orientation, Result, ScrollViewer, StackPanel, TabControl, TabItem,
-    Window, WindowStartupLocation,
+    AnyEl, AppScope, Border, Button, Control, Dock, DockPanel, Effect, FontWeight, HorizontalAlignment, NodeRef, Orientation, Result, ScrollBarVisibility,
+    ScrollViewer, Signal, StackPanel, TabControl, TabItem, TextBlock, Window, WindowStartupLocation,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -79,9 +80,130 @@ fn share_values(inputs: &[Input]) -> std::result::Result<Value, String> {
     let values = inputs.iter().enumerate().map(|(index, input)| match (index, input) {
         (0, Input::Nothing) => Ok(Value::Null),
         (1.., Input::Check(control)) => share_checkbox(control.is_checked().map_err(|error| format!("could not read a Share destination: {error}"))),
+        (1.., Input::Switch(control)) => share_checkbox(control.is_checked().map_err(|error| format!("could not read a Share destination: {error}"))),
         _ => Err("the Share preference fields are invalid".into()),
     }).collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(Value::Array(values))
+}
+
+/// Visual card section inside a Preferences tab.
+#[derive(Debug, PartialEq, Eq)]
+struct CardGroup {
+    heading: &'static str,
+    indices: Vec<usize>,
+}
+
+/// Concise helper subtitle explaining consequential or layout settings inline,
+/// inspired by UniGetUI's grouped settings cards.
+fn row_subtitle(tab_id: &str, row: &parts::Row) -> Option<&'static str> {
+    let label = match row {
+        parts::Row::Number { label, .. }
+        | parts::Row::Check { label, .. }
+        | parts::Row::Choice { label, .. }
+        | parts::Row::Text { label, .. }
+        | parts::Row::Folder { label, .. }
+        | parts::Row::Hotkey { label, .. } => label.as_str(),
+        _ => return None,
+    };
+    match (tab_id, label) {
+        ("capture", l) if l.starts_with("Run Jiffshot") => Some("Launch in the background so global capture shortcuts stay ready"),
+        ("capture", "Show the Capture Widget at the top of the screen") => Some("Keep a compact quick-capture bar docked to the top of the primary display"),
+        ("capture", "Copy captures to the clipboard") | ("capture", "Copy each capture to the clipboard") => Some("Place every new screenshot on the clipboard automatically"),
+        ("capture", "Open captures in the editor") => Some("Open screenshots in Jiffshot Editor right after capture"),
+        ("capture", "Keep the pointer as a movable object in the editor") => Some("Capture the mouse cursor on its own layer so it can be moved or removed"),
+        ("capture", "Time delay (s)") => Some("Wait before capturing so menus or hover tooltips can be opened"),
+        ("capture", "Recording countdown (s)") => Some("Display a visual countdown before video recording starts"),
+        ("capture", "Recording frame rate") => Some("Higher frame rates produce smoother motion and larger video files"),
+        ("capture", "Recording sound") => Some("Choose which audio sources are mixed into screen recordings"),
+        ("capture", "Draw the pointer into recordings") => Some("Include the mouse cursor in recorded videos"),
+        ("capture", "Offer Screen Draw while recording") => Some("Allow live ink annotations on screen during recording"),
+        ("capture", "Screen Draw marks fade after (s, 0 keeps them)") => Some("Automatically fade live ink marks after a set duration"),
+        ("capture", "Show a tray icon") => Some("Keep Jiffshot accessible from the system notification area"),
+        ("editor", "Color theme (every Jiffshot window)") => Some("Applies across the editor, Capture window, Preferences, and notifications"),
+        ("editor", "Show tool names in the toolbar") => Some("Display captions below tool icons in the top toolbar"),
+        ("editor", "Show the side bar (Quick Styles and properties)") => Some("Show Quick Styles and tool settings along the right side of the editor"),
+        ("editor", "Show the Recent Captures tray") => Some("Dock recent library items along the bottom of the editor"),
+        ("editor", "Export as") => Some("Default file format selected when exporting an image"),
+        ("library", "Library folder") => Some("Directory where new screenshots and recordings are stored"),
+        ("hotkeys", "Capture") => Some("Start an interactive region, window, or full-screen capture"),
+        ("hotkeys", "Full screen") => Some("Capture the entire display immediately"),
+        ("hotkeys", "Repeat last region") => Some("Capture the previous screen area again without re-selecting"),
+        _ => None,
+    }
+}
+
+/// Partitions `0..rows.len()` into logical card groups for `tab_id`.
+/// Every row index appears exactly once, while `inputs` is always built in
+/// strict `0..rows.len()` order beforehand.
+fn group_tab_rows(tab_id: &str, rows: &[parts::Row]) -> Vec<CardGroup> {
+    let len = rows.len();
+    if len == 0 {
+        return Vec::new();
+    }
+    match tab_id {
+        "capture" if len >= 12 => {
+            let mut startup = vec![0];
+            startup.extend(12..len);
+            startup.push(1);
+            vec![
+                CardGroup { heading: "Startup & Workspace", indices: startup },
+                CardGroup { heading: "Screenshots & Clipboard", indices: (2..6).collect() },
+                CardGroup { heading: "Video Recording", indices: (6..12).collect() },
+            ]
+        }
+        "capture" => vec![CardGroup { heading: "General Capture", indices: (0..len).collect() }],
+        "editor" if len >= 5 => vec![
+            CardGroup { heading: "Appearance & Workspace", indices: (0..4).collect() },
+            CardGroup { heading: "Export", indices: (4..len).collect() },
+        ],
+        "editor" => vec![CardGroup { heading: "Editor", indices: (0..len).collect() }],
+        "library" => vec![CardGroup { heading: "Storage Location", indices: (0..len).collect() }],
+        "share" => vec![CardGroup { heading: "External Destinations", indices: (0..len).collect() }],
+        "hotkeys" if len >= 7 && matches!(rows.get(1), Some(parts::Row::Hotkey { .. })) => vec![
+            CardGroup { heading: "Global Shortcuts", indices: (0..6).collect() },
+            CardGroup { heading: "Capture Presets", indices: (6..len).collect() },
+        ],
+        "hotkeys" => vec![CardGroup { heading: "Global Shortcuts", indices: (0..len).collect() }],
+        _ => vec![CardGroup { heading: "Settings", indices: (0..len).collect() }],
+    }
+}
+
+fn build_card(scope: &AppScope, dark: Signal<bool>, heading: &str, controls: Vec<Control>) -> Result<StackPanel> {
+    let section = StackPanel::new()?;
+    section.set_spacing(6.0)?;
+    section.children()?.add(
+        TextBlock::el()
+            .text(heading.to_owned())
+            .font_size(12.5)
+            .font_weight(FontWeight::DemiBold)
+            .margin((2.0, 0.0, 0.0, 0.0))
+            .foreground(move || solid(Surface::for_theme(dark.get()).secondary_text))
+            .build(scope)?,
+    )?;
+
+    let list = StackPanel::new()?;
+    let list_children = list.children()?;
+    for (idx, control) in controls.into_iter().enumerate() {
+        if idx > 0 {
+            list_children.add(
+                Border::el()
+                    .height(1.0)
+                    .background(move || solid(Surface::for_theme(dark.get()).divider))
+                    .build(scope)?,
+            )?;
+        }
+        list_children.add(control)?;
+    }
+
+    let card = Border::el()
+        .corner_radius(8.0)
+        .border_thickness(1.0)
+        .background(move || solid(Surface::for_theme(dark.get()).card))
+        .border_brush(move || solid(Surface::for_theme(dark.get()).border))
+        .child(AnyEl::from_control(list))
+        .build(scope)?;
+    section.children()?.add(card)?;
+    Ok(section)
 }
 
 /// Starts following the main view model's signals. Called once, on the UI
@@ -111,22 +233,42 @@ fn show(json: &str) -> Result<()> {
 
     let subs = Subscriptions::default();
     let window_ref = NodeRef::new();
+    let dark = scope.signal(parts::dark_theme(&scope));
     let mut tabs: Vec<(String, Vec<Input>)> = Vec::new();
     let mut items = Vec::new();
     for tab in &dialog.tabs {
-        let rows = {
-            let control = StackPanel::new()?;
-            control.set_spacing(10.0)?;
-            control.set_margin((18.0, 16.0, 18.0, 16.0))?;
-            control
-        };
-        let list = rows.children()?;
-        let mut inputs = Vec::new();
+        let mut inputs = Vec::with_capacity(tab.rows.len());
+        let mut rendered: Vec<Option<Control>> = Vec::with_capacity(tab.rows.len());
         for row in &tab.rows {
-            list.add(parts::row(&scope, Form::Prefs, row, window_ref, &mut inputs, &subs)?)?;
+            let subtitle = row_subtitle(&tab.id, row);
+            let ctrl = parts::prefs_row(&scope, dark, row, subtitle, window_ref, &mut inputs, &subs)?;
+            rendered.push(Some(ctrl));
+        }
+        let page = StackPanel::new()?;
+        page.set_spacing(16.0)?;
+        page.set_margin((20.0, 14.0, 20.0, 20.0))?;
+        let page_children = page.children()?;
+        for group in group_tab_rows(&tab.id, &tab.rows) {
+            let group_controls: Vec<Control> = group
+                .indices
+                .into_iter()
+                .filter_map(|i| rendered.get_mut(i).and_then(Option::take))
+                .collect();
+            if !group_controls.is_empty() {
+                page_children.add(build_card(&scope, dark, group.heading, group_controls)?)?;
+            }
         }
         tabs.push((tab.id.clone(), inputs));
-        items.push(TabItem::el().header(tab.title.clone()).content(ScrollViewer::el().content(AnyEl::from_control(rows))));
+        items.push(
+            TabItem::el()
+                .class("jiffshot-prefs-tab")
+                .header(tab.title.clone())
+                .content(
+                    ScrollViewer::el()
+                        .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+                        .content(AnyEl::from_control(page)),
+                ),
+        );
     }
     let selected = dialog.tabs.iter().position(|t| t.id == dialog.tab).unwrap_or(0);
     #[cfg(any(windows, target_os = "macos"))]
@@ -135,7 +277,14 @@ fn show(json: &str) -> Result<()> {
     let share_initial = dialog.share_initial;
 
     let ok = parts::on_click(
-        Button::el().content("OK").min_width(90.0).default(true).horizontal_content_alignment(HorizontalAlignment::Center),
+        with_role(
+            Button::el()
+                .content("OK")
+                .default(true)
+                .horizontal_content_alignment(HorizontalAlignment::Center),
+            dark,
+            ButtonRole::Primary,
+        ),
         &subs,
         move |_| {
             // The values to send, by tab.
@@ -181,34 +330,47 @@ fn show(json: &str) -> Result<()> {
         },
     );
     let cancel = parts::on_click(
-        Button::el().content("Cancel").min_width(90.0).cancel(true).horizontal_content_alignment(HorizontalAlignment::Center),
+        with_role(
+            Button::el()
+                .content("Cancel")
+                .cancel(true)
+                .horizontal_content_alignment(HorizontalAlignment::Center),
+            dark,
+            ButtonRole::Secondary,
+        ),
         &subs,
         |_| close_later(),
     );
+    let footer = Border::el()
+        .dock_panel_dock(Dock::Bottom)
+        .background(move || solid(Surface::for_theme(dark.get()).panel))
+        .border_brush(move || solid(Surface::for_theme(dark.get()).border))
+        .border_thickness((0.0, 1.0, 0.0, 0.0))
+        .padding((20.0, 12.0))
+        .child(
+            StackPanel::el()
+                .orientation(Orientation::Horizontal)
+                .spacing(8.0)
+                .horizontal_alignment(HorizontalAlignment::Right)
+                .child(ok)
+                .child(cancel),
+        );
     let window = Window::el()
         .title("Jiffshot Preferences")
         .icon(super::icon_file())
-        .width(640.0)
-        .height(560.0)
-        .min_width(520.0)
-        .min_height(420.0)
+        .width(700.0)
+        .height(620.0)
+        .min_width(560.0)
+        .min_height(440.0)
         .window_startup_location(WindowStartupLocation::CenterScreen)
         .content(
             DockPanel::el()
-                .child(
-                    StackPanel::el()
-                        .orientation(Orientation::Horizontal)
-                        .spacing(8.0)
-                        .horizontal_alignment(HorizontalAlignment::Right)
-                        .margin(14.0)
-                        .dock_panel_dock(Dock::Bottom)
-                        .child(ok)
-                        .child(cancel),
-                )
-                .child(TabControl::el().items_iter(items).selected_index(i32::try_from(selected).unwrap_or(0))),
+                .child(footer)
+                .child(TabControl::el().margin((0.0, 4.0, 0.0, 0.0)).items_iter(items).selected_index(i32::try_from(selected).unwrap_or(0))),
         )
         .node_ref(window_ref)
         .build(&scope)?;
+    bind_window_theme(&scope, &window, dark)?;
     // A hotkey box may still have the focus.
     subs.keep(window.subscribe_closing(|_| parts::pause_hotkeys(false))?);
 
@@ -223,6 +385,20 @@ fn show(json: &str) -> Result<()> {
     }
     with(|s| s.open = Some(Open { window, subs }));
     Ok(())
+}
+
+/// Closes the dialog once the click that asked for it has returned (its
+/// subscriptions end with it).
+fn close_later() {
+    let Some(scope) = with(|s| s.scope.clone()) else { return };
+    post(&scope, "Preferences", || {
+        if let Some(open) = with(|s| s.open.take()).flatten() {
+            let _ = open.window.close();
+            open.subs.clear();
+        }
+        parts::pause_hotkeys(false);
+        Ok(())
+    });
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -240,16 +416,60 @@ mod tests {
     }
 }
 
-/// Closes the dialog once the click that asked for it has returned (its
-/// subscriptions end with it).
-fn close_later() {
-    let Some(scope) = with(|s| s.scope.clone()) else { return };
-    post(&scope, "Preferences", || {
-        if let Some(open) = with(|s| s.open.take()).flatten() {
-            let _ = open.window.close();
-            open.subs.clear();
-        }
-        parts::pause_hotkeys(false);
-        Ok(())
-    });
+#[cfg(test)]
+mod grouping_tests {
+    use super::*;
+
+    fn check_row(label: &str) -> parts::Row {
+        parts::Row::Check { label: label.to_owned(), value: false }
+    }
+
+    fn hotkey_row(label: &str) -> parts::Row {
+        parts::Row::Hotkey { label: label.to_owned(), value: String::new(), placeholder: "None".into() }
+    }
+
+    fn note_row(text: &str) -> parts::Row {
+        parts::Row::Note { text: text.to_owned() }
+    }
+
+    fn assert_bijection(groups: &[CardGroup], expected_len: usize) {
+        let mut seen: Vec<usize> = groups.iter().flat_map(|g| g.indices.iter().copied()).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..expected_len).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn capture_tab_groups_cover_every_row_including_optional_startup_detail() {
+        let mut rows: Vec<parts::Row> = (0..12).map(|i| check_row(&format!("row-{i}"))).collect();
+        let groups = group_tab_rows("capture", &rows);
+        assert_eq!(groups.len(), 3);
+        assert_bijection(&groups, 12);
+
+        rows.push(note_row("Startup requires approval"));
+        let groups_with_detail = group_tab_rows("capture", &rows);
+        assert_eq!(groups_with_detail[0].indices, vec![0, 12, 1]);
+        assert_bijection(&groups_with_detail, 13);
+    }
+
+    #[test]
+    fn editor_library_share_and_hotkeys_groups_preserve_all_indices() {
+        let editor: Vec<parts::Row> = (0..5).map(|i| check_row(&format!("e-{i}"))).collect();
+        let editor_groups = group_tab_rows("editor", &editor);
+        assert_eq!(editor_groups.len(), 2);
+        assert_bijection(&editor_groups, 5);
+
+        let hotkeys = vec![
+            note_row("active"),
+            hotkey_row("Capture"),
+            hotkey_row("Full screen"),
+            hotkey_row("Repeat last region"),
+            note_row("defaults"),
+            note_row("recording"),
+            note_row("presets"),
+            hotkey_row("Preset 1"),
+        ];
+        let hotkey_groups = group_tab_rows("hotkeys", &hotkeys);
+        assert_eq!(hotkey_groups.len(), 2);
+        assert_bijection(&hotkey_groups, 8);
+    }
 }

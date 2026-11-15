@@ -2,8 +2,9 @@
 //! controls, the narration bar, and the video controls.
 
 use super::main_common::{bar, choice_box, command, one_way_toggle, rule, solid, time_text, Ctx, Tone, RED, WHITE};
+use super::super::icons::vector as vicons;
 use crate::vm::MainViewModelSink;
-use rustolonia::{Border, Button, CheckBox, Dock, DockPanel, El, FontWeight, Orientation, Signal, Slider, StackPanel, TextAlignment, TextBlock, ToggleButton, VerticalAlignment};
+use rustolonia::{Border, Button, CheckBox, Dock, DockPanel, El, FontWeight, Orientation, Path, Signal, Slider, StackPanel, TextAlignment, TextBlock, ToggleButton, VerticalAlignment};
 
 /// The zoom slider's range, in percent.
 const ZOOM_MIN: f64 = 5.0;
@@ -70,13 +71,22 @@ pub fn status_bar(ctx: &Ctx, zoom: ZoomView) -> El<Border> {
                 .font_size(12.0)
                 .tool_tip_tip("Show or hide the Recent Captures tray"),
         );
+    let history_icon = |path_data: &'static str| {
+        Path::el()
+            .width(14.0)
+            .height(14.0)
+            .data(path_data)
+            .stroke(move || Some(theme.get(Tone::Text)))
+            .stroke_thickness(1.5)
+            .vertical_alignment(VerticalAlignment::Center)
+    };
     let history = StackPanel::el()
         .dock_panel_dock(Dock::Left)
         .orientation(Orientation::Horizontal)
         .spacing(2.0)
         .vertical_alignment(VerticalAlignment::Center)
-        .child(bar("↶").font_size(14.0).tool_tip_tip(crate::ui::shortcut("Undo (Ctrl+Z)")).command(command(s.undo_enabled.local(), |m| m.undo())))
-        .child(bar("↷").font_size(14.0).tool_tip_tip(crate::ui::shortcut("Redo (Ctrl+Y)")).command(command(s.redo_enabled.local(), |m| m.redo())));
+        .child(bar(history_icon(vicons::UNDO)).name("UndoButton").tool_tip_tip(crate::ui::shortcut("Undo (Ctrl+Z)")).command(command(s.undo_enabled.local(), |m| m.undo())))
+        .child(bar(history_icon(vicons::REDO)).name("RedoButton").tool_tip_tip(crate::ui::shortcut("Redo (Ctrl+Y)")).command(command(s.redo_enabled.local(), |m| m.redo())));
     Border::el()
         .dock_panel_dock(Dock::Bottom)
         .background(theme.brush(Tone::Panel))
