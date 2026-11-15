@@ -16,7 +16,10 @@ use std::time::Duration;
 /// How long a notice stays up.
 const SHOWN_FOR: Duration = Duration::from_secs(5);
 
-const ACCENT: Color = rgb(0x3D8BFF);
+const ACCENT: [Color; 2] = [
+    rgb(dark_blue::windows_or(0x0068C3, 0x3D8BFF)),
+    rgb(dark_blue::windows_or(dark_blue::ACCENT_TEXT, 0x3D8BFF)),
+];
 const PROBLEM: Color = rgb(0xE5534B);
 
 /// Card, border, title and text colors: light, dark.
@@ -246,7 +249,7 @@ fn build(scope: &AppScope) -> Result<Toast> {
                         .child(
                             Border::el()
                                 .width(4.0)
-                                .background(move || if problem.get() { PROBLEM } else { ACCENT })
+                                .background(move || if problem.get() { PROBLEM } else if dark.get() { ACCENT[1] } else { ACCENT[0] })
                                 .corner_radius((8.0, 0.0, 0.0, 8.0))
                                 .dock_panel_dock(Dock::Left),
                         )

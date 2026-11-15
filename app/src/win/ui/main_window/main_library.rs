@@ -3,7 +3,7 @@
 //! (wrapping). Click a capture to open it, Ctrl+click to pick it.
 
 use super::main_common::{
-    act, choice_box, command, solid, with_context_menu, Ctx, Theme, Tone, BLUE, ORANGE,
+    act, brand_text, choice_box, command, solid, with_context_menu, Ctx, Theme, Tone, ORANGE,
     TRANSPARENT, WHITE,
 };
 use crate::vm::{LibraryItemFields, LibraryItemViewModel, MainViewModelSink};
@@ -249,7 +249,7 @@ pub(super) fn tile(s: MainViewModelSink, theme: Theme, key: u64) -> AnyEl {
                 .font_size(16.0)
                 .font_weight(FontWeight::Bold)
                 .foreground(solid(WHITE))
-                .background(solid(BLUE))
+                .background(move || solid(brand_text(theme)))
                 .padding((4.0, 0.0))
                 .horizontal_alignment(HorizontalAlignment::Right)
                 .vertical_alignment(VerticalAlignment::Bottom)
@@ -262,6 +262,7 @@ pub(super) fn tile(s: MainViewModelSink, theme: Theme, key: u64) -> AnyEl {
             TextBlock::el()
                 .text(move || fields.with(|f| f.label.clone()))
                 .font_size(10.5)
+                .font_weight(move || if fields.with(|f| f.is_current) { FontWeight::DemiBold } else { FontWeight::Normal })
                 .horizontal_alignment(HorizontalAlignment::Center)
                 .foreground(theme.brush(Tone::Caption))
                 .max_width(move || height() * 2.0)
@@ -281,11 +282,12 @@ pub(super) fn tile(s: MainViewModelSink, theme: Theme, key: u64) -> AnyEl {
         .background(theme.brush(Tone::Chip))
         .border_thickness(2.0)
         .border_brush(move || {
+            let current_color = brand_text(theme);
             fields.with(|f| {
                 solid(if f.is_selected {
                     ORANGE
                 } else if f.is_current {
-                    BLUE
+                    current_color
                 } else {
                     TRANSPARENT
                 })
