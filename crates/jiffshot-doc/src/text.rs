@@ -574,7 +574,17 @@ pub fn layout(text: &str, style: &TextStyle, max_width: Option<f32>) -> Layout {
 
     let mut lines = Vec::new();
     for paragraph in text.split('\n') {
-        let paragraph = paragraph.trim_end_matches('\r');
+        // Tabs advance like spaces; other control characters have no glyph
+        // and would draw the font's missing-glyph box.
+        let mut cleaned = String::with_capacity(paragraph.len());
+        for c in paragraph.trim_end_matches('\r').chars() {
+            match c {
+                '\t' => cleaned.push_str("    "),
+                c if c.is_control() => {}
+                c => cleaned.push(c),
+            }
+        }
+        let paragraph = cleaned.as_str();
         let mut line = Line::default();
         let mut visible_width = 0.0;
         let mut prev: Option<(usize, GlyphId)> = None;
@@ -803,6 +813,34 @@ mod tests {
             p.data().chunks(4).any(|px| px[3] > 200),
             "glyphs were drawn"
         );
+    }
+
+    #[test]
+    fn tabs_and_control_characters_draw_no_missing_glyph_boxes() {
+        if font(DEFAULT_FAMILY, false, false).is_none() {
+            return;
+        }
+        for text in ["\t", "\u{1}\u{7f}"] {
+            let layout = layout(text, &style(40.0), None);
+            let mut pixels = Pixmap::new(200, 60).unwrap();
+            draw(
+                &mut pixels,
+                (0, 0),
+                &layout,
+                0.0,
+                0.0,
+                200.0,
+                Align::Left,
+                Rgba::BLACK,
+            );
+            assert!(
+                pixels.data().chunks(4).all(|pixel| pixel[3] == 0),
+                "{text:?} drew ink"
+            );
+        }
+        let tabbed = layout("a\tb", &style(20.0), None);
+        let spaced = layout("a b", &style(20.0), None);
+        assert!(tabbed.width() > spaced.width());
     }
 
     #[test]

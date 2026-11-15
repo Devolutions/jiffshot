@@ -113,9 +113,8 @@ impl Session {
         let (id, st) = (self.id, self.scene.state);
         self.scene.title = api::text(id, api::TEXT_TITLE)?;
         self.scene.size = api::text(id, api::TEXT_SIZE)?;
-        if self.scene.hint.is_empty() {
-            self.scene.hint = api::text(id, api::TEXT_HINT)?;
-        }
+        // The hint follows the mode, which keys change mid-session (1–4 in video).
+        self.scene.hint = api::text(id, api::TEXT_HINT)?;
         let path_len = st.path_count.max(0) as usize * 2;
         if self.scene.path.len() != path_len {
             self.scene.path = api::points(id, api::POINTS_PATH, path_len);
@@ -715,8 +714,36 @@ mod tests {
         assert!(parse_draw_announcement(&draw.to_string()).is_none());
     }
 
+    /// The capture side keeps one overlay session: demo tests take turns.
+    static DEMO: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn key_hints_follow_mode_changes_within_a_session() {
+        let _turn = DEMO.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (id, monitors, cursor) = parse_announcement(&api::demo(3)).unwrap();
+        struct Demo(u64);
+        impl Drop for Demo {
+            fn drop(&mut self) {
+                api::end_demo(self.0);
+            }
+        }
+        let _demo = Demo(id);
+        let mut session = Session { id, monitors, scene: Scene::default() };
+        let (x, y) = (f64::from(cursor.0), f64::from(cursor.1));
+        assert!(!session.input(api::REFRESH, x, y, 0, 0));
+        session.refresh().unwrap();
+        let freeform = session.scene.hint.clone();
+        assert!(freeform.contains("1–4: fixed sizes"), "{freeform}");
+        // 1 switches video selection to a fixed size, whose keys differ.
+        assert!(!session.input(api::KEY, x, y, api::virtual_key(Some(rustolonia::Key::D1)), 0));
+        session.refresh().unwrap();
+        assert_ne!(session.scene.hint, freeform);
+        assert!(session.scene.hint.contains("same key: freeform"), "{}", session.scene.hint);
+    }
+
     #[test]
     fn invalid_or_missing_displays_fail_only_the_matching_overlay_session() {
+        let _turn = DEMO.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let announcement = api::demo(0);
         let (id, monitors, _) = parse_announcement(&announcement).unwrap();
         struct Demo(u64);
@@ -937,7 +964,8 @@ fn on_draw_input(id: u64, input: &SurfaceInput) -> bool {
                         cancel = true;
                         api::draw_input(id, api::CANCEL, x, y, 0)
                     }
-                    PointerKind::Pressed => api::draw_input(id, api::PRESS, x, y, 0),
+                    // Only the left button ends a mark: another one would leave it drawing.
+                    PointerKind::Pressed if p.button == MouseButton::Left => api::draw_input(id, api::PRESS, x, y, 0),
                     PointerKind::Moved => api::draw_input(id, api::MOVE, x, y, 0),
                     PointerKind::Released if p.button == MouseButton::Left => api::draw_input(id, api::RELEASE, x, y, 0),
                     _ => return false,

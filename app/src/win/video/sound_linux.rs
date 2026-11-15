@@ -30,9 +30,24 @@ fn play_inner(
         .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
         .ok_or("missing audio source")?;
     let gain = pipeline.by_name("volume").ok_or("missing volume control")?;
-    pipeline
+    // Stop the pipeline on every exit; dropping it while playing leaks the audio device.
+    let result = pipeline
         .set_state(gst::State::Playing)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+        .and_then(|_| stream(&mut reader, &src, &gain, &pipeline, stop, volume));
+    let _ = pipeline.set_state(gst::State::Null);
+    result
+}
+
+fn stream(
+    reader: &mut PlaybackAudio,
+    src: &gst_app::AppSrc,
+    gain: &gst::Element,
+    pipeline: &gst::Pipeline,
+    stop: &AtomicBool,
+    volume: &AtomicU32,
+) -> Result<(), String> {
+    let spec = reader.spec;
     let mut sent = 0u64;
     let rate = u64::from(spec.sample_rate);
     while !stop.load(Ordering::Acquire) {
@@ -72,7 +87,6 @@ fn play_inner(
     } else {
         std::thread::sleep(Duration::from_millis(1));
     }
-    let _ = pipeline.set_state(gst::State::Null);
     Ok(())
 }
 

@@ -195,37 +195,17 @@ impl Document {
         match format {
             "Letters" | "Lowercase" => {
                 let base = if format == "Letters" { b'A' } else { b'a' };
-                let mut next = labels
+                let last = labels
                     .iter()
-                    .filter(|label| {
-                        !label.is_empty()
-                            && label
-                                .bytes()
-                                .all(|byte| (base..=base + 25).contains(&byte))
-                    })
+                    .filter(|label| is_letters(label, base))
                     .max_by(|left, right| {
                         left.len()
                             .cmp(&right.len())
                             .then_with(|| left.cmp(right))
                     })
-                    .map(|label| label.as_bytes().to_vec())
+                    .copied()
                     .unwrap_or_default();
-                let mut carry = !next.is_empty();
-                for digit in next.iter_mut().rev() {
-                    if *digit < base + 25 {
-                        *digit += 1;
-                        carry = false;
-                        break;
-                    }
-                    *digit = base;
-                }
-                if carry {
-                    next.insert(0, base);
-                }
-                if next.is_empty() {
-                    next.push(base);
-                }
-                String::from_utf8(next).expect("ASCII letters are UTF-8")
+                next_letters(last, base)
             }
             "Roman" => {
                 let (thousands, remainder) = labels
@@ -233,11 +213,7 @@ impl Document {
                     .filter_map(|label| from_roman(label))
                     .max()
                     .unwrap_or((0, 0));
-                if remainder == 999 {
-                    "m".repeat(thousands + 1)
-                } else {
-                    format!("{}{}", "m".repeat(thousands), to_roman(remainder + 1))
-                }
+                next_roman(thousands, remainder)
             }
             _ => Self::next_number_label(labels.into_iter()),
         }
@@ -245,11 +221,16 @@ impl Document {
 
     fn next_step_label_from(labels: &[&str]) -> String {
         if let Some(last) = labels.last() {
-            let mut chars = last.chars();
-            if let (Some(c), None) = (chars.next(), chars.next()) {
-                if c.is_ascii_alphabetic() && c != 'z' && c != 'Z' {
-                    return char::from(c as u8 + 1).to_string();
-                }
+            if is_letters(last, b'A') {
+                return next_letters(last, b'A');
+            }
+            if is_letters(last, b'a') {
+                // Single letters stay letters; longer lowercase labels are
+                // usually Roman numerals.
+                return match from_roman(last).filter(|_| last.len() > 1) {
+                    Some((thousands, remainder)) => next_roman(thousands, remainder),
+                    None => next_letters(last, b'a'),
+                };
             }
         }
         Self::next_number_label(labels.iter().copied())
@@ -525,6 +506,12 @@ impl Document {
             } else {
                 o.map_points(&|p| Pt::new(p.x, hf - p.y), 1.0);
             }
+            // A mirror reverses the direction of every turn.
+            o.walk_mut(&mut |object| {
+                if object.rotatable() && object.rotation != 0.0 {
+                    object.rotation = (-object.rotation).rem_euclid(360.0);
+                }
+            });
         }
     }
 
@@ -551,6 +538,41 @@ const ROMAN: &[(u32, &str)] = &[
     (4, "iv"),
     (1, "i"),
 ];
+
+/// Whether `label` is one or more letters from `base` ('A' or 'a') to Z.
+fn is_letters(label: &str, base: u8) -> bool {
+    !label.is_empty() && label.bytes().all(|byte| (base..=base + 25).contains(&byte))
+}
+
+/// The letter label after `label` (A, ..., Z, AA, AB, ...); `base` before
+/// any letters.
+fn next_letters(label: &str, base: u8) -> String {
+    let mut next = label.as_bytes().to_vec();
+    let mut carry = !next.is_empty();
+    for digit in next.iter_mut().rev() {
+        if *digit < base + 25 {
+            *digit += 1;
+            carry = false;
+            break;
+        }
+        *digit = base;
+    }
+    if carry {
+        next.insert(0, base);
+    }
+    if next.is_empty() {
+        next.push(base);
+    }
+    String::from_utf8(next).expect("ASCII letters are UTF-8")
+}
+
+fn next_roman(thousands: usize, remainder: u32) -> String {
+    if remainder == 999 {
+        "m".repeat(thousands + 1)
+    } else {
+        format!("{}{}", "m".repeat(thousands), to_roman(remainder + 1))
+    }
+}
 
 fn to_roman(mut n: u32) -> String {
     let mut out = String::new();
@@ -1033,6 +1055,81 @@ mod tests {
         assert_eq!(d.next_step_label_as("Letters"), "AAA");
         d.add(step("z"), Style::default());
         assert_eq!(d.next_step_label_as("Lowercase"), "aa");
+    }
+
+    #[test]
+    fn next_step_label_continues_letters_past_z_and_roman_numerals() {
+        for (labels, next) in [
+            (&["Z"][..], "AA"),
+            (&["AZ"][..], "BA"),
+            (&["7", "Y"][..], "Z"),
+            (&["z"][..], "aa"),
+            (&["ab"][..], "ac"),
+            (&["iii"][..], "iv"),
+            (&["i"][..], "j"),
+            (&["7", "B"][..], "C"),
+            (&["7"][..], "8"),
+        ] {
+            assert_eq!(
+                Document::next_step_label_from(labels),
+                next,
+                "after {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn flipping_mirrors_rotated_objects_and_group_children() {
+        for horizontal in [true, false] {
+            let mut d = Document::blank(80, 60, Rgba::WHITE);
+            let style = Style {
+                fill: Rgba::RED,
+                width: 0.0,
+                ..Style::default()
+            };
+            let mut shape = Object::new(
+                1,
+                Kind::Shape {
+                    rect: Box2::new(10.0, 15.0, 50.0, 30.0),
+                    shape: ShapeKind::Rectangle,
+                },
+                style,
+            );
+            shape.rotation = 30.0;
+            d.insert(shape.clone());
+            d.add(
+                Kind::Group {
+                    objects: vec![shape],
+                },
+                Style::default(),
+            );
+            let before = d.flatten();
+            d.flip(horizontal);
+            let after = d.flatten();
+            for object in &d.objects {
+                object.walk(&mut |o| {
+                    if o.rotatable() {
+                        assert_eq!(o.rotation, 330.0);
+                    }
+                });
+            }
+            let mut filled = 0;
+            let mut mismatches = 0;
+            for y in 0..60 {
+                for x in 0..80 {
+                    let (nx, ny) = if horizontal { (79 - x, y) } else { (x, 59 - y) };
+                    let expected = raster::pixel(&before, x, y).g < 128;
+                    let actual = raster::pixel(&after, nx, ny).g < 128;
+                    filled += usize::from(expected);
+                    mismatches += usize::from(expected != actual);
+                }
+            }
+            assert!(filled > 100);
+            assert!(
+                mismatches <= filled / 10,
+                "flip differed at {mismatches} of {filled} pixels"
+            );
+        }
     }
 
     #[test]

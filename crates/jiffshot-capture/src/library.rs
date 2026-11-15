@@ -71,11 +71,45 @@ pub fn read_meta_checked(capture: &Path) -> io::Result<Option<CaptureMeta>> {
     })
 }
 
+/// Replaces a capture's metadata through a staging file, so a failed write
+/// (a full disk, say) never truncates the existing sidecar.
 pub fn write_meta(capture: &Path, meta: &CaptureMeta) -> io::Result<()> {
-    std::fs::write(
-        sidecar(capture),
-        serde_json::to_vec_pretty(meta).map_err(io::Error::other)?,
-    )
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let json = serde_json::to_vec_pretty(meta).map_err(io::Error::other)?;
+    let path = sidecar(capture);
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "a file name is required"))?;
+    for _ in 0..100 {
+        let mut staging_name = std::ffi::OsString::from(".");
+        staging_name.push(name);
+        staging_name.push(format!(
+            ".{}-{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let staging = path.with_file_name(staging_name);
+        let mut file = match std::fs::File::options()
+            .write(true)
+            .create_new(true)
+            .open(&staging)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let written = file.write_all(&json).and_then(|()| file.sync_all());
+        drop(file);
+        return written
+            .and_then(|()| std::fs::rename(&staging, &path))
+            .map_err(|error| cleanup_created_files(error, &[&staging]));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not reserve a metadata staging file",
+    ))
 }
 
 /// The extension of a capture's saved edits (a Jiffshot document).
@@ -219,6 +253,13 @@ pub fn rename(capture: &Path, name: &str) -> io::Result<PathBuf> {
         target_name.push(ext);
     }
     let target = capture.with_file_name(target_name);
+    if is_companion_image(&target) {
+        // The library would take it for a pointer image or thumbnail and hide it.
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a capture name cannot end with .cursor or .thumb",
+        ));
+    }
     let target_companions = companions(&target);
     std::fs::symlink_metadata(capture)?;
     for destination in std::iter::once(&target).chain(target_companions.iter()) {
@@ -238,6 +279,15 @@ pub fn rename(capture: &Path, name: &str) -> io::Result<PathBuf> {
     files.push((capture.to_path_buf(), target.clone()));
     move_files_with_rollback(&files, rename_library_exclusively)?;
     Ok(target)
+}
+
+/// A pointer image or thumbnail stored beside a capture, not a capture.
+fn is_companion_image(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    name.ends_with(".thumb.png") || name.ends_with(".cursor.png")
 }
 
 fn path_exists(path: &Path) -> io::Result<bool> {
@@ -835,8 +885,12 @@ impl Library {
                     .is_some_and(|e| e.eq_ignore_ascii_case("png") || e.eq_ignore_ascii_case("mp4"))
             })
             .filter(|entry| {
-                !entry.path().to_string_lossy().ends_with(".thumb.png")
-                    && !entry.path().to_string_lossy().ends_with(".cursor.png")
+                // In-progress (or abandoned) export staging files.
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".jiffshot-")
+                    && !is_companion_image(&entry.path())
             })
             .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
             .collect();
@@ -1125,11 +1179,63 @@ mod tests {
         assert!(!first.exists() && !first.with_extension("jsd").exists());
         assert_eq!(edits_of(&renamed), Some(renamed.with_extension("jsd")));
         assert!(rename(&renamed, "a/b").is_err());
+        for hidden in ["Pointer.cursor", "Preview.THUMB"] {
+            assert_eq!(
+                rename(&renamed, hidden).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        assert_eq!(library.recent(10).len(), 2);
         let extensionless = root.join("extensionless");
         std::fs::write(&extensionless, b"extensionless file").unwrap();
         let renamed_extensionless = rename(&extensionless, "renamed").unwrap();
         assert_eq!(renamed_extensionless, root.join("renamed"));
         assert!(renamed_extensionless.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn metadata_rewrites_replace_the_sidecar_and_staging_stays_out_of_the_library() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "jiffshot-library-write-meta-{}-{nonce}",
+            std::process::id()
+        ));
+        let folder = root.join("2000-01");
+        std::fs::create_dir_all(&folder).unwrap();
+        let capture = folder.join("capture.png");
+        std::fs::write(&capture, b"image").unwrap();
+        std::fs::write(sidecar(&capture), b"previous metadata").unwrap();
+        let mut meta = CaptureMeta {
+            kind: CaptureKind::Region,
+            rect: Rect::new(0, 0, 1, 1),
+            width: 1,
+            height: 1,
+            captured_at: timestamp(),
+            window_title: None,
+            process: None,
+            cursor_included: false,
+            url: None,
+            tags: vec!["first".into()],
+            pinned: false,
+        };
+        write_meta(&capture, &meta).unwrap();
+        meta.tags = vec!["second".into()];
+        meta.pinned = true;
+        write_meta(&capture, &meta).unwrap();
+        assert_eq!(read_meta(&capture), Some(meta));
+        let mut names: Vec<_> = std::fs::read_dir(&folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["capture.json", "capture.png"]);
+
+        std::fs::write(folder.join(".jiffshot-export-1-0.mp4"), b"partial").unwrap();
+        assert_eq!(Library::new(root.clone()).recent(10), [capture]);
         std::fs::remove_dir_all(root).unwrap();
     }
 

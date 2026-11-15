@@ -16,7 +16,8 @@ use objc2_vision::{
 
 /// Recognizes text in a top-down BGRA image, line by line.
 pub fn recognize(width: u32, height: u32, bgra: &[u8]) -> Result<Vec<Line>, String> {
-    if width == 0 || height == 0 || bgra.len() < (width * height * 4) as usize {
+    let required = (width as usize).checked_mul(height as usize).and_then(|pixels| pixels.checked_mul(4));
+    if width == 0 || height == 0 || required.is_none_or(|required| bgra.len() < required) {
         return Ok(Vec::new());
     }
     let image = sck::bgra_image(width as usize, height as usize, bgra).map_err(|e| e.to_string())?;
@@ -102,5 +103,12 @@ mod tests {
         assert!(recognize(0, 0, &[]).unwrap().is_empty());
         let white = vec![255u8; 64 * 32 * 4];
         assert!(recognize(64, 32, &white).unwrap().is_empty());
+    }
+
+    #[test]
+    fn oversized_dimensions_do_not_overflow_the_buffer_check() {
+        // 65536 x 16385 x 4 exceeds u32::MAX; a short buffer is not an image.
+        assert!(recognize(65_536, 16_385, &[0; 16]).unwrap().is_empty());
+        assert!(recognize(u32::MAX, u32::MAX, &[0; 16]).unwrap().is_empty());
     }
 }

@@ -196,6 +196,14 @@ fn ax_url_string(element: AXUIElementRef, name: &str) -> Option<String> {
     obj.downcast_ref::<NSURL>()?.absoluteString().map(|s| s.to_string())
 }
 
+/// A messaging timeout applies only to the element it is set on, not to the
+/// windows and children read from it, which otherwise wait the system
+/// default (about 6 s) on an unresponsive application.
+fn short_timeout(element: AXUIElementRef) {
+    // SAFETY: a live element and a finite timeout.
+    unsafe { AXUIElementSetMessagingTimeout(element, 0.25) };
+}
+
 fn ax_children(element: AXUIElementRef) -> Vec<Ax> {
     let Some(v) = ax_attr(element, "AXChildren") else { return Vec::new() };
     // SAFETY: AXChildren is a CFArray of AXUIElements (toll-free bridged).
@@ -205,6 +213,7 @@ fn ax_children(element: AXUIElementRef) -> Vec<Ax> {
         .iter()
         // SAFETY: each element is retained for the returned `Ax`.
         .map(|e| Ax(unsafe { CFRetain(Retained::as_ptr(&e) as CFTypeRef) }))
+        .inspect(|child| short_timeout(child.0))
         .collect()
 }
 
@@ -641,6 +650,7 @@ impl Targets {
         let Some(array) = obj.downcast_ref::<NSArray>() else { return };
         for w in array.iter() {
             let element = Retained::as_ptr(&w) as AXUIElementRef;
+            short_timeout(element);
             if ax_rect(element).is_some_and(|bounds| same_native_bounds(bounds, frame)) {
                 self.children(element, index, clip, scale, 1);
                 break;
@@ -953,8 +963,11 @@ pub fn browser_url(window: isize) -> Option<String> {
     let windows = ax_attr(app.0, "AXWindows")?;
     // SAFETY: AXWindows is a CFArray of elements.
     let array = unsafe { &*(windows.0 as *const AnyObject) }.downcast_ref::<NSArray>()?;
+    // Tiled windows can share an origin; match the whole frame, as `walk_window` does.
     let matching = array.iter().find(|w| {
-        ax_rect(Retained::as_ptr(w) as AXUIElementRef).is_some_and(|a| (a.origin.x - frame.origin.x).abs() < 2.0 && (a.origin.y - frame.origin.y).abs() < 2.0)
+        let element = Retained::as_ptr(w) as AXUIElementRef;
+        short_timeout(element);
+        ax_rect(element).is_some_and(|bounds| same_native_bounds(bounds, frame))
     })?;
     let element = Retained::as_ptr(&matching) as AXUIElementRef;
     for attribute in ["AXDocument", "AXURL"] {

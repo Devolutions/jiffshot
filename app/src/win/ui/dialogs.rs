@@ -147,8 +147,10 @@ fn rows(rows: &[(&str, &NumericUpDown)]) -> Result<Grid> {
 /// `done` gets the new size when the user resizes.
 pub fn resize_image(scope: &AppScope, owner: &Window, w: u32, h: u32, done: impl FnOnce(u32, u32) + Send + 'static) -> Result<()> {
     let (w, h) = (w.max(1), h.max(1));
-    let width = number(w, 1, 16384)?;
-    let height = number(h, 1, 16384)?;
+    // A taller scrolling capture must keep its size: a box clamped to the
+    // limit would resize it to 16384 unasked (the model refuses larger sizes).
+    let width = number(w, 1, w.max(16384))?;
+    let height = number(h, 1, h.max(16384))?;
     let percent = number(100, 1, 1000)?;
     let keep = {
         let control = CheckBox::new()?;

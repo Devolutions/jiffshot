@@ -773,8 +773,13 @@ fn enqueue_recording_finish(
         Ok(()) => slot.take().ok_or_else(no_recording),
         Err(error @ async_channel::TrySendError::Full(_)) => Err(recording_command_error(error)),
         Err(async_channel::TrySendError::Closed(_)) => {
-            drop(slot.take());
-            Err(no_recording())
+            // The recorder already ended on its own (for example the desktop stopped the
+            // screen share); report why instead of claiming nothing was recording.
+            let failure = slot
+                .take()
+                .and_then(|recording| recording.finished.recv_timeout(STATE_TIMEOUT).ok())
+                .and_then(Result::err);
+            Err(failure.map_or_else(no_recording, internal))
         }
     }
 }
@@ -952,13 +957,40 @@ mod tests {
     fn stop_clears_a_recording_with_a_closed_command_queue() {
         let (commands, receiver) = async_channel::bounded(1);
         drop(receiver);
-        let (_done, finished) = mpsc::channel();
+        let (done, finished) = mpsc::channel();
+        drop(done);
         let mut slot = Some(ActiveRecording {
             commands,
             state: Arc::new(Mutex::new(RecordingState::Recording)),
             finished,
         });
         assert!(enqueue_recording_finish(&mut slot, RecordingCommand::Stop).is_err());
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn stop_reports_why_a_recording_ended_on_its_own() {
+        let (commands, receiver) = async_channel::bounded(1);
+        drop(receiver);
+        let (done, finished) = mpsc::channel();
+        done.send(Err("screen capture stream ended unexpectedly".to_owned()))
+            .unwrap();
+        drop(done);
+        let mut slot = Some(ActiveRecording {
+            commands,
+            state: Arc::new(Mutex::new(RecordingState::Recording)),
+            finished,
+        });
+        let error = match enqueue_recording_finish(&mut slot, RecordingCommand::Stop) {
+            Err(error) => error,
+            Ok(_) => panic!("a recording that already failed cannot be stopped"),
+        };
+        assert_eq!(error.code, ErrorCode::Internal);
+        assert!(
+            error.message.contains("stream ended unexpectedly"),
+            "{}",
+            error.message
+        );
         assert!(slot.is_none());
     }
 

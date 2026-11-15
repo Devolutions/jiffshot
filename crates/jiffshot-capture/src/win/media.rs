@@ -310,12 +310,16 @@ impl Reader {
             let mut devices: *mut Option<IMFActivate> = std::ptr::null_mut();
             let mut count = 0u32;
             MFEnumDeviceSources(&attrs, &mut devices, &mut count).map_err(e)?;
-            let list = std::slice::from_raw_parts_mut(devices, count as usize);
-            let first = list.first().cloned().flatten();
-            for d in list.iter_mut() {
-                drop(d.take());
+            // With no camera the array may be null, which a slice must never be.
+            let mut first = None;
+            if !devices.is_null() {
+                let list = std::slice::from_raw_parts_mut(devices, count as usize);
+                first = list.first().cloned().flatten();
+                for d in list.iter_mut() {
+                    drop(d.take());
+                }
+                CoTaskMemFree(Some(devices as *const _));
             }
-            CoTaskMemFree(Some(devices as *const _));
             let activate = first.ok_or("no webcam")?;
             let source: IMFMediaSource = activate.ActivateObject().map_err(e)?;
             let mut rattrs: Option<IMFAttributes> = None;

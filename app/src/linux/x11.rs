@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::screensaver::ConnectionExt as _;
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ConnectionExt, GetPropertyReply, KeyButMask, Window,
+    Atom, AtomEnum, ConnectionExt, GetPropertyReply, KeyButMask, MapState, Window,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -170,7 +170,14 @@ fn list_windows() -> Option<Vec<(Rect, String)>> {
         let minimized = property(window, state, AtomEnum::ATOM.into(), 64)
             .and_then(|reply| Some(reply.value32()?.any(|value| value == hidden)))
             .unwrap_or(false);
-        if minimized {
+        // The client list spans every workspace; windows on other workspaces are unmapped,
+        // not hidden, and must not be offered over the visible ones.
+        let viewable = connection
+            .get_window_attributes(window)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .is_some_and(|attributes| attributes.map_state == MapState::VIEWABLE);
+        if minimized || !viewable {
             continue;
         }
         let geometry = connection.get_geometry(window).ok()?.reply().ok();

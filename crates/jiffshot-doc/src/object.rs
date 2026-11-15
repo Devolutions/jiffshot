@@ -920,14 +920,11 @@ impl Object {
                     tail, more_tails, ..
                 } = &self.kind
                 {
-                    h.push((H_TAIL, *tail));
-                    h.extend(
-                        more_tails
-                            .iter()
-                            .take(6)
-                            .enumerate()
-                            .map(|(i, t)| (H_MORE_TAILS + i as u8, *t)),
-                    );
+                    // Tails are stored in the unrotated frame, like the body.
+                    h.push((H_TAIL, rotate_about(*tail, c, self.rotation)));
+                    h.extend(more_tails.iter().take(6).enumerate().map(|(i, t)| {
+                        (H_MORE_TAILS + i as u8, rotate_about(*t, c, self.rotation))
+                    }));
                 }
                 h
             }
@@ -1046,6 +1043,8 @@ impl Object {
             self.translate(before.x - after.x, before.y - after.y);
             return;
         }
+        // Callout tails live in the unrotated frame.
+        let local = self.local(p);
         match &mut self.kind {
             Kind::Line { a, b, control } => match h {
                 H_START => *a = if square { snap45(*b, p) } else { p },
@@ -1059,10 +1058,10 @@ impl Object {
                 _ => {}
             },
             Kind::Step { center, radius, .. } => *radius = center.dist(p).max(6.0),
-            Kind::Callout { tail, .. } if h == H_TAIL => *tail = p,
+            Kind::Callout { tail, .. } if h == H_TAIL => *tail = local,
             Kind::Callout { more_tails, .. } if (H_MORE_TAILS..H_VERTEX).contains(&h) => {
                 if let Some(t) = more_tails.get_mut((h - H_MORE_TAILS) as usize) {
-                    *t = p;
+                    *t = local;
                 }
             }
             Kind::Polygon { points } if h >= H_VERTEX => {
@@ -2536,6 +2535,50 @@ mod tests {
         );
         assert!(spotlight.hit(Pt::new(50.0, 0.0), 2.0));
         assert!(!spotlight.hit(Pt::new(0.0, 0.0), 2.0));
+    }
+
+    #[test]
+    fn rotated_callout_tail_handles_follow_the_drawn_tail() {
+        let mut callout = Object::new(
+            11,
+            Kind::Callout {
+                rect: Box2::new(0.0, 0.0, 100.0, 50.0),
+                tail: Pt::new(150.0, 25.0),
+                text: String::new(),
+                shape: ShapeKind::Rectangle,
+                arrow: false,
+                more_tails: vec![Pt::new(50.0, 120.0)],
+            },
+            Style::default(),
+        );
+        callout.rotation = 90.0;
+        let handle = |o: &Object, id| o.handles().into_iter().find(|(h, _)| *h == id).unwrap().1;
+        let tail = handle(&callout, H_TAIL);
+        assert!(tail.dist(Pt::new(50.0, 125.0)) < 1e-3, "{tail:?}");
+        assert!(callout.hit(tail, 2.0), "the tail is drawn under its handle");
+        let extra = handle(&callout, H_MORE_TAILS);
+        assert!(extra.dist(Pt::new(-45.0, 25.0)) < 1e-3, "{extra:?}");
+
+        let before = callout.clone();
+        callout.move_handle(H_TAIL, tail, false);
+        callout.move_handle(H_MORE_TAILS, extra, false);
+        let (
+            Kind::Callout {
+                tail: a,
+                more_tails: m,
+                ..
+            },
+            Kind::Callout {
+                tail: b,
+                more_tails: n,
+                ..
+            },
+        ) = (&callout.kind, &before.kind)
+        else {
+            panic!("expected callouts")
+        };
+        assert!(a.dist(*b) < 1e-3, "a tail dragged onto itself stays: {a:?}");
+        assert!(m[0].dist(n[0]) < 1e-3, "{m:?}");
     }
 
     #[test]

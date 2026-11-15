@@ -83,6 +83,9 @@ impl TimelineView {
             }
             SurfaceInput::Pointer(pointer) => {
                 if self.sink.video_saving.get() {
+                    // The release is not seen: forget the drag, or later hover
+                    // moves would keep selecting and seeking.
+                    self.drag.set(None);
                     return Ok(false);
                 }
                 let at = self.time(pointer.x);

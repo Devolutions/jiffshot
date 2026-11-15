@@ -74,6 +74,32 @@ fn required_path(a: &Args, key: &str, extensions: &[&str]) -> Result<PathBuf, Er
         .ok_or_else(|| invalid(format!("{key} is required")))
 }
 
+/// A file to read: absolute, with one of `extensions`. Unlike an output
+/// path, its folder is never created.
+fn input_path(a: &Args, key: &str, extensions: &[&str]) -> Result<PathBuf, Error> {
+    let text = a
+        .string(key)?
+        .ok_or_else(|| invalid(format!("{key} is required")))?;
+    let path = PathBuf::from(&text);
+    if !path.is_absolute() {
+        return Err(invalid(format!(
+            "{key} must be an absolute path (the CLI makes paths absolute), not {text:?}"
+        )));
+    }
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !extensions.contains(&extension.as_str()) {
+        return Err(invalid(format!(
+            "{key} must end in .{}",
+            extensions.join(" or .")
+        )));
+    }
+    Ok(path)
+}
+
 fn info(id: &str, session: &Session) -> Value {
     let e = &session.editor;
     json!({
@@ -174,7 +200,7 @@ pub(super) fn dispatch(command: &str, a: &Args) -> Reply {
         }
         "doc.open" => {
             a.only(&["path"])?;
-            let path = required_path(a, "path", io::OPEN_EXTENSIONS)?;
+            let path = input_path(a, "path", io::OPEN_EXTENSIONS)?;
             return insert(io::open(&path).map_err(internal)?, Some(path));
         }
         "doc.combine" => return combine_documents(a),
@@ -299,11 +325,18 @@ pub(super) fn dispatch(command: &str, a: &Args) -> Reply {
             if e.document().objects.len() >= MAX_OBJECTS {
                 return Err(invalid("document has 4096 objects"));
             }
-            let path = required_path(a, "path", &["png", "jpg", "jpeg", "bmp", "gif", "webp"])?;
+            let path = input_path(a, "path", &["png", "jpg", "jpeg", "bmp", "gif", "webp"])?;
             let pm = io::load_image(&path).map_err(internal)?;
             dimensions(pm.width(), pm.height())?;
-            let (x, y) = a.point("at")?.unwrap_or((0, 0));
-            e.drop_image(Pt::new(x as f32, y as f32), pm);
+            // The image is centered on `at`; by default, on the document.
+            let at = match a.point("at")? {
+                Some((x, y)) => Pt::new(x as f32, y as f32),
+                None => Pt::new(
+                    e.document().width() as f32 / 2.0,
+                    e.document().height() as f32 / 2.0,
+                ),
+            };
+            e.drop_image(at, pm);
         }
         "doc.select" => {
             a.only(&["id", "object_ids"])?;
@@ -780,6 +813,40 @@ mod tests {
             json!({"x0":15.0,"y0":15.0,"x1":35.0,"y1":35.0})
         );
         dispatch("doc.close", &args(json!({"id":id}))).unwrap();
+    }
+
+    #[test]
+    fn inserted_images_center_on_the_document_and_reading_creates_no_folders() {
+        let root = std::env::temp_dir().join(format!(
+            "jiffshot-doc-image-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let image = root.join("small.png");
+        jiffshot_capture::Frame::new(10, 6)
+            .save_png(&image)
+            .unwrap();
+        let created = dispatch("doc.new", &args(json!({"width":100,"height":80}))).unwrap();
+        let id = created["id"].as_str().unwrap().to_owned();
+        let inserted = dispatch("doc.image", &args(json!({"id":id,"path":image}))).unwrap();
+        assert_eq!(
+            inserted["objects"][0]["kind"]["rect"],
+            json!({"x0":45.0,"y0":37.0,"x1":55.0,"y1":43.0})
+        );
+        let missing = root.join("missing");
+        assert!(dispatch("doc.open", &args(json!({"path":missing.join("a.png")}))).is_err());
+        assert!(dispatch(
+            "doc.image",
+            &args(json!({"id":id,"path":missing.join("b.png")}))
+        )
+        .is_err());
+        assert!(!missing.exists());
+        dispatch("doc.close", &args(json!({"id":id}))).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

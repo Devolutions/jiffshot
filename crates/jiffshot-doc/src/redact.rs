@@ -60,12 +60,17 @@ fn is_email(w: &str) -> bool {
 }
 
 fn is_url(w: &str) -> bool {
-    let l = w.to_ascii_lowercase();
+    // Addresses are often wrapped in brackets or quotes: "(https://…)".
+    let l = w
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .to_ascii_lowercase();
     l.starts_with("http://") || l.starts_with("https://") || l.starts_with("www.")
 }
 
 fn is_ip(w: &str) -> bool {
     let w = w.trim_matches(|c: char| !c.is_ascii_digit());
+    // An address may carry a port (`:3389`) or a network prefix (`/24`).
+    let w = w.split([':', '/']).next().unwrap_or(w);
     let parts: Vec<&str> = w.split('.').collect();
     parts.len() == 4
         && parts
@@ -284,6 +289,31 @@ mod tests {
             kinds("See https://example.com/a,b"),
             [("https://example.com/a,b".into(), Kind::Url)]
         );
+    }
+
+    #[test]
+    fn finds_bracketed_web_addresses() {
+        assert_eq!(
+            kinds("See (https://secret.example.com/token)"),
+            [("(https://secret.example.com/token)".into(), Kind::Url)]
+        );
+        assert_eq!(
+            kinds("Open \"www.example.com\""),
+            [("\"www.example.com\"".into(), Kind::Url)]
+        );
+    }
+
+    #[test]
+    fn finds_ip_addresses_with_ports_and_prefixes() {
+        assert_eq!(
+            kinds("RDP 192.168.1.10:3389 now"),
+            [("192.168.1.10:3389".into(), Kind::Ip)]
+        );
+        assert_eq!(
+            kinds("Subnet 10.0.0.0/24"),
+            [("10.0.0.0/24".into(), Kind::Ip)]
+        );
+        assert!(kinds("Meet at 12:30").is_empty());
     }
 
     #[test]

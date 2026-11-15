@@ -195,11 +195,13 @@ fn gray(f: &Frame, k: usize) -> (Vec<u8>, usize, usize) {
 /// Mean absolute difference of `b` placed at (`dx`, `dy`) over `a`, on the
 /// overlap (sampled every `step` pixels); `None` when the overlap is small.
 fn sad(a: &[u8], b: &[u8], w: usize, h: usize, dx: i32, dy: i32, step: usize) -> Option<f32> {
-    let (x0, x1) = (dx.max(0) as usize, (w as i32 + dx.min(0)) as usize);
-    let (y0, y1) = (dy.max(0) as usize, (h as i32 + dy.min(0)) as usize);
-    if x1 <= x0 + w / 5 || y1 <= y0 + h / 5 {
+    // Offsets larger than the image leave no overlap (and negative edges).
+    let (x0, x1) = (i64::from(dx.max(0)), w as i64 + i64::from(dx.min(0)));
+    let (y0, y1) = (i64::from(dy.max(0)), h as i64 + i64::from(dy.min(0)));
+    if x1 <= x0 + (w / 5) as i64 || y1 <= y0 + (h / 5) as i64 {
         return None;
     }
+    let (x0, x1, y0, y1) = (x0 as usize, x1 as usize, y0 as usize, y1 as usize);
     let (mut sum, mut n) = (0u64, 0u64);
     for y in (y0..y1).step_by(step) {
         let by = (y as i32 - dy) as usize;
@@ -452,6 +454,13 @@ mod tests {
             pixel[..3].fill(1);
         }
         assert_eq!(translation(&a, &b), Some((0, 0)));
+    }
+
+    #[test]
+    fn translation_of_small_frames_ignores_offsets_beyond_the_image() {
+        let p = page(40, 40);
+        let a = p.crop(crate::Rect::new(0, 0, 8, 8)).unwrap();
+        assert_eq!(translation(&a, &a.clone()), Some((0, 0)));
     }
 
     #[test]

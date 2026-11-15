@@ -28,8 +28,10 @@ mod timeline;
 use preview::Preview;
 use timeline::{Span, Timeline};
 
+/// Rounded, so a time read back from [`seconds`] is the same tick (the
+/// end of the video stays the end, not one tick before it).
 fn hns(seconds: f64) -> i64 {
-    (seconds * HNS_PER_SECOND as f64) as i64
+    (seconds * HNS_PER_SECOND as f64).round() as i64
 }
 
 fn seconds(hns: i64) -> f64 {
@@ -207,6 +209,13 @@ pub(crate) fn publish(app: &mut App) {
         let _ = sink.set_undo_enabled(v.can_undo());
         let _ = sink.set_redo_enabled(v.can_redo());
         let _ = sink.set_video_saving(v.saving);
+    }
+}
+
+/// Stops playback (and its sound), keeping the video and its cuts open.
+pub(crate) fn pause(app: &mut App) {
+    if app.video.as_mut().is_some_and(Session::stop_playing) {
+        publish(app);
     }
 }
 
@@ -1684,6 +1693,13 @@ fn narration_picked<S: NarrationSource + 'static>(
         app.narration_request = None;
         return;
     }
+    // Narrating closes the open video: its unsaved cuts must not be lost.
+    if app.video.is_some() {
+        if let Err(error) = app.autosave_checked() {
+            app.narration_request = None;
+            return app.set_status(error);
+        }
+    }
     app.stop_video();
     let sound: Arc<Mutex<NarrationSound>> = Arc::default();
     let stop = Arc::new(AtomicBool::new(false));
@@ -2000,6 +2016,24 @@ pub fn thumbnail(path: &Path) -> Option<Pixmap> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cutting_a_selection_to_the_end_leaves_no_sliver_clip() {
+        // These durations read back one tick short when truncated.
+        for duration in [21, 30_000_004, 30_000_088] {
+            assert_eq!(hns(seconds(duration)), duration, "{duration}");
+            let mut timeline = Timeline::new(duration).unwrap();
+            let end = seconds(timeline.duration());
+            timeline.cut(hns(end / 2.0), hns(end), 1).unwrap();
+            assert_eq!(
+                timeline.spans().len(),
+                1,
+                "{duration}: {:?}",
+                timeline.spans()
+            );
+            assert!(timeline.joins().is_empty(), "{duration}");
+        }
+    }
 
     #[test]
     fn clips_pcm_to_retained_source_ranges_on_sample_boundaries() {
