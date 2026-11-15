@@ -3006,6 +3006,7 @@ impl App {
         #[cfg(windows)]
         self.restore_startup_ui();
         if let Some(window) = self.scope.main_window() {
+            crate::ui::before_show(&self.scope, &window);
             let _ = window.show();
             #[cfg(windows)]
             if let Ok(handle) = self.scope.platform_handle(&window) {

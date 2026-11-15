@@ -95,7 +95,11 @@ pub(crate) fn hide_window(window: &Window) -> io::Result<()> {
 }
 
 fn restore(state: &mut State) {
+    let scope = super::scope();
     for (window, activated) in state.windows.drain(..) {
+        if let Some(scope) = &scope {
+            super::before_show(scope, &window);
+        }
         let result = window.set_show_activated(false).and_then(|_| window.show());
         if let Err(error) = result {
             eprintln!("Could not restore a Jiffshot window after capture: {error}");

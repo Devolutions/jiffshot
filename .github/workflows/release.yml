@@ -230,6 +230,13 @@ jobs:
               -AppInstallerPath "release\$appInstallerName" -Repository $env:GITHUB_REPOSITORY
             Compress-Archive -Path "$portable\*" `
               -DestinationPath "release\Devolutions.Jiffshot-windows-$arch-$env:RELEASE_VERSION.zip"
+            # Debug symbols for crash dumps and hang analysis of this release's binaries.
+            $symbols = "artifacts\jiffshot-win-$arch-symbols"
+            foreach ($required in @("$symbols\jiffshot.pdb", "$symbols\jiffshot_cli.pdb")) {
+              if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Missing release symbols: $required" }
+            }
+            Compress-Archive -Path "$symbols\*" `
+              -DestinationPath "release\Devolutions.Jiffshot-windows-$arch-$env:RELEASE_VERSION-symbols.zip"
           }
           pwsh -NoProfile -File package/linux/assemble-release.ps1 -ArtifactDir artifacts `
             -OutputDir release -Version "$env:RELEASE_VERSION"
@@ -281,4 +288,4 @@ jobs:
         if: inputs.dry_run
         shell: pwsh
         run: |
-          "Dry run completed for $env:RELEASE_TAG using $env:SIGNING_ENVIRONMENT. Signed Windows packages, six unsigned Linux x64/ARM64 tar.gz/DEB/RPM packages, two macOS disk images (unsigned when Apple credentials are unavailable), per-architecture Linux checksums, and SHA256SUMS.txt are in the release-assets artifact. No tag or GitHub Release was created." >> $env:GITHUB_STEP_SUMMARY
+          "Dry run completed for $env:RELEASE_TAG using $env:SIGNING_ENVIRONMENT. Signed Windows packages, Windows debug symbols (PDB) archives, six unsigned Linux x64/ARM64 tar.gz/DEB/RPM packages, two macOS disk images (unsigned when Apple credentials are unavailable), per-architecture Linux checksums, and SHA256SUMS.txt are in the release-assets artifact. No tag or GitHub Release was created." >> $env:GITHUB_STEP_SUMMARY
