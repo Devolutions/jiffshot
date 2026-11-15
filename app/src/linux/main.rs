@@ -5552,8 +5552,17 @@ fn slideshow_dialog(scope: &AppScope, seconds: String, status: Signal<String>) {
     status.set_if_changed("Select the images for the slideshow…".to_owned());
     let task_scope = scope.clone();
     if let Err(error) = scope.spawn(async move {
-        let Ok(PickerOutcome::Selected(items)) = operation.await else {
-            return;
+        let items = match operation.await {
+            Ok(PickerOutcome::Selected(items)) => items,
+            Ok(PickerOutcome::Cancelled) => return,
+            Err(error) => {
+                if let Err(post_error) = task_scope.post(move || {
+                    status.set_if_changed(format!("Could not select images: {error}"))
+                }) {
+                    eprintln!("Could not report the slideshow picker error: {post_error}");
+                }
+                return;
+            }
         };
         let paths = items
             .iter()
@@ -5609,8 +5618,17 @@ fn save_slideshow_dialog(
     status.set_if_changed("Choose where to save the slideshow…".to_owned());
     let task_scope = scope.clone();
     if let Err(error) = scope.spawn(async move {
-        let Ok(PickerOutcome::Selected(items)) = operation.await else {
-            return;
+        let items = match operation.await {
+            Ok(PickerOutcome::Selected(items)) => items,
+            Ok(PickerOutcome::Cancelled) => return,
+            Err(error) => {
+                if let Err(post_error) = task_scope.post(move || {
+                    status.set_if_changed(format!("Could not choose the slideshow file: {error}"))
+                }) {
+                    eprintln!("Could not report the slideshow save picker error: {post_error}");
+                }
+                return;
+            }
         };
         let Some(destination) = items
             .first()

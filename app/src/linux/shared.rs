@@ -283,7 +283,7 @@ pub fn start_tray() -> Option<super::tray::Session> {
     use super::tray::Event;
     let session = super::tray::Session::start(|event| match event {
         Event::Ready => {}
-        Event::Open => {}
+        Event::Open => app::post(|app| app.show_editor()),
         Event::Capture => app::post(|_| super::capture_window::show()),
         Event::Quit => std::process::exit(0),
         Event::Unavailable(error) => eprintln!("jiffshot: tray unavailable: {error}"),
@@ -403,7 +403,13 @@ pub fn run_launch_action(flag: &str) {
             super::scroll::Direction::Horizontal,
         )),
         "--panoramic" => capture_scrolling(super::scroll::Mode::Panoramic),
-        "--interval" => capture_interval(5, true),
+        // Like the classic UI, the command line uses the saved interval preferences.
+        "--interval" => match super::settings::interval_preferences()
+            .and_then(|preferences| Ok((preferences, super::settings::capture_cursor()?)))
+        {
+            Ok((preferences, cursor)) => capture_interval_with(preferences, cursor.included()),
+            Err(error) => report(format!("Could not start interval capture: {error}")),
+        },
         _ => {}
     }
 }
@@ -655,6 +661,16 @@ pub(super) fn capture_scrolling_with(mode: super::scroll::Mode, delivery: Delive
 
 /// Starts an interval capture; a second call stops it.
 pub(crate) fn capture_interval(seconds: u32, cursor: bool) {
+    if busy() {
+        return finish_active(false);
+    }
+    match super::settings::IntervalPreferences::new(seconds, true) {
+        Ok(preferences) => capture_interval_with(preferences, cursor),
+        Err(error) => report(error),
+    }
+}
+
+fn capture_interval_with(preferences: super::settings::IntervalPreferences, cursor: bool) {
     use super::interval::Progress;
     let (stop, receiver) = async_channel::bounded(1);
     {
@@ -665,13 +681,6 @@ pub(crate) fn capture_interval(seconds: u32, cursor: bool) {
         }
         *slot = Some(Active::Interval(stop));
     }
-    let preferences = match super::settings::IntervalPreferences::new(seconds, true) {
-        Ok(preferences) => preferences,
-        Err(error) => {
-            *active() = None;
-            return report(error);
-        }
-    };
     let delivery = Delivery::from_settings(true);
     report("Choose a screen or window for interval capture…".into());
     std::thread::spawn(move || {

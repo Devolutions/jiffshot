@@ -143,7 +143,10 @@ pub(super) fn copy_to_folder(source: &Path, directory: &Path) -> Result<PathBuf,
             directory.display()
         )
     })?;
+    // Staging files are private (0600); give the copy the capture's own permissions.
     std::io::copy(&mut input, &mut temporary)
+        .and_then(|_| input.metadata())
+        .and_then(|metadata| temporary.as_file().set_permissions(metadata.permissions()))
         .and_then(|_| temporary.as_file().sync_all())
         .map_err(|error| format!("could not copy {}: {error}", source.display()))?;
 
@@ -233,6 +236,23 @@ mod tests {
         assert_eq!(
             std::fs::read(target_dir.join(name)).unwrap(),
             b"existing capture"
+        );
+    }
+
+    #[test]
+    fn folder_copies_keep_the_capture_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().expect("temporary directory should be available");
+        let source = directory.path().join("capture.png");
+        let destination = directory.path().join("shared");
+        std::fs::write(&source, b"capture data").unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let copied = copy_to_folder(&source, &destination).expect("copy should succeed");
+        assert_eq!(
+            std::fs::metadata(copied).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "a shared copy must stay readable like the original"
         );
     }
 

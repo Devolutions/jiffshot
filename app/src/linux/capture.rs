@@ -1166,6 +1166,11 @@ fn run_recording(
             format!("could not start recording: {detail}"),
         ));
     }
+    // Opening the devices can take longer than the sampling gap; input before now is not
+    // part of the recording, so start sampling from here.
+    if let Some(tracker) = input.as_mut() {
+        tracker.resume(Instant::now());
+    }
     state_changed(RecordingState::Recording);
     let mut paused = false;
     loop {
@@ -2144,17 +2149,22 @@ fn save_pipewire_frame(fd: i32, node_id: u32, path: &Path) -> Result<(), String>
     gst::Element::link_many([&source, &convert, &encoder, &sink])
         .map_err(|error| format!("could not connect screen capture pipeline: {error}"))?;
 
-    pipeline
-        .set_state(gst::State::Playing)
-        .map_err(|error| format!("could not start screen capture pipeline: {error}"))?;
+    // A failed start must still return the pipeline (and the PipeWire stream) to Null.
     let result = pipeline
-        .bus()
-        .ok_or_else(|| "screen capture pipeline has no event bus".to_owned())?
-        .timed_pop_filtered(
-            gst::ClockTime::from_seconds(Duration::from_secs(15).as_secs()),
-            &[gst::MessageType::Eos, gst::MessageType::Error],
-        )
-        .ok_or_else(|| "timed out waiting for a screen capture frame".to_owned())
+        .set_state(gst::State::Playing)
+        .map_err(|error| format!("could not start screen capture pipeline: {error}"))
+        .and_then(|_| {
+            pipeline
+                .bus()
+                .ok_or_else(|| "screen capture pipeline has no event bus".to_owned())
+        })
+        .and_then(|bus| {
+            bus.timed_pop_filtered(
+                gst::ClockTime::from_seconds(Duration::from_secs(15).as_secs()),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .ok_or_else(|| "timed out waiting for a screen capture frame".to_owned())
+        })
         .and_then(|message| match message.view() {
             gst::MessageView::Eos(_) => Ok(()),
             gst::MessageView::Error(error) => {

@@ -297,7 +297,17 @@ impl Overlay {
             _ => None,
         };
         if let Some((dx, dy)) = direction {
-            return Some((x + dx * step, y + dy * step));
+            // Wayland gives no way to warp the pointer, so the nudge moves this overlay's cursor.
+            let target = (
+                (x + dx * step)
+                    .min(self.bounds.right() - 1)
+                    .max(self.bounds.x),
+                (y + dy * step)
+                    .min(self.bounds.bottom() - 1)
+                    .max(self.bounds.y),
+            );
+            self.pointer_moved(target.0, target.1);
+            return Some(target);
         }
         match vk {
             VK_ESCAPE => self.cancel(),
@@ -438,7 +448,12 @@ mod tests {
     fn keys_nudge_cancel_and_toggle() {
         let mut o = overlay(Mode::Normal);
         assert_eq!(o.key(VK_RIGHT, true), Some((20, 10)));
-        assert_eq!(o.key(VK_UP, false), Some((10, 9)));
+        assert_eq!(o.key(VK_UP, false), Some((20, 9)));
+        assert_eq!(
+            o.view().cursor,
+            (20, 9),
+            "arrows move the overlay's own cursor"
+        );
         o.key(VK_F1, false);
         assert!(o.view().help);
         o.key(b'M' as u16, false);
@@ -454,6 +469,25 @@ mod tests {
         o.pointer_moved(40, 30);
         o.key(VK_RETURN, false);
         assert_eq!(o.outcome, Some(Some(Selection::Region(Rect::new(10, 10, 31, 21)))));
+    }
+
+    #[test]
+    fn arrows_extend_a_keyboard_region_and_stay_on_the_screen() {
+        let mut o = overlay(Mode::Normal);
+        o.key(VK_RETURN, true);
+        for _ in 0..3 {
+            o.key(VK_RIGHT, true);
+        }
+        o.key(VK_DOWN, false);
+        o.key(VK_RETURN, false);
+        assert_eq!(
+            o.outcome,
+            Some(Some(Selection::Region(Rect::new(10, 10, 31, 2))))
+        );
+        let mut edge = overlay(Mode::Normal);
+        edge.pointer_moved(195, 1);
+        assert_eq!(edge.key(VK_RIGHT, true), Some((199, 1)));
+        assert_eq!(edge.key(VK_UP, true), Some((199, 0)));
     }
 
     #[test]
