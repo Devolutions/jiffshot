@@ -337,6 +337,8 @@ enum Drag {
         /// afresh, so fixed corners, proportions and fitted text cannot
         /// drift, and a box dragged through zero size recovers.
         original: std::sync::Arc<Object>,
+        /// Whether the drag has changed the object (and recorded history).
+        moved: bool,
     },
     Marquee {
         start: Pt,
@@ -608,6 +610,9 @@ impl Editor {
         self.region = None;
         self.others.clear();
         self.drag = None;
+        // A polygon being drawn belonged to the old document; its id may
+        // name an unrelated object in the new one.
+        self.building = None;
         self.marquee = None;
         self.canvas_resize_error = None;
         self.modified = false;
@@ -727,14 +732,18 @@ impl Editor {
     /// Edits the selection's style (undoably, coalescing edits of the same
     /// property) and the current tool's style for new objects.
     pub fn update_style(&mut self, property: &str, change: impl Fn(&mut Style)) {
+        // One key for every selected object, so a whole edit coalesces into
+        // one undo step.
+        let ids: Vec<String> = self.selected_ids().iter().map(u64::to_string).collect();
+        let key = format!("{property}{}", ids.join(","));
         for id in self.others.clone() {
-            self.edit(id, "Change style", Some(format!("{property}*")), |o| {
+            self.edit(id, "Change style", Some(key.clone()), |o| {
                 o.walk_mut(&mut |o| change(&mut o.style));
                 o.fit_text();
             });
         }
         if let Some(id) = self.selection {
-            self.edit(id, "Change style", Some(format!("{property}{id}")), |o| {
+            self.edit(id, "Change style", Some(key), |o| {
                 change(&mut o.style);
                 o.fit_text();
             });
@@ -1411,14 +1420,18 @@ impl Editor {
             ));
         }
         if !self.others.is_empty() {
-            let copies: Vec<Object> = self
-                .selected_ids()
+            // Copy in stacking order so the copies overlap like the originals.
+            let order = self.selected_ids();
+            let copies: Vec<(u64, Object)> = self
+                .doc
+                .objects
                 .iter()
-                .filter_map(|id| self.doc.get(*id).cloned())
+                .filter(|o| order.contains(&o.id))
+                .map(|o| (o.id, o.clone()))
                 .collect();
             self.checkpoint("Duplicate", None);
-            let mut ids = Vec::new();
-            for mut c in copies {
+            let mut copied = HashMap::new();
+            for (original, mut c) in copies {
                 c.translate(20.0, 20.0);
                 if let Kind::Step { label, .. } = &mut c.kind {
                     *label = self.doc.next_step_label();
@@ -1429,8 +1442,13 @@ impl Editor {
                 }
                 let b = self.doc.get(id).unwrap().bounds();
                 self.invalidate_box(b);
-                ids.push(id);
+                copied.insert(original, id);
             }
+            // The panel's object stays first.
+            let ids: Vec<u64> = order
+                .iter()
+                .filter_map(|id| copied.get(id).copied())
+                .collect();
             self.set_selection(ids.clone());
             return ids.first().copied();
         }
@@ -1684,15 +1702,21 @@ impl Editor {
 
     /// Fill (crop to the zone) or fit (show all) for the selected zones.
     pub fn set_zone_fit(&mut self, fit: bool) {
-        for id in self.selected_ids() {
-            if self.doc.get(id).is_some_and(|o| o.zone.is_some()) {
-                self.edit(id, "Fill or fit", Some(format!("fit{id}")), move |o| {
-                    if let Some(z) = o.zone.as_mut() {
-                        z.fit = fit;
-                        z.pan = Pt::default();
-                    }
-                });
-            }
+        let zones: Vec<u64> = self
+            .selected_ids()
+            .into_iter()
+            .filter(|id| self.doc.get(*id).is_some_and(|o| o.zone.is_some()))
+            .collect();
+        // One key for all the zones, so the change is one undo step.
+        let ids: Vec<String> = zones.iter().map(u64::to_string).collect();
+        let key = format!("fit{}", ids.join(","));
+        for id in zones {
+            self.edit(id, "Fill or fit", Some(key.clone()), move |o| {
+                if let Some(z) = o.zone.as_mut() {
+                    z.fit = fit;
+                    z.pan = Pt::default();
+                }
+            });
         }
     }
 
@@ -1900,11 +1924,21 @@ impl Editor {
 
     /// Grows the canvas to include every object (in the canvas color).
     pub fn expand_to_fit(&mut self) -> bool {
+        // A spotlight dims everything; only its spot needs to fit.
+        fn extent(o: &Object) -> Option<Box2> {
+            match &o.kind {
+                Kind::Spotlight { rect, .. } => Some(*rect),
+                Kind::Group { objects } => {
+                    objects.iter().filter_map(extent).reduce(|a, b| a.union(&b))
+                }
+                _ => Some(o.bounds()),
+            }
+        }
         let Some(all) = self
             .doc
             .objects
             .iter()
-            .map(|o| o.bounds())
+            .filter_map(extent)
             .reduce(|a, b| a.union(&b))
         else {
             return false;
@@ -2111,11 +2145,13 @@ impl Editor {
                 .into_iter()
                 .find(|(_, q)| q.dist(p) <= tolerance * 1.5)
             {
-                self.checkpoint("Resize", None);
+                // History is recorded once the drag changes something, so
+                // a click on a handle keeps the redo branch.
                 self.drag = Some(Drag::Handle {
                     id,
                     handle: h,
                     original,
+                    moved: false,
                 });
                 return;
             }
@@ -2355,13 +2391,27 @@ impl Editor {
                 id,
                 handle,
                 original,
+                moved,
             } => {
+                let mut changed = (*original).clone();
+                changed.move_handle(handle, p, m.shift);
+                if !moved {
+                    if changed == *original || self.doc.get(id).is_none() {
+                        return;
+                    }
+                    self.checkpoint("Resize", None);
+                    self.drag = Some(Drag::Handle {
+                        id,
+                        handle,
+                        original,
+                        moved: true,
+                    });
+                }
                 let Some(o) = self.doc.get_mut(id) else {
                     return;
                 };
                 let before = o.bounds();
-                *o = (*original).clone();
-                o.move_handle(handle, p, m.shift);
+                *o = changed;
                 let after = o.bounds();
                 self.invalidate_box(before.union(&after));
                 self.events |= EVENT_SELECTION;
@@ -2447,10 +2497,14 @@ impl Editor {
                     }
                 }
                 if self.tool == Tool::Magnify && self.variant(Tool::Magnify).ends_with("view") {
+                    // Part of creating the lens, so no separate undo step.
                     let v = self.variant(Tool::Magnify);
-                    self.edit(id, "Add Magnify", Some(format!("view{id}")), move |o| {
-                        apply_variant(o, &v)
-                    });
+                    if let Some(o) = self.doc.get_mut(id) {
+                        let before = o.bounds();
+                        apply_variant(o, &v);
+                        let after = o.bounds();
+                        self.invalidate_box(before.union(&after));
+                    }
                 }
                 self.events |= EVENT_SELECTION;
             }
@@ -2778,6 +2832,10 @@ impl Editor {
         let Some(r) = b.to_irect().intersect(&self.doc.bounds()) else {
             return;
         };
+        if self.intersects_annotation(r) {
+            self.events |= EVENT_REGION_OVERLAP;
+            return;
+        }
         // Even-odd point-in-polygon per pixel center.
         let inside = |x: f32, y: f32| {
             let mut c = false;
@@ -4989,12 +5047,203 @@ mod tests {
         assert!(e.take_damage().is_some());
         assert_eq!(e.display().data(), expected.data());
     }
+
+    #[test]
+    fn style_edits_of_a_multi_selection_are_one_undo_step() {
+        let mut e = editor();
+        let (kind, style) = square(10.0, Rgba::RED);
+        let a = e.add_object("Add", kind, style);
+        let (kind, style) = square(60.0, Rgba::BLACK);
+        let b = e.add_object("Add", kind, style);
+        e.set_selection(vec![a, b]);
+        let steps = e.undo.len();
+        for width in [2.0, 3.0, 4.0] {
+            e.update_style("width", |s| s.width = width);
+        }
+        assert_eq!(e.undo.len(), steps + 1);
+        assert!(e.undo());
+        assert_eq!(e.doc.get(a).unwrap().style.width, 0.0);
+        assert_eq!(e.doc.get(b).unwrap().style.width, 0.0);
+    }
+
+    #[test]
+    fn fill_or_fit_of_several_zones_is_one_undo_step() {
+        let mut e = editor();
+        let mut zone = |x| {
+            let id = e.add_object(
+                "Zone",
+                Kind::Image {
+                    rect: Box2::from_xywh(x, 10.0, 60.0, 40.0),
+                    image: ImageRef {
+                        key: String::new(),
+                        pixmap: None,
+                    },
+                },
+                Style::default(),
+            );
+            e.doc.get_mut(id).unwrap().zone = Some(Zone::default());
+            id
+        };
+        let (a, b) = (zone(10.0), zone(100.0));
+        e.set_selection(vec![a, b]);
+        let steps = e.undo.len();
+        e.set_zone_fit(true);
+        assert_eq!(e.undo.len(), steps + 1);
+        assert!(e.undo());
+        assert!(!e.doc.get(a).unwrap().zone.unwrap().fit);
+        assert!(!e.doc.get(b).unwrap().zone.unwrap().fit);
+    }
+
+    #[test]
+    fn clicking_a_handle_without_dragging_keeps_history() {
+        let mut e = editor();
+        let (kind, style) = square(10.0, Rgba::RED);
+        let id = e.add_object("Add", kind, style);
+        let (kind, style) = square(60.0, Rgba::BLACK);
+        e.add_object("Add", kind, style);
+        assert!(e.undo());
+        e.mark_saved();
+        e.set_tool(Tool::Shape);
+        e.select(Some(id));
+        e.pointer_down(Pt::new(40.0, 40.0), NONE, 4.0);
+        e.pointer_up(Pt::new(40.0, 40.0), NONE);
+        assert!(!e.is_modified());
+        assert_eq!(e.redo_label(), Some("Add"), "a click keeps the redo branch");
+        assert_eq!(e.undo.len(), 1);
+
+        drag(&mut e, (40.0, 40.0), (60.0, 60.0));
+        assert_eq!(e.undo_label(), Some("Resize"));
+        let rect = |e: &Editor| e.doc.get(id).unwrap().rect().unwrap();
+        assert_eq!(rect(&e), Box2::new(10.0, 10.0, 60.0, 60.0));
+        assert!(e.undo());
+        assert_eq!(rect(&e), Box2::new(10.0, 10.0, 40.0, 40.0));
+    }
+
+    #[test]
+    fn duplicating_a_multi_selection_keeps_the_stacking_order() {
+        let mut e = editor();
+        let (kind, style) = square(10.0, Rgba::RED);
+        let a = e.add_object("Add", kind, style);
+        let (kind, style) = square(20.0, Rgba::BLACK);
+        let b = e.add_object("Add", kind, style);
+        e.set_selection(vec![b, a]);
+        let first = e.duplicate_selected().unwrap();
+        let fills: Vec<Rgba> = e.document().objects.iter().map(|o| o.style.fill).collect();
+        assert_eq!(fills, [Rgba::RED, Rgba::BLACK, Rgba::RED, Rgba::BLACK]);
+        assert_eq!(e.doc.get(first).unwrap().style.fill, Rgba::BLACK);
+        assert_eq!(e.selected_ids().len(), 2);
+    }
+
+    #[test]
+    fn lasso_over_an_annotation_is_refused_like_other_region_lifts() {
+        let mut e = editor();
+        let (kind, style) = square(100.0, Rgba::RED);
+        e.add_object("Add", kind, style);
+        e.set_tool(Tool::Selection);
+        e.set_variant("Freehand");
+        e.mark_saved();
+        e.take_events();
+        let before = e.document().background().data().to_vec();
+        e.pointer_down(Pt::new(90.0, 5.0), NONE, 4.0);
+        for (x, y) in [(140.0, 5.0), (140.0, 50.0), (90.0, 50.0)] {
+            e.pointer_move(Pt::new(x, y), NONE);
+        }
+        e.pointer_up(Pt::new(90.0, 50.0), NONE);
+        assert_ne!(e.take_events() & EVENT_REGION_OVERLAP, 0);
+        assert_eq!(e.document().objects.len(), 1);
+        assert_eq!(e.document().background().data(), &before[..]);
+        assert!(!e.is_modified());
+    }
+
+    #[test]
+    fn expand_to_fit_ignores_the_dimmed_area_of_a_spotlight() {
+        let mut doc = Document::blank(200, 100, Rgba::WHITE);
+        doc.add(
+            Kind::Spotlight {
+                rect: Box2::new(20.0, 20.0, 60.0, 60.0),
+                ellipse: false,
+                dim: 0.5,
+                blur: 0.0,
+                rounded: false,
+            },
+            Style {
+                width: 0.0,
+                ..Style::default()
+            },
+        );
+        doc.add(
+            Kind::Line {
+                a: Pt::new(250.0, 40.0),
+                b: Pt::new(250.0, 60.0),
+                control: None,
+            },
+            Style {
+                width: 0.0,
+                ..Style::default()
+            },
+        );
+        let mut e = Editor::new(doc);
+        assert!(e.expand_to_fit());
+        let (w, h) = e.document().size();
+        assert!((250..300).contains(&w), "width {w}");
+        assert_eq!(h, 100);
+    }
+
+    #[test]
+    fn creating_a_magnifier_with_a_view_is_one_undo_step() {
+        let mut e = editor();
+        e.set_tool(Tool::Magnify);
+        e.set_variant("Circle with view");
+        drag(&mut e, (100.0, 100.0), (160.0, 160.0));
+        assert_eq!(e.document().objects.len(), 1);
+        assert!(matches!(
+            e.document().objects[0].kind,
+            Kind::Magnify { offset, .. } if offset.len() > 0.5
+        ));
+        assert!(e.undo());
+        assert!(e.document().objects.is_empty());
+        assert_eq!(e.undo_label(), None);
+    }
+
+    #[test]
+    fn loading_a_document_abandons_the_polygon_being_drawn() {
+        let mut e = editor();
+        e.set_tool(Tool::Shape);
+        e.set_variant("Polygon");
+        e.pointer_down(Pt::new(10.0, 10.0), NONE, 4.0);
+        let mut doc = Document::blank(400, 300, Rgba::WHITE);
+        let polygon = doc.add(
+            Kind::Polygon {
+                points: vec![
+                    Pt::new(50.0, 50.0),
+                    Pt::new(90.0, 50.0),
+                    Pt::new(70.0, 90.0),
+                ],
+            },
+            Style::default(),
+        );
+        let original = doc.get(polygon).unwrap().clone();
+        e.load(doc);
+        e.pointer_move(Pt::new(300.0, 200.0), NONE);
+        e.pointer_down(Pt::new(320.0, 220.0), NONE, 4.0);
+        assert_eq!(e.document().get(polygon), Some(&original));
+    }
+
+    #[test]
+    fn smoothing_handles_empty_and_single_point_strokes() {
+        assert!(smooth_stroke(&[], 3.0).is_empty());
+        let point = [Pt::new(1.0, 2.0)];
+        assert_eq!(smooth_stroke(&point, 3.0), point);
+    }
 }
 
 /// Evens out a freehand stroke: a few passes of neighbor averaging
 /// (`strength` 1 to 10), ends kept, then points closer than a pixel
 /// dropped.
 pub fn smooth_stroke(points: &[Pt], strength: f32) -> Vec<Pt> {
+    if points.is_empty() {
+        return Vec::new();
+    }
     let passes = strength.round().clamp(1.0, 10.0) as usize;
     let mut cur = points.to_vec();
     for _ in 0..passes {
