@@ -456,7 +456,7 @@ const POSITIONALS: &[(&str, &[&str])] = &[
     ("click", &["at"]),
     ("move", &["at"]),
     ("drag", &["from", "to"]),
-    ("scroll", &["amount"]),
+    ("scroll", &["amount", "at"]),
     ("type", &["text*"]),
     ("key", &["keys"]),
     ("focus", &["title*"]),
@@ -484,7 +484,7 @@ const GROUPS: &[&str] = &[
     "record", "steps", "wait", "doc", "video", "capture", "library",
 ];
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Globals {
     pretty: bool,
     timeout: Option<Duration>,
@@ -515,12 +515,17 @@ fn globals(argv: &[String]) -> Result<GlobalArguments, Error> {
     let mut extra = Map::new();
     let mut it = argv.iter();
     while let Some(a) = it.next() {
-        match a.as_str() {
+        // Like every other option, the valued globals also take `--name=value`.
+        let (name, inline) = match a.split_once('=') {
+            Some((name, v)) if matches!(name, "--timeout" | "--args") => (name, Some(v)),
+            _ => (a.as_str(), None),
+        };
+        match name {
             "--pretty" => g.pretty = true,
             "--no-launch" => g.no_launch = true,
             "--timeout" => {
-                let v = it
-                    .next()
+                let v = inline
+                    .or_else(|| it.next().map(String::as_str))
                     .ok_or_else(|| usage("--timeout needs a number of seconds"))?;
                 let secs: f64 = v
                     .parse()
@@ -535,8 +540,8 @@ fn globals(argv: &[String]) -> Result<GlobalArguments, Error> {
                 );
             }
             "--args" => {
-                let v = it
-                    .next()
+                let v = inline
+                    .or_else(|| it.next().map(String::as_str))
                     .ok_or_else(|| usage("--args needs a JSON object"))?;
                 match serde_json::from_str(v) {
                     Ok(Value::Object(m)) => extra.extend(m),
@@ -683,6 +688,20 @@ fn default_timeout(command: &str, args: &Map<String, Value>) -> Duration {
         "capture.scroll" => {
             Duration::from_millis(ms("timeout_ms").unwrap_or(30_000.0) as u64)
                 + Duration::from_secs(15)
+        }
+        // The server sleeps the requested delay before capturing.
+        "screenshot" => {
+            Duration::from_millis(ms("delay_ms").unwrap_or(0.0) as u64) + Duration::from_secs(60)
+        }
+        // Typing is paced per character (35 ms by default while recording).
+        "type" => {
+            let characters = args
+                .get("text")
+                .and_then(Value::as_str)
+                .map_or(0, |text| text.chars().count());
+            Duration::from_millis(ms("delay_ms").unwrap_or(35.0) as u64)
+                .saturating_mul(u32::try_from(characters).unwrap_or(u32::MAX))
+                .saturating_add(Duration::from_secs(60))
         }
         "video.info" if args.get("exact").is_some_and(|value| !value.is_null()) => {
             Duration::from_secs(300)
@@ -865,6 +884,22 @@ fn error_json(e: &Error) -> Value {
     json!({ "code": e.code.as_str(), "message": e.message })
 }
 
+/// Parses a script step's `argv` exactly like a command line: its global
+/// options apply to this step (on top of the script's) and `--args` merges.
+fn argv_action(words: &[String], g: &Globals, cwd: &Path) -> Result<(Action, Globals), Error> {
+    let (step, words, extra) = globals(words)?;
+    let mut action = parse(&words, cwd)?;
+    if let Action::Call { args, .. } = &mut action {
+        args.extend(extra);
+    }
+    let g = Globals {
+        pretty: g.pretty,
+        timeout: step.timeout.or(g.timeout),
+        no_launch: g.no_launch || step.no_launch,
+    };
+    Ok((action, g))
+}
+
 /// Runs one step of a script: its result (or error) and elapsed time.
 fn run_step(step: &Value, g: &Globals, cwd: &Path) -> (Value, Option<Error>) {
     let started = Instant::now();
@@ -876,7 +911,7 @@ fn run_step(step: &Value, g: &Globals, cwd: &Path) -> (Value, Option<Error>) {
             std::thread::sleep(Duration::from_millis(ms));
             return Ok(("sleep".into(), json!({ "slept_ms": ms })));
         }
-        let action = if let Some(argv) = step.get("argv") {
+        let (action, g) = if let Some(argv) = step.get("argv") {
             let words: Option<Vec<String>> = argv
                 .as_array()
                 .and_then(|a| a.iter().map(|w| w.as_str().map(str::to_owned)).collect());
@@ -886,17 +921,20 @@ fn run_step(step: &Value, g: &Globals, cwd: &Path) -> (Value, Option<Error>) {
                     usage("argv must be an array of strings"),
                 )
             })?;
-            parse(&words, cwd).map_err(|e| (words.join(" "), e))?
+            argv_action(&words, g, cwd).map_err(|e| (words.join(" "), e))?
         } else if let Some(command) = step.get("command").and_then(Value::as_str) {
             let args = match step.get("args") {
                 None | Some(Value::Null) => Map::new(),
                 Some(Value::Object(m)) => m.clone(),
                 Some(_) => return Err((command.to_string(), usage("args must be an object"))),
             };
-            Action::Call {
-                command: command.to_string(),
-                args,
-            }
+            (
+                Action::Call {
+                    command: command.to_string(),
+                    args,
+                },
+                *g,
+            )
         } else {
             return Err((
                 String::new(),
@@ -904,7 +942,7 @@ fn run_step(step: &Value, g: &Globals, cwd: &Path) -> (Value, Option<Error>) {
             ));
         };
         match action {
-            Action::Call { command, args } => call(&command, args, g)
+            Action::Call { command, args } => call(&command, args, &g)
                 .map(|r| (command.clone(), r))
                 .map_err(|e| (command, e)),
             Action::Sleep(ms) => {
@@ -1391,6 +1429,82 @@ mod tests {
             default_timeout("video.info", &exact),
             Duration::from_secs(300)
         );
+    }
+
+    #[test]
+    fn client_side_waits_extend_the_default_timeout() {
+        let delayed = json!({ "delay_ms": "90000" }).as_object().unwrap().clone();
+        assert_eq!(
+            default_timeout("screenshot", &delayed),
+            Duration::from_secs(150)
+        );
+        assert_eq!(
+            default_timeout("screenshot", &Map::new()),
+            Duration::from_secs(60)
+        );
+        let typed = json!({ "text": "abcé", "delay_ms": 1000 })
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(default_timeout("type", &typed), Duration::from_secs(64));
+    }
+
+    #[test]
+    fn scroll_takes_an_optional_point() {
+        assert_eq!(
+            call_of("scroll -3 100,200 --horizontal"),
+            (
+                "scroll".into(),
+                json!({ "amount": "-3", "at": "100,200", "horizontal": true })
+            )
+        );
+    }
+
+    #[test]
+    fn global_options_take_inline_values() {
+        let (g, rest, extra) = globals(&words(r#"--timeout=2.5 status --args={"a":1}"#)).unwrap();
+        assert_eq!(g.timeout, Some(Duration::from_millis(2500)));
+        assert_eq!(rest, words("status"));
+        assert_eq!(Value::Object(extra), json!({ "a": 1 }));
+        assert!(globals(&words("--timeout=")).is_err());
+        assert!(globals(&words("--args=[1]")).is_err());
+    }
+
+    #[test]
+    fn script_argv_steps_honor_global_options() {
+        let base = Globals {
+            pretty: true,
+            timeout: Some(Duration::from_secs(1)),
+            no_launch: false,
+        };
+        let argv = [
+            "record",
+            "options",
+            "--args",
+            r#"{"microphone":false}"#,
+            "--timeout",
+            "5",
+            "--no-launch",
+        ]
+        .map(str::to_owned);
+        let (action, g) = argv_action(&argv, &base, test_cwd()).unwrap();
+        assert_eq!(
+            action,
+            Action::Call {
+                command: "record.options".into(),
+                args: json!({ "microphone": false }).as_object().unwrap().clone(),
+            }
+        );
+        assert_eq!(
+            g,
+            Globals {
+                pretty: true,
+                timeout: Some(Duration::from_secs(5)),
+                no_launch: true,
+            }
+        );
+        let (_, g) = argv_action(&words("status"), &base, test_cwd()).unwrap();
+        assert_eq!(g, base);
     }
 
     #[test]

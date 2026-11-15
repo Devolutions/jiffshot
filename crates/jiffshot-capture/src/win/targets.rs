@@ -254,9 +254,15 @@ impl Targets {
         false
     }
 
-    /// How many levels the target at `index` has above it.
-    pub fn depth_of(&self, index: usize) -> u32 {
-        self.list[index].depth
+    /// How many levels the target at `index` has above it. Counted through
+    /// the parents, since `depth` also counts looked-through full-size hosts.
+    pub fn depth_of(&self, mut index: usize) -> u32 {
+        let mut depth = 0;
+        while let Some(parent) = self.list[index].parent {
+            depth += 1;
+            index = parent;
+        }
+        depth
     }
 
     /// The top-level window that contains the target at `index`.
@@ -323,5 +329,24 @@ mod tests {
         assert_eq!(targets.hit(50, 5, 0), Some(1));
         assert_eq!(targets.hit(200, 200, 0), Some(4));
         assert_eq!(targets.hit(500, 500, 0), None);
+    }
+
+    #[test]
+    fn depth_counts_selectable_levels_through_looked_through_hosts() {
+        let rect = Rect::new(0, 0, 100, 100);
+        // A pane inside a full-size host (looked through, so not listed) and
+        // its button: recursion depths 2 and 3, but one and two levels up.
+        let targets = Targets {
+            list: vec![
+                target(rect, 0, None),
+                target(Rect::new(0, 0, 50, 50), 2, Some(0)),
+                target(Rect::new(0, 0, 20, 20), 3, Some(1)),
+            ],
+        };
+        assert_eq!(targets.depth_of(0), 0);
+        assert_eq!(targets.depth_of(1), 1);
+        assert_eq!(targets.depth_of(2), 2);
+        assert_eq!(targets.hit(10, 10, 0), Some(2));
+        assert_eq!(targets.hit(10, 10, targets.depth_of(2)), Some(0));
     }
 }
