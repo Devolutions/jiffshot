@@ -135,8 +135,8 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
         Button::el()
             .content(label.to_owned())
             .tool_tip_tip(tip.to_owned())
-            .padding((12.0, 5.0))
-            .corner_radius(6.0)
+            .padding((15.0, 7.0))
+            .corner_radius(0.0)
             .background(move || if on() { theme.get(Tone::Well) } else { solid(TRANSPARENT) })
             .font_weight(move || if on() { FontWeight::DemiBold } else { FontWeight::Normal })
             .command(main_common::act(move || expanded.set_if_changed(library)))
@@ -164,6 +164,13 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
         .spacing(6.0)
         .vertical_alignment(VerticalAlignment::Center)
         .child(rule(theme, (4.0, 6.0)))
+        .child(
+            ToggleButton::el()
+                .content("Properties")
+                .checked(s.show_side_bar.two_way())
+                .padding((10.0, 4.0))
+                .tool_tip_tip("Show or hide the Properties panel"),
+        )
         .child(ToggleButton::el().content("✦ Effects").checked(s.show_effects.two_way()).tool_tip_tip("Show or hide the Effects panel"))
         .child(Button::el().content("Copy All").tool_tip_tip(shortcut("Copy the whole image (Ctrl+Shift+C)")).command(main_common::command(s.copy_image_enabled.local(), |m| m.copy_image())))
         .child(with_flyout(Button::el().content("Share ▾").tool_tip_tip("Send the capture to another app, a file or a printer"), share_flyout(ctx)));

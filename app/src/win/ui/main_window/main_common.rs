@@ -99,17 +99,17 @@ impl Tone {
     /// `#AARRGGBB` in the dark and the light theme.
     pub(super) fn argb(self, dark: bool) -> u32 {
         let (dark_argb, light_argb) = match self {
-            Tone::Window => (dark_blue::windows_or(dark_blue::WINDOW, 0xFF1B1C1F), 0xFFF3F4F6),
+            Tone::Window => (dark_blue::windows_or(dark_blue::WINDOW, 0xFF1B1C1F), 0xFFF9F9F9),
             Tone::Panel => (dark_blue::windows_or(dark_blue::PANEL, 0xFF232428), 0xFFFFFFFF),
-            Tone::Tray => (dark_blue::windows_or(dark_blue::CHROME, 0xFF1F2023), 0xFFECEEF1),
-            Tone::Chip => (dark_blue::windows_or(dark_blue::CARD, 0xFF26282C), 0xFFE8EAED),
-            Tone::Well => (dark_blue::windows_or(dark_blue::HOVER, 0xFF2C2E33), 0xFFE1E4E8),
-            Tone::Border => (dark_blue::windows_or(dark_blue::BORDER, 0xFF2E3034), 0xFFD5D8DD),
-            Tone::BorderStrong => (dark_blue::windows_or(dark_blue::INPUT_BORDER, 0xFF3A3C40), 0xFFC4C8CE),
-            Tone::Muted => (dark_blue::windows_or(dark_blue::MUTED_TEXT, 0xFF8A8F98), 0xFF6B7280),
-            Tone::Caption => (dark_blue::windows_or(dark_blue::SECONDARY_TEXT, 0xFFC0C4CC), 0xFF4B5563),
-            Tone::Subtle => (dark_blue::windows_or(dark_blue::SECONDARY_TEXT, 0xFFC8CACE), 0xFF374151),
-            Tone::Text => (dark_blue::windows_or(dark_blue::TEXT, 0xFFF2F3F5), 0xFF1F2328),
+            Tone::Tray => (dark_blue::windows_or(dark_blue::CHROME, 0xFF1F2023), 0xFFF2F2F2),
+            Tone::Chip => (dark_blue::windows_or(dark_blue::CARD, 0xFF26282C), 0xFFF9F9F9),
+            Tone::Well => (dark_blue::windows_or(dark_blue::HOVER, 0xFF2C2E33), 0xFFF2F2F2),
+            Tone::Border => (dark_blue::windows_or(dark_blue::BORDER, 0xFF2E3034), 0xFFD9D9D9),
+            Tone::BorderStrong => (dark_blue::windows_or(dark_blue::INPUT_BORDER, 0xFF3A3C40), 0xFFB2B2B2),
+            Tone::Muted => (dark_blue::windows_or(dark_blue::MUTED_TEXT, 0xFF8A8F98), 0xFF737373),
+            Tone::Caption => (dark_blue::windows_or(dark_blue::SECONDARY_TEXT, 0xFFC0C4CC), 0xFF404040),
+            Tone::Subtle => (dark_blue::windows_or(dark_blue::SECONDARY_TEXT, 0xFFC8CACE), 0xFF404040),
+            Tone::Text => (dark_blue::windows_or(dark_blue::TEXT, 0xFFF2F3F5), 0xFF0D0D0D),
         };
         if dark {
             dark_argb
@@ -150,10 +150,23 @@ pub fn solid(argb: u32) -> Brush {
 
 pub const TRANSPARENT: u32 = 0x00000000;
 pub const WHITE: u32 = 0xFFFFFFFF;
-/// The active tool's background.
-pub const ACCENT: u32 = 0xFF2F5DA8;
-/// The current capture's outline and the picked mark.
-pub const BLUE: u32 = 0xFF3D8BFF;
+/// The Devolutions brand accent for the current theme and platform.
+pub fn brand_accent(theme: Theme) -> u32 {
+    if cfg!(windows) {
+        if theme.dark.get() { dark_blue::ACCENT } else { 0xFF0068C3 }
+    } else {
+        0xFF2F5DA8
+    }
+}
+
+/// The foreground brand color for indicators that need stronger contrast.
+pub fn brand_text(theme: Theme) -> u32 {
+    if cfg!(windows) {
+        if theme.dark.get() { dark_blue::ACCENT_TEXT } else { 0xFF0068C3 }
+    } else {
+        0xFF3D8BFF
+    }
+}
 /// Picked captures, favorites and unsaved edits.
 pub const ORANGE: u32 = 0xFFF5A623;
 /// Capture and narration.

@@ -21,7 +21,7 @@ const COLLAPSE_AFTER: Duration = Duration::from_millis(400);
 const MODES: [(&str, &str, &str); 4] =
     [("image", "\u{E722}", "Image"), ("video", "\u{E714}", "Video"), ("scrolling", "\u{E74B}", "Scrolling"), ("text", "\u{E8D2}", "Grab text")];
 
-const STRIP: Color = rgb(0x3D8BFF);
+const STRIP: Color = rgb(dark_blue::windows_or(0x0068C3, 0x3D8BFF));
 
 /// What the windows need. UI thread only.
 struct Extras {

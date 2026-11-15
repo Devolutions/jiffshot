@@ -2,7 +2,7 @@
 //! order, then More with the rest; right-click a tool to move or hide it)
 //! and the Effects panel.
 
-use super::main_common::{act, action, chip, note, run, section, solid, with_context_menu, Ctx, Tone, ACCENT, TRANSPARENT, WHITE};
+use super::main_common::{act, action, brand_accent, chip, note, run, section, solid, with_context_menu, Ctx, Tone, TRANSPARENT, WHITE};
 use crate::vm::MainViewModelSink;
 use rustolonia::{
     AnyEl, AppScope, Border, Button, Dock, DockPanel, Effect, El, FontWeight, HorizontalAlignment, MenuFlyout, MenuItem, MenuItemToggleType, Orientation, Panel, Path, ScrollBarVisibility, ScrollViewer, Separator, Signal, StackPanel, TextBlock,
@@ -217,7 +217,7 @@ fn palette_button(sink: MainViewModelSink) -> El<Button> {
         .height(move || if sink.tool_labels.get() { LABELED_HEIGHT } else { 34.0 })
         .padding(0.0)
         .margin(2.0)
-        .corner_radius(6.0)
+        .corner_radius(4.0)
         .horizontal_content_alignment(HorizontalAlignment::Center)
         .vertical_content_alignment(VerticalAlignment::Center)
 }
@@ -240,7 +240,7 @@ fn tool_button(sink: MainViewModelSink, theme: super::main_common::Theme, index:
         .tool_tip_tip(def.caption)
         .background(move || {
             if active() {
-                solid(if theme.dark.get() && cfg!(windows) { crate::ui::dark_blue::SELECTION } else { ACCENT })
+                solid(if theme.dark.get() && cfg!(windows) { crate::ui::dark_blue::SELECTION } else { brand_accent(theme) })
             } else {
                 solid(TRANSPARENT)
             }
