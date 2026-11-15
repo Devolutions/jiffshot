@@ -1433,8 +1433,9 @@ fn floyd_steinberg_dither(rgba: &mut image::RgbaImage) {
             let old = rgba.get_pixel(x, y).0;
             let mut new = old;
             for channel in 0..3 {
-                let level = ((u16::from(old[channel]) + 16) / 32).min(7);
-                new[channel] = (level * 32) as u8;
+                // Eight levels spanning the full range, so white stays white.
+                let level = (u16::from(old[channel]) * 7 + 127) / 255;
+                new[channel] = ((level * 255 + 3) / 7) as u8;
             }
             rgba.put_pixel(x, y, image::Rgba(new));
             for channel in 0..3 {
@@ -1457,6 +1458,19 @@ fn floyd_steinberg_dither(rgba: &mut image::RgbaImage) {
 }
 
 fn quantize_palette(rgba: &mut image::RgbaImage, palette_size: u16) {
+    if palette_size < 8 {
+        // Fewer than one bit per channel: a channel pinned to mid-level would
+        // tint the image, so spend the budget on evenly spaced grays.
+        let steps = u32::from(palette_size.max(2)) - 1;
+        for pixel in rgba.pixels_mut() {
+            let [r, g, b, _] = pixel.0.map(u32::from);
+            let luma = (r * 77 + g * 150 + b * 29 + 128) >> 8;
+            let level = (luma * steps + 127) / 255;
+            let value = ((level * 255 + steps / 2) / steps) as u8;
+            pixel.0[..3].fill(value);
+        }
+        return;
+    }
     let mut bits = [0_u8; 3];
     let mut colors = 1_u16;
     while colors.saturating_mul(2) <= palette_size {
@@ -3493,6 +3507,30 @@ mod tests {
     }
 
     #[test]
+    fn small_palettes_do_not_tint_black_and_white_images() {
+        let mut pixels = image::RgbaImage::new(3, 1);
+        pixels.put_pixel(0, 0, image::Rgba([0, 0, 0, 255]));
+        pixels.put_pixel(1, 0, image::Rgba([255, 255, 255, 255]));
+        pixels.put_pixel(2, 0, image::Rgba([200, 30, 30, 255]));
+
+        quantize_palette(&mut pixels, 2);
+
+        assert_eq!(pixels.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        assert_eq!(pixels.get_pixel(1, 0).0, [255, 255, 255, 255]);
+        assert_eq!(pixels.get_pixel(2, 0).0, [0, 0, 0, 255]);
+
+        let mut gradient = image::RgbaImage::new(256, 1);
+        for (x, _, pixel) in gradient.enumerate_pixels_mut() {
+            *pixel = image::Rgba([x as u8, x as u8, x as u8, 255]);
+        }
+        quantize_palette(&mut gradient, 5);
+        let colors: std::collections::HashSet<[u8; 4]> =
+            gradient.pixels().map(|pixel| pixel.0).collect();
+        assert_eq!(colors.len(), 5);
+        assert!(colors.iter().all(|c| c[0] == c[1] && c[1] == c[2]));
+    }
+
+    #[test]
     fn floyd_steinberg_dither_handles_white_edges_without_wrapping_alpha() {
         let mut pixels = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 255, 255, 0]));
 
@@ -3501,7 +3539,11 @@ mod tests {
         assert!(pixels.pixels().all(|pixel| pixel.0[3] == 0));
         assert!(pixels
             .pixels()
-            .all(|pixel| pixel.0[..3].iter().all(|channel| *channel == 224)));
+            .all(|pixel| pixel.0[..3].iter().all(|channel| *channel == 255)));
+
+        let mut black = image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 0, 255]));
+        floyd_steinberg_dither(&mut black);
+        assert!(black.pixels().all(|pixel| pixel.0 == [0, 0, 0, 255]));
     }
 
     #[test]

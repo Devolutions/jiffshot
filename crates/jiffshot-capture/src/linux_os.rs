@@ -44,5 +44,10 @@ pub fn open_path(path: &std::path::Path) -> std::io::Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map(|_| ())
+        .map(|mut child| {
+            // Reap it, or each opened folder leaves a zombie process behind.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        })
 }

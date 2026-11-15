@@ -43,6 +43,13 @@ fn overridden(var: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// An XDG base directory; the specification makes relative values invalid,
+/// since they would move with the working directory.
+#[cfg(any(target_os = "linux", test))]
+fn xdg_base(value: Option<PathBuf>) -> Option<PathBuf> {
+    value.filter(|path| path.is_absolute())
+}
+
 /// Settings, presets and stamps: `%APPDATA%\Jiffshot` on Windows,
 /// `~/Library/Application Support/Jiffshot` on macOS.
 pub fn config_dir() -> Option<PathBuf> {
@@ -63,7 +70,7 @@ pub fn config_dir() -> Option<PathBuf> {
     }
     #[cfg(target_os = "linux")]
     {
-        let base = overridden("XDG_CONFIG_HOME")
+        let base = xdg_base(overridden("XDG_CONFIG_HOME"))
             .or_else(|| crate::os::home_dir().map(|home| home.join(".config")))?;
         Some(base.join(NAME))
     }
@@ -82,7 +89,7 @@ pub fn local_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     let base = crate::os::home_dir().map(|home| home.join("Library/Caches"));
     #[cfg(target_os = "linux")]
-    let base = overridden("XDG_CACHE_HOME")
+    let base = xdg_base(overridden("XDG_CACHE_HOME"))
         .or_else(|| crate::os::home_dir().map(|home| home.join(".cache")));
     base.unwrap_or_else(std::env::temp_dir).join(NAME)
 }
@@ -100,5 +107,13 @@ mod tests {
         for invalid in ["/tmp/%", "/tmp/%2", "/tmp/%xy", "/tmp/%00"] {
             assert!(decode_uri_path(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn relative_xdg_base_directories_are_ignored() {
+        let absolute = std::env::temp_dir().join("config");
+        assert_eq!(xdg_base(Some(absolute.clone())), Some(absolute));
+        assert_eq!(xdg_base(Some(PathBuf::from("relative/config"))), None);
+        assert_eq!(xdg_base(None), None);
     }
 }

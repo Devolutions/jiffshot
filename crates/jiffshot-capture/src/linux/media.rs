@@ -85,6 +85,19 @@ fn settle(pipeline: &gst::Pipeline) -> Result<()> {
     }
 }
 
+/// Returns the pipeline to `Null` when `result` failed: one dropped in another
+/// state leaks its streaming threads and open files.
+fn stop_on_error<T>(pipeline: &gst::Pipeline, result: Result<T>) -> Result<T> {
+    if result.is_err() {
+        let _ = pipeline.set_state(gst::State::Null);
+    }
+    result
+}
+
+fn start_or_stop(pipeline: &gst::Pipeline, state: gst::State) -> Result<()> {
+    stop_on_error(pipeline, pipeline.set_state(state).map(|_| ()).map_err(e))
+}
+
 fn pull_sample(
     pipeline: &gst::Pipeline,
     sink: &gst_app::AppSink,
@@ -141,17 +154,18 @@ impl Writer {
             ));
         }
         let pipeline = launch(&description)?;
+        // A path value keeps non-UTF-8 file names byte for byte.
         pipeline
             .by_name("sink")
             .ok_or("missing file sink")?
-            .set_property("location", path.to_string_lossy().as_ref());
+            .set_property_from_value("location", &path.to_value());
         let video = app_src(&pipeline, "video")?;
         let audio_src = if audio.is_some() {
             Some(app_src(&pipeline, "audio")?)
         } else {
             None
         };
-        pipeline.set_state(gst::State::Playing).map_err(e)?;
+        start_or_stop(&pipeline, gst::State::Playing)?;
         Ok(Writer {
             pipeline,
             video,
@@ -277,24 +291,28 @@ impl Reader {
 
     fn start(pipeline: gst::Pipeline, uri: Option<String>) -> Result<Reader> {
         let video_sink = app_sink(&pipeline, "sink")?;
-        pipeline.set_state(gst::State::Paused).map_err(e)?;
-        settle(&pipeline)?;
-        let caps = video_sink
-            .static_pad("sink")
-            .and_then(|pad| pad.current_caps())
-            .ok_or("the video has no frames")?;
-        let info = gst_video::VideoInfo::from_caps(&caps).map_err(e)?;
-        let duration = pipeline
-            .query_duration::<gst::ClockTime>()
-            .map(time_to_hns)
-            .unwrap_or(0);
+        let prerolled = (|| -> Result<_> {
+            pipeline.set_state(gst::State::Paused).map_err(e)?;
+            settle(&pipeline)?;
+            let caps = video_sink
+                .static_pad("sink")
+                .and_then(|pad| pad.current_caps())
+                .ok_or("the video has no frames")?;
+            let info = gst_video::VideoInfo::from_caps(&caps).map_err(e)?;
+            let duration = pipeline
+                .query_duration::<gst::ClockTime>()
+                .map(time_to_hns)
+                .unwrap_or(0);
+            pipeline.set_state(gst::State::Playing).map_err(e)?;
+            Ok((info, duration))
+        })();
+        let (info, duration) = stop_on_error(&pipeline, prerolled)?;
         let fps = info.fps();
         let fps = if fps.denom() > 0 && fps.numer() > 0 {
             fps.numer() as f64 / fps.denom() as f64
         } else {
             30.0
         };
-        pipeline.set_state(gst::State::Playing).map_err(e)?;
         Ok(Reader {
             video: pipeline,
             video_sink,
@@ -332,9 +350,12 @@ impl Reader {
                  ! appsink name=sink max-buffers=4 sync=false"
             ))?;
             let sink = app_sink(&pipeline, "sink")?;
-            pipeline.set_state(gst::State::Paused).map_err(e)?;
-            settle(&pipeline)?;
-            pipeline.set_state(gst::State::Playing).map_err(e)?;
+            let started = pipeline
+                .set_state(gst::State::Paused)
+                .map_err(e)
+                .and_then(|_| settle(&pipeline))
+                .and_then(|()| pipeline.set_state(gst::State::Playing).map_err(e));
+            stop_on_error(&pipeline, started)?;
             self.audio_pipeline = Some((pipeline, sink));
             if self.position > 0 {
                 self.seek(self.position)?;
@@ -517,7 +538,7 @@ pub fn capture_audio_cancellable(
          ! appsink name=sink max-buffers=64 sync=false"
     ))?;
     let sink = app_sink(&pipeline, "sink")?;
-    pipeline.set_state(gst::State::Playing).map_err(e)?;
+    start_or_stop(&pipeline, gst::State::Playing)?;
     let started = settle(&pipeline);
     if cancel.load(Ordering::Acquire) {
         let _ = pipeline.set_state(gst::State::Null);
@@ -531,7 +552,7 @@ pub fn capture_audio_cancellable(
     let stop = Arc::new(AtomicBool::new(false));
     let failure = Arc::new(Mutex::new(None));
     let (flag, worker_failure) = (stop.clone(), failure.clone());
-    let thread = std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("audio-capture".into())
         .spawn(move || {
             while !flag.load(Ordering::Acquire) {
@@ -566,7 +587,8 @@ pub fn capture_audio_cancellable(
                 }
             }
         })
-        .map_err(e)?;
+        .map_err(e);
+    let thread = stop_on_error(&pipeline, spawned)?;
     Ok(AudioCapture {
         spec: AudioSpec {
             sample_rate: RATE,
@@ -598,6 +620,50 @@ mod tests {
             reader.next_video().is_err(),
             "a decoder error must not be reported as end-of-stream"
         );
+    }
+
+    #[test]
+    fn failed_reader_start_returns_the_pipeline_to_null() {
+        startup().expect("initialize GStreamer");
+        let pipeline = launch(&format!("fakesrc num-buffers=0 ! {BGRA_SINK}"))
+            .expect("create frameless pipeline");
+        let handle = pipeline.clone();
+        assert!(Reader::start(pipeline, None).is_err());
+        assert_eq!(handle.current_state(), gst::State::Null);
+    }
+
+    #[test]
+    fn writer_keeps_non_utf8_file_names() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "jiffshot-writer-name-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join(std::ffi::OsString::from_vec(b"caf\xe9.mp4".to_vec()));
+        let mut writer =
+            Writer::create(&path, VideoSpec::for_size(64, 48, 10), None).expect("encoder");
+        for index in 0..3 {
+            writer
+                .write_frame(
+                    &[0, 0, 200, 0].repeat(64 * 48),
+                    index * 1_000_000,
+                    1_000_000,
+                )
+                .expect("frame");
+        }
+        writer.finish().expect("finish");
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(names, [path]);
     }
 
     #[test]
