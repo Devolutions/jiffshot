@@ -84,12 +84,18 @@ pub fn from_rgba_image(img: &image::RgbaImage) -> Option<Pixmap> {
 }
 
 pub fn decode_image(bytes: &[u8]) -> Result<Pixmap> {
+    use image::ImageDecoder;
     let format = image::guess_format(bytes).map_err(|e| e.to_string())?;
-    let dimensions = image::ImageReader::with_format(Cursor::new(bytes), format)
-        .into_dimensions()
+    let mut decoder = image::ImageReader::with_format(Cursor::new(bytes), format)
+        .into_decoder()
         .map_err(|e| e.to_string())?;
-    validate_image_dimensions(dimensions)?;
-    let img = image::load_from_memory_with_format(bytes, format).map_err(|e| e.to_string())?;
+    validate_image_dimensions(decoder.dimensions())?;
+    // Camera photos store their rotation in EXIF instead of in the pixels.
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = image::DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
+    img.apply_orientation(orientation);
     from_rgba_image(&img.to_rgba8()).ok_or_else(|| "image has no pixels".to_owned())
 }
 
@@ -204,7 +210,20 @@ pub fn encode(pm: &Pixmap, format: Format, jpeg_quality: u8) -> Result<Vec<u8>> 
             image::DynamicImage::ImageRgb8(rgb).write_to(&mut out, image::ImageFormat::Bmp)
         }
         Format::Gif => {
-            image::DynamicImage::ImageRgba8(rgba).write_to(&mut out, image::ImageFormat::Gif)
+            // GIF transparency is all or nothing: drop mostly transparent
+            // pixels and flatten the rest onto white rather than letting the
+            // encoder make every partly transparent pixel fully opaque.
+            let mut gif = rgba;
+            for p in gif.pixels_mut() {
+                let a = p[3] as u32;
+                *p = if a < 128 {
+                    image::Rgba([0, 0, 0, 0])
+                } else {
+                    let f = |c: u8| ((c as u32 * a + 255 * (255 - a)) / 255) as u8;
+                    image::Rgba([f(p[0]), f(p[1]), f(p[2]), 255])
+                };
+            }
+            image::DynamicImage::ImageRgba8(gif).write_to(&mut out, image::ImageFormat::Gif)
         }
         Format::Webp => {
             image::DynamicImage::ImageRgba8(rgba).write_to(&mut out, image::ImageFormat::WebP)
@@ -917,6 +936,42 @@ mod tests {
         assert!(write_atomic(&directory, b"cannot replace a directory").is_err());
         assert!(directory.is_dir());
         assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn decoding_applies_exif_orientation() {
+        // A big-endian TIFF block with one IFD entry: Orientation = 6
+        // (rotate 90 degrees clockwise).
+        let exif = vec![
+            b'M', b'M', 0, 0x2A, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0,
+            0, 0,
+        ];
+        let mut jpeg = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95);
+        image::ImageEncoder::set_exif_metadata(&mut encoder, exif).unwrap();
+        image::ImageEncoder::write_image(
+            encoder,
+            &[255, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 255],
+            4,
+            1,
+            image::ExtendedColorType::Rgb8,
+        )
+        .unwrap();
+        let decoded = decode_image(&jpeg).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (1, 4));
+    }
+
+    #[test]
+    fn gif_export_keeps_partial_transparency_out_of_opaque_pixels() {
+        let mut pm = crate::raster::solid(3, 1, Rgba::WHITE).unwrap();
+        crate::raster::set_pixel(&mut pm, 0, 0, Rgba::BLACK.with_alpha(115));
+        crate::raster::set_pixel(&mut pm, 1, 0, Rgba::BLACK.with_alpha(200));
+        let back = decode_image(&encode(&pm, Format::Gif, 0).unwrap()).unwrap();
+        assert_eq!(crate::raster::pixel(&back, 0, 0).a, 0);
+        let flattened = crate::raster::pixel(&back, 1, 0);
+        assert_eq!(flattened.a, 255);
+        assert!((40..=70).contains(&flattened.r), "{flattened:?}");
+        assert_eq!(crate::raster::pixel(&back, 2, 0), Rgba::WHITE);
     }
 
     #[test]

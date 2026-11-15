@@ -227,14 +227,32 @@ fn profile(style: EdgeStyle, i: u32, depth: f32, seed: u32) -> f32 {
     }
 }
 
-/// Bilinear sample of straight color at a fractional position.
+/// Bilinear sample at a fractional position, as a straight color. Pixels
+/// are mixed premultiplied so transparent neighbors do not darken it.
 fn sample(pm: &Pixmap, x: f32, y: f32) -> Rgba {
     let (x0, y0) = (x.floor(), y.floor());
     let (fx, fy) = (x - x0, y - y0);
-    let p = |dx: i32, dy: i32| raster::pixel(pm, x0 as i32 + dx, y0 as i32 + dy);
-    let top = p(0, 0).lerp(p(1, 0), fx);
-    let bottom = p(0, 1).lerp(p(1, 1), fx);
-    top.lerp(bottom, fy)
+    let p = |dx: i32, dy: i32| {
+        let (px, py) = (x0 as i32 + dx, y0 as i32 + dy);
+        let c = (px >= 0 && py >= 0)
+            .then(|| pm.pixel(px as u32, py as u32))
+            .flatten();
+        c.map_or([0.0; 4], |c| {
+            [c.red(), c.green(), c.blue(), c.alpha()].map(f32::from)
+        })
+    };
+    let lerp = |a: [f32; 4], b: [f32; 4], t: f32| [0, 1, 2, 3].map(|i| a[i] + (b[i] - a[i]) * t);
+    let c = lerp(lerp(p(0, 0), p(1, 0), fx), lerp(p(0, 1), p(1, 1), fx), fy);
+    if c[3] < 0.5 {
+        return Rgba::TRANSPARENT;
+    }
+    let straight = |v: f32| channel(v * 255.0 / c[3]);
+    Rgba::new(
+        straight(c[0]),
+        straight(c[1]),
+        straight(c[2]),
+        channel(c[3]),
+    )
 }
 
 fn map_pixels(pm: &mut Pixmap, f: impl Fn(Rgba) -> Rgba) {
@@ -585,8 +603,11 @@ pub fn apply(doc: &mut Document, effect: Effect) -> bool {
             for p in doc.background_mut().pixels_mut() {
                 let c = Rgba::from_premultiplied(*p);
                 if c.a > 0 && near(c) {
-                    *p = to.faded(c.a as f32 / 255.0).premultiplied();
-                    changed = true;
+                    let replacement = to.faded(c.a as f32 / 255.0).premultiplied();
+                    if *p != replacement {
+                        *p = replacement;
+                        changed = true;
+                    }
                 }
             }
             return changed;
@@ -975,6 +996,30 @@ mod tests {
         ));
         assert_eq!(raster::pixel(d.background(), 0, 0).a, 0);
         assert_eq!(raster::pixel(d.background(), 1, 0).a, 0);
+    }
+
+    #[test]
+    fn replacing_a_color_with_itself_reports_no_change() {
+        let mut d = Document::blank(3, 1, Rgba::RED);
+        let before = d.background().data().to_vec();
+        assert!(!apply(
+            &mut d,
+            Effect::ReplaceColor {
+                from: Rgba::RED,
+                to: Rgba::RED,
+            },
+        ));
+        assert_eq!(d.background().data(), before);
+    }
+
+    #[test]
+    fn sampling_next_to_transparency_keeps_the_color() {
+        let mut pm = raster::solid(2, 1, Rgba::WHITE).unwrap();
+        raster::set_pixel(&mut pm, 1, 0, Rgba::TRANSPARENT);
+        let c = sample(&pm, 0.5, 0.0);
+        assert_eq!((c.r, c.g, c.b), (255, 255, 255), "{c:?}");
+        assert!((127..=128).contains(&c.a), "{c:?}");
+        assert_eq!(sample(&pm, 0.0, 0.0), Rgba::WHITE);
     }
 
     #[test]

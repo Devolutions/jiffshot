@@ -32,18 +32,22 @@ fn distance(a: Rgba, b: Rgba) -> u32 {
 /// around `r`, or along its inside edge where `r` touches the image edge.
 pub fn border_color(pm: &Pixmap, r: IRect) -> Rgba {
     let (w, h) = (pm.width() as i32, pm.height() as i32);
-    let mut counts: HashMap<(u8, u8, u8, u8), (u32, [u32; 4])> = HashMap::new();
+    // Each bucket remembers when it was first seen, so ties go to the same
+    // color every time instead of depending on the hash map's order.
+    let mut counts: HashMap<(u8, u8, u8, u8), (u32, usize, [u32; 4])> = HashMap::new();
+    let mut seen = 0;
     let mut visit = |x: i32, y: i32| {
         let (x, y) = (x.clamp(0, w - 1), y.clamp(0, h - 1));
         let c = raster::pixel(pm, x, y);
         let e = counts
             .entry((c.r >> 3, c.g >> 3, c.b >> 3, c.a >> 3))
-            .or_insert((0, [0; 4]));
+            .or_insert((0, seen, [0; 4]));
+        seen += 1;
         e.0 += 1;
-        e.1[0] += c.r as u32;
-        e.1[1] += c.g as u32;
-        e.1[2] += c.b as u32;
-        e.1[3] += c.a as u32;
+        e.2[0] += c.r as u32;
+        e.2[1] += c.g as u32;
+        e.2[2] += c.b as u32;
+        e.2[3] += c.a as u32;
     };
     for x in r.x - 1..=r.right() {
         visit(x, r.y - 1);
@@ -53,7 +57,10 @@ pub fn border_color(pm: &Pixmap, r: IRect) -> Rgba {
         visit(r.x - 1, y);
         visit(r.right(), y);
     }
-    let Some((_, (n, sum))) = counts.into_iter().max_by_key(|(_, (n, _))| *n) else {
+    let Some((_, (n, _, sum))) = counts
+        .into_iter()
+        .max_by_key(|(_, (n, first, _))| (*n, std::cmp::Reverse(*first)))
+    else {
         return Rgba::WHITE;
     };
     Rgba::new(
@@ -71,8 +78,15 @@ pub fn fill_hole(pm: &mut Pixmap, r: IRect) {
         return;
     };
     let (w, h) = (pm.width() as i32, pm.height() as i32);
-    let edge =
-        |pm: &Pixmap, x: i32, y: i32| raster::pixel(pm, x.clamp(0, w - 1), y.clamp(0, h - 1));
+    // Sides beyond the image edge have nothing to blend from; clamping them
+    // would sample the hole's own pixels (the text being erased).
+    let edge = |pm: &Pixmap, x: i32, y: i32| {
+        (x >= 0 && y >= 0 && x < w && y < h).then(|| raster::pixel(pm, x, y))
+    };
+    let blend = |a: Option<Rgba>, b: Option<Rgba>, t: f32| match (a, b) {
+        (Some(a), Some(b)) => Some(a.lerp(b, t)),
+        (a, b) => a.or(b),
+    };
     let source = pm.clone();
     for y in r.y..r.bottom() {
         let left = edge(&source, r.x - 1, y);
@@ -82,13 +96,15 @@ pub fn fill_hole(pm: &mut Pixmap, r: IRect) {
             let bottom = edge(&source, x, r.bottom());
             let tx = (x - r.x + 1) as f32 / (r.w + 1) as f32;
             let ty = (y - r.y + 1) as f32 / (r.h + 1) as f32;
-            let horizontal = left.lerp(right, tx);
-            let vertical = top.lerp(bottom, ty);
+            let horizontal = blend(left, right, tx);
+            let vertical = blend(top, bottom, ty);
             let dx = (x - r.x + 1).min(r.right() - x) as f32;
             let dy = (y - r.y + 1).min(r.bottom() - y) as f32;
             let wh = 1.0 / dx;
             let wv = 1.0 / dy;
-            raster::set_pixel(pm, x, y, horizontal.lerp(vertical, wv / (wh + wv)));
+            if let Some(color) = blend(horizontal, vertical, wv / (wh + wv)) {
+                raster::set_pixel(pm, x, y, color);
+            }
         }
     }
 }
@@ -412,7 +428,7 @@ pub fn quantize(pm: &mut Pixmap, k: usize) {
     }
     let common = counts
         .iter()
-        .max_by_key(|(_, n)| **n)
+        .max_by_key(|(k, n)| (**n, std::cmp::Reverse(**k)))
         .map(|(k, _)| *k)
         .unwrap();
     let mut centers: Vec<[f32; 3]> = vec![[
@@ -576,6 +592,31 @@ mod tests {
         fill_hole(&mut pm, IRect::new(3, 0, 4, 1));
         let mid = raster::pixel(&pm, 5, 0).r;
         assert!((100..=150).contains(&mid), "{mid}");
+    }
+
+    #[test]
+    fn hole_fill_at_the_image_edge_ignores_the_hole_itself() {
+        let mut pm = raster::solid(10, 1, Rgba::WHITE).unwrap();
+        for x in 0..3 {
+            raster::set_pixel(&mut pm, x, 0, Rgba::BLACK);
+        }
+        fill_hole(&mut pm, IRect::new(0, 0, 3, 1));
+        for x in 0..3 {
+            assert_eq!(raster::pixel(&pm, x, 0), Rgba::WHITE, "pixel {x}");
+        }
+    }
+
+    #[test]
+    fn border_color_breaks_ties_the_same_way_every_time() {
+        let mut pm = raster::solid(4, 4, Rgba::WHITE).unwrap();
+        for y in 0..4 {
+            for x in 2..4 {
+                raster::set_pixel(&mut pm, x, y, Rgba::BLACK);
+            }
+        }
+        for _ in 0..64 {
+            assert_eq!(border_color(&pm, IRect::new(1, 1, 2, 2)), Rgba::WHITE);
+        }
     }
 
     #[test]

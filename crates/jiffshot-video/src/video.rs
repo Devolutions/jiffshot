@@ -595,7 +595,7 @@ fn export(a: &Args, should_cancel: &dyn Fn() -> bool) -> Reply {
                     .map_err(internal)?,
             );
             gif_options.captions = output_captions;
-            run_export(should_cancel, |cancelled| {
+            let mut gif = run_export(should_cancel, |cancelled| {
                 post::export_gif_cancellable(
                     &mp4_path,
                     &out,
@@ -604,7 +604,13 @@ fn export(a: &Args, should_cancel: &dyn Fn() -> bool) -> Reply {
                     |_| {},
                     cancelled,
                 )
-            })
+            })?;
+            // The silent intermediate hides the source's audio from the GIF
+            // export, so report the dropped audio here.
+            if source_metadata.audio.is_some() || source_metadata.audio_note.is_some() {
+                gif.audio_note = Some("GIF cannot retain source audio".into());
+            }
+            Ok(gif)
         } else {
             run_export(should_cancel, |cancelled| {
                 post::export_gif_cancellable(
@@ -2924,5 +2930,36 @@ mod tests {
         assert_eq!(gif["audio_note"], "GIF cannot retain source audio");
         let default = options(&Args::new(json!({})).expect("object")).expect("options");
         assert_eq!(default.audio, Audio::RequireCompatible);
+    }
+
+    #[test]
+    fn marked_gif_export_reports_dropped_source_audio() {
+        let fixtures = Fixtures::new();
+        let sound = fixtures.video(
+            "marked-sound.mp4",
+            Some(AudioSpec {
+                sample_rate: 48_000,
+                channels: 2,
+            }),
+        );
+        let markers = [(0, "selection"), (500, "selection")]
+            .into_iter()
+            .map(|(at_ms, label)| recording_marks::Marker::Label {
+                at_ms,
+                label: label.into(),
+            })
+            .collect();
+        recording_marks::write(
+            &sound,
+            &recording_marks::RecordingMarks::new(1000, 12, 64, 48, markers),
+        )
+        .expect("recording sidecar");
+        let gif = fixtures
+            .run(
+                "video.export",
+                json!({"path":sound,"out":fixtures.path("marked-sound.gif"),"keep_marked":true}),
+            )
+            .expect("marked GIF without sound");
+        assert_eq!(gif["audio_note"], "GIF cannot retain source audio");
     }
 }
