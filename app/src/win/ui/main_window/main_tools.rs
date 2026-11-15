@@ -24,7 +24,7 @@ const fn tool(name: &'static str, path: &'static str, caption: &'static str, des
 
 /// Every tool, in the usual order, using a unified stroke-vector icon set.
 pub const TOOLS: [ToolDef; 23] = [
-    tool("Select", vicons::SELECT_REGION, "Select Region", "Select a rectangular area of the image"),
+    tool("Select", vicons::SELECT_REGION, "Select", "Select a rectangular region of the image"),
     tool("Move", vicons::MOVE, "Move", "Select, move, and resize objects"),
     tool("Arrow", vicons::ARROW, "Arrow", "Draw an arrow annotation"),
     tool("Line", vicons::LINE, "Line", "Draw a straight line"),
@@ -81,7 +81,7 @@ fn ordered(order: &str) -> Vec<usize> {
 
 /// How many tools fit beside the More button in `width`.
 fn capacity(width: f64, labels: bool) -> usize {
-    let per = if labels { 72.0 } else { 42.0 };
+    let per = if labels { 64.0 } else { 42.0 };
     if width.is_finite() && width > per {
         ((width - per) / per) as usize
     } else {
@@ -176,7 +176,7 @@ pub fn tool_bar(ctx: &Ctx) -> El<Panel> {
 fn tool_content(sink: MainViewModelSink, theme: super::main_common::Theme, path_data: &'static str, caption: &str, active: impl Fn() -> bool + Clone + 'static) -> El<StackPanel> {
     let glyph_active = active.clone();
     let icon = Border::el()
-        .height(if cfg!(target_os = "linux") { 24.0 } else { 21.0 })
+        .height(if cfg!(target_os = "linux") { 28.0 } else { 21.0 })
         .child(
             Path::el()
                 .width(18.0)
@@ -203,16 +203,16 @@ fn tool_content(sink: MainViewModelSink, theme: super::main_common::Theme, path_
 
 /// Linux fonts have taller line boxes, so the icon and its caption need more room.
 #[cfg(target_os = "linux")]
-const LABELED_HEIGHT: f64 = 58.0;
+const LABELED_HEIGHT: f64 = 62.0;
 #[cfg(not(target_os = "linux"))]
 const LABELED_HEIGHT: f64 = 48.0;
 
 /// A palette-sized button (`Button.tool`, `compact` without labels).
 fn palette_button(sink: MainViewModelSink) -> El<Button> {
     Button::el()
-        .width(move || if sink.tool_labels.get() { 68.0 } else { 38.0 })
+        .width(move || if sink.tool_labels.get() { 60.0 } else { 38.0 })
         .height(move || if sink.tool_labels.get() { LABELED_HEIGHT } else { 34.0 })
-        .padding((2.0, 0.0))
+        .padding(0.0)
         .margin(2.0)
         .corner_radius(4.0)
         .border_thickness(1.0)
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn tooltips_include_shortcuts_for_first_nine_tools() {
         let first = format_tool_tooltip("", 0);
-        assert!(first.contains("Select Region") && first.contains("1") && first.contains("Select a rectangular area"));
+        assert!(first.contains("Select (") && first.contains("1") && first.contains("Select a rectangular region"));
         let tenth = format_tool_tooltip("", 9);
         assert!(tenth.starts_with("Highlight — "));
     }

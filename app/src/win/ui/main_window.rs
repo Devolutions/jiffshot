@@ -46,6 +46,7 @@ pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
         sink,
         theme: Theme::new(),
         canvas: canvas.clone(),
+        window_width: rustolonia::Signal::new(1500.0),
         window_height: rustolonia::Signal::new(960.0),
         text_editor: NodeRef::new(),
     };
@@ -53,7 +54,7 @@ pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
     let theme = ctx.theme;
     // The actual variant, which the "System" theme changes with the system.
     canvas.follow_theme(theme.dark)?;
-    let window_height = ctx.window_height;
+    let (window_width, window_height) = (ctx.window_width, ctx.window_height);
     let live_side_bar_width = rustolonia::Signal::new(crate::settings::clamp_side_bar_width(sink.side_bar_width.get_untracked()));
     let content = DockPanel::el();
     #[cfg(not(target_os = "macos"))]
@@ -66,7 +67,10 @@ pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
         .min_height(600.0)
         .icon(super::icon_file())
         .background(theme.brush(Tone::Window))
-        .on_size_changed(move |args| window_height.set_if_changed(args.new_size.height))
+        .on_size_changed(move |args| {
+            window_width.set_if_changed(args.new_size.width);
+            window_height.set_if_changed(args.new_size.height);
+        })
         .content(
             content
                 .child(top_bar(&ctx))
@@ -131,8 +135,11 @@ pub(super) fn library_tile_for_selftest(scope: &AppScope, key: u64) -> Result<Wi
 /// The Editor and Library tabs, capture and creation actions, the tool palette,
 /// the Properties and Effects toggles, Copy All and Share ▾.
 fn top_bar(ctx: &Ctx) -> El<Border> {
-    let (s, theme) = (ctx.sink, ctx.theme);
+    let (s, theme, window_width) = (ctx.sink, ctx.theme, ctx.window_width);
     let expanded = s.library_expanded;
+    // Collapse secondary top-bar text labels on narrow windows (< 1100 px) so the
+    // center tool palette always retains room for primary tools + More.
+    let wide_chrome = move || window_width.get() >= 1100.0;
     let tab = move |label: &str, library: bool, tip: &str| {
         let on = move || expanded.get() == library;
         let underline_on = on;
@@ -140,7 +147,7 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
         Button::el()
             .name(if library { "TabLibrary" } else { "TabEditor" })
             .tool_tip_tip(tip.to_owned())
-            .padding((14.0, 6.0, 14.0, 4.0))
+            .padding((12.0, 5.0, 12.0, 4.0))
             .corner_radius(4.0)
             .background(move || if on() { theme.get(Tone::Well) } else { solid(TRANSPARENT) })
             .content(
@@ -177,7 +184,9 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
             .vertical_alignment(VerticalAlignment::Center);
         let text = TextBlock::el()
             .text(label.to_owned())
+            .margin((6.0, 0.0, 0.0, 0.0))
             .vertical_alignment(VerticalAlignment::Center)
+            .visible(wide_chrome)
             .foreground(move || {
                 if active.is_some_and(|on| on.get()) {
                     solid(WHITE)
@@ -187,7 +196,6 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
             });
         let row = StackPanel::el()
             .orientation(Orientation::Horizontal)
-            .spacing(6.0)
             .vertical_alignment(VerticalAlignment::Center)
             .child(icon)
             .child(text);
@@ -196,6 +204,7 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
                 Path::el()
                     .width(11.0)
                     .height(11.0)
+                    .margin((5.0, 0.0, 0.0, 0.0))
                     .data(vicons::CHEVRON_DOWN)
                     .stroke(move || Some(theme.get(Tone::Caption)))
                     .stroke_thickness(1.4)
