@@ -384,15 +384,21 @@ fn capture_cursor(
     }
 }
 
-/// Makes pixels outside `keep` (screen coordinates) transparent.
+/// Makes pixels outside `keep` (screen coordinates) transparent, and clears
+/// their color: the screen there must not survive in the saved file or in
+/// clipboard formats that ignore alpha.
 fn mask_frame(frame: &mut Frame, mapping: CaptureMapping, keep: impl Fn(f64, f64) -> bool) {
     frame.alpha = true;
     let stride = frame.stride();
     for y in 0..frame.height as i32 {
         for x in 0..frame.width as i32 {
             let (screen_x, screen_y) = mapping.pixel_center(x as u32, y as u32);
-            let a = if keep(screen_x, screen_y) { 255 } else { 0 };
-            frame.pixels[y as usize * stride + x as usize * 4 + 3] = a;
+            let at = y as usize * stride + x as usize * 4;
+            if keep(screen_x, screen_y) {
+                frame.pixels[at + 3] = 255;
+            } else {
+                frame.pixels[at..at + 4].fill(0);
+            }
         }
     }
 }
@@ -2160,5 +2166,16 @@ mod tests {
         });
         let alphas: Vec<_> = frame.pixels.chunks_exact(4).map(|p| p[3]).collect();
         assert_eq!(alphas, [255, 0, 0, 255, 255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn masked_out_pixels_keep_no_screen_content() {
+        let mapping = CaptureMapping::identity(Rect::new(0, 0, 2, 1)).unwrap();
+        let mut frame = Frame::new(2, 1);
+        frame
+            .pixels
+            .copy_from_slice(&[10, 20, 30, 0, 40, 50, 60, 0]);
+        mask_frame(&mut frame, mapping, |x, _| x < 1.0);
+        assert_eq!(frame.pixels, [10, 20, 30, 255, 0, 0, 0, 0]);
     }
 }

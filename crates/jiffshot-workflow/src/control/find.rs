@@ -36,18 +36,18 @@ pub struct Window {
 
 /// What to look for among top-level windows.
 #[derive(Default)]
-pub struct Query<'a> {
+pub struct Query {
     pub hwnd: Option<isize>,
     /// Substring of the title, any case.
-    pub title: Option<&'a str>,
+    pub title: Option<String>,
     /// Executable name, any case, `.exe` optional.
-    pub process: Option<&'a str>,
-    pub class: Option<&'a str>,
+    pub process: Option<String>,
+    pub class: Option<String>,
     /// Untitled, tool and our own windows too.
     pub all: bool,
 }
 
-impl Query<'_> {
+impl Query {
     pub fn is_empty(&self) -> bool {
         self.hwnd.is_none()
             && self.title.is_none()
@@ -64,9 +64,13 @@ impl Query<'_> {
         self.hwnd.is_none_or(|h| h == w.hwnd)
             && self
                 .title
+                .as_deref()
                 .is_none_or(|t| w.title.to_lowercase().contains(&t.to_lowercase()))
-            && self.process.is_none_or(process)
-            && self.class.is_none_or(|c| w.class.eq_ignore_ascii_case(c))
+            && self.process.as_deref().is_none_or(process)
+            && self
+                .class
+                .as_deref()
+                .is_none_or(|c| w.class.eq_ignore_ascii_case(c))
     }
 }
 
@@ -326,6 +330,10 @@ pub fn elements(hwnd: isize, max: usize) -> Result<Vec<Element>, String> {
 /// `control_type` if given.
 pub fn find_elements(all: Vec<Element>, name: &str, control_type: Option<&str>) -> Vec<Element> {
     let name = normalize(name);
+    // A blank name would otherwise match every unnamed control.
+    if name.is_empty() {
+        return Vec::new();
+    }
     let typed: Vec<Element> = all
         .into_iter()
         .filter(|e| control_type.is_none_or(|t| e.control_type.eq_ignore_ascii_case(t)))
@@ -340,7 +348,7 @@ pub fn find_elements(all: Vec<Element>, name: &str, control_type: Option<&str>) 
     }
     typed
         .into_iter()
-        .filter(|e| !name.is_empty() && normalize(&e.name).contains(&name))
+        .filter(|e| normalize(&e.name).contains(&name))
         .collect()
 }
 
@@ -412,7 +420,14 @@ mod tests {
         ];
         assert_eq!(find_elements(all.clone(), "save", None).len(), 2);
         assert_eq!(find_elements(all.clone(), "save", Some("Button")).len(), 1);
-        assert_eq!(find_elements(all, "save a", None)[0].name, "Save as");
+        assert_eq!(
+            find_elements(all.clone(), "save a", None)[0].name,
+            "Save as"
+        );
+        let mut unnamed = all;
+        unnamed.push(e("", "pane"));
+        assert!(find_elements(unnamed.clone(), "", None).is_empty());
+        assert!(find_elements(unnamed, "  ", Some("pane")).is_empty());
     }
 
     #[test]
@@ -428,23 +443,23 @@ mod tests {
             foreground: false,
         };
         assert!(Query {
-            title: Some("notepad"),
+            title: Some("notepad".into()),
             ..Query::default()
         }
         .matches(&w));
         assert!(Query {
-            process: Some("notepad"),
+            process: Some("notepad".into()),
             ..Query::default()
         }
         .matches(&w));
         assert!(Query {
-            process: Some("NOTEPAD.EXE"),
-            class: Some("notepad"),
+            process: Some("NOTEPAD.EXE".into()),
+            class: Some("notepad".into()),
             ..Query::default()
         }
         .matches(&w));
         assert!(!Query {
-            process: Some("note"),
+            process: Some("note".into()),
             ..Query::default()
         }
         .matches(&w));

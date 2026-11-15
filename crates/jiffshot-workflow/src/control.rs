@@ -459,7 +459,7 @@ fn has_target(a: &Args) -> bool {
     TARGET.iter().any(|k| *k != "no_activate" && a.has(k))
 }
 
-fn window_query(a: &Args) -> Result<find::Query<'_>, Error> {
+fn window_query(a: &Args) -> Result<find::Query, Error> {
     let hwnd = match a.0.get("window") {
         None | Some(Value::Null) => None,
         Some(Value::Number(n)) => Some(
@@ -480,12 +480,13 @@ fn window_query(a: &Args) -> Result<find::Query<'_>, Error> {
         }
         Some(_) => return Err(invalid("window must be a window handle")),
     };
-    let text = |k: &str| a.0.get(k).and_then(Value::as_str);
+    // Read like every other text argument: a number names a title too, and
+    // other values are refused instead of silently matching every window.
     Ok(find::Query {
         hwnd,
-        title: text("title"),
-        process: text("process"),
-        class: text("class"),
+        title: a.string("title")?,
+        process: a.string("process")?,
+        class: a.string("class")?,
         all: false,
     })
 }
@@ -962,7 +963,7 @@ fn record_start(a: &Args) -> Reply {
     let (c, p, rect) = (control.clone(), path.clone(), t.rect);
     let worker = std::thread::Builder::new()
         .name("jiffshot-control-record".into())
-        .spawn(move || recorder::record_to(&p, rect, &options, &c))
+        .spawn(move || report_recording_error(&c, recorder::record_to(&p, rect, &options, &c)))
         .map_err(internal)?;
     // Ready once frames are being written, so the caller can start acting.
     let started = Instant::now();
@@ -1006,6 +1007,18 @@ fn record_start(a: &Args) -> Reply {
     let reply = recording_json(&recording);
     *RECORDING.lock().unwrap() = Some(recording);
     Ok(reply)
+}
+
+/// Keeps a recorder failure for `record.status`, which reports a recording
+/// that ended by itself before `record.stop` collects it.
+fn report_recording_error(
+    control: &recorder::Control,
+    result: Result<VideoSpec, String>,
+) -> Result<VideoSpec, String> {
+    if let Err(error) = &result {
+        *control.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.clone());
+    }
+    result
 }
 
 fn current_recording<'a>(
@@ -1591,9 +1604,14 @@ fn snippet(texts: impl Iterator<Item = String>) -> String {
 fn locate(a: &Args) -> Result<((i32, i32), Value), Error> {
     let nth = a.int("nth", 1, 1000)?.unwrap_or(1) as usize;
     let offset = a.point("offset")?.unwrap_or((0, 0));
-    let shift = |p: (i32, i32)| (p.0 + offset.0, p.1 + offset.1);
+    let shift = |p: (i32, i32)| match (p.0.checked_add(offset.0), p.1.checked_add(offset.1)) {
+        (Some(x), Some(y)) => Ok((x, y)),
+        _ => Err(invalid(
+            "offset moves the point outside the screen coordinate range",
+        )),
+    };
     if let Some(p) = a.point("at")? {
-        return Ok((shift(p), Value::Null));
+        return Ok((shift(p)?, Value::Null));
     }
     if let Some(phrase) = a.string("text")? {
         let area = if has_target(a) {
@@ -1610,7 +1628,7 @@ fn locate(a: &Args) -> Result<((i32, i32), Value), Error> {
                 snippet(lines.iter().map(|l| l.text.clone()))
             ))
         })?;
-        return Ok((shift(hit.center), json!({ "text": hit })));
+        return Ok((shift(hit.center)?, json!({ "text": hit })));
     }
     if let Some(name) = a.string("element")? {
         let window = target_window(a, true).map_err(|e| {
@@ -1634,7 +1652,7 @@ fn locate(a: &Args) -> Result<((i32, i32), Value), Error> {
                 found.len()
             ))
         })?;
-        return Ok((shift(hit.center), json!({ "element": hit })));
+        return Ok((shift(hit.center)?, json!({ "element": hit })));
     }
     Err(invalid(
         "give at (X,Y), text (to find by OCR) or element (a UI Automation name)",
@@ -1651,6 +1669,22 @@ fn button(a: &Args) -> Result<Button, Error> {
     match a.string("button")? {
         None => Ok(Button::Left),
         Some(b) => Button::parse(&b).ok_or_else(|| invalid("button must be left, right or middle")),
+    }
+}
+
+/// Refuses a point on no display: Windows clips the pointer to the screens,
+/// so input meant for it would land on the nearest screen edge instead.
+fn on_screen(p: (i32, i32)) -> Result<(i32, i32), Error> {
+    on_screen_in(&screen::monitors(), p)
+}
+
+fn on_screen_in(monitors: &[screen::Monitor], p: (i32, i32)) -> Result<(i32, i32), Error> {
+    if monitors.iter().any(|m| m.rect.contains(p.0, p.1)) {
+        Ok(p)
+    } else {
+        Err(invalid(format!(
+            "{p:?} is not on any display; `monitors` lists them"
+        )))
     }
 }
 
@@ -1672,6 +1706,7 @@ fn click(a: &Args) -> Reply {
     ]))?;
     let _input = INPUT.lock().unwrap();
     let (at, matched) = locate(a)?;
+    on_screen(at)?;
     let button = button(a)?;
     let count = if a.bool("double")? {
         2
@@ -1710,6 +1745,7 @@ fn move_pointer(a: &Args) -> Reply {
     a.only(&with(&[TARGET, POINTER, &["glide_ms"]]))?;
     let _input = INPUT.lock().unwrap();
     let (at, matched) = locate(a)?;
+    on_screen(at)?;
     if !input::move_to(at, glide(a)?) {
         return Err(internal("Windows could not position the cursor"));
     }
@@ -1727,10 +1763,11 @@ fn drag(a: &Args) -> Reply {
         "settle_ms",
     ])?;
     let _input = INPUT.lock().unwrap();
-    let from = a
-        .point("from")?
-        .ok_or_else(|| invalid("from is required"))?;
-    let to = a.point("to")?.ok_or_else(|| invalid("to is required"))?;
+    let from = on_screen(
+        a.point("from")?
+            .ok_or_else(|| invalid("from is required"))?,
+    )?;
+    let to = on_screen(a.point("to")?.ok_or_else(|| invalid("to is required"))?)?;
     if !input::drag(from, to, button(a)?, a.millis("glide_ms", 500)?) {
         return Err(internal("Windows refused the input"));
     }
@@ -1752,6 +1789,7 @@ fn scroll(a: &Args) -> Reply {
     let horizontal = a.bool("horizontal")?;
     let at = if a.has("at") || a.has("text") || a.has("element") {
         let (at, _) = locate(a)?;
+        on_screen(at)?;
         if !input::move_to(at, glide(a)?) {
             return Err(internal("Windows could not position the cursor"));
         }
@@ -1847,12 +1885,21 @@ fn ocr(a: &Args) -> Reply {
     }
 }
 
+/// How many controls `elements` reads: name and type filters apply to every
+/// control, not only to the first `max` of them.
+fn elements_to_read(a: &Args, max: usize) -> usize {
+    if a.has("name") || a.has("type") {
+        5000
+    } else {
+        max
+    }
+}
+
 fn elements(a: &Args) -> Reply {
     a.only(&with(&[TARGET, &["name", "type", "max"]]))?;
     let window = target_window(a, !a.bool("no_activate")?)?;
     let max = a.int("max", 1, 5000)?.unwrap_or(300) as usize;
-    let mut all =
-        find::elements(window.hwnd, if a.has("name") { 5000 } else { max }).map_err(internal)?;
+    let mut all = find::elements(window.hwnd, elements_to_read(a, max)).map_err(internal)?;
     let control_type = a.string("type")?;
     if let Some(name) = a.string("name")? {
         all = find::find_elements(all, &name, control_type.as_deref());
@@ -1967,6 +2014,18 @@ fn open(a: &Args) -> Reply {
 
 fn quit(a: &Args) -> Reply {
     a.only(&[])?;
+    // A recording being started or finalized is not in RECORDING yet (or
+    // any more); exiting then would leave a truncated MP4.
+    let _lifecycle = match RECORDING_LIFECYCLE.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(guard)) => guard.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            return Err(Error::new(
+                ErrorCode::Conflict,
+                "a recording is starting or being finalized; wait for it to finish",
+            ))
+        }
+    };
     if let Some(r) = RECORDING.lock().unwrap().as_ref() {
         return Err(Error::new(
             ErrorCode::Conflict,
@@ -2560,6 +2619,79 @@ mod tests {
                 .unwrap_err()
                 .code,
             ErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn window_queries_read_text_arguments_strictly() {
+        let query = window_query(&args(json!({ "title": 2024, "process": "excel" }))).unwrap();
+        assert_eq!(query.title.as_deref(), Some("2024"));
+        assert_eq!(query.process.as_deref(), Some("excel"));
+        assert_eq!(
+            window_query(&args(json!({ "title": ["Notepad"] })))
+                .err()
+                .map(|error| error.code),
+            Some(ErrorCode::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn pointer_offsets_cannot_overflow_the_point() {
+        let (at, _) = locate(&args(json!({ "at": "10,20", "offset": "-5,5" }))).unwrap();
+        assert_eq!(at, (5, 25));
+        let error = locate(&args(json!({ "at": [2147483647, 0], "offset": "1,0" }))).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn a_failed_recording_reports_its_error_before_it_is_stopped() {
+        let control = recorder::Control::default();
+        assert!(report_recording_error(&control, Err("display changed".into())).is_err());
+        assert_eq!(
+            control.error.lock().unwrap().as_deref(),
+            Some("display changed")
+        );
+    }
+
+    #[test]
+    fn input_points_must_be_on_a_display() {
+        let monitor = |x, y| screen::Monitor {
+            rect: Rect::new(x, y, 100, 50),
+            work: Rect::new(x, y, 100, 50),
+            dpi: 96,
+            primary: x == 0,
+            device: String::new(),
+        };
+        let monitors = [monitor(0, 0), monitor(200, 0)];
+        assert_eq!(on_screen_in(&monitors, (99, 49)).unwrap(), (99, 49));
+        assert_eq!(on_screen_in(&monitors, (250, 10)).unwrap(), (250, 10));
+        for outside in [(150, 10), (100, 0), (0, 50), (-1, 0)] {
+            assert_eq!(
+                on_screen_in(&monitors, outside).unwrap_err().code,
+                ErrorCode::InvalidRequest,
+                "{outside:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn element_filters_search_every_control() {
+        assert_eq!(elements_to_read(&args(json!({ "max": 10 })), 10), 10);
+        assert_eq!(
+            elements_to_read(&args(json!({ "type": "button" })), 10),
+            5000
+        );
+        assert_eq!(elements_to_read(&args(json!({ "name": "Save" })), 10), 5000);
+    }
+
+    #[test]
+    fn quit_waits_for_a_recording_that_is_starting_or_finalizing() {
+        let _lifecycle = RECORDING_LIFECYCLE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(
+            quit(&args(Value::Null)).unwrap_err().code,
+            ErrorCode::Conflict
         );
     }
 
