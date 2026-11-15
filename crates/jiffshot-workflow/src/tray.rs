@@ -864,6 +864,30 @@ impl Drop for ReopenCaptureWindow {
     }
 }
 
+/// Applies a preset's cursor, effects and share choices to the settings of
+/// an overlay capture in `mode`. A recording sends to its video destination.
+fn apply_preset_choices(
+    settings: &mut Settings,
+    mode: usize,
+    cursor: Option<bool>,
+    effects: Option<Vec<String>>,
+    share: Option<String>,
+) {
+    if let Some(c) = cursor {
+        settings.include_cursor = c;
+    }
+    if let Some(to) = share {
+        if matches!(mode, MODE_VIDEO | MODE_VIDEO_FIXED) {
+            settings.video_share = to;
+        } else {
+            settings.share = to;
+        }
+    }
+    if let Some(e) = effects {
+        settings.capture_effects = e;
+    }
+}
+
 fn select_create_mode(choice: Option<usize>) -> Option<usize> {
     const MODES: [usize; 4] = [MODE_IMAGE, MODE_VIDEO, MODE_SCROLLING, MODE_PANORAMIC];
     choice.and_then(|index| MODES.get(index).copied())
@@ -921,6 +945,15 @@ fn capture_interactive(mode: usize, mut image_attempt: ImageAttempt) {
     if matches!(mode, MODE_TEXT | MODE_VIDEO | MODE_VIDEO_FIXED) {
         image_attempt.dismiss_without_reopen();
     }
+    // A preset's choices belong to this capture only, even when it does not
+    // start, so they never carry over to a later one.
+    let overrides = with_app(|app| {
+        (
+            app.override_cursor.take(),
+            app.override_effects.take(),
+            app.override_share.take(),
+        )
+    });
     let Some((hwnd, settings)) = with_app(|app| {
         if app.busy {
             return None;
@@ -1092,22 +1125,8 @@ fn capture_interactive(mode: usize, mut image_attempt: ImageAttempt) {
         return;
     }
     let mut settings = settings;
-    if let Some((cursor, effects, share)) = with_app(|app| {
-        (
-            app.override_cursor.take(),
-            app.override_effects.take(),
-            app.override_share.take(),
-        )
-    }) {
-        if let Some(c) = cursor {
-            settings.include_cursor = c;
-        }
-        if let Some(to) = share {
-            settings.share = to;
-        }
-        if let Some(e) = effects {
-            settings.capture_effects = e;
-        }
+    if let Some((cursor, effects, share)) = overrides {
+        apply_preset_choices(&mut settings, mode, cursor, effects, share);
     }
     let Some(selection) = selection else {
         with_app(|app| app.busy = false);
@@ -1663,6 +1682,24 @@ fn capture_from_file(image_attempt: ImageAttempt) {
     }
 }
 
+/// The settings each imported capture finishes with: only the last one that
+/// loaded opens in the editor, or selects there; none goes to the clipboard.
+fn import_batch(captures: Vec<Capture>, settings: &Settings) -> Vec<(Capture, Settings)> {
+    let total = captures.len();
+    captures
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut capture)| {
+            let last = i + 1 == total;
+            let mut s = settings.clone();
+            s.open_in_editor &= last;
+            s.copy_to_clipboard = false;
+            capture.background = !last;
+            (capture, s)
+        })
+        .collect()
+}
+
 fn import_files(
     files: Vec<std::path::PathBuf>,
     settings: Settings,
@@ -1673,21 +1710,13 @@ fn import_files(
         return None;
     }
     let mut errors = Vec::new();
-    let mut loaded = Vec::with_capacity(files.len());
-    let total = files.len();
-    for (i, path) in files.iter().enumerate() {
+    let mut captures = Vec::with_capacity(files.len());
+    for path in &files {
         match jiffshot_doc::io::load_image(path) {
             Ok(pm) => {
                 let frame = workflow::frame_from_pixmap(&pm);
                 let rect = Rect::new(0, 0, frame.width as i32, frame.height as i32);
-                let mut s = settings.clone();
-                // Only the last one opens in the editor, or selects there.
-                let last = i + 1 == total;
-                s.open_in_editor &= last;
-                s.copy_to_clipboard = false;
-                let mut capture = workflow::from_frame(CaptureKind::Region, rect, frame);
-                capture.background = !last;
-                loaded.push((capture, s));
+                captures.push(workflow::from_frame(CaptureKind::Region, rect, frame));
             }
             Err(error) => {
                 let message = format!("{}: {error}", path.display());
@@ -1696,6 +1725,7 @@ fn import_files(
             }
         }
     }
+    let loaded = import_batch(captures, &settings);
     if loaded.is_empty() {
         image_attempt.fail();
         #[cfg(target_os = "macos")]
@@ -1756,7 +1786,11 @@ fn import_files(
 /// Minutes from now until the next `HH:MM` (local time).
 pub(crate) fn minutes_until(at: &str) -> Option<u32> {
     let (h, m) = at.trim().split_once(':')?;
-    let target = h.parse::<u32>().ok()?.min(23) * 60 + m.parse::<u32>().ok()?.min(59);
+    let (h, m) = (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?);
+    if h > 23 || m > 59 {
+        return None;
+    }
+    let target = h * 60 + m;
     let (_, _, _, hour, minute, _) = jiffshot_capture::os::local_time();
     let now = hour as u32 * 60 + minute as u32;
     Some((target + 24 * 60 - now) % (24 * 60))
@@ -2895,11 +2929,16 @@ pub fn run_preset_now(index: usize) {
     run_preset(index);
 }
 
-fn dispatch_mode(mode: usize, mut attempt: ImageAttempt) {
-    if matches!(
+/// Whether [`dispatch_mode`] runs `mode` through the selection overlay.
+fn opens_overlay(mode: usize) -> bool {
+    !matches!(
         mode,
-        MODE_FULLSCREEN | MODE_CLIPBOARD | MODE_FILE | MODE_VIDEO_FULL
-    ) {
+        usize::MAX | MODE_STEPS | MODE_FULLSCREEN | MODE_CLIPBOARD | MODE_FILE | MODE_VIDEO_FULL
+    )
+}
+
+fn dispatch_mode(mode: usize, mut attempt: ImageAttempt) {
+    if !opens_overlay(mode) {
         // A preset's choices apply to the overlay's captures only.
         with_app(|app| {
             (
@@ -3003,7 +3042,7 @@ pub(crate) fn start_mode_after_delay(name: &str, mut attempt: ImageAttempt) {
     let Some((hwnd, delay)) = with_app(|app| (app.hwnd, app.settings.delay_seconds)) else {
         return;
     };
-    if delay == 0 || matches!(mode, MODE_VIDEO | MODE_VIDEO_FIXED) {
+    if delay == 0 || counts_down_itself(mode) {
         // Let the Capture window disappear from the screen first.
         with_app(|app| app.pending_mode = Some(PendingMode::Mode(mode, attempt)));
         // SAFETY: a timer on our own window.
@@ -3013,7 +3052,19 @@ pub(crate) fn start_mode_after_delay(name: &str, mut attempt: ImageAttempt) {
     with_app(|app| app.pending_mode = Some(PendingMode::Mode(mode, attempt)));
     begin_countdown(hwnd, None, "Get ready to capture", delay, TIMER_MODE);
     // SAFETY: as above.
-    unsafe { SetTimer(hwnd, TIMER_MODE, delay * 1000, None) };
+    unsafe { SetTimer(hwnd, TIMER_MODE, timer_ms(delay), None) };
+}
+
+/// Recordings count their own countdown down, so the capture delay (an
+/// image setting) does not hold them up.
+fn counts_down_itself(mode: usize) -> bool {
+    matches!(mode, MODE_VIDEO | MODE_VIDEO_FIXED | MODE_VIDEO_FULL)
+}
+
+/// A delay of `seconds` as timer milliseconds; a long delay from a settings
+/// or presets file saturates instead of overflowing.
+fn timer_ms(seconds: u32) -> u32 {
+    seconds.saturating_mul(1000)
 }
 
 #[cfg(target_os = "macos")]
@@ -3114,7 +3165,7 @@ pub(crate) fn capture_rect_after_delay(rect: Rect, mut attempt: ImageAttempt) {
         begin_countdown(hwnd, Some(rect), "Get ready to capture", delay, TIMER_MODE);
     }
     // SAFETY: a timer on our own window.
-    unsafe { SetTimer(hwnd, TIMER_MODE, (delay * 1000).max(150), None) };
+    unsafe { SetTimer(hwnd, TIMER_MODE, timer_ms(delay).max(150), None) };
 }
 
 fn run_pending_mode() {
@@ -3128,7 +3179,7 @@ fn run_pending_mode() {
         #[cfg(target_os = "macos")]
         Some(PendingMode::Fixed(ticket, attempt)) => (capture_fixed_rect(&settings, &ticket), attempt),
         #[cfg(windows)]
-        Some(PendingMode::Fixed(rect, attempt)) => (capture_fixed_rect(rect, settings.include_cursor), attempt),
+        Some(PendingMode::Fixed(rect, attempt)) => (capture_fixed_rect(rect, &settings), attempt),
         #[cfg(windows)]
         Some(PendingMode::Record(rect)) => return record_rect(rect),
         None => return,
@@ -3181,21 +3232,33 @@ pub(crate) fn capture_fixed_rect(
 }
 
 #[cfg(windows)]
-fn capture_fixed_rect(rect: Rect, include_cursor: bool) -> std::io::Result<workflow::Capture> {
-    workflow::immediate(CaptureKind::Region, rect, include_cursor)
+fn capture_fixed_rect(rect: Rect, settings: &Settings) -> std::io::Result<workflow::Capture> {
+    workflow::immediate_in_layout_with_cursor(
+        CaptureKind::Region,
+        rect,
+        settings.include_cursor,
+        settings.cursor_as_object,
+        &CaptureLayout::current()?,
+    )
 }
 
 fn run_preset(index: usize) {
+    start_preset(index, false);
+}
+
+/// Runs preset `index`, first counting its delay down unless `waited` (its
+/// timer fired). A preset started during another's countdown replaces it.
+fn start_preset(index: usize, waited: bool) {
     let Some((hwnd, preset)) = with_app(|app| (app.hwnd, app.settings.presets.get(index).cloned()))
     else {
         return;
     };
     let Some(preset) = preset else { return };
-    if preset.delay > 0 && with_app(|app| app.pending_preset.is_none()).unwrap_or(false) {
+    if preset.delay > 0 && !waited {
         with_app(|app| app.pending_preset = Some(index));
         begin_countdown(hwnd, None, &preset.name, preset.delay, TIMER_PRESET);
         // SAFETY: a timer on our own window.
-        unsafe { SetTimer(hwnd, TIMER_PRESET, preset.delay * 1000, None) };
+        unsafe { SetTimer(hwnd, TIMER_PRESET, timer_ms(preset.delay), None) };
         return;
     }
     with_app(|app| {
@@ -3274,7 +3337,6 @@ fn capture_now(kind: CaptureKind, region: CaptureRegion, mut image_attempt: Imag
     let Some((hwnd, settings)) = with_app(|app| (app.hwnd, app.settings.clone())) else {
         return;
     };
-    #[cfg(target_os = "macos")]
     let capture = workflow::immediate_in_layout_with_cursor(
         kind,
         region.rect,
@@ -3282,9 +3344,6 @@ fn capture_now(kind: CaptureKind, region: CaptureRegion, mut image_attempt: Imag
         settings.cursor_as_object,
         &region.layout,
     );
-    #[cfg(windows)]
-    let capture =
-        workflow::immediate_in_layout(kind, region.rect, settings.include_cursor, &region.layout);
     match capture {
         Ok(mut capture) => {
             capture.request_id = image_attempt.take();
@@ -3355,7 +3414,7 @@ fn start_delayed() {
     if let Some((hwnd, seconds)) = with_app(|app| (app.hwnd, app.settings.delay_seconds.max(1))) {
         begin_countdown(hwnd, None, "Get ready to capture", seconds, TIMER_DELAY);
         // SAFETY: a timer on our own window.
-        unsafe { SetTimer(hwnd, TIMER_DELAY, seconds * 1000, None) };
+        unsafe { SetTimer(hwnd, TIMER_DELAY, timer_ms(seconds), None) };
     }
 }
 
@@ -3692,9 +3751,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_TIMER if wparam == TIMER_PRESET => {
             KillTimer(hwnd, TIMER_PRESET);
             end_countdown(hwnd, TIMER_PRESET);
-            if let Some(i) = with_app(|app| app.pending_preset).flatten() {
-                run_preset(i);
-                with_app(|app| app.pending_preset = None);
+            if let Some(i) = with_app(|app| app.pending_preset.take()).flatten() {
+                start_preset(i, true);
             }
             0
         }
@@ -4424,6 +4482,111 @@ mod tests {
         }
         assert_eq!(mode_named("steps"), Some(MODE_STEPS));
         assert_eq!(mode_named("video-fixed"), Some(MODE_VIDEO_FIXED));
+    }
+
+    #[test]
+    fn scheduled_times_outside_the_clock_are_rejected() {
+        for at in ["00:00", "9:05", " 23:59 "] {
+            assert!(minutes_until(at).is_some_and(|m| m < 24 * 60), "{at}");
+        }
+        for at in ["24:00", "25:30", "12:60", "99:99", "12", "ab:cd", ""] {
+            assert_eq!(minutes_until(at), None, "{at}");
+        }
+    }
+
+    #[test]
+    fn preset_choices_apply_only_to_the_capture_they_were_for() {
+        let mut s = Settings::default();
+        apply_preset_choices(
+            &mut s,
+            MODE_IMAGE,
+            Some(true),
+            Some(vec!["Border".into()]),
+            Some("email".into()),
+        );
+        assert_eq!(
+            (
+                s.include_cursor,
+                s.capture_effects.as_slice(),
+                s.share.as_str(),
+                s.video_share.as_str()
+            ),
+            (true, &["Border".to_owned()][..], "email", "none")
+        );
+        let mut s = Settings::default();
+        apply_preset_choices(&mut s, MODE_VIDEO, None, None, Some("file".into()));
+        assert_eq!(
+            (s.share.as_str(), s.video_share.as_str()),
+            ("none", "file"),
+            "a video preset sends its recording"
+        );
+
+        for mode in [
+            usize::MAX,
+            MODE_STEPS,
+            MODE_FULLSCREEN,
+            MODE_CLIPBOARD,
+            MODE_FILE,
+            MODE_VIDEO_FULL,
+        ] {
+            assert!(
+                !opens_overlay(mode),
+                "mode {mode} ignores preset choices, so they are cleared"
+            );
+        }
+        assert!(opens_overlay(MODE_IMAGE) && opens_overlay(MODE_VIDEO));
+
+        // A capture that cannot start still consumes its preset's choices.
+        APP.with(|app| {
+            *app.borrow_mut() = Some(test_app(std::ptr::null_mut(), Settings::default()))
+        });
+        with_app(|app| {
+            app.busy = true;
+            app.override_cursor = Some(true);
+            app.override_effects = Some(vec!["Border".into()]);
+            app.override_share = Some("email".into());
+        });
+        capture_interactive(MODE_IMAGE, ImageAttempt::none());
+        let left = with_app(|app| {
+            (
+                app.override_cursor,
+                app.override_effects.clone(),
+                app.override_share.clone(),
+            )
+        });
+        APP.with(|app| *app.borrow_mut() = None);
+        assert_eq!(left, Some((None, None, None)));
+    }
+
+    #[test]
+    fn recordings_skip_the_image_delay_and_long_delays_do_not_overflow() {
+        for name in ["video", "video-fixed", "video-fullscreen"] {
+            assert!(counts_down_itself(mode_named(name).unwrap()), "{name}");
+        }
+        for name in ["image", "fullscreen", "steps"] {
+            assert!(!counts_down_itself(mode_named(name).unwrap()), "{name}");
+        }
+        assert_eq!(timer_ms(3), 3000);
+        assert_eq!(timer_ms(5_000_000), u32::MAX);
+    }
+
+    #[test]
+    fn the_last_file_that_loads_opens_in_the_editor() {
+        let capture = || {
+            workflow::from_frame(
+                CaptureKind::Region,
+                Rect::new(0, 0, 2, 2),
+                jiffshot_capture::Frame::new(2, 2),
+            )
+        };
+        // The third file failed to load; the second is now the last import.
+        let batch = import_batch(vec![capture(), capture()], &Settings::default());
+        let roles: Vec<_> = batch
+            .iter()
+            .map(|(c, s)| (c.background, s.open_in_editor, s.copy_to_clipboard))
+            .collect();
+        assert_eq!(roles, [(true, false, false), (false, true, false)]);
+        assert!(import_batch(Vec::new(), &Settings::default()).is_empty());
     }
 
     #[cfg(any(windows, target_os = "macos"))]

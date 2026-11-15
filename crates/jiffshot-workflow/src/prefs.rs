@@ -12,6 +12,8 @@ const AUDIO: [(&str, &str); 4] = [
     ("both", "Both, mixed"),
     ("none", "No sound"),
 ];
+/// The longest capture delay, as the Capture window's Time delay panel allows.
+const MAX_DELAY: i64 = 600;
 
 /// The Capture tab.
 pub fn capture(s: &Settings, runs_at_startup: bool) -> Vec<Row> {
@@ -39,7 +41,7 @@ pub fn capture(s: &Settings, runs_at_startup: bool) -> Vec<Row> {
             "Keep the pointer as a movable object in the editor",
             s.cursor_as_object,
         ),
-        number("Time delay (s)", s.delay_seconds as i64, 0, 60),
+        number("Time delay (s)", s.delay_seconds as i64, 0, MAX_DELAY),
         number("Recording countdown (s)", s.countdown as i64, 0, 10),
         choice("Recording frame rate", &["15", "24", "30", "60"], fps),
         choice("Recording sound", &AUDIO.map(|(_, label)| label), audio),
@@ -61,7 +63,7 @@ pub fn apply_capture(s: &mut Settings, values: &[Value], runs_at_startup: bool) 
     s.copy_to_clipboard = on(values, 2);
     s.open_in_editor = on(values, 3);
     s.cursor_as_object = on(values, 4);
-    s.delay_seconds = clamp(5, 0, 60) as u32;
+    s.delay_seconds = clamp(5, 0, MAX_DELAY) as u32;
     s.countdown = clamp(6, 0, 10) as u32;
     s.record_fps = FPS[clamp(7, 0, 3) as usize];
     s.record_audio = AUDIO[clamp(8, 0, 3) as usize].0.to_owned();
@@ -194,6 +196,25 @@ mod tests {
         changed[8] = json!(1);
         assert_eq!(apply_capture(&mut s, &changed, false), Some(true));
         assert_eq!((s.record_fps, s.record_audio.as_str()), (60, "microphone"));
+    }
+
+    #[test]
+    fn a_long_time_delay_set_in_the_capture_window_survives_preferences() {
+        let mut s = Settings {
+            delay_seconds: 120,
+            ..Settings::default()
+        };
+        let values: Vec<Value> = capture(&s, false)
+            .iter()
+            .map(|r| match r {
+                Row::Check { value, .. } => json!(value),
+                Row::Number { value, .. } => json!(value),
+                Row::Choice { value, .. } => json!(value),
+                _ => Value::Null,
+            })
+            .collect();
+        apply_capture(&mut s, &values, false);
+        assert_eq!(s.delay_seconds, 120);
     }
 
     #[test]
