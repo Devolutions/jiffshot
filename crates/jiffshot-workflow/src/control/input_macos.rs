@@ -228,9 +228,16 @@ fn move_to(layout: &DisplayLayout, to: (i32, i32), duration: Duration, dragging:
             (f64::from(from.1) + (f64::from(to.1) - f64::from(from.1)) * eased).round() as i32,
         );
         if previous != Some(point) || t >= 1.0 {
-            let native = checked_point(layout, point)?;
-            mouse_event(kind, button, native, 1, true)?;
-            previous = Some(point);
+            match checked_point(layout, point) {
+                Ok(native) => {
+                    mouse_event(kind, button, native, 1, true)?;
+                    previous = Some(point);
+                }
+                // A straight glide between displays that only touch at a
+                // corner crosses points outside every display; skip them.
+                Err(error) if t < 1.0 && error.code == ErrorCode::InvalidRequest => {}
+                Err(error) => return Err(error),
+            }
         }
         if t >= 1.0 {
             return Ok(());

@@ -7,7 +7,7 @@ use jiffshot_control::{Error, ErrorCode};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 struct Guide {
     id: String,
@@ -17,6 +17,16 @@ struct Guide {
 
 static GUIDE: Mutex<Option<Guide>> = Mutex::new(None);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// The guide is only changed after a step's capture and input succeed, so a
+/// panic while the lock was held leaves it consistent. Recover it instead of
+/// making every later steps command panic until Jiffshot restarts.
+fn lock_guide() -> MutexGuard<'static, Option<Guide>> {
+    GUIDE.lock().unwrap_or_else(|poisoned| {
+        GUIDE.clear_poison();
+        poisoned.into_inner()
+    })
+}
 
 fn summary(guide: &Option<Guide>) -> Value {
     match guide {
@@ -49,7 +59,7 @@ fn start(a: &Args) -> Reply {
     a.only(&["title", "restart"])?;
     let restart = a.bool("restart")?;
     let title = a.string("title")?.unwrap_or_else(|| "How to …".into());
-    let mut slot = GUIDE.lock().unwrap();
+    let mut slot = lock_guide();
     if let Some(guide) = slot.as_ref() {
         if !restart {
             return Err(Error::new(
@@ -90,7 +100,7 @@ fn add_with(
     let description = a
         .string("description")?
         .filter(|text| !text.trim().is_empty());
-    let mut slot = GUIDE.lock().unwrap();
+    let mut slot = lock_guide();
     let guide = slot
         .as_mut()
         .ok_or_else(|| not_found("no guide is in progress; run steps.start first"))?;
@@ -168,12 +178,7 @@ pub(super) fn click_with_step(
 }
 
 pub(super) fn require_for_click(requested: Option<bool>) -> Result<(), Error> {
-    if requested == Some(true)
-        && GUIDE
-            .lock()
-            .map_err(|_| internal("the guide state is unavailable"))?
-            .is_none()
-    {
+    if requested == Some(true) && lock_guide().is_none() {
         return Err(not_found(
             "step needs a guide in progress; run steps.start first",
         ));
@@ -194,9 +199,7 @@ fn click_with_step_and_capture(
         perform()?;
         return Ok(None);
     }
-    let mut slot = GUIDE
-        .lock()
-        .map_err(|_| internal("the guide state is unavailable"))?;
+    let mut slot = lock_guide();
     let Some(guide) = slot.as_mut() else {
         if requested == Some(true) {
             return Err(not_found(
@@ -240,7 +243,7 @@ fn finish_with_open(a: &Args, open_in_editor: impl FnOnce(&Path) -> bool) -> Rep
     let out = a.out("out", &["png"])?;
     let title = a.string("title")?;
     let open = a.bool("open")?;
-    let mut slot = GUIDE.lock().unwrap();
+    let mut slot = lock_guide();
     let guide = slot
         .as_ref()
         .ok_or_else(|| not_found("no guide is in progress"))?;
@@ -298,18 +301,14 @@ fn finish_with_open(a: &Args, open_in_editor: impl FnOnce(&Path) -> bool) -> Rep
 
 fn cancel(a: &Args) -> Reply {
     a.only(&[])?;
-    let guide = GUIDE
-        .lock()
-        .unwrap()
+    let guide = lock_guide()
         .take()
         .ok_or_else(|| not_found("no guide is in progress"))?;
     Ok(json!({ "id": guide.id, "cancelled": true, "steps": guide.steps.len() }))
 }
 
 pub(super) fn status() -> Reply {
-    let guide = GUIDE
-        .lock()
-        .map_err(|_| internal("the guide state is unavailable"))?;
+    let guide = lock_guide();
     Ok(summary(&guide))
 }
 
@@ -366,6 +365,31 @@ mod tests {
             call("steps.status", json!({})).unwrap(),
             json!({"active":false})
         );
+    }
+
+    #[test]
+    fn a_panicked_step_capture_does_not_disable_guides() {
+        let _test = TEST_LOCK.lock().unwrap();
+        *lock_guide() = None;
+        let started = call("steps.start", json!({"title":"Poisoned"})).unwrap();
+        let panicked = std::panic::catch_unwind(|| {
+            add_with(
+                &Args::new(json!({"at":[3,4], "description":"Never added"})).unwrap(),
+                |_, _, _| panic!("injected step capture panic"),
+                |_| Ok(()),
+            )
+        });
+        assert!(panicked.is_err());
+        let status = call("steps.status", json!({})).unwrap();
+        assert_eq!(status["id"], started["id"]);
+        assert_eq!(status["steps"], json!([]));
+        assert_eq!(
+            call("steps.cancel", json!({})).unwrap()["id"],
+            started["id"]
+        );
+        assert!(!GUIDE.is_poisoned());
+        assert!(call("steps.start", json!({})).is_ok());
+        call("steps.cancel", json!({})).unwrap();
     }
 
     #[test]

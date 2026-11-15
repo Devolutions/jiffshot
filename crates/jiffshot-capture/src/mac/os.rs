@@ -61,5 +61,17 @@ pub const LINE_END: &str = "\n";
 
 /// Opens a file or folder the way Finder would.
 pub fn open_path(path: &std::path::Path) -> std::io::Result<()> {
-    std::process::Command::new("/usr/bin/open").arg(path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ())
+    let mut child = std::process::Command::new("/usr/bin/open").arg(path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()?;
+    // Reap the short-lived helper so each request does not leave a zombie
+    // process behind for the lifetime of the app.
+    let reaper = std::thread::Builder::new().name("jiffshot-open".into()).spawn(move || {
+        if let Err(error) = child.wait() {
+            eprintln!("could not wait for /usr/bin/open: {error}");
+        }
+    });
+    if let Err(error) = reaper {
+        // The request was already handed to `open`; only its exit status is lost.
+        eprintln!("could not watch /usr/bin/open: {error}");
+    }
+    Ok(())
 }
