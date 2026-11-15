@@ -738,6 +738,85 @@ fn jiffshot_exe() -> Option<PathBuf> {
 struct Detached(windows_sys::Win32::Foundation::HANDLE);
 
 #[cfg(windows)]
+fn resolve_executable(exe: &Path) -> std::io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::SystemInformation::{
+        GetSystemDirectoryW, GetWindowsDirectoryW,
+    };
+
+    fn windows_directory(
+        get_directory: unsafe extern "system" fn(*mut u16, u32) -> u32,
+    ) -> std::io::Result<PathBuf> {
+        let mut buffer = vec![0u16; 260];
+        loop {
+            // SAFETY: the buffer is writable and its length fits in a u32.
+            let len = unsafe { get_directory(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+            if len == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if len < buffer.len() {
+                return Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])));
+            }
+            buffer.resize(len, 0);
+        }
+    }
+
+    fn exists(path: &Path) -> bool {
+        // As with Command, an inaccessible search candidate does not stop PATH lookup.
+        std::fs::symlink_metadata(path).is_ok()
+    }
+
+    let name = exe.as_os_str().as_encoded_bytes();
+    if name.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "program path has no file name",
+        ));
+    }
+    if exe
+        .parent()
+        .is_some_and(|parent| parent.as_os_str().is_empty())
+    {
+        let mut filename = exe.as_os_str().to_os_string();
+        if !name.contains(&b'.') {
+            filename.push(".exe");
+        }
+        let mut directories = vec![
+            std::env::current_exe()?.with_file_name(""),
+            windows_directory(GetSystemDirectoryW)?,
+            windows_directory(GetWindowsDirectoryW)?,
+        ];
+        if let Some(path) = std::env::var_os("PATH") {
+            directories
+                .extend(std::env::split_paths(&path).filter(|dir| !dir.as_os_str().is_empty()));
+        }
+        for dir in directories {
+            let candidate = dir.join(&filename);
+            if exists(&candidate) {
+                return Ok(candidate);
+            }
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "program not found",
+        ));
+    }
+
+    if !name
+        .get(name.len().saturating_sub(4)..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(b".exe"))
+    {
+        let mut with_suffix = exe.as_os_str().to_os_string();
+        with_suffix.push(".exe");
+        let with_suffix = PathBuf::from(with_suffix);
+        if exists(&with_suffix) {
+            return Ok(with_suffix);
+        }
+    }
+    Ok(exe.to_path_buf())
+}
+
+#[cfg(windows)]
 impl Detached {
     /// Starts `exe` with `args` (each quoted), detached and in its own process group.
     fn spawn(exe: &Path, args: &[&str]) -> std::io::Result<Self> {
@@ -749,12 +828,14 @@ impl Detached {
         };
 
         let wide = |text: &std::ffi::OsStr| text.encode_wide().chain([0]).collect::<Vec<u16>>();
-        let application = wide(exe.as_os_str());
-        let mut line = format!("\"{}\"", exe.display());
+        let application = wide(resolve_executable(exe)?.as_os_str());
+        let mut line = vec![b'"' as u16];
+        line.extend(exe.as_os_str().encode_wide());
+        line.push(b'"' as u16);
         for arg in args {
-            line.push_str(&format!(" \"{arg}\""));
+            line.extend(format!(" \"{arg}\"").encode_utf16());
         }
-        let mut line = wide(std::ffi::OsStr::new(&line));
+        line.push(0);
         // SAFETY: plain data; zero is a valid starting value.
         let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
         startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
@@ -842,7 +923,11 @@ fn launch() -> Result<(), Error> {
         #[cfg(windows)]
         let ended = child.exit_status();
         #[cfg(not(windows))]
-        let ended = child.try_wait().ok().flatten().map(|status| status.to_string());
+        let ended = child
+            .try_wait()
+            .ok()
+            .flatten()
+            .map(|status| status.to_string());
         if let Some(status) = ended {
             if exited.get_or_insert_with(Instant::now).elapsed() > Duration::from_secs(5) {
                 return Err(Error::new(
@@ -1216,6 +1301,75 @@ pub(super) fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn detached_spawn_resolves_executable_names_and_paths() {
+        use std::process::Command;
+
+        const MARKER: &str = "JIFFSHOT_CLI_TEST_EXECUTABLE_LOOKUP";
+        if let Some(dir) = std::env::var_os(MARKER) {
+            let dir = PathBuf::from(dir);
+            let paths = [
+                PathBuf::from("lookup-target"),
+                PathBuf::from("lookup-target.exe"),
+                dir.join("lookup-target"),
+            ];
+            for path in paths {
+                let child = Detached::spawn(&path, &["--exact", "no_such_test"])
+                    .unwrap_or_else(|error| panic!("starting {}: {error}", path.display()));
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    if let Some(status) = child.exit_status() {
+                        assert_eq!(status, "exit code: 0", "starting {}", path.display());
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for {}",
+                        path.display()
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            assert!(Detached::spawn(Path::new("missing-lookup-target"), &[]).is_err());
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "jiffshot cli executable lookup {}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).expect("create lookup test directory");
+        let executable = dir.join("lookup-target.exe");
+        let current_dir = dir.join("current directory");
+        std::fs::create_dir(&current_dir).expect("create working directory");
+        let shadow = current_dir.join("lookup-target.exe");
+        std::fs::write(&shadow, b"not an executable").expect("create shadow executable");
+        let current = std::env::current_exe().expect("locate test executable");
+        std::fs::copy(&current, &executable).expect("copy test executable");
+        let output = Command::new(current)
+            .args([
+                "--exact",
+                "desktop::tests::detached_spawn_resolves_executable_names_and_paths",
+                "--nocapture",
+            ])
+            .env("PATH", &dir)
+            .env(MARKER, &dir)
+            .current_dir(&current_dir)
+            .output()
+            .expect("run lookup test subprocess");
+        std::fs::remove_file(executable).expect("remove copied test executable");
+        std::fs::remove_file(shadow).expect("remove shadow executable");
+        std::fs::remove_dir(current_dir).expect("remove working directory");
+        std::fs::remove_dir(dir).expect("remove lookup test directory");
+        assert!(
+            output.status.success(),
+            "lookup subprocess failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     /// The launched Jiffshot must not keep the caller's output pipe open: with an
     /// inherited pipe, `$(jiffshot-cli ...)` waits until Jiffshot quits.
     #[cfg(windows)]
@@ -1236,13 +1390,19 @@ mod tests {
         };
         let (mut read, mut write): (HANDLE, HANDLE) = (std::ptr::null_mut(), std::ptr::null_mut());
         // SAFETY: both out pointers are valid; the attributes outlive the call.
-        assert_ne!(unsafe { CreatePipe(&mut read, &mut write, &attributes, 0) }, 0);
+        assert_ne!(
+            unsafe { CreatePipe(&mut read, &mut write, &attributes, 0) },
+            0
+        );
 
         // A stand-in for Jiffshot that keeps running.
         let system = std::env::var_os("SystemRoot").expect("SystemRoot is set");
         let ping = Path::new(&system).join(r"System32\PING.EXE");
         let child = Detached::spawn(&ping, &["-n", "30", "127.0.0.1"]).expect("start the stand-in");
-        assert!(child.exit_status().is_none(), "the stand-in must still be running");
+        assert!(
+            child.exit_status().is_none(),
+            "the stand-in must still be running"
+        );
 
         // SAFETY: this test owns the write handle and closes it once.
         unsafe { CloseHandle(write) };
