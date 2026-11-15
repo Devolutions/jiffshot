@@ -170,15 +170,19 @@ pub fn color_brush(hex: &str) -> Brush {
 /// Seconds as `m:ss.f` (`TimeConverter`).
 pub fn time_text(seconds: f64) -> String {
     let seconds = if seconds.is_finite() { seconds.max(0.0) } else { 0.0 };
-    format!("{}:{:04.1}", (seconds / 60.0) as i64, seconds % 60.0)
+    // Round to tenths first, so 59.97 s carries into the minute ("1:00.0", not "0:60.0").
+    let tenths = (seconds * 10.0).round_ties_even() as i64;
+    format!("{}:{:02}.{}", tenths / 600, tenths % 600 / 10, tenths % 10)
 }
 
 /// A slider's value as its label shows it: whole numbers without decimals.
 pub fn number_text(value: f64) -> String {
-    if (value - value.round()).abs() < 0.05 {
-        format!("{value:.0}")
+    // Rounded to what is shown first (+0 drops the sign of a zero): -0.02 shows "0", not "-0".
+    let shown = (value * 10.0).round() / 10.0 + 0.0;
+    if shown.fract() == 0.0 {
+        format!("{shown:.0}")
     } else {
-        format!("{value:.1}")
+        format!("{shown:.1}")
     }
 }
 
@@ -389,6 +393,9 @@ mod tests {
         assert_eq!(time_text(0.0), "0:00.0");
         assert_eq!(time_text(65.25), "1:05.2");
         assert_eq!(time_text(f64::NAN), "0:00.0");
+        assert_eq!(time_text(59.97), "1:00.0");
+        assert_eq!(time_text(119.96), "2:00.0");
+        assert_eq!(time_text(3599.99), "60:00.0");
     }
 
     #[test]
@@ -404,5 +411,9 @@ mod tests {
         assert_eq!(file_name("file:///tmp/%é.png"), "%é.png");
         assert_eq!(number_text(28.0), "28");
         assert_eq!(number_text(2.46), "2.5");
+        assert_eq!(number_text(-0.02), "0");
+        assert_eq!(number_text(-0.96), "-1");
+        assert_eq!(number_text(2.95), "3");
+        assert_eq!(number_text(0.05), "0.1");
     }
 }

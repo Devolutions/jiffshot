@@ -491,14 +491,23 @@ fn widget_command(command: &str) {
         eprintln!("Capture Widget menu: {error:?}");
     }
     collapse();
-    let binding = super::TRAY.with(|tray| tray.borrow().clone()).expect("the tray is mounted before the Capture Widget is shown");
-    binding.model.run(|model| match command {
+    let run = |model: &mut dyn crate::vm::TrayViewModel| match command {
         "hide" => model.set_show_widget(false),
         "capture-window" => model.show_capture_window(),
         "editor" => model.show_editor(),
         "preferences" => model.preferences(),
         _ => unreachable!("unknown Capture Widget command: {command}"),
-    });
+    };
+    match super::TRAY.with(|tray| tray.borrow().clone()) {
+        Some(binding) => binding.model.run(run),
+        // Windows shows the widget even when the tray icon could not be made;
+        // the tray's model works without its icon.
+        None => {
+            if let Err(error) = run(&mut crate::tray::TrayModel) {
+                eprintln!("Capture Widget menu: {error:?}");
+            }
+        }
+    }
 }
 
 fn close_widget_menu() -> Result<()> {

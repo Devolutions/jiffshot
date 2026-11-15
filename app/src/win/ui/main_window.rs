@@ -39,7 +39,6 @@ const CLOSE_OS_SHUTDOWN: rustolonia::WindowCloseReason = rustolonia::WindowClose
 pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
     let sink = binding.sink;
     let canvas = CanvasView::new(scope)?;
-    canvas.follow_theme(sink.theme.local())?;
     super::set_canvas(canvas.clone());
     let ctx = Ctx {
         scope: scope.clone(),
@@ -51,6 +50,8 @@ pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
     };
     let zoom = ZoomView::new();
     let theme = ctx.theme;
+    // The actual variant, which the "System" theme changes with the system.
+    canvas.follow_theme(theme.dark)?;
     let window_height = ctx.window_height;
     let content = DockPanel::el();
     #[cfg(not(target_os = "macos"))]

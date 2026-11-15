@@ -241,8 +241,10 @@ fn share_menu(ctx: &Ctx) -> MenuEntry {
     })
 }
 
+/// Destinations are named after programs ("sublime_text"), not schema
+/// headers: their underscores are kept.
 fn share_items(shares: &[String]) -> Vec<MenuEntry> {
-    shares.iter().map(|name| item(name, action(format!("share:{name}")), None)).collect()
+    shares.iter().map(|name| MenuEntry::action(name, action(format!("share:{name}")), None)).collect()
 }
 
 /// Tools: every tool, the first nine on Ctrl+1 … Ctrl+9.

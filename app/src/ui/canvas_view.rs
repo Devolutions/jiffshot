@@ -25,7 +25,7 @@ use rustolonia::pixel_surface::{
     Cursor, Interpolation, Modifiers, MouseButton, PixelFormat, Placement, PointerInput,
     PointerKind, SurfaceInput, SurfaceMetrics,
 };
-use rustolonia::{AppScope, Control, Effect, Key, PixelSurface, Result, Signal, ThemeVariant};
+use rustolonia::{AppScope, Control, Effect, Key, PixelSurface, Result, Signal};
 use std::cell::{RefCell, RefMut};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
@@ -437,22 +437,17 @@ impl CanvasView {
         })
     }
 
-    /// Follows the editor's color theme ("Dark", "Light" or "System") for the
-    /// backdrop around the document. Dark until called.
-    pub fn follow_theme(&self, theme: Signal<String>) -> Result<()> {
+    /// Follows the editor's theme for the backdrop around the document:
+    /// `dark` is whether the application shows its dark variant, so that
+    /// "System" follows the system's changes too. Dark until called.
+    pub fn follow_theme(&self, dark: Signal<bool>) -> Result<()> {
         let inner = self.inner.clone();
         Effect::new(move || {
-            let light = match theme.with(|t| t.clone()).as_str() {
-                "Light" => true,
-                "Dark" => false,
-                _ => inner
-                    .scope
-                    .actual_theme_variant()
-                    .is_ok_and(|v| v == ThemeVariant::Light),
-            };
-            inner
-                .surface
-                .set_background(Some(if light { BACKDROP_LIGHT } else { BACKDROP_DARK }))
+            inner.surface.set_background(Some(if dark.get() {
+                BACKDROP_DARK
+            } else {
+                BACKDROP_LIGHT
+            }))
         })?;
         Ok(())
     }
