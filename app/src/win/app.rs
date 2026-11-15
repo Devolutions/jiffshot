@@ -1138,6 +1138,8 @@ fn amount_label(kind: &str) -> &'static str {
 /// What the properties panel shows, read from the editor in one go.
 struct Snapshot {
     tool: Tool,
+    /// The tool whose quick styles and variants apply: the selection's.
+    style_tool: Tool,
     kind: Option<String>,
     style: Style,
     text: String,
@@ -1332,6 +1334,7 @@ impl App {
             .unwrap_or_else(|| e.variant(tool));
         Some(Snapshot {
             tool,
+            style_tool: variant_tool,
             kind,
             style: e.current_style(),
             text: selected
@@ -1399,7 +1402,9 @@ impl App {
                 }
             }
             self.shown.strings.remove("Variant");
-            self.publish_quick_styles(&kind_name);
+            // By tool, not kind: a selected marker ("Marker") uses the
+            // Pen's quick styles, as saving one from it does.
+            self.publish_quick_styles(s.style_tool.name());
         }
         let st = &s.style;
         self.put_str("StrokeColor", &st.stroke.to_hex(), |k, v| {
@@ -1614,7 +1619,7 @@ impl App {
         let _ = self.autosave_checked();
     }
 
-    fn autosave_checked(&mut self) -> std::result::Result<(), String> {
+    pub(crate) fn autosave_checked(&mut self) -> std::result::Result<(), String> {
         if let Some(video) = &self.video {
             return if video.is_saving() {
                 Err("Wait for the edited video to finish saving before leaving it.".into())
@@ -2866,9 +2871,20 @@ impl App {
     }
 
     /// The editor window was closed: Jiffshot keeps running in the tray.
+    /// Unsaved video cuts stay in memory (only playback stops), as they
+    /// do everywhere else until saved or undone.
     pub fn hidden(&mut self) {
         self.autosave();
-        self.stop_video();
+        if self
+            .video
+            .as_ref()
+            .is_some_and(|v| v.is_dirty() || v.is_saving())
+        {
+            crate::video::pause(self);
+            self.cancel_narration();
+        } else {
+            self.stop_video();
+        }
     }
 
     /// Shows a notice from the capture side as a toast (the `toast` signal).
@@ -3431,7 +3447,8 @@ impl App {
                 let root = PathBuf::from(arg);
                 self.settings.set_library(root.clone());
                 self.library = Library::new(root);
-                self.show_library();
+                // The new folder's captures, not the old folder's.
+                self.refresh_library();
                 self.set_status(format!("Library: {arg}"));
             }
             "align" => {
@@ -4185,13 +4202,10 @@ impl App {
         else {
             return self.set_status("Only library captures can be deleted here");
         };
-        with_editor(|e| e.mark_saved());
-        let files: Vec<PathBuf> = ["png", "mp4", EDITS_EXT, "json", "cursor.png", "cursor.json"]
-            .iter()
-            .map(|x| src.with_extension(x))
-            .filter(|p| p.exists())
-            .collect();
+        let files = capture_files(&src);
         if winutil::recycle(&files) {
+            // Only now: a failed delete keeps the edits to be autosaved.
+            with_editor(|e| e.mark_saved());
             self.source = None;
             self.path = None;
             self.refresh_library();
@@ -4315,7 +4329,11 @@ impl App {
             }
         }
         self.shown_filters = filters;
-        let hidden = if view.expanded { 0 } else { closed.len() };
+        let hidden = if view.expanded {
+            0
+        } else {
+            library::closed_count(entries, &view.closed)
+        };
         let mut info = format!(
             "{} of {} captures in {}",
             self.library_items.len(),
@@ -4685,6 +4703,9 @@ impl App {
                         with_editor(|e| e.mark_saved());
                         self.source = None;
                         self.path = None;
+                        // The next capture must come from the library as it
+                        // is now, without the ones just deleted.
+                        self.refresh_library();
                         self.close_file();
                     }
                     let trash = if cfg!(target_os = "macos") {
@@ -5190,6 +5211,15 @@ pub(crate) fn try_add_cursor_object(
     Ok(true)
 }
 
+/// A capture and the companions it has: what deleting it removes. Another
+/// capture that only shares its stem (`a.png` beside `a.mp4`) is not one.
+fn capture_files(capture: &Path) -> Vec<PathBuf> {
+    std::iter::once(capture.to_path_buf())
+        .chain(jiffshot_capture::library::companions(capture))
+        .filter(|p| p.exists())
+        .collect()
+}
+
 /// "1 capture", "3 captures".
 fn count_of(n: usize) -> String {
     format!("{n} capture{}", if n == 1 { "" } else { "s" })
@@ -5580,6 +5610,30 @@ mod tests {
         receiver
             .recv_timeout(std::time::Duration::from_secs(10))
             .unwrap();
+    }
+
+    #[test]
+    fn deleting_a_capture_leaves_other_captures_with_the_same_stem() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "jiffshot-capture-files-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let image = root.join("Demo.png");
+        let video = root.join("Demo.mp4");
+        for file in [&image, &video, &image.with_extension(EDITS_EXT)] {
+            std::fs::write(file, b"x").unwrap();
+        }
+        let mut files = capture_files(&image);
+        files.sort();
+        assert_eq!(files, [image.with_extension(EDITS_EXT), image.clone()]);
+        assert!(capture_files(&video).contains(&video));
+        assert!(!capture_files(&video).contains(&image));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -113,6 +113,18 @@ impl Entry {
     }
 }
 
+/// Whether two apps, sites or tags are the same, ignoring case the way tag
+/// input does (Unicode, not only ASCII).
+fn same_name(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b) || a.to_lowercase() == b.to_lowercase()
+}
+
+/// How many of `entries` are closed from the tray. Closed paths of captures
+/// that were since deleted or moved are not counted.
+pub fn closed_count(entries: &[Entry], closed: &[PathBuf]) -> usize {
+    entries.iter().filter(|e| closed.contains(&e.path)).count()
+}
+
 /// The filters offered, from what the entries have: fixed ones, then
 /// each app, web site and tag.
 pub fn filters(entries: &[Entry]) -> Vec<String> {
@@ -131,7 +143,7 @@ pub fn filters(entries: &[Entry]) -> Vec<String> {
     let mut add = |prefix: &str, values: Vec<&str>| {
         let mut v: Vec<&str> = values;
         v.sort_unstable_by_key(|s| s.to_lowercase());
-        v.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        v.dedup_by(|a, b| same_name(a, b));
         out.extend(v.into_iter().map(|x| format!("{prefix}: {x}")));
     };
     add("App", entries.iter().filter_map(Entry::app).collect());
@@ -172,9 +184,9 @@ pub fn select(
             "Last 7 days" => age(e) < Duration::from_secs(7 * 24 * 3600),
             "Tagged" => !e.tags().is_empty(),
             f => match f.split_once(": ") {
-                Some(("App", a)) => e.app().is_some_and(|x| x.eq_ignore_ascii_case(a)),
-                Some(("Site", s)) => e.site().is_some_and(|x| x.eq_ignore_ascii_case(s)),
-                Some(("Tag", t)) => e.tags().iter().any(|x| x.eq_ignore_ascii_case(t)),
+                Some(("App", a)) => e.app().is_some_and(|x| same_name(x, a)),
+                Some(("Site", s)) => e.site().is_some_and(|x| same_name(x, s)),
+                Some(("Tag", t)) => e.tags().iter().any(|x| same_name(x, t)),
                 _ => true,
             },
         })
@@ -631,6 +643,45 @@ mod tests {
             "tags deduplicated ignoring case: {f:?}"
         );
         assert_eq!(parse_tags(" a, b ;; c ,A"), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn unicode_tag_case_variants_share_one_filter_that_matches_both() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let all = vec![
+            entry("first", 1, Some("Éditeur.exe"), None, &["École"], false),
+            entry("second", 2, Some("éditeur.exe"), None, &["école"], false),
+        ];
+        let f = filters(&all);
+        assert_eq!(
+            f.iter().filter(|x| x.starts_with("Tag: ")).count(),
+            1,
+            "{f:?}"
+        );
+        assert_eq!(
+            f.iter().filter(|x| x.starts_with("App: ")).count(),
+            1,
+            "{f:?}"
+        );
+        let tag = f.iter().find(|x| x.starts_with("Tag: ")).unwrap();
+        let names = |v: Vec<Entry>| v.iter().map(|e| e.name()).collect::<Vec<_>>();
+        assert_eq!(
+            names(select(&all, "", tag, "Newest", now)),
+            ["first", "second"]
+        );
+        let app = f.iter().find(|x| x.starts_with("App: ")).unwrap();
+        assert_eq!(
+            names(select(&all, "", app, "Newest", now)),
+            ["first", "second"]
+        );
+    }
+
+    #[test]
+    fn closed_count_ignores_captures_no_longer_in_the_library() {
+        let all = vec![entry("kept", 1, None, None, &[], false)];
+        let closed = vec![all[0].path.clone(), PathBuf::from("C:/lib/deleted.png")];
+        assert_eq!(closed_count(&all, &closed), 1);
+        assert_eq!(closed_count(&[], &closed), 0);
     }
 
     #[test]
