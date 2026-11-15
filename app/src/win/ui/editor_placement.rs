@@ -9,8 +9,9 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM}
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetWindowRect, IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SetWindowPos,
-    ShowWindow, MINMAXINFO, SWP_NOACTIVATE, SWP_NOZORDER, SW_MAXIMIZE, WM_APP, WM_DISPLAYCHANGE,
+    GetCursorPos, GetWindowPlacement, GetWindowRect, IsIconic, IsWindowVisible, IsZoomed,
+    PostMessageW, SetWindowPlacement, SetWindowPos, ShowWindow, MINMAXINFO, SWP_NOACTIVATE,
+    SWP_NOZORDER, SW_MAXIMIZE, SW_SHOWMAXIMIZED, WINDOWPLACEMENT, WM_APP, WM_DISPLAYCHANGE,
     WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_MOVE, WM_NCDESTROY,
     WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SIZE,
 };
@@ -18,6 +19,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 const SECTION: &str = "editor_window";
 const SUBCLASS_ID: usize = 0x4A53_4550;
 const RECONCILE: u32 = WM_APP + 0x455;
+/// Maximizes an already visible editor after the current message, never from inside
+/// Avalonia's `Loaded` callback, which runs before Avalonia has shown the window.
+const MAXIMIZE: u32 = WM_APP + 0x456;
 const INITIAL_WORK_AREA_FRACTION: f64 = 0.9;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +175,69 @@ fn persist(placement: Placement) -> io::Result<()> {
     config::try_set_section(SECTION, value)
 }
 
+/// Where and how Avalonia should first show the editor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Startup {
+    /// The restored frame's top-left in physical pixels, so the window opens
+    /// (and maximizes) on the monitor it was saved on.
+    pub x: i32,
+    pub y: i32,
+    pub maximized: bool,
+}
+
+/// The saved placement to apply before the editor is first shown, if any.
+///
+/// A saved maximized state must reach Avalonia as its own `WindowState`
+/// before `Show`: Avalonia then shows the window maximized itself. `Loaded`
+/// (where `install` runs) is raised before Avalonia shows the window, and the
+/// tray-started editor is not shown at all; `ShowWindow(SW_MAXIMIZE)` there made
+/// the native window visible without Avalonia ever rendering into it.
+pub(super) fn startup() -> Option<Startup> {
+    let saved = load()?;
+    let monitors = screen::monitors();
+    let monitor = monitor_for(saved.normal, &monitors)?;
+    Some(startup_for(saved, monitor.work, monitor.dpi))
+}
+
+fn startup_for(saved: Placement, work: Rect, dpi: u32) -> Startup {
+    let normal = restored(saved, work, dpi);
+    Startup {
+        x: normal.x,
+        y: normal.y,
+        maximized: saved.maximized,
+    }
+}
+
+/// Sets the bounds a maximized window restores to, without changing its state.
+fn set_restore_bounds(hwnd: HWND, normal: Bounds, monitor: &screen::Monitor) -> io::Result<()> {
+    // SAFETY: WINDOWPLACEMENT is plain data; zero is a valid starting value.
+    let mut placement: WINDOWPLACEMENT = unsafe { std::mem::zeroed() };
+    placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+    // SAFETY: hwnd is live and placement is writable with its length set.
+    if unsafe { GetWindowPlacement(hwnd, &mut placement) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // rcNormalPosition is in workspace coordinates: relative to the work area,
+    // not the monitor, when a taskbar sits on the top or left edge.
+    let (dx, dy) = (
+        monitor.work.x - monitor.rect.x,
+        monitor.work.y - monitor.rect.y,
+    );
+    placement.flags = 0;
+    placement.showCmd = SW_SHOWMAXIMIZED as u32;
+    placement.rcNormalPosition = RECT {
+        left: normal.x - dx,
+        top: normal.y - dy,
+        right: normal.x - dx + normal.width,
+        bottom: normal.y - dy + normal.height,
+    };
+    // SAFETY: hwnd is live and placement is fully initialized.
+    if unsafe { SetWindowPlacement(hwnd, &placement) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Installs on the UI thread after Rustolonia has created the native editor window.
 pub(super) fn install(hwnd: HWND) -> io::Result<()> {
     if WINDOWS.with(|windows| windows.borrow().contains_key(&(hwnd as isize))) {
@@ -223,10 +290,29 @@ pub(super) fn install(hwnd: HWND) -> io::Result<()> {
             },
         );
     });
-    place(hwnd, normal)?;
-    if placement.maximized {
-        // SAFETY: hwnd is our live editor window.
-        unsafe { ShowWindow(hwnd, SW_MAXIMIZE) };
+    // SAFETY: querying the maximized state does not retain hwnd.
+    let zoomed = unsafe { IsZoomed(hwnd) } != 0;
+    crate::trace::line(&format!(
+        "editor placement: install maximized={} zoomed={zoomed}",
+        placement.maximized
+    ));
+    if zoomed {
+        // Avalonia already showed it maximized (see `startup`): only remember
+        // where it restores to, without a second state change.
+        set_restore_bounds(hwnd, normal, monitor)?;
+    } else {
+        place(hwnd, normal)?;
+        if placement.maximized {
+            // The state did not reach Avalonia before Show. Maximize once this
+            // callback (and Avalonia's first layout pass) has returned.
+            // SAFETY: the custom message contains no pointers and targets our live window.
+            if unsafe { PostMessageW(hwnd, MAXIMIZE, 0, 0) } == 0 {
+                eprintln!(
+                    "Editor placement: could not queue maximizing: {}",
+                    io::Error::last_os_error()
+                );
+            }
+        }
     }
     queue(hwnd);
     Ok(())
@@ -318,8 +404,14 @@ fn reconcile(hwnd: HWND) -> io::Result<()> {
     if unsafe { IsIconic(hwnd) } != 0 {
         return Ok(());
     }
-    // SAFETY: querying the maximized state does not retain hwnd.
-    let maximized = unsafe { IsZoomed(hwnd) } != 0;
+    // A hidden editor is never natively maximized; Avalonia applies the remembered state
+    // when it shows it, so keep that state rather than saving "not maximized".
+    // SAFETY: these queries do not retain hwnd.
+    let maximized = if unsafe { IsWindowVisible(hwnd) } != 0 {
+        (unsafe { IsZoomed(hwnd) }) != 0
+    } else {
+        previous.placement.maximized
+    };
     let bounds = window_bounds(hwnd)?;
     let monitors = screen::monitors();
     let monitor = monitor_for(bounds, &monitors)
@@ -369,6 +461,16 @@ unsafe extern "system" fn subclass(
     if message == RECONCILE {
         if let Err(error) = reconcile(hwnd) {
             eprintln!("Editor placement: {error}");
+        }
+        return 0;
+    }
+    if message == MAXIMIZE {
+        // A hidden editor keeps Avalonia's own state for its next Show; never show it from here.
+        // SAFETY: these queries and the state change only use our live window.
+        unsafe {
+            if IsWindowVisible(hwnd) != 0 && IsZoomed(hwnd) == 0 && IsIconic(hwnd) == 0 {
+                ShowWindow(hwnd, SW_MAXIMIZE);
+            }
         }
         return 0;
     }
@@ -477,6 +579,44 @@ mod tests {
         assert_eq!(
             restored(decoded, Rect::new(1920, 0, 1920, 1040), 120),
             saved.normal
+        );
+    }
+
+    #[test]
+    fn startup_carries_the_fitted_position_and_maximized_state_to_avalonia() {
+        let saved = Placement {
+            normal: Bounds {
+                x: 1170,
+                y: 300,
+                width: 1516,
+                height: 999,
+            },
+            dpi: 96,
+            maximized: true,
+        };
+        assert_eq!(
+            startup_for(saved, Rect::new(0, 0, 3840, 1560), 96),
+            Startup {
+                x: 1170,
+                y: 300,
+                maximized: true
+            }
+        );
+        // A frame saved partly off a smaller work area opens fully inside it.
+        assert_eq!(
+            startup_for(
+                Placement {
+                    maximized: false,
+                    ..saved
+                },
+                Rect::new(0, 0, 1920, 1040),
+                96
+            ),
+            Startup {
+                x: 404,
+                y: 41,
+                maximized: false
+            }
         );
     }
 
@@ -777,6 +917,155 @@ mod tests {
             window_bounds(window.0).unwrap(),
             saved.normal,
             "a new window must restore the saved normal placement"
+        );
+    }
+
+    /// Regression: Avalonia raises `Loaded` (where `install` runs) before it shows the
+    /// window, and the tray-started editor is mounted hidden. Maximizing there made the
+    /// native window visible behind Avalonia's back, so it never started rendering and
+    /// the editor opened as an empty frame.
+    #[test]
+    fn saved_maximized_state_never_shows_a_hidden_editor_and_maximizes_after_the_callback() {
+        const CHILD: &str = "JIFFSHOT_PLACEMENT_MAXIMIZED_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = std::env::temp_dir().join(format!(
+                "jiffshot-placement-maximized-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "ui::editor_placement::tests::saved_maximized_state_never_shows_a_hidden_editor_and_maximizes_after_the_callback", "--nocapture"])
+                .env(CHILD, "1")
+                .env("JIFFSHOT_CONFIG_DIR", &directory)
+                .output()
+                .expect("run the native maximized placement fixture with isolated settings");
+            std::fs::remove_dir_all(&directory).unwrap();
+            assert!(
+                output.status.success(),
+                "native maximized placement fixture failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, DispatchMessageW, PeekMessageW, TranslateMessage, MSG,
+            PM_REMOVE, SW_SHOWNOACTIVATE, WS_OVERLAPPEDWINDOW,
+        };
+        struct TestWindow(HWND);
+        impl Drop for TestWindow {
+            fn drop(&mut self) {
+                // SAFETY: this test created the window on the current thread.
+                unsafe { DestroyWindow(self.0) };
+            }
+        }
+        fn window() -> TestWindow {
+            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+            // SAFETY: STATIC is a system class; the string is terminated and no creation data is retained.
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    std::ptr::null(),
+                    WS_OVERLAPPEDWINDOW,
+                    0,
+                    0,
+                    1200,
+                    800,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                )
+            };
+            assert!(
+                !hwnd.is_null(),
+                "create the placement fixture: {}",
+                io::Error::last_os_error()
+            );
+            TestWindow(hwnd)
+        }
+        fn pump() {
+            // SAFETY: MSG is plain data; the loop only drains this thread's queue.
+            unsafe {
+                let mut message: MSG = std::mem::zeroed();
+                while PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+        }
+
+        screen::enable_per_monitor_dpi();
+        let monitors = screen::monitors();
+        let primary = monitors
+            .iter()
+            .find(|monitor| monitor.primary)
+            .or(monitors.first())
+            .expect("a monitor");
+        let normal = initial(primary.work, primary.dpi);
+        persist(Placement {
+            normal,
+            dpi: primary.dpi,
+            maximized: true,
+        })
+        .unwrap();
+        assert_eq!(
+            startup().map(|startup| (startup.x, startup.y, startup.maximized)),
+            Some((normal.x, normal.y, true)),
+            "the saved maximized state must be handed to Avalonia before Show"
+        );
+
+        let hidden = window();
+        install(hidden.0).expect("install on the hidden editor");
+        pump();
+        // SAFETY: queries on the live fixture.
+        unsafe {
+            assert_eq!(
+                IsWindowVisible(hidden.0),
+                0,
+                "placement must never show a hidden editor"
+            );
+            assert_eq!(
+                IsZoomed(hidden.0),
+                0,
+                "a hidden editor must not be maximized natively"
+            );
+        }
+        assert!(
+            load().unwrap().maximized,
+            "a hidden editor must keep the saved maximized state"
+        );
+        drop(hidden);
+
+        let shown = window();
+        // SAFETY: show only this fixture, without activating it.
+        unsafe { ShowWindow(shown.0, SW_SHOWNOACTIVATE) };
+        install(shown.0).expect("install on the shown editor");
+        // SAFETY: query on the live fixture.
+        assert_eq!(
+            unsafe { IsZoomed(shown.0) },
+            0,
+            "install must not change the window state inside Avalonia's Loaded callback"
+        );
+        pump();
+        // SAFETY: query on the live fixture.
+        assert_ne!(
+            unsafe { IsZoomed(shown.0) },
+            0,
+            "the shown editor must be maximized afterwards"
+        );
+        pump();
+        let saved = load().unwrap();
+        assert!(saved.maximized, "the maximized state must persist");
+        assert_eq!(
+            saved.normal, normal,
+            "maximizing must keep the restored bounds"
         );
     }
 }

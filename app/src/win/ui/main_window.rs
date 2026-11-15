@@ -84,6 +84,20 @@ pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
     wire_window(&ctx, &window)?;
     #[cfg(windows)]
     {
+        // Give Avalonia the saved position and maximized state before the window is
+        // shown, so it opens maximized itself instead of being maximized during `Loaded`.
+        if let Some(startup) = super::editor_placement::startup() {
+            let applied = window.set_position((startup.x, startup.y)).and_then(|()| {
+                if startup.maximized {
+                    window.set_window_state(rustolonia::WindowState::Maximized)
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(error) = applied {
+                eprintln!("Could not restore the editor placement: {error}");
+            }
+        }
         let app = scope.clone();
         let editor = UiOnly::new(window.clone());
         window.clone().on_loaded(scope, move |_| {

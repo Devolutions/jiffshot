@@ -176,6 +176,15 @@ jobs:
           }
           Write-Host "Version OK: jiffshot.exe FileVersion=$($exeInfo.FileVersion) ProductVersion=$($exeInfo.ProductVersion)"
           Get-ChildItem $dir | Format-Table Name, Length
+          # Symbols for the exact binaries above (release profile: line tables), kept out of the
+          # portable folder so packages stay unchanged. Signing does not affect PDB matching.
+          $symbols = "jiffshot-${{ matrix.rid }}-symbols"
+          New-Item -ItemType Directory -Path $symbols | Out-Null
+          foreach ($pdb in @("$out/jiffshot.pdb", "$out/jiffshot_cli.pdb")) {
+            if (-not (Test-Path -LiteralPath $pdb -PathType Leaf)) { throw "Missing release symbols: $pdb" }
+            Copy-Item -LiteralPath $pdb -Destination $symbols
+          }
+          Get-ChildItem $symbols | Format-Table Name, Length
 
       - name: Sign portable binaries
         if: github.event_name != 'pull_request' && inputs.signing_environment != ''
@@ -198,6 +207,12 @@ jobs:
         with:
           name: jiffshot-${{ matrix.rid }}
           path: jiffshot-${{ matrix.rid }}
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jiffshot-${{ matrix.rid }}-symbols
+          path: jiffshot-${{ matrix.rid }}-symbols
           if-no-files-found: error
 
   linux:
