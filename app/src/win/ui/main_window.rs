@@ -46,7 +46,6 @@ pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
         sink,
         theme: Theme::new(),
         canvas: canvas.clone(),
-        window_width: rustolonia::Signal::new(1500.0),
         window_height: rustolonia::Signal::new(960.0),
         text_editor: NodeRef::new(),
     };
@@ -54,7 +53,7 @@ pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
     let theme = ctx.theme;
     // The actual variant, which the "System" theme changes with the system.
     canvas.follow_theme(theme.dark)?;
-    let (window_width, window_height) = (ctx.window_width, ctx.window_height);
+    let window_height = ctx.window_height;
     let live_side_bar_width = rustolonia::Signal::new(crate::settings::clamp_side_bar_width(sink.side_bar_width.get_untracked()));
     let content = DockPanel::el();
     #[cfg(not(target_os = "macos"))]
@@ -67,10 +66,7 @@ pub fn build(scope: &AppScope, binding: &MainBinding) -> Result<Window> {
         .min_height(600.0)
         .icon(super::icon_file())
         .background(theme.brush(Tone::Window))
-        .on_size_changed(move |args| {
-            window_width.set_if_changed(args.new_size.width);
-            window_height.set_if_changed(args.new_size.height);
-        })
+        .on_size_changed(move |args| window_height.set_if_changed(args.new_size.height))
         .content(
             content
                 .child(top_bar(&ctx))
@@ -135,11 +131,12 @@ pub(super) fn library_tile_for_selftest(scope: &AppScope, key: u64) -> Result<Wi
 /// The Editor and Library tabs, capture and creation actions, the tool palette,
 /// the Properties and Effects toggles, Copy All and Share ▾.
 fn top_bar(ctx: &Ctx) -> El<Border> {
-    let (s, theme, window_width) = (ctx.sink, ctx.theme, ctx.window_width);
+    let (s, theme) = (ctx.sink, ctx.theme);
     let expanded = s.library_expanded;
-    // Collapse secondary top-bar text labels on narrow windows (< 1100 px) so the
-    // center tool palette always retains room for primary tools + More.
-    let wide_chrome = move || window_width.get() >= 1100.0;
+    // Measured directly on the bar so initial X11/Xvfb layouts at 800–900 px
+    // keep the exact 3-tool compact toolbar budget (`Select`, `Move`, `Arrow`, `More`).
+    let bar_width = rustolonia::Signal::new(0.0_f64);
+    let wide_chrome = move || bar_width.get() >= 1100.0;
     let tab = move |label: &str, library: bool, tip: &str| {
         let on = move || expanded.get() == library;
         let underline_on = on;
@@ -168,18 +165,15 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
             )
             .command(main_common::act(move || expanded.set_if_changed(library)))
     };
-    let icon_label = move |path_data: &'static str, label: &str, chevron: bool, active: Option<rustolonia::Signal<bool>>| {
+    // Panel toggles (`Properties`, `Effects`) keep their icon on narrow windows and
+    // show their text label when wide; action buttons (`Create`, `Copy All`, `Share`)
+    // keep their text label on narrow windows and add their leading icon when wide.
+    let toggle_content = move |path_data: &'static str, label: &str, active: rustolonia::Signal<bool>| {
         let icon = Path::el()
             .width(14.0)
             .height(14.0)
             .data(path_data)
-            .stroke(move || {
-                Some(if active.is_some_and(|on| on.get()) {
-                    solid(WHITE)
-                } else {
-                    theme.get(Tone::Text)
-                })
-            })
+            .stroke(move || Some(if active.get() { solid(WHITE) } else { theme.get(Tone::Text) }))
             .stroke_thickness(1.4)
             .vertical_alignment(VerticalAlignment::Center);
         let text = TextBlock::el()
@@ -187,13 +181,26 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
             .margin((6.0, 0.0, 0.0, 0.0))
             .vertical_alignment(VerticalAlignment::Center)
             .visible(wide_chrome)
-            .foreground(move || {
-                if active.is_some_and(|on| on.get()) {
-                    solid(WHITE)
-                } else {
-                    theme.get(Tone::Text)
-                }
-            });
+            .foreground(move || if active.get() { solid(WHITE) } else { theme.get(Tone::Text) });
+        StackPanel::el()
+            .orientation(Orientation::Horizontal)
+            .vertical_alignment(VerticalAlignment::Center)
+            .child(icon)
+            .child(text)
+    };
+    let action_content = move |path_data: &'static str, label: &str, chevron: bool| {
+        let icon = Path::el()
+            .width(14.0)
+            .height(14.0)
+            .margin((0.0, 0.0, 6.0, 0.0))
+            .data(path_data)
+            .stroke(move || Some(theme.get(Tone::Text)))
+            .stroke_thickness(1.4)
+            .vertical_alignment(VerticalAlignment::Center)
+            .visible(wide_chrome);
+        let text = TextBlock::el()
+            .text(label.to_owned())
+            .vertical_alignment(VerticalAlignment::Center);
         let row = StackPanel::el()
             .orientation(Orientation::Horizontal)
             .vertical_alignment(VerticalAlignment::Center)
@@ -250,7 +257,7 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
             with_flyout(
                 Button::el()
                     .name("CreateMenu")
-                    .content(icon_label(vicons::CREATE_PLUS, "Create", true, None))
+                    .content(action_content(vicons::CREATE_PLUS, "Create", true))
                     .padding((10.0, 5.0))
                     .corner_radius(4.0)
                     .tool_tip_tip("Create an image from a template, combine images, or build a video from images"),
@@ -267,7 +274,7 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
         .child(
             ToggleButton::el()
                 .name("TogglePropertiesPanel")
-                .content(icon_label(vicons::PROPERTIES_SLIDERS, "Properties", false, Some(s.show_side_bar.local())))
+                .content(toggle_content(vicons::PROPERTIES_SLIDERS, "Properties", s.show_side_bar.local()))
                 .checked(s.show_side_bar.two_way())
                 .padding((10.0, 5.0))
                 .corner_radius(4.0)
@@ -276,7 +283,7 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
         .child(
             ToggleButton::el()
                 .name("ToggleEffectsPanel")
-                .content(icon_label(vicons::EFFECTS_SPARKLE, "Effects", false, Some(s.show_effects.local())))
+                .content(toggle_content(vicons::EFFECTS_SPARKLE, "Effects", s.show_effects.local()))
                 .checked(s.show_effects.two_way())
                 .padding((10.0, 5.0))
                 .corner_radius(4.0)
@@ -285,7 +292,7 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
         .child(
             Button::el()
                 .name("CopyAllImage")
-                .content(icon_label(vicons::COPY_SHEETS, "Copy All", false, None))
+                .content(action_content(vicons::COPY_SHEETS, "Copy All", false))
                 .padding((10.0, 5.0))
                 .corner_radius(4.0)
                 .tool_tip_tip(shortcut("Copy the whole image (Ctrl+Shift+C)"))
@@ -295,7 +302,7 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
             with_flyout(
                 Button::el()
                     .name("ShareMenu")
-                    .content(icon_label(vicons::SHARE_NODE, "Share", true, None))
+                    .content(action_content(vicons::SHARE_NODE, "Share", true))
                     .padding((10.0, 5.0))
                     .corner_radius(4.0)
                     .tool_tip_tip("Send the capture to another app, export to a file, or print"),
@@ -308,6 +315,7 @@ fn top_bar(ctx: &Ctx) -> El<Border> {
         .padding((8.0, 4.0))
         .border_brush(theme.brush(Tone::Border))
         .border_thickness((0.0, 0.0, 0.0, 1.0))
+        .on_size_changed(move |args| bar_width.set_if_changed(args.new_size.width))
         .child(StackPanel::el().spacing(4.0).child(DockPanel::el().child(left).child(right).child(tool_bar(ctx))))
 }
 

@@ -246,7 +246,7 @@ fn tool_button(sink: MainViewModelSink, theme: super::main_common::Theme, index:
             }
         })
         .border_brush(move || {
-            if border_active() {
+            if border_active() && theme.dark.get() && cfg!(windows) {
                 solid(brand_text(theme))
             } else {
                 solid(TRANSPARENT)

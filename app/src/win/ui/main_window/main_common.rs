@@ -25,8 +25,6 @@ pub struct Ctx {
     pub sink: MainViewModelSink,
     pub theme: Theme,
     pub canvas: CanvasView,
-    /// The window's width, for responsive top-bar chrome on narrow windows.
-    pub window_width: Signal<f64>,
     /// The window's height, for the library view.
     pub window_height: Signal<f64>,
     /// The properties panel's text box, which [`crate::ui::main_window`]
