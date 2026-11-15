@@ -893,6 +893,39 @@ fn script() -> Script {
             test.line("capture visibility: non-animated hides, safe frame cutoff, nested guards, restoration, and already-dismissed windows checked");
             100
         });
+        // Avalonia re-shows a hidden window in the state it last applied itself,
+        // so a maximize from the title bar was lost on every capture and reopen.
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Foundation::HWND;
+            use windows_sys::Win32::UI::WindowsAndMessaging::{IsZoomed, ShowWindow, SW_MAXIMIZE, SW_RESTORE};
+            fn editor_hwnd() -> HWND {
+                main_window().expect("the editor has no native window") as HWND
+            }
+            s.step(|_| {
+                // SAFETY: the editor's live window belongs to this UI thread.
+                unsafe { ShowWindow(editor_hwnd(), SW_MAXIMIZE) };
+                300
+            });
+            s.step(|test| {
+                let scope = super::scope().expect("the application scope is unavailable");
+                let editor = scope.main_window().expect("the editor is unavailable");
+                // SAFETY: querying the editor's live window does not retain it.
+                let zoomed = || unsafe { IsZoomed(editor_hwnd()) } != 0;
+                assert!(zoomed(), "the editor did not maximize");
+                drop(jiffshot_capture::visibility::hide().expect("hide application windows"));
+                assert!(editor.is_visible().unwrap(), "capture did not restore the maximized editor");
+                assert!(zoomed(), "capture restored a maximized editor un-maximized");
+                editor.hide().expect("hide the editor to the tray");
+                super::before_show(&scope, &editor);
+                editor.show().expect("reopen the editor");
+                assert!(zoomed(), "reopening restored a maximized editor un-maximized");
+                // SAFETY: the editor's live window belongs to this UI thread.
+                unsafe { ShowWindow(editor_hwnd(), SW_RESTORE) };
+                test.line("capture visibility: a maximized editor stays maximized after a capture and after reopening");
+                100
+            });
+        }
         let (send, receive) = std::sync::mpsc::channel();
         s.step(move |_| {
             let scope = super::scope().expect("the application scope is unavailable");

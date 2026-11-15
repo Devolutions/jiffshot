@@ -238,6 +238,51 @@ fn client_dips(frame: Bounds, dpi: u32) -> (f64, f64) {
     )
 }
 
+/// Call before Avalonia shows a hidden editor again (opening it from the tray,
+/// or restoring it after a capture): Avalonia re-shows a hidden window in the
+/// state it last applied itself, which is not a maximize done in the window's
+/// title bar, so the editor came back restored and its saved state was lost.
+pub(super) fn before_show(scope: &rustolonia::AppScope, window: &rustolonia::Window) {
+    use rustolonia::WindowState;
+    let Ok(handle) = scope.platform_handle(window) else { return };
+    let hwnd = handle as HWND;
+    // SAFETY: the visibility query does not retain hwnd.
+    if hwnd.is_null() || unsafe { IsWindowVisible(hwnd) } != 0 {
+        return;
+    }
+    let Some(maximized) = WINDOWS.with(|windows| {
+        windows.borrow().get(&handle).map(|state| state.placement.maximized)
+    }) else {
+        return;
+    };
+    let avalonia = window.window_state();
+    crate::trace::line(&format!(
+        "editor placement: before show maximized={maximized} avalonia={avalonia:?} zoomed={}",
+        // SAFETY: the query does not retain hwnd.
+        unsafe { IsZoomed(hwnd) } != 0
+    ));
+    if !maximized {
+        return;
+    }
+    // Setting the state Avalonia already reports is ignored, so step through Normal:
+    // while the window is hidden, Avalonia only records the state for its next Show.
+    let result = match avalonia {
+        Ok(WindowState::Maximized) => window
+            .set_window_state(WindowState::Normal)
+            .and_then(|()| window.set_window_state(WindowState::Maximized)),
+        _ => window.set_window_state(WindowState::Maximized),
+    };
+    if let Err(error) = result {
+        eprintln!("Editor placement: could not keep the editor maximized: {error}");
+    }
+    crate::trace::line(&format!(
+        "editor placement: before show applied visible={} zoomed={}",
+        // SAFETY: the queries do not retain hwnd.
+        unsafe { IsWindowVisible(hwnd) } != 0,
+        unsafe { IsZoomed(hwnd) } != 0
+    ));
+}
+
 /// Sets the bounds a maximized window restores to, without changing its state.
 fn set_restore_bounds(hwnd: HWND, normal: Bounds, monitor: &screen::Monitor) -> io::Result<()> {
     // SAFETY: WINDOWPLACEMENT is plain data; zero is a valid starting value.

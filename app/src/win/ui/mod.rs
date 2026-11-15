@@ -105,6 +105,15 @@ pub(crate) fn main_window_handle() -> Option<isize> {
     scope.platform_handle(&window).ok().filter(|h| *h != 0)
 }
 
+/// Call right before showing a window that may be hidden: keeps a hidden
+/// editor's maximized state for Avalonia's `Show` (no-op for other windows).
+pub(crate) fn before_show(scope: &AppScope, window: &Window) {
+    #[cfg(windows)]
+    editor_placement::before_show(scope, window);
+    #[cfg(not(windows))]
+    let _ = (scope, window);
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn forget_native_window(handle: isize) {
     hud::native::forget_cloak(handle);
