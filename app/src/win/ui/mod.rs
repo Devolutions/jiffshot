@@ -198,7 +198,6 @@ pub fn mount_main_window(
     scope: &AppScope,
     model: impl MainViewModel,
     show: bool,
-    _background: bool,
 ) -> Result<()> {
     let binding = MainBinding::new(model)?;
     MAIN.with(|m| *m.borrow_mut() = Some(binding.clone()));
@@ -222,7 +221,7 @@ pub fn mount_main_window(
         overlay::install(scope)?;
         hud::install(scope)?;
         #[cfg(target_os = "macos")]
-        permissions_macos::install(scope, _background);
+        permissions_macos::install(scope);
     }
     #[cfg(target_os = "linux")]
     prefs_window::install(scope)?;
@@ -234,11 +233,6 @@ pub fn mount_main_window(
         scope.post(move || selftest::start(&test_scope, std::path::Path::new(&dir)))?;
     }
     Ok(())
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn set_permission_background_mode(background: bool) {
-    permissions_macos::set_background(background);
 }
 
 /// Mounts the Capture window, hidden.

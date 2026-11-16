@@ -8,10 +8,7 @@ use rustolonia::{
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 struct Guidance {
     window: Window,
@@ -22,20 +19,9 @@ thread_local! {
     static WINDOWS: RefCell<HashMap<Permission, Guidance>> = RefCell::new(HashMap::new());
 }
 
-static BACKGROUND: AtomicBool = AtomicBool::new(false);
-
-pub(super) fn install(scope: &AppScope, background: bool) {
-    set_background(background);
+pub(super) fn install(scope: &AppScope) {
     let scope = scope.clone();
     permissions::set_denied_handler(Some(Arc::new(move |permission| {
-        if BACKGROUND.load(Ordering::Acquire) {
-            jiffshot_workflow::log(&format!(
-                "permission required for {}: {}",
-                permission.name(),
-                permission.instructions()
-            ));
-            return;
-        }
         let ui = scope.clone();
         if let Err(error) = scope.post(move || {
             if let Err(error) = show(&ui, permission) {
@@ -51,10 +37,6 @@ pub(super) fn install(scope: &AppScope, background: bool) {
             );
         }
     })));
-}
-
-pub(super) fn set_background(background: bool) {
-    BACKGROUND.store(background, Ordering::Release);
 }
 
 fn report_failure(permission: Permission, error: &str) {
@@ -82,6 +64,7 @@ fn show(scope: &AppScope, permission: Permission) -> Result<()> {
     // Repeated failures (for example an interval capture) must not open more
     // windows or steal focus from System Settings while the user enables access.
     if !window.is_visible()? {
+        scope.promote_macos_to_foreground()?;
         window.show()?;
         if let Some(handle) = parts::hwnd(scope, &window) {
             crate::winutil::bring_forward(handle as isize);

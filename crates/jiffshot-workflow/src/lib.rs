@@ -1137,7 +1137,9 @@ pub fn start_engine(
     let _ = HOOKS.set(app);
     // Scripts and agents drive this instance through `jiffshot-cli`.
     #[cfg(windows)]
-    control::start(_control_required)?;
+    let control_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(windows)]
+    control::start(_control_required, Some(control_ready.clone()))?;
     // Reserve the required socket before returning, but gate requests until
     // the capture thread has initialized.
     #[cfg(target_os = "macos")]
@@ -1151,7 +1153,7 @@ pub fn start_engine(
         })?),
         None => None,
     };
-    #[cfg(target_os = "macos")]
+    #[cfg(any(windows, target_os = "macos"))]
     let (startup_tx, startup_rx) = if _control_required {
         let (tx, rx) = std::sync::mpsc::channel();
         (Some(tx), Some(rx))
@@ -1165,6 +1167,10 @@ pub fn start_engine(
             let mut control = control;
             let code = tray::run(
                 initial,
+                #[cfg(windows)]
+                Some(control_ready.as_ref()),
+                #[cfg(windows)]
+                startup_tx,
                 #[cfg(target_os = "macos")]
                 &mut control,
                 #[cfg(target_os = "macos")]
@@ -1201,6 +1207,12 @@ pub fn start_engine(
             {
                 return result;
             }
+            #[cfg(windows)]
+            if code != 0
+                && !control_ready.load(std::sync::atomic::Ordering::Acquire)
+            {
+                return code;
+            }
             if let Some(hooks) = hooks() {
                 (hooks.quit)();
             }
@@ -1209,19 +1221,24 @@ pub fn start_engine(
             #[cfg(not(target_os = "macos"))]
             code
         })?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(windows, target_os = "macos"))]
     if let Some(startup_rx) = startup_rx {
-        // Hotkey setup needs the UI thread, so wait only for instance binding.
+        // Background startup waits until the capture thread has initialized.
         let error = match startup_rx.recv() {
             Ok(Ok(())) => None,
             Ok(Err(error)) => Some(error),
             Err(_) => Some(std::io::Error::other(
-                "the capture engine stopped before its instance listener started",
+                "the capture engine stopped before it became ready",
             )),
         };
         if let Some(error) = error {
             return Err(match engine.join() {
+                #[cfg(target_os = "macos")]
                 Ok(Err(shutdown)) => std::io::Error::other(format!("{error}; {shutdown}")),
+                #[cfg(windows)]
+                Ok(code) if code != 0 => {
+                    std::io::Error::other(format!("{error}; the capture engine exited with {code}"))
+                }
                 Err(_) => std::io::Error::other(format!("{error}; the capture engine panicked")),
                 _ => error,
             });

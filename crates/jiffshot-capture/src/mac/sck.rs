@@ -29,17 +29,21 @@ pub fn err(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }
 
-fn ns_err(error: *mut NSError) -> io::Error {
+fn ns_err(error: *mut NSError, report_permission_denied: bool) -> io::Error {
     // SAFETY: a non-null NSError handed to a completion handler.
     match unsafe { error.as_ref() } {
-        Some(e) => framework_error(e),
+        Some(e) => framework_error_with_reporting(e, report_permission_denied),
         None => err("ScreenCaptureKit failed"),
     }
 }
 
-fn framework_error(error: &NSError) -> io::Error {
+fn framework_error_with_reporting(error: &NSError, report_permission_denied: bool) -> io::Error {
     if &*error.domain() == unsafe { SCStreamErrorDomain } && error.code() == SCStreamErrorCode::UserDeclined.0 {
-        super::permissions::Permission::ScreenRecording.denied()
+        if report_permission_denied {
+            super::permissions::Permission::ScreenRecording.denied()
+        } else {
+            super::permissions::Permission::ScreenRecording.error()
+        }
     } else {
         err(error.localizedDescription())
     }
@@ -74,13 +78,14 @@ fn shareable_content_with_visibility(on_screen_only: bool) -> io::Result<Retaine
     if !screen_access(true) {
         return Err(denied());
     }
+    let report_permission_denied = !super::permissions::denied_handler_is_suppressed();
     let (tx, rx) = mpsc::channel();
     let handler = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
         // SAFETY: the handler's content is valid for its duration; retained
         // to keep it.
         let result = match unsafe { Retained::retain(content) } {
             Some(c) => Ok(c),
-            None => Err(ns_err(error)),
+            None => Err(ns_err(error, report_permission_denied)),
         };
         let _ = tx.send(SendBox(result));
     });
@@ -243,6 +248,7 @@ type Handler = Box<dyn Fn(&SCStream, &CMSampleBuffer, SCStreamOutputType) + Send
 pub struct OutputIvars {
     handler: Handler,
     failure: Arc<Mutex<Option<String>>>,
+    report_permission_denied: bool,
 }
 
 define_class!(
@@ -264,15 +270,27 @@ define_class!(
         #[allow(non_snake_case)]
         #[unsafe(method(stream:didStopWithError:))]
         unsafe fn stream_didStopWithError(&self, _stream: &SCStream, error: &NSError) {
-            let message = framework_error(error).to_string();
+            let message = framework_error_with_reporting(
+                error,
+                self.ivars().report_permission_denied,
+            )
+            .to_string();
             *self.ivars().failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(message);
         }
     }
 );
 
 impl StreamOutput {
-    fn new(handler: Handler, failure: Arc<Mutex<Option<String>>>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(OutputIvars { handler, failure });
+    fn new(
+        handler: Handler,
+        failure: Arc<Mutex<Option<String>>>,
+        report_permission_denied: bool,
+    ) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(OutputIvars {
+            handler,
+            failure,
+            report_permission_denied,
+        });
         // SAFETY: NSObject's designated initializer.
         unsafe { msg_send![super(this), init] }
     }
@@ -284,19 +302,29 @@ pub struct Stream {
     _output: Retained<StreamOutput>,
     _queue: dispatch2::DispatchRetained<DispatchQueue>,
     failure: Arc<Mutex<Option<String>>>,
+    report_permission_denied: bool,
 }
 
 // SAFETY: SCStream is thread-safe for start/stop; the output object is only
 // called by the stream on its queue.
 unsafe impl Send for Stream {}
 
-fn wait_done(action: &str, start: impl FnOnce(&block2::DynBlock<dyn Fn(*mut NSError)>)) -> io::Result<()> {
+fn wait_done(
+    action: &str,
+    report_permission_denied: bool,
+    start: impl FnOnce(&block2::DynBlock<dyn Fn(*mut NSError)>),
+) -> io::Result<()> {
     let (tx, rx) = mpsc::channel();
     let block = RcBlock::new(move |error: *mut NSError| {
-        let _ = tx.send(if error.is_null() { Ok(()) } else { Err(ns_err(error).to_string()) });
+        let _ = tx.send(if error.is_null() {
+            Ok(())
+        } else {
+            Err(ns_err(error, report_permission_denied))
+        });
     });
     start(&block);
-    rx.recv_timeout(Duration::from_secs(10)).map_err(|_| err(format!("ScreenCaptureKit did not {action}")))?.map_err(err)
+    rx.recv_timeout(Duration::from_secs(10))
+        .map_err(|_| err(format!("ScreenCaptureKit did not {action}")))?
 }
 
 impl Stream {
@@ -310,7 +338,12 @@ impl Stream {
     ) -> io::Result<Stream> {
         let queue = DispatchQueue::new("com.devolutions.jiffshot.capture", None);
         let failure = Arc::new(Mutex::new(None));
-        let output = StreamOutput::new(Box::new(handler), failure.clone());
+        let report_permission_denied = !super::permissions::denied_handler_is_suppressed();
+        let output = StreamOutput::new(
+            Box::new(handler),
+            failure.clone(),
+            report_permission_denied,
+        );
         // SAFETY: valid filter, configuration and output; the queue and the
         // output are kept alive with the stream.
         unsafe {
@@ -323,10 +356,20 @@ impl Stream {
             for kind in kinds {
                 stream
                     .addStreamOutput_type_sampleHandlerQueue_error(ProtocolObject::from_ref(&*output), *kind, Some(&queue))
-                    .map_err(|e| framework_error(&e))?;
+                    .map_err(|e| {
+                        framework_error_with_reporting(&e, report_permission_denied)
+                    })?;
             }
-            wait_done("start", |block| stream.startCaptureWithCompletionHandler(Some(block)))?;
-            Ok(Stream { stream, _output: output, _queue: queue, failure })
+            wait_done("start", report_permission_denied, |block| {
+                stream.startCaptureWithCompletionHandler(Some(block))
+            })?;
+            Ok(Stream {
+                stream,
+                _output: output,
+                _queue: queue,
+                failure,
+                report_permission_denied,
+            })
         }
     }
 
@@ -334,9 +377,14 @@ impl Stream {
     pub fn update_filter(&self, filter: &SCContentFilter) -> io::Result<()> {
         // SAFETY: the live stream and filter remain retained until the
         // completion callback reports that the update has finished.
-        wait_done("update its content filter", |block| unsafe {
-            self.stream.updateContentFilter_completionHandler(filter, Some(block))
-        })
+        wait_done(
+            "update its content filter",
+            self.report_permission_denied,
+            |block| unsafe {
+                self.stream
+                    .updateContentFilter_completionHandler(filter, Some(block))
+            },
+        )
     }
 
     pub fn failure(&self) -> Option<String> {
@@ -353,7 +401,9 @@ impl Drop for Stream {
         // SAFETY: stopping a started stream; waits so no sample arrives after
         // the handler is gone.
         let stream = &self.stream;
-        let _ = wait_done("stop", |block| unsafe { stream.stopCaptureWithCompletionHandler(Some(block)) });
+        let _ = wait_done("stop", self.report_permission_denied, |block| unsafe {
+            stream.stopCaptureWithCompletionHandler(Some(block))
+        });
     }
 }
 
@@ -362,9 +412,10 @@ pub fn screenshot(filter: &SCContentFilter, config: &SCStreamConfiguration, widt
     if AnyClass::get(c"SCScreenshotManager").is_some() {
         // macOS 14 and later.
         let (tx, rx) = mpsc::channel();
+        let report_permission_denied = !super::permissions::denied_handler_is_suppressed();
         let handler = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
             let result = if image.is_null() {
-                Err(ns_err(error).to_string())
+                Err(ns_err(error, report_permission_denied).to_string())
             } else {
                 image_bgra(image as CGImageRef, width, height).map_err(|e| e.to_string())
             };
@@ -419,12 +470,12 @@ mod tests {
     #[test]
     fn framework_permission_denials_include_recovery_without_mislabeling_other_errors() {
         let denied = unsafe { NSError::errorWithDomain_code_userInfo(SCStreamErrorDomain, SCStreamErrorCode::UserDeclined.0, None) };
-        let error = framework_error(&denied);
+        let error = framework_error_with_reporting(&denied, true);
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("Screen Recording"));
         assert!(error.to_string().contains("System Settings"));
         let other = unsafe { NSError::errorWithDomain_code_userInfo(&NSString::from_str("JiffshotTest"), SCStreamErrorCode::UserDeclined.0, None) };
-        let error = framework_error(&other);
+        let error = framework_error_with_reporting(&other, true);
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(error.to_string(), other.localizedDescription().to_string());
     }

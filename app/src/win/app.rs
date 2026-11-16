@@ -3022,7 +3022,6 @@ impl App {
             return false;
         }
         self.restore_startup_ui();
-        crate::ui::set_permission_background_mode(false);
         true
     }
 

@@ -286,7 +286,9 @@ fn start(a: &Args) -> Reply {
         target.layout.clone(),
     );
     let worker = std::thread::Builder::new().name("jiffshot-control-record".into()).spawn(move || {
-        let result = recorder::record_with_lease(&staged_path, rect, &options, &c, &layout, lease);
+        let result = jiffshot_capture::macos::permissions::with_denied_handler_suppressed(|| {
+            recorder::record_with_lease(&staged_path, rect, &options, &c, &layout, lease)
+        });
         if let Err(error) = &result {
             match c.error.lock() {
                 Ok(mut state) => *state = Some(error.clone()),

@@ -3791,6 +3791,8 @@ fn request_exit() {
 /// for (a mode, or `usize::MAX` for menus). Returns the exit code.
 pub fn run(
     initial: Option<usize>,
+    #[cfg(windows)] control_ready: Option<&std::sync::atomic::AtomicBool>,
+    #[cfg(windows)] startup: Option<std::sync::mpsc::Sender<std::io::Result<()>>>,
     #[cfg(target_os = "macos")] control: &mut Option<jiffshot_control::Server>,
     #[cfg(target_os = "macos")] control_ready: Option<&std::sync::atomic::AtomicBool>,
     #[cfg(target_os = "macos")] startup: Option<std::sync::mpsc::Sender<std::io::Result<()>>>,
@@ -3805,6 +3807,15 @@ pub fn run(
                 .is_err()
             {
                 log("could not report capture instance listener startup");
+            }
+        }
+        #[cfg(windows)]
+        if let Some(startup) = startup {
+            if startup
+                .send(Err(std::io::Error::other("could not create the tray window")))
+                .is_err()
+            {
+                log("could not report capture engine startup");
             }
         }
         return 1;
@@ -3907,6 +3918,17 @@ pub fn run(
         match crate::control_macos::start(None) {
             Ok(server) => *control = Some(server),
             Err(error) => log(&format!("control: not available: {error}")),
+        }
+    }
+    #[cfg(windows)]
+    if let Some(ready) = control_ready {
+        ready.store(true, std::sync::atomic::Ordering::Release);
+    }
+    #[cfg(windows)]
+    if let Some(startup) = startup {
+        if startup.send(Ok(())).is_err() {
+            log("could not report capture engine startup");
+            return 1;
         }
     }
 

@@ -169,8 +169,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
 
 /// Starts serving. A background launch must fail if the pipe cannot be created,
 /// rather than remaining alive without serving CLI requests.
-pub fn start(required: bool) -> std::io::Result<()> {
-    match jiffshot_control::serve(handle) {
+pub fn start(required: bool, ready: Option<Arc<AtomicBool>>) -> std::io::Result<()> {
+    match jiffshot_control::serve(move |request| handle_when_ready(ready.as_deref(), request)) {
         Ok(()) => {
             log(&format!(
                 "control: listening on {}",
@@ -187,6 +187,16 @@ pub fn start(required: bool) -> std::io::Result<()> {
             }
         }
     }
+}
+
+fn handle_when_ready(ready: Option<&AtomicBool>, request: Request) -> Response {
+    if ready.is_some_and(|ready| !ready.load(Ordering::Acquire)) {
+        return Response::err(
+            &request.id,
+            Error::new(ErrorCode::Unavailable, "the capture engine is starting"),
+        );
+    }
+    handle(request)
 }
 
 fn handle(request: Request) -> Response {
@@ -2057,6 +2067,16 @@ mod tests {
 
     fn args(v: Value) -> Args {
         Args::new(v).unwrap()
+    }
+
+    #[test]
+    fn control_requests_are_rejected_until_capture_startup_completes() {
+        let ready = AtomicBool::new(false);
+        let request = Request::new("status", serde_json::Value::Null);
+        let response = handle_when_ready(Some(&ready), request.clone());
+        assert!(!response.ok);
+        assert_eq!(response.id, request.id);
+        assert_eq!(response.error.unwrap().code, ErrorCode::Unavailable);
     }
 
     fn test_guide() -> Mutex<Option<Guide>> {

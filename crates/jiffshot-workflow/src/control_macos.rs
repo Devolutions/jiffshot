@@ -187,7 +187,9 @@ fn handle_in_pool(request: Request) -> (Response, Option<jiffshot_control::Compl
     let reply = if crate::shutdown_macos::requested() {
         Err(Error::new(ErrorCode::Conflict, "Jiffshot is shutting down"))
     } else {
-        Args::new(request.args).and_then(|args| dispatch(&request.command, &args))
+        jiffshot_capture::macos::permissions::with_denied_handler_suppressed(|| {
+            Args::new(request.args).and_then(|args| dispatch(&request.command, &args))
+        })
     };
     let ms = started.elapsed().as_millis();
     match reply {
