@@ -167,15 +167,25 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("quit", "exit Jiffshot"),
 ];
 
-/// Starts serving; logs and gives up when the pipe cannot be created
-/// (another Jiffshot owns it).
-pub fn start() {
+/// Starts serving. A background launch must fail if the pipe cannot be created,
+/// rather than remaining alive without serving CLI requests.
+pub fn start(required: bool) -> std::io::Result<()> {
     match jiffshot_control::serve(handle) {
-        Ok(()) => log(&format!(
-            "control: listening on {}",
-            jiffshot_control::pipe_name().unwrap_or_default()
-        )),
-        Err(error) => log(&format!("control: not available: {error}")),
+        Ok(()) => {
+            log(&format!(
+                "control: listening on {}",
+                jiffshot_control::pipe_name().unwrap_or_default()
+            ));
+            Ok(())
+        }
+        Err(error) => {
+            log(&format!("control: not available: {error}"));
+            if required {
+                Err(error)
+            } else {
+                Ok(())
+            }
+        }
     }
 }
 

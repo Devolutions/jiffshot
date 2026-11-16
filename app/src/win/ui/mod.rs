@@ -194,7 +194,12 @@ pub(crate) fn recent_file_name(uri: &str) -> String {
 
 /// Mounts the editor window, shown or hidden. It is the application's main
 /// window, so it must be mounted first.
-pub fn mount_main_window(scope: &AppScope, model: impl MainViewModel, show: bool) -> Result<()> {
+pub fn mount_main_window(
+    scope: &AppScope,
+    model: impl MainViewModel,
+    show: bool,
+    _background: bool,
+) -> Result<()> {
     let binding = MainBinding::new(model)?;
     MAIN.with(|m| *m.borrow_mut() = Some(binding.clone()));
     let window = main_window::build(scope, &binding)?;
@@ -217,7 +222,7 @@ pub fn mount_main_window(scope: &AppScope, model: impl MainViewModel, show: bool
         overlay::install(scope)?;
         hud::install(scope)?;
         #[cfg(target_os = "macos")]
-        permissions_macos::install(scope);
+        permissions_macos::install(scope, _background);
     }
     #[cfg(target_os = "linux")]
     prefs_window::install(scope)?;
@@ -229,6 +234,11 @@ pub fn mount_main_window(scope: &AppScope, model: impl MainViewModel, show: bool
         scope.post(move || selftest::start(&test_scope, std::path::Path::new(&dir)))?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn set_permission_background_mode(background: bool) {
+    permissions_macos::set_background(background);
 }
 
 /// Mounts the Capture window, hidden.

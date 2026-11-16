@@ -363,6 +363,7 @@ pub fn run(dir: &Path) -> io::Result<()> {
         show_editor: Box::new(|| {}),
         quit: Box::new(|| {}),
         notify: Box::new(|_, _, _| {}),
+        startup_notice: Box::new(|_, _, _| {}),
         state: Box::new(|_| {}),
         recording: Box::new(|_| {}),
         startup_status: Box::new(|_| {}),

@@ -25,6 +25,11 @@ fn is_background_launch(args: &[String], startup_activation: bool) -> bool {
     args == ["--background"] || (args.is_empty() && startup_activation)
 }
 
+#[cfg(target_os = "macos")]
+fn is_background_launch(args: &[String]) -> bool {
+    args == ["--background"]
+}
+
 #[cfg(windows)]
 fn wait_for_running_instance(wait: std::time::Duration, mut forward: impl FnMut() -> bool) -> bool {
     let started = std::time::Instant::now();
@@ -621,7 +626,7 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         });
         vm_support::install(scope);
         app::install(scope.clone(), opening);
-        ui::mount_main_window(scope, Model, true)?;
+        ui::mount_main_window(scope, Model, true, false)?;
         let window = ui::mount_capture_window(scope, crate::linux::capture_window::CaptureModel)?;
         crate::linux::capture_window::set_window(window);
         if let Some(flag) = std::env::args().nth(1) {
@@ -741,6 +746,8 @@ pub(crate) fn run() -> rustolonia::Result<()> {
     } else {
         is_background_launch(&args, false)
     };
+    #[cfg(target_os = "macos")]
+    let background = is_background_launch(&args);
     #[cfg(windows)]
     let test_capture_engine = !tray && std::env::var_os("JIFFSHOT_UITEST_GRAB_TEXT").is_some();
     #[cfg(target_os = "macos")]
@@ -847,6 +854,9 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         }
         #[cfg(target_os = "macos")]
         {
+            if background {
+                return Ok(());
+            }
             let result = match files.first() {
                 Some(file) => std::path::absolute(file).and_then(|file| {
                     jiffshot_capture::ipc::send_to_editor_when_ready(
@@ -878,7 +888,7 @@ pub(crate) fn run() -> rustolonia::Result<()> {
     #[cfg(windows)]
     let show_editor = (!tray && !background) || !files.is_empty();
     #[cfg(target_os = "macos")]
-    let show_editor = !tray || !files.is_empty();
+    let show_editor = (!tray && !background) || !files.is_empty();
     #[cfg(target_os = "macos")]
     let show_editor = show_editor
         && !(test_capture_engine && std::env::var_os("JIFFSHOT_UITEST_SETTINGS_HANDOFF").is_some());
@@ -889,6 +899,12 @@ pub(crate) fn run() -> rustolonia::Result<()> {
     let app = App::load_from_env()?;
     #[cfg(target_os = "macos")]
     let app = app.with_application_name(jiffshot_capture::paths::NAME)?;
+    #[cfg(target_os = "macos")]
+    let app = if background {
+        app.with_macos_background()?
+    } else {
+        app
+    };
     #[cfg(windows)]
     let test_engine = test_capture_engine.then(|| {
         std::sync::Arc::new(std::sync::Mutex::new(None::<std::thread::JoinHandle<i32>>))
@@ -912,6 +928,10 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         app::install(scope.clone(), opening);
         #[cfg(windows)]
         if defer_startup_ui {
+            app::with(|app| app.defer_startup_ui());
+        }
+        #[cfg(target_os = "macos")]
+        if background {
             app::with(|app| app.defer_startup_ui());
         }
         #[cfg(target_os = "macos")]
@@ -956,7 +976,7 @@ pub(crate) fn run() -> rustolonia::Result<()> {
             // The tray keeps Jiffshot running with the editor closed.
             scope.set_shutdown_mode(rustolonia::ShutdownMode::OnExplicitShutdown)?;
         }
-        ui::mount_main_window(scope, Model, show_editor)?;
+        ui::mount_main_window(scope, Model, show_editor, background)?;
         #[cfg(windows)]
         if let Some(error) = startup_error {
             app::post(move |app| app.startup_notice("Windows startup unavailable", &error, true));
@@ -965,7 +985,7 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         if let Some(error) = editor_ipc_error {
             eprintln!("could not start the editor instance listener: {error}");
             app::post(move |app| {
-                app.toast("Jiffshot hand-off unavailable", &error.to_string(), true)
+                app.startup_notice("Jiffshot hand-off unavailable", &error.to_string(), true)
             });
         }
         #[cfg(windows)]
@@ -1047,7 +1067,6 @@ pub(crate) fn run() -> rustolonia::Result<()> {
                         }
                     });
                 }),
-                #[cfg(windows)]
                 startup_notice: Box::new(|title, text, problem| {
                     let (title, text) = (title.to_owned(), text.to_owned());
                     app::post(move |app| app.startup_notice(&title, &text, problem));
@@ -1078,19 +1097,26 @@ pub(crate) fn run() -> rustolonia::Result<()> {
                 }),
             };
             #[cfg(target_os = "macos")]
-            let started =
-                capture_engine_macos::start(|| jiffshot_workflow::start_engine(capture, hooks));
-            #[cfg(windows)]
-            let started = jiffshot_workflow::start_engine(capture, hooks).map(|handle| {
-                if let Some(slot) = &test_engine_in_app {
-                    *slot.lock().expect("self-test engine lock") = Some(handle);
-                }
+            let started = capture_engine_macos::start(|| {
+                jiffshot_workflow::start_engine(capture, hooks, background)
             });
+            #[cfg(windows)]
+            let started =
+                jiffshot_workflow::start_engine(capture, hooks, background).map(|handle| {
+                    if let Some(slot) = &test_engine_in_app {
+                        *slot.lock().expect("self-test engine lock") = Some(handle);
+                    }
+                });
             if let Err(error) = started {
                 #[cfg(windows)]
                 if test_capture_engine {
                     return Err(rustolonia::Error::Load(format!(
                         "the self-test capture engine did not start: {error}"
+                    )));
+                }
+                if background {
+                    return Err(rustolonia::Error::Load(format!(
+                        "the background service did not start: {error}"
                     )));
                 }
                 eprintln!("the capture side did not start: {error}");
@@ -1294,5 +1320,17 @@ mod resource_tests {
                 "missing {expected:?} in VS_VERSION_INFO"
             );
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_background_launch_tests {
+    use super::is_background_launch;
+
+    #[test]
+    fn only_the_explicit_background_argument_is_background() {
+        assert!(is_background_launch(&["--background".into()]));
+        assert!(!is_background_launch(&[]));
+        assert!(!is_background_launch(&["image.png".into()]));
     }
 }

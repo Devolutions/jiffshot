@@ -1761,6 +1761,11 @@ fn record_shutdown_fixture(dir: &Path, rect: Rect) -> Result<(), String> {
                 eprintln!("recording shutdown self-test: {title}: {text}");
             }
         }),
+        startup_notice: Box::new(|title, text, problem| {
+            if problem {
+                eprintln!("recording shutdown self-test: {title}: {text}");
+            }
+        }),
         state: Box::new(move |_| { let _ = ready_tx.try_send(()); }),
         recording: Box::new(|_| {}),
         startup_status: Box::new(|_| {}),
@@ -1784,7 +1789,8 @@ fn record_shutdown_fixture(dir: &Path, rect: Rect) -> Result<(), String> {
         overlay: Box::new(|_| {}),
         screen_draw: Box::new(|_| {}),
     };
-    let engine = crate::start_engine(None, hooks).map_err(|error| format!("could not start the capture engine: {error}"))?;
+    let engine = crate::start_engine(None, hooks, false)
+        .map_err(|error| format!("could not start the capture engine: {error}"))?;
     if ready_rx.recv_timeout(Duration::from_secs(15)).is_err() {
         crate::stop_engine();
         return Err("the recording shutdown test capture engine did not start".into());
@@ -1886,6 +1892,11 @@ fn record_workflow_fixture(dir: &Path, rect: Rect) -> Result<(), String> {
                 eprintln!("recording workflow self-test: {title}: {text}");
             }
         }),
+        startup_notice: Box::new(|title, text, problem| {
+            if problem {
+                eprintln!("recording workflow self-test: {title}: {text}");
+            }
+        }),
         state: Box::new(move |_| { let _ = ready_tx.try_send(()); }),
         recording: Box::new(|_| {}),
         startup_status: Box::new(|_| {}),
@@ -1941,7 +1952,8 @@ fn record_workflow_fixture(dir: &Path, rect: Rect) -> Result<(), String> {
         overlay: Box::new(|_| {}),
         screen_draw: Box::new(|_| {}),
     };
-    let engine = crate::start_engine(None, hooks).map_err(|error| format!("could not start the capture engine: {error}"))?;
+    let engine = crate::start_engine(None, hooks, false)
+        .map_err(|error| format!("could not start the capture engine: {error}"))?;
     if ready_rx.recv_timeout(Duration::from_secs(15)).is_err() {
         crate::stop_engine();
         return Err("the recording test capture engine did not start".into());

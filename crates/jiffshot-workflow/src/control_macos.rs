@@ -16,6 +16,10 @@ mod steps;
 use jiffshot_control::{Error, ErrorCode, Request, Response};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Instant;
 
 type Reply = Result<Value, Error>;
@@ -141,8 +145,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("record.cancel", "discard a recording"),
 ];
 
-pub(crate) fn start() -> std::io::Result<jiffshot_control::Server> {
-    let server = jiffshot_control::serve_owned_with_completion(handle)?;
+pub(crate) fn start(ready: Option<Arc<AtomicBool>>) -> std::io::Result<jiffshot_control::Server> {
+    let server = jiffshot_control::serve_owned_with_completion(move |request| {
+        handle_when_ready(ready.as_deref(), request)
+    })?;
     match jiffshot_control::pipe_name() {
         Ok(name) => crate::log(&format!("control: listening on {name}")),
         Err(error) => crate::log(&format!(
@@ -158,6 +164,22 @@ pub(crate) fn shutdown_recording() -> Result<(), String> {
 
 fn handle(request: Request) -> (Response, Option<jiffshot_control::Completion>) {
     objc2::rc::autoreleasepool(|_| handle_in_pool(request))
+}
+
+fn handle_when_ready(
+    ready: Option<&AtomicBool>,
+    request: Request,
+) -> (Response, Option<jiffshot_control::Completion>) {
+    if ready.is_some_and(|ready| !ready.load(Ordering::Acquire)) {
+        return (
+            Response::err(
+                &request.id,
+                Error::new(ErrorCode::Unavailable, "Jiffshot is still starting"),
+            ),
+            None,
+        );
+    }
+    handle(request)
 }
 
 fn handle_in_pool(request: Request) -> (Response, Option<jiffshot_control::Completion>) {
@@ -464,5 +486,22 @@ impl Args {
                 .map_err(|error| invalid(format!("cannot create {}: {error}", parent.display())))?;
         }
         Ok(Some(path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn starting_service_rejects_requests_without_running_them() {
+        let ready = AtomicBool::new(false);
+        for command in ["status", "quit", "doc.new"] {
+            let request = Request::new(command, json!({}));
+            let (response, completion) = handle_when_ready(Some(&ready), request.clone());
+            assert_eq!(response.id, request.id);
+            assert_eq!(response.error.unwrap().code, ErrorCode::Unavailable);
+            assert!(completion.is_none());
+        }
     }
 }

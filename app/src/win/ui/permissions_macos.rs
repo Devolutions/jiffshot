@@ -8,7 +8,10 @@ use rustolonia::{
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 struct Guidance {
     window: Window,
@@ -19,9 +22,20 @@ thread_local! {
     static WINDOWS: RefCell<HashMap<Permission, Guidance>> = RefCell::new(HashMap::new());
 }
 
-pub(super) fn install(scope: &AppScope) {
+static BACKGROUND: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn install(scope: &AppScope, background: bool) {
+    set_background(background);
     let scope = scope.clone();
     permissions::set_denied_handler(Some(Arc::new(move |permission| {
+        if BACKGROUND.load(Ordering::Acquire) {
+            jiffshot_workflow::log(&format!(
+                "permission required for {}: {}",
+                permission.name(),
+                permission.instructions()
+            ));
+            return;
+        }
         let ui = scope.clone();
         if let Err(error) = scope.post(move || {
             if let Err(error) = show(&ui, permission) {
@@ -37,6 +51,10 @@ pub(super) fn install(scope: &AppScope) {
             );
         }
     })));
+}
+
+pub(super) fn set_background(background: bool) {
+    BACKGROUND.store(background, Ordering::Release);
 }
 
 fn report_failure(permission: Permission, error: &str) {

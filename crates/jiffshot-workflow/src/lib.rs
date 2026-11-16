@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! jiffshot                              tray (or, if already running, the Capture window)
-//! jiffshot --background                 start the tray without opening windows (Windows)
+//! jiffshot --background                 start the tray without opening windows (Windows and macOS)
 //! jiffshot FILE...                      open files in the editor
 //! jiffshot --capture|--scrolling|--panoramic|--text|--record|--menu|--steps|--freehand|--window
 //!                                       start that capture (starting Jiffshot if needed)
@@ -104,7 +104,7 @@ pub struct Hooks {
     /// A notice for the user (title, text, whether it reports a problem).
     pub notify: Box<dyn Fn(&str, &str, bool) + Send + Sync>,
     /// An automatic startup notice, which may be deferred until the app is opened.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     pub startup_notice: Box<dyn Fn(&str, &str, bool) + Send + Sync>,
     /// What the tray menu should show, sent after anything in it changes.
     pub state: Box<dyn Fn(TrayState) + Send + Sync>,
@@ -1125,27 +1125,52 @@ pub type EngineExit = Result<i32, String>;
 #[cfg(not(target_os = "macos"))]
 pub type EngineExit = i32;
 
-/// Starts the capture side on its own thread. When it stops, `app.quit` runs
-/// on that thread.
+/// Starts the capture side on its own thread. Once started, `app.quit` runs
+/// on that thread when it stops.
 pub fn start_engine(
     initial: Option<usize>,
     app: Hooks,
+    _control_required: bool,
 ) -> std::io::Result<std::thread::JoinHandle<EngineExit>> {
     #[cfg(target_os = "macos")]
     shutdown_macos::begin()?;
     let _ = HOOKS.set(app);
     // Scripts and agents drive this instance through `jiffshot-cli`.
     #[cfg(windows)]
-    control::start();
-    std::thread::Builder::new()
+    control::start(_control_required)?;
+    // Reserve the required socket before returning, but gate requests until
+    // the capture thread has initialized.
+    #[cfg(target_os = "macos")]
+    let control_ready = _control_required
+        .then(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    #[cfg(target_os = "macos")]
+    let control = match control_ready.as_ref() {
+        Some(ready) => Some(control_macos::start(Some(ready.clone())).map_err(|error| {
+            log(&format!("control: not available: {error}"));
+            error
+        })?),
+        None => None,
+    };
+    #[cfg(target_os = "macos")]
+    let (startup_tx, startup_rx) = if _control_required {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+    let engine = std::thread::Builder::new()
         .name("jiffshot-capture".into())
         .spawn(move || {
             #[cfg(target_os = "macos")]
-            let mut control = None;
+            let mut control = control;
             let code = tray::run(
                 initial,
                 #[cfg(target_os = "macos")]
                 &mut control,
+                #[cfg(target_os = "macos")]
+                control_ready.as_deref(),
+                #[cfg(target_os = "macos")]
+                startup_tx,
             );
             #[cfg(target_os = "macos")]
             let result = {
@@ -1168,6 +1193,14 @@ pub fn start_engine(
                     Err(errors.join("; "))
                 }
             };
+            #[cfg(target_os = "macos")]
+            if code != 0
+                && control_ready
+                    .as_ref()
+                    .is_some_and(|ready| !ready.load(std::sync::atomic::Ordering::Acquire))
+            {
+                return result;
+            }
             if let Some(hooks) = hooks() {
                 (hooks.quit)();
             }
@@ -1175,7 +1208,26 @@ pub fn start_engine(
             return result;
             #[cfg(not(target_os = "macos"))]
             code
-        })
+        })?;
+    #[cfg(target_os = "macos")]
+    if let Some(startup_rx) = startup_rx {
+        // Hotkey setup needs the UI thread, so wait only for instance binding.
+        let error = match startup_rx.recv() {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error),
+            Err(_) => Some(std::io::Error::other(
+                "the capture engine stopped before its instance listener started",
+            )),
+        };
+        if let Some(error) = error {
+            return Err(match engine.join() {
+                Ok(Err(shutdown)) => std::io::Error::other(format!("{error}; {shutdown}")),
+                Err(_) => std::io::Error::other(format!("{error}; the capture engine panicked")),
+                _ => error,
+            });
+        }
+    }
+    Ok(engine)
 }
 
 /// Asks the capture side to stop (as its Exit does); safe from any thread.
@@ -1389,7 +1441,7 @@ pub fn request_capture(mode: usize, delay_ms: u32) {
 /// `--selftest` and the rest), returning its exit code; `None` when `args`
 /// ask for the app itself (nothing, a capture flag, or files to open).
 pub fn run_command(args: &[String]) -> Option<i32> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     if args == ["--background"] {
         return None;
     }
@@ -1484,6 +1536,16 @@ pub fn run_command(args: &[String]) -> Option<i32> {
             1
         }
     })
+}
+
+#[cfg(all(test, any(windows, target_os = "macos")))]
+mod background_arg_tests {
+    use super::run_command;
+
+    #[test]
+    fn background_argument_starts_the_app_instead_of_running_a_command() {
+        assert_eq!(run_command(&["--background".into()]), None);
+    }
 }
 
 #[cfg(all(test, windows))]

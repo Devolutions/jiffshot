@@ -899,7 +899,7 @@ pub fn install(scope: AppScope, opening: Option<PathBuf>) {
             source: None,
             library,
             exiting: false,
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             startup_ui: StartupUi::new(jiffshot_workflow::settings_snapshot().show_widget),
             #[cfg(target_os = "macos")]
             native_termination: None,
@@ -945,7 +945,7 @@ pub struct App {
     scope: AppScope,
     /// Set once Exit started, so the capture side stopping does not start it again.
     exiting: bool,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     startup_ui: StartupUi,
     #[cfg(target_os = "macos")]
     native_termination: Option<i64>,
@@ -1015,14 +1015,14 @@ impl ObjectClipboard {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 struct StartupUi {
     requested: bool,
     deferred: bool,
     notices: Vec<DeferredStartupNotice>,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[derive(Debug, Eq, PartialEq)]
 struct DeferredStartupNotice {
     title: String,
@@ -1030,7 +1030,7 @@ struct DeferredStartupNotice {
     problem: bool,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 impl StartupUi {
     fn new(requested: bool) -> Self {
         Self {
@@ -2899,6 +2899,10 @@ impl App {
 
     #[cfg(any(windows, target_os = "macos"))]
     pub fn show_capture_window(&mut self) {
+        #[cfg(target_os = "macos")]
+        if !self.restore_macos_ui() {
+            return;
+        }
         #[cfg(windows)]
         self.restore_startup_ui();
         crate::capture_window::show(&self.scope);
@@ -2913,6 +2917,10 @@ impl App {
 
     /// Shows Grab Text's result in its window (the `grab_text` signal).
     pub fn show_grab_text(&mut self, text: &str) {
+        #[cfg(target_os = "macos")]
+        if !self.restore_macos_ui() {
+            return;
+        }
         #[cfg(windows)]
         self.restore_startup_ui();
         self.toasts += 1;
@@ -2933,6 +2941,10 @@ impl App {
     /// Opens the Preferences dialog on `tab` (the `prefs` signal).
     #[cfg(any(windows, target_os = "macos"))]
     pub fn open_prefs(&mut self, tab: &str) {
+        #[cfg(target_os = "macos")]
+        if !self.restore_macos_ui() {
+            return;
+        }
         #[cfg(windows)]
         self.restore_startup_ui();
         self.toasts += 1;
@@ -2954,23 +2966,23 @@ impl App {
 
     /// The Capture Widget follows the capture side's setting.
     pub fn set_widget(&mut self, on: bool) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         let was_deferred = self.startup_ui.deferred;
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         let on = self.startup_ui.update(on);
         self.put_flag("Widget", on, |k, v| k.set_widget(v));
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         if was_deferred && !self.startup_ui.deferred {
             self.flush_startup_notices();
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn defer_startup_ui(&mut self) {
         self.startup_ui.deferred = true;
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     fn restore_startup_ui(&mut self) {
         if self.startup_ui.deferred {
             let on = self.startup_ui.open();
@@ -2979,14 +2991,14 @@ impl App {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn startup_notice(&mut self, title: &str, text: &str, problem: bool) {
         if !self.startup_ui.defer_notice(title, text, problem) {
             self.toast(title, text, problem);
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     fn flush_startup_notices(&mut self) {
         let notices = std::mem::take(&mut self.startup_ui.notices);
         if notices.is_empty() {
@@ -3001,8 +3013,25 @@ impl App {
         self.toast("Jiffshot startup", &text, problem);
     }
 
+    #[cfg(target_os = "macos")]
+    fn restore_macos_ui(&mut self) -> bool {
+        if let Err(error) = self.scope.promote_macos_to_foreground() {
+            let message = format!("Could not bring Jiffshot to the foreground: {error}");
+            jiffshot_workflow::log(&message);
+            self.toast("Could not open Jiffshot", &message, true);
+            return false;
+        }
+        self.restore_startup_ui();
+        crate::ui::set_permission_background_mode(false);
+        true
+    }
+
     /// Shows the editor window and brings it forward.
     pub fn show_editor(&mut self) {
+        #[cfg(target_os = "macos")]
+        if !self.restore_macos_ui() {
+            return;
+        }
         #[cfg(windows)]
         self.restore_startup_ui();
         if let Some(window) = self.scope.main_window() {
@@ -5304,7 +5333,7 @@ fn path_of_uri(uri: &str) -> std::result::Result<PathBuf, String> {
 mod tests {
     use super::*;
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn startup_widget_stays_hidden_until_the_app_is_opened() {
         let mut widget = StartupUi::new(true);
@@ -5315,7 +5344,7 @@ mod tests {
         assert!(widget.update(true));
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn startup_widget_respects_changes_while_deferred() {
         let mut widget = StartupUi::new(true);
@@ -5325,7 +5354,7 @@ mod tests {
         assert!(widget.update(true));
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn automatic_startup_notices_wait_for_opening_and_keep_the_latest_status() {
         let mut widget = StartupUi::new(true);
