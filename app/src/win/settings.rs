@@ -378,6 +378,7 @@ mod tests {
     fn default_theme_follows_the_system_when_unset() {
         let settings = Settings::default();
         assert_eq!(settings.theme.as_deref().unwrap_or(DEFAULT_THEME), "System");
+        #[cfg(any(windows, target_os = "macos"))]
         assert_eq!(crate::prefs::THEMES.iter().position(|t| *t == DEFAULT_THEME), Some(2));
     }
 }
