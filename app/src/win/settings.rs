@@ -42,6 +42,10 @@ pub struct Settings {
     pub recent: Vec<PathBuf>,
 }
 
+/// Default shared color theme when no preference has been saved yet:
+/// follows the operating system's dark or light mode automatically.
+pub const DEFAULT_THEME: &str = "System";
+
 /// Default, minimum and maximum widths for the resizable Properties panel.
 pub const SIDE_BAR_DEFAULT_WIDTH: f64 = 300.0;
 pub const SIDE_BAR_MIN_WIDTH: f64 = 240.0;
@@ -368,5 +372,12 @@ mod tests {
         assert_eq!(clamp_side_bar_width(900.0), SIDE_BAR_MAX_WIDTH);
         assert_eq!(clamp_side_bar_width(f64::NAN), SIDE_BAR_DEFAULT_WIDTH);
         assert_eq!(clamp_side_bar_width(360.0), 360.0);
+    }
+
+    #[test]
+    fn default_theme_follows_the_system_when_unset() {
+        let settings = Settings::default();
+        assert_eq!(settings.theme.as_deref().unwrap_or(DEFAULT_THEME), "System");
+        assert_eq!(crate::prefs::THEMES.iter().position(|t| *t == DEFAULT_THEME), Some(2));
     }
 }

@@ -1509,7 +1509,7 @@ impl App {
             .settings
             .theme
             .clone()
-            .unwrap_or_else(|| "Dark".to_owned());
+            .unwrap_or_else(|| crate::settings::DEFAULT_THEME.to_owned());
         self.put_str("Theme", &theme, |k, v| k.set_theme(v));
         let tools = self.settings.toolbar.join(",");
         self.put_str("ToolOrder", &tools, |k, v| k.set_tool_order(v));
@@ -4008,7 +4008,12 @@ impl App {
 
     /// Dark → Light → System (follows Windows) → Dark.
     pub fn cycle_theme(&mut self) {
-        let next = match self.settings.theme.as_deref().unwrap_or("Dark") {
+        let next = match self
+            .settings
+            .theme
+            .as_deref()
+            .unwrap_or(crate::settings::DEFAULT_THEME)
+        {
             "Dark" => "Light",
             "Light" => "System",
             _ => "Dark",

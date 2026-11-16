@@ -546,7 +546,7 @@ impl MainViewModelSink {
             gradient_radial: Signal::new(false),
             gradient_angle: Signal::new(90.0),
             canvas_color: Signal::new(String::from("#FFFFFFFF")),
-            theme: Signal::new(String::from("Dark")),
+            theme: Signal::new(String::from("System")),
             gif_preset: Signal::new(String::from("Screen recording")),
             gif_loop: Signal::new(true),
             gif_fade: Signal::new(false),

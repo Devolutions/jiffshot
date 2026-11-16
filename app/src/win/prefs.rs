@@ -54,7 +54,11 @@ impl ShareSnapshot {
 pub fn dialog(app: &App, tab: &str) -> String {
     let capture_settings = jiffshot_workflow::settings_snapshot();
     let s = &app.settings;
-    let theme = THEMES.iter().position(|t| Some(*t) == s.theme.as_deref()).unwrap_or(0);
+    let current_theme = s
+        .theme
+        .as_deref()
+        .unwrap_or(crate::settings::DEFAULT_THEME);
+    let theme = THEMES.iter().position(|t| *t == current_theme).unwrap_or(2);
     let format = FORMATS.iter().position(|(_, ext)| *ext == s.export_format.as_deref().unwrap_or("")).unwrap_or(0);
     let mut share = Vec::new();
     if s.programs.is_empty() {
@@ -161,7 +165,7 @@ fn apply_editor(app: &mut App, editor: &[Value], library: &[Value]) -> bool {
     let mut changes = serde_json::Map::new();
     if !editor.is_empty() {
         let theme = THEMES[(editor[0].as_u64().unwrap_or(0) as usize).min(2)];
-        if updated.theme.as_deref() != Some(theme) {
+        if updated.theme.as_deref().unwrap_or(crate::settings::DEFAULT_THEME) != theme {
             updated.theme = Some(theme.to_owned());
             changes.insert("theme".into(), Value::String(theme.to_owned()));
         }
@@ -210,7 +214,7 @@ fn apply_editor(app: &mut App, editor: &[Value], library: &[Value]) -> bool {
 fn apply_editor(app: &mut App, editor: &[Value], library: &[Value]) {
     if !editor.is_empty() {
         let theme = THEMES[(editor[0].as_u64().unwrap_or(0) as usize).min(2)];
-        if app.settings.theme.as_deref() != Some(theme) {
+        if app.settings.theme.as_deref().unwrap_or(crate::settings::DEFAULT_THEME) != theme {
             app.run(&format!("theme:{theme}"));
         }
         let (labels, side_bar, tray) = (on(editor, 1), on(editor, 2), on(editor, 3));

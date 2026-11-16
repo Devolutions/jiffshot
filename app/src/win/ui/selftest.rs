@@ -2936,7 +2936,7 @@ fn share_program_script() -> Script {
         crate::app::act(|app| {
             let previous = app.settings.programs.clone();
             let request = share_request(app, serde_json::json!({
-                "capture": [0], "editor": [0, true, true, true, 0],
+                "capture": [0], "editor": [2, true, true, true, 0],
                 "share": [null, false, false]
             }));
             crate::prefs::apply(app, &request);
@@ -2960,7 +2960,7 @@ fn share_program_script() -> Script {
         crate::app::act(|app| {
             let previous = app.settings.programs.clone();
             let request = share_request(app, serde_json::json!({
-                "capture": [0], "editor": [0, true, true, true, 0],
+                "capture": [0], "editor": [2, true, true, true, 0],
                 "share": [null, false, false]
             }));
             crate::prefs::apply(app, &request);
@@ -4808,15 +4808,19 @@ fn capture_widget_script() -> Script {
         }
         test.line("capture_widget_script: expanded Grab Text icon and visible More action");
         test.note = sink().theme.get_untracked();
-        run(if test.note == "Light" { "theme:Dark" } else { "theme:Light" });
+        let was_dark = super::capture_view::parts::dark_theme(&super::scope().expect("the editor scope"));
+        run(if was_dark { "theme:Light" } else { "theme:Dark" });
         350
     }).step(|test| {
         let windows = test.new_windows();
         assert_eq!(windows.len(), 1, "expected just the floating bar after a theme change");
         test.shot_of(windows[0], "capture-widget-theme.png");
         #[cfg(windows)]
-        assert_eq!(assert_widget_pixels(&test.path("capture-widget-theme.png"), windows[0]), test.note == "Light",
-            "the floating bar did not follow the changed theme");
+        {
+            let expected_dark = super::capture_view::parts::dark_theme(&super::scope().expect("the editor scope"));
+            assert_eq!(assert_widget_pixels(&test.path("capture-widget-theme.png"), windows[0]), expected_dark,
+                "the floating bar did not follow the changed theme");
+        }
         test.line("capture_widget_script: Grab Text stays visible after changing the theme");
         run(format!("theme:{}", test.note));
         350
