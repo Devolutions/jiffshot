@@ -22,13 +22,20 @@ flowchart LR
 ```
 
 - The running Jiffshot (the tray process) owns all state: recordings, guides, settings.
-  Its control server (`crates/jiffshot-workflow/src/control.rs`) serves a named pipe
-  that only the same user can open (a protected DACL with that user's SID; remote
-  clients are rejected), named per user and Windows session.
+  On Windows its control server serves a named pipe restricted to the same user
+  and session. On macOS it uses a private per-user Unix socket.
 - `jiffshot-cli` is a short-lived client. Each invocation sends one request and prints
-  one JSON object. When Jiffshot is not running it starts the `jiffshot.exe` beside it
-  (or `JIFFSHOT_EXE`) in the tray and waits until it answers; `--no-launch` disables
-  that.
+  one JSON object. When Jiffshot is not running it starts `jiffshot` (`jiffshot.exe`
+  on Windows) beside it
+  (or `JIFFSHOT_EXE`) and waits until it answers. On Windows and macOS it passes
+  `--background` to avoid opening the Capture window; Linux retains its normal
+  startup behavior. `--no-launch` disables auto-start.
+- On macOS, background startup keeps the app out of the Dock and does not
+  activate it. The menu-bar icon, capture services and required overlays remain
+  available. The saved Capture Widget and startup notices wait until the app
+  is opened. `open`, opening the Capture window, or opening Preferences
+  explicitly promotes the existing process to an ordinary foreground app. Video
+  commands still use the same app process over IPC; they do not open the editor.
 - The protocol lives in `crates/jiffshot-control`: requests are
   `{"protocol":1,"id","command","args"}`, responses `{"id","ok","result"|"error"}`.
   A protocol mismatch is refused with `unsupported`.

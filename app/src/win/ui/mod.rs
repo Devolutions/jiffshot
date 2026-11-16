@@ -194,7 +194,11 @@ pub(crate) fn recent_file_name(uri: &str) -> String {
 
 /// Mounts the editor window, shown or hidden. It is the application's main
 /// window, so it must be mounted first.
-pub fn mount_main_window(scope: &AppScope, model: impl MainViewModel, show: bool) -> Result<()> {
+pub fn mount_main_window(
+    scope: &AppScope,
+    model: impl MainViewModel,
+    show: bool,
+) -> Result<()> {
     let binding = MainBinding::new(model)?;
     MAIN.with(|m| *m.borrow_mut() = Some(binding.clone()));
     let window = main_window::build(scope, &binding)?;

@@ -1,6 +1,7 @@
 //! On-demand permission failures. Only the desktop app installs a UI handler;
 //! command-line tools retain actionable errors without opening windows.
 
+use std::cell::Cell;
 use std::io;
 use std::sync::{Arc, Mutex};
 
@@ -16,11 +17,34 @@ pub enum Permission {
 type DeniedHandler = Arc<dyn Fn(Permission) + Send + Sync>;
 static DENIED_HANDLER: Mutex<Option<DeniedHandler>> = Mutex::new(None);
 
+thread_local! {
+    static DENIED_HANDLER_SUPPRESSED: Cell<bool> = const { Cell::new(false) };
+}
+
 /// Installs guidance without querying or requesting any permissions.
 pub fn set_denied_handler(handler: Option<DeniedHandler>) {
     *DENIED_HANDLER
         .lock()
         .unwrap_or_else(|error| error.into_inner()) = handler;
+}
+
+/// Runs a headless operation without opening desktop permission guidance.
+pub fn with_denied_handler_suppressed<T>(operation: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DENIED_HANDLER_SUPPRESSED.with(|suppressed| suppressed.set(self.0));
+        }
+    }
+
+    let previous = DENIED_HANDLER_SUPPRESSED.with(|suppressed| suppressed.replace(true));
+    let _restore = Restore(previous);
+    operation()
+}
+
+pub(crate) fn denied_handler_is_suppressed() -> bool {
+    DENIED_HANDLER_SUPPRESSED.with(Cell::get)
 }
 
 impl Permission {
@@ -87,6 +111,9 @@ impl Permission {
     }
 
     pub(crate) fn report_denied(self) {
+        if denied_handler_is_suppressed() {
+            return;
+        }
         let handler = DENIED_HANDLER
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -139,6 +166,9 @@ pub(crate) fn check_or_request(
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static HANDLER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn passive_and_granted_checks_never_prompt_or_warn() {
@@ -183,6 +213,34 @@ mod tests {
             || true,
             || panic!("newly granted")
         ));
+    }
+
+    #[test]
+    fn suppressed_denial_handler_is_scoped_and_restored_after_unwind() {
+        let _lock = HANDLER_TEST_LOCK.lock().unwrap();
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                set_denied_handler(None);
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        set_denied_handler(Some(Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+        })));
+        let _reset = Reset;
+
+        with_denied_handler_suppressed(|| Permission::Accessibility.report_denied());
+        Permission::Accessibility.report_denied();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        let _ = std::panic::catch_unwind(|| {
+            with_denied_handler_suppressed(|| panic!("fixture panic"));
+        });
+        Permission::Accessibility.report_denied();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
 
     #[test]

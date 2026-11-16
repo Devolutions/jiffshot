@@ -628,6 +628,15 @@ jobs:
         run: |
           cargo test --release --locked --workspace --target ${{ matrix.target }}
 
+      - name: Test macOS background CLI launch
+        if: matrix.arch == 'arm64'
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          & ./package/macos/background_selftest.ps1 `
+            -BinaryDirectory "target/${{ matrix.target }}/release" `
+            -Output (Join-Path $env:RUNNER_TEMP 'jiffshot-background-launch')
+
       - name: Test macOS Grab Text
         if: matrix.arch == 'arm64'
         timeout-minutes: 5

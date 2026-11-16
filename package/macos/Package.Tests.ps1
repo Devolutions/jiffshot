@@ -155,6 +155,7 @@ Describe 'macOS packaging' {
             $plist = Get-MacInfoPlist '1.2.3'
             $plist.CFBundleShortVersionString | Should -BeExactly '1.2.3'
             $plist.LSMinimumSystemVersion | Should -BeExactly '13.0'
+            $plist.LSUIElement | Should -BeTrue
             foreach ($key in 'NSCameraUsageDescription', 'NSMicrophoneUsageDescription', 'NSScreenCaptureUsageDescription', 'NSAppleEventsUsageDescription') {
                 $plist[$key] | Should -Not -BeNullOrEmpty
             }

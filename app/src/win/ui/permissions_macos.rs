@@ -64,6 +64,7 @@ fn show(scope: &AppScope, permission: Permission) -> Result<()> {
     // Repeated failures (for example an interval capture) must not open more
     // windows or steal focus from System Settings while the user enables access.
     if !window.is_visible()? {
+        scope.promote_macos_to_foreground()?;
         window.show()?;
         if let Some(handle) = parts::hwnd(scope, &window) {
             crate::winutil::bring_forward(handle as isize);

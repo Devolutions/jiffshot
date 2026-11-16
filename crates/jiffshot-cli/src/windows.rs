@@ -889,7 +889,7 @@ impl Drop for Detached {
     }
 }
 
-/// Starts Jiffshot in the tray and waits until it answers.
+/// Starts Jiffshot and waits until it answers.
 fn launch() -> Result<(), Error> {
     let exe = jiffshot_exe().ok_or_else(|| {
         Error::new(ErrorCode::Unavailable, "Jiffshot is not running and its executable was not found beside jiffshot-cli (set JIFFSHOT_EXE)")
@@ -902,14 +902,19 @@ fn launch() -> Result<(), Error> {
         )
     };
     #[cfg(windows)]
-    let child = Detached::spawn(&exe, &[]).map_err(cannot_start)?;
+    let child = Detached::spawn(&exe, &["--background"]).map_err(cannot_start)?;
     #[cfg(not(windows))]
-    let mut child = std::process::Command::new(&exe)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(cannot_start)?;
+    let mut child = {
+        let mut command = std::process::Command::new(&exe);
+        #[cfg(target_os = "macos")]
+        command.arg("--background");
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(cannot_start)?
+    };
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut exited: Option<Instant> = None;
     loop {

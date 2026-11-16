@@ -350,17 +350,11 @@ fn notify(_hwnd: HWND, title: &str, text: &str, warning: bool) {
     }
 }
 
-fn notify_startup(hwnd: HWND, title: &str, text: &str, warning: bool) {
-    #[cfg(windows)]
-    {
-        let _ = hwnd;
-        log(&format!("{title}: {text}"));
-        if let Some(hooks) = crate::hooks() {
-            (hooks.startup_notice)(title, text, warning);
-        }
+fn notify_startup(_hwnd: HWND, title: &str, text: &str, warning: bool) {
+    log(&format!("{title}: {text}"));
+    if let Some(hooks) = crate::hooks() {
+        (hooks.startup_notice)(title, text, warning);
     }
-    #[cfg(target_os = "macos")]
-    notify(hwnd, title, text, warning);
 }
 
 /// What the tray menu shows, as the capture side sees it now.
@@ -3797,11 +3791,33 @@ fn request_exit() {
 /// for (a mode, or `usize::MAX` for menus). Returns the exit code.
 pub fn run(
     initial: Option<usize>,
+    #[cfg(windows)] control_ready: Option<&std::sync::atomic::AtomicBool>,
+    #[cfg(windows)] startup: Option<std::sync::mpsc::Sender<std::io::Result<()>>>,
     #[cfg(target_os = "macos")] control: &mut Option<jiffshot_control::Server>,
+    #[cfg(target_os = "macos")] control_ready: Option<&std::sync::atomic::AtomicBool>,
+    #[cfg(target_os = "macos")] startup: Option<std::sync::mpsc::Sender<std::io::Result<()>>>,
 ) -> i32 {
     let hwnd = sys::create_message_window(CLASS, "Jiffshot Capture", wndproc);
     if hwnd.is_null() {
         log("could not create the tray window");
+        #[cfg(target_os = "macos")]
+        if let Some(startup) = startup {
+            if startup
+                .send(Err(std::io::Error::other("could not create the tray window")))
+                .is_err()
+            {
+                log("could not report capture instance listener startup");
+            }
+        }
+        #[cfg(windows)]
+        if let Some(startup) = startup {
+            if startup
+                .send(Err(std::io::Error::other("could not create the tray window")))
+                .is_err()
+            {
+                log("could not report capture engine startup");
+            }
+        }
         return 1;
     }
 
@@ -3813,7 +3829,19 @@ pub fn run(
             "could not start the capture instance listener: {error}"
         ));
         eprintln!("could not start the capture instance listener: {error}");
+        if let Some(startup) = startup {
+            if startup.send(Err(error)).is_err() {
+                log("could not report capture instance listener startup");
+            }
+        }
         return 1;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(startup) = startup {
+        if startup.send(Ok(())).is_err() {
+            log("could not report capture instance listener startup");
+            return 1;
+        }
     }
     let settings = Settings::load();
     #[cfg(target_os = "macos")]
@@ -3864,7 +3892,7 @@ pub fn run(
     }
     #[cfg(target_os = "macos")]
     if let Err(error) = synchronize_schedule(hwnd, &settings_now) {
-        notify(hwnd, "Scheduled capture paused", &error.to_string(), true);
+        notify_startup(hwnd, "Scheduled capture paused", &error.to_string(), true);
     }
     publish_state();
     #[cfg(any(windows, target_os = "macos"))]
@@ -3874,7 +3902,7 @@ pub fn run(
             #[cfg(windows)]
             notify_startup(hwnd, "Startup status", "Could not refresh startup status automatically. Reopen Preferences to check it.", true);
             #[cfg(target_os = "macos")]
-            notify(hwnd, "Open at login status", "Could not refresh the login-item status automatically. Reopen Preferences to check it.", true);
+            notify_startup(hwnd, "Open at login status", "Could not refresh the login-item status automatically. Reopen Preferences to check it.", true);
         }
     }
     if initial.is_some() {
@@ -3884,9 +3912,24 @@ pub fn run(
     }
 
     #[cfg(target_os = "macos")]
-    match crate::control_macos::start() {
-        Ok(server) => *control = Some(server),
-        Err(error) => log(&format!("control: not available: {error}")),
+    if let Some(ready) = control_ready {
+        ready.store(true, std::sync::atomic::Ordering::Release);
+    } else {
+        match crate::control_macos::start(None) {
+            Ok(server) => *control = Some(server),
+            Err(error) => log(&format!("control: not available: {error}")),
+        }
+    }
+    #[cfg(windows)]
+    if let Some(ready) = control_ready {
+        ready.store(true, std::sync::atomic::Ordering::Release);
+    }
+    #[cfg(windows)]
+    if let Some(startup) = startup {
+        if startup.send(Ok(())).is_err() {
+            log("could not report capture engine startup");
+            return 1;
+        }
     }
 
     // SAFETY: the standard message loop for this thread, then cleanup of the
@@ -4295,7 +4338,6 @@ mod tests {
                     assert!(warning);
                     notified.lock().unwrap().push("error");
                 }),
-                #[cfg(windows)]
                 startup_notice: Box::new(|_, _, _| panic!("capture must not report startup")),
                 state: Box::new(|_| {}),
                 recording: Box::new(|_| {}),

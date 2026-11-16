@@ -25,6 +25,11 @@ fn is_background_launch(args: &[String], startup_activation: bool) -> bool {
     args == ["--background"] || (args.is_empty() && startup_activation)
 }
 
+#[cfg(target_os = "macos")]
+fn is_background_launch(args: &[String]) -> bool {
+    args == ["--background"]
+}
+
 #[cfg(windows)]
 fn wait_for_running_instance(wait: std::time::Duration, mut forward: impl FnMut() -> bool) -> bool {
     let started = std::time::Instant::now();
@@ -81,8 +86,16 @@ fn windows_taskbar_present() -> bool {
 }
 
 #[cfg(windows)]
-fn report_tray_unavailable(detail: String) {
+fn report_tray_unavailable(detail: String, quiet_background: bool) {
     jiffshot_workflow::log(&format!("Windows tray unavailable: {detail}"));
+    if quiet_background {
+        if let Err(error) = app::act(|app| {
+            app.startup_notice("Windows tray unavailable", &detail, true);
+        }) {
+            jiffshot_workflow::log(&format!("Could not defer the missing-tray notice: {error}"));
+        }
+        return;
+    }
     if let Err(error) = app::act(|app| {
         app.show_editor();
         app.toast("Windows tray unavailable", &detail, true);
@@ -92,7 +105,10 @@ fn report_tray_unavailable(detail: String) {
 }
 
 #[cfg(windows)]
-fn watch_windows_taskbar(scope: rustolonia::AppScope) -> std::io::Result<()> {
+fn watch_windows_taskbar(
+    scope: rustolonia::AppScope,
+    quiet_background: bool,
+) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("jiffshot-taskbar".into())
         .spawn(move || {
@@ -102,9 +118,10 @@ fn watch_windows_taskbar(scope: rustolonia::AppScope) -> std::io::Result<()> {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
-            if let Err(error) = scope.post(|| {
+            if let Err(error) = scope.post(move || {
                 report_tray_unavailable(
-                    "Windows did not provide a taskbar. Jiffshot was opened so you can access it; try again after Explorer starts.".into(),
+                    "Windows did not provide a taskbar. Try again after Explorer starts.".into(),
+                    quiet_background,
                 )
             }) {
                 jiffshot_workflow::log(&format!("Could not report the missing Windows taskbar: {error}"));
@@ -730,17 +747,23 @@ pub(crate) fn run() -> rustolonia::Result<()> {
     // into the tray and single-instance claim.
     let tray = std::env::var_os("JIFFSHOT_UITEST").is_none();
     #[cfg(windows)]
-    let background = if tray && args.is_empty() {
+    let explicit_background = args.iter().any(|arg| arg == "--background");
+    #[cfg(windows)]
+    let startup_activation = if tray && args.is_empty() {
         match jiffshot_workflow::is_windows_startup_activation() {
-            Ok(startup) => is_background_launch(&args, startup),
+            Ok(startup) => startup,
             Err(error) => {
                 jiffshot_workflow::log(&format!("Could not determine Windows startup activation: {error}"));
                 true
             }
         }
     } else {
-        is_background_launch(&args, false)
+        false
     };
+    #[cfg(windows)]
+    let background = is_background_launch(&args, startup_activation);
+    #[cfg(target_os = "macos")]
+    let background = is_background_launch(&args);
     #[cfg(windows)]
     let test_capture_engine = !tray && std::env::var_os("JIFFSHOT_UITEST_GRAB_TEXT").is_some();
     #[cfg(target_os = "macos")]
@@ -847,6 +870,9 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         }
         #[cfg(target_os = "macos")]
         {
+            if background {
+                return Ok(());
+            }
             let result = match files.first() {
                 Some(file) => std::path::absolute(file).and_then(|file| {
                     jiffshot_capture::ipc::send_to_editor_when_ready(
@@ -878,7 +904,7 @@ pub(crate) fn run() -> rustolonia::Result<()> {
     #[cfg(windows)]
     let show_editor = (!tray && !background) || !files.is_empty();
     #[cfg(target_os = "macos")]
-    let show_editor = !tray || !files.is_empty();
+    let show_editor = (!tray && !background) || !files.is_empty();
     #[cfg(target_os = "macos")]
     let show_editor = show_editor
         && !(test_capture_engine && std::env::var_os("JIFFSHOT_UITEST_SETTINGS_HANDOFF").is_some());
@@ -889,6 +915,12 @@ pub(crate) fn run() -> rustolonia::Result<()> {
     let app = App::load_from_env()?;
     #[cfg(target_os = "macos")]
     let app = app.with_application_name(jiffshot_capture::paths::NAME)?;
+    #[cfg(target_os = "macos")]
+    let app = if background {
+        app.with_macos_background()?
+    } else {
+        app
+    };
     #[cfg(windows)]
     let test_engine = test_capture_engine.then(|| {
         std::sync::Arc::new(std::sync::Mutex::new(None::<std::thread::JoinHandle<i32>>))
@@ -912,6 +944,10 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         app::install(scope.clone(), opening);
         #[cfg(windows)]
         if defer_startup_ui {
+            app::with(|app| app.defer_startup_ui());
+        }
+        #[cfg(target_os = "macos")]
+        if background {
             app::with(|app| app.defer_startup_ui());
         }
         #[cfg(target_os = "macos")]
@@ -965,7 +1001,7 @@ pub(crate) fn run() -> rustolonia::Result<()> {
         if let Some(error) = editor_ipc_error {
             eprintln!("could not start the editor instance listener: {error}");
             app::post(move |app| {
-                app.toast("Jiffshot hand-off unavailable", &error.to_string(), true)
+                app.startup_notice("Jiffshot hand-off unavailable", &error.to_string(), true)
             });
         }
         #[cfg(windows)]
@@ -1047,7 +1083,6 @@ pub(crate) fn run() -> rustolonia::Result<()> {
                         }
                     });
                 }),
-                #[cfg(windows)]
                 startup_notice: Box::new(|title, text, problem| {
                     let (title, text) = (title.to_owned(), text.to_owned());
                     app::post(move |app| app.startup_notice(&title, &text, problem));
@@ -1078,14 +1113,16 @@ pub(crate) fn run() -> rustolonia::Result<()> {
                 }),
             };
             #[cfg(target_os = "macos")]
-            let started =
-                capture_engine_macos::start(|| jiffshot_workflow::start_engine(capture, hooks));
-            #[cfg(windows)]
-            let started = jiffshot_workflow::start_engine(capture, hooks).map(|handle| {
-                if let Some(slot) = &test_engine_in_app {
-                    *slot.lock().expect("self-test engine lock") = Some(handle);
-                }
+            let started = capture_engine_macos::start(|| {
+                jiffshot_workflow::start_engine(capture, hooks, background)
             });
+            #[cfg(windows)]
+            let started =
+                jiffshot_workflow::start_engine(capture, hooks, background).map(|handle| {
+                    if let Some(slot) = &test_engine_in_app {
+                        *slot.lock().expect("self-test engine lock") = Some(handle);
+                    }
+                });
             if let Err(error) = started {
                 #[cfg(windows)]
                 if test_capture_engine {
@@ -1093,22 +1130,38 @@ pub(crate) fn run() -> rustolonia::Result<()> {
                         "the self-test capture engine did not start: {error}"
                     )));
                 }
+                if background {
+                    return Err(rustolonia::Error::Load(format!(
+                        "the background service did not start: {error}"
+                    )));
+                }
                 eprintln!("the capture side did not start: {error}");
             }
             let tray_result = ui::mount_tray(scope, tray::TrayModel);
             #[cfg(target_os = "macos")]
-            tray_result?;
+            if let Err(error) = tray_result {
+                let error = match capture_engine_macos::stop() {
+                    Ok(()) => error,
+                    Err(stop_error) => rustolonia::Error::Load(format!(
+                        "{error}; additionally failed to stop the capture engine: {stop_error}"
+                    )),
+                };
+                return Err(error);
+            }
             #[cfg(windows)]
             match tray_result {
-                Err(error) => report_tray_unavailable(format!(
-                    "Jiffshot could not create its notification-area icon: {error}. The editor was opened instead."
-                )),
+                Err(error) => report_tray_unavailable(
+                    format!("Jiffshot could not create its notification-area icon: {error}."),
+                    explicit_background,
+                ),
                 Ok(()) if defer_startup_ui && !windows_taskbar_present() => {
                     jiffshot_workflow::log("Waiting for the Windows taskbar to become available.");
-                    if let Err(error) = watch_windows_taskbar(scope.clone()) {
+                    if let Err(error) =
+                        watch_windows_taskbar(scope.clone(), explicit_background)
+                    {
                         report_tray_unavailable(format!(
-                            "Jiffshot could not watch for the Windows taskbar: {error}. The editor was opened instead."
-                        ));
+                            "Jiffshot could not watch for the Windows taskbar: {error}."
+                        ), explicit_background);
                     }
                 }
                 Ok(()) => {}
@@ -1156,23 +1209,31 @@ pub(crate) fn run() -> rustolonia::Result<()> {
     #[cfg(target_os = "macos")]
     let dispatcher_error = shutdown_ui_macos::stop().err();
     #[cfg(target_os = "macos")]
-    let unexpected_engine = match capture_engine_macos::running() {
-        Ok(true) => Some("the UI loop ended before the capture engine stopped".to_owned()),
-        Ok(false) => None,
-        Err(error) => Some(error),
+    let unexpected_engine = if result.is_ok() {
+        match capture_engine_macos::running() {
+            Ok(true) => Some("the UI loop ended before the capture engine stopped".to_owned()),
+            Ok(false) => None,
+            Err(error) => Some(error),
+        }
+    } else {
+        None
     };
     ui::detach_all();
     #[cfg(target_os = "macos")]
     if let Some(error) = file_drag_error {
         let message = format!("could not stop macOS file dragging: {error}");
         jiffshot_workflow::log(&message);
-        return Err(rustolonia::Error::Load(message));
+        if result.is_ok() {
+            return Err(rustolonia::Error::Load(message));
+        }
     }
     #[cfg(target_os = "macos")]
     if let Some(error) = dispatcher_error {
         let message = format!("could not stop the shutdown dispatcher: {error}");
         jiffshot_workflow::log(&message);
-        return Err(rustolonia::Error::Load(message));
+        if result.is_ok() {
+            return Err(rustolonia::Error::Load(message));
+        }
     }
     #[cfg(target_os = "macos")]
     if let Some(error) = unexpected_engine {
@@ -1294,5 +1355,17 @@ mod resource_tests {
                 "missing {expected:?} in VS_VERSION_INFO"
             );
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_background_launch_tests {
+    use super::is_background_launch;
+
+    #[test]
+    fn only_the_explicit_background_argument_is_background() {
+        assert!(is_background_launch(&["--background".into()]));
+        assert!(!is_background_launch(&[]));
+        assert!(!is_background_launch(&["image.png".into()]));
     }
 }

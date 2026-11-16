@@ -143,6 +143,8 @@ function Get-MacInfoPlist([string]$Version) {
         CFBundleShortVersionString = $Version
         CFBundleVersion = $Version
         LSMinimumSystemVersion = $script:MinimumMacOS
+        # Start without a Dock flash; the host promotes interactive launches.
+        LSUIElement = $true
         NSHighResolutionCapable = $true
         NSCameraUsageDescription = 'Jiffshot uses the camera when you include a webcam in a recording.'
         NSMicrophoneUsageDescription = 'Jiffshot uses the microphone when you include your voice in a recording.'
