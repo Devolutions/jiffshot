@@ -83,6 +83,7 @@ pub trait MainViewModel: Send + 'static {
     fn set_template_numbers(&mut self, value: bool) -> Result<()>;
     fn set_template_footer(&mut self, value: String) -> Result<()>;
     fn set_show_side_bar(&mut self, value: bool) -> Result<()>;
+    fn set_side_bar_width(&mut self, value: f64) -> Result<()>;
     fn set_show_effects(&mut self, value: bool) -> Result<()>;
     fn set_show_tray(&mut self, value: bool) -> Result<()>;
     fn set_tool_labels(&mut self, value: bool) -> Result<()>;
@@ -267,6 +268,7 @@ pub struct MainViewModelSink {
     pub tool_order: Signal<String>,
     pub narrating: Signal<bool>,
     pub show_side_bar: Signal<bool>,
+    pub side_bar_width: Signal<f64>,
     pub show_effects: Signal<bool>,
     pub show_tray: Signal<bool>,
     pub tool_labels: Signal<bool>,
@@ -565,6 +567,7 @@ impl MainViewModelSink {
             tool_order: Signal::new(String::new()),
             narrating: Signal::new(false),
             show_side_bar: Signal::new(true),
+            side_bar_width: Signal::new(crate::settings::SIDE_BAR_DEFAULT_WIDTH),
             show_effects: Signal::new(false),
             show_tray: Signal::new(true),
             tool_labels: Signal::new(true),
@@ -911,6 +914,9 @@ impl MainViewModelSink {
     pub fn set_show_side_bar(&self, value: bool) -> Result<()> {
         publish(self.show_side_bar, value)
     }
+    pub fn set_side_bar_width(&self, value: f64) -> Result<()> {
+        publish(self.side_bar_width, value)
+    }
     pub fn set_show_effects(&self, value: bool) -> Result<()> {
         publish(self.show_effects, value)
     }
@@ -1124,6 +1130,7 @@ impl MainBinding {
             m.set_template_footer(v)
         })?;
         watch(sink.show_side_bar, &model, |m, v| m.set_show_side_bar(v))?;
+        watch(sink.side_bar_width, &model, |m, v| m.set_side_bar_width(v))?;
         watch(sink.show_effects, &model, |m, v| m.set_show_effects(v))?;
         watch(sink.show_tray, &model, |m, v| m.set_show_tray(v))?;
         watch(sink.tool_labels, &model, |m, v| m.set_tool_labels(v))?;

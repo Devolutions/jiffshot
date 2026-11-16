@@ -42,12 +42,32 @@ pub struct Settings {
     pub recent: Vec<PathBuf>,
 }
 
+/// Default, minimum and maximum widths for the resizable Properties panel.
+pub const SIDE_BAR_DEFAULT_WIDTH: f64 = 300.0;
+pub const SIDE_BAR_MIN_WIDTH: f64 = 240.0;
+pub const SIDE_BAR_MAX_WIDTH: f64 = 520.0;
+
+fn default_side_bar_width() -> f64 {
+    SIDE_BAR_DEFAULT_WIDTH
+}
+
+pub fn clamp_side_bar_width(width: f64) -> f64 {
+    if width.is_finite() {
+        width.clamp(SIDE_BAR_MIN_WIDTH, SIDE_BAR_MAX_WIDTH)
+    } else {
+        SIDE_BAR_DEFAULT_WIDTH
+    }
+}
+
 /// Which parts of the window show, kept between sessions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Layout {
     /// Quick Styles and tool properties, on the right.
     pub side_bar: bool,
+    /// Width of the Properties panel in logical pixels.
+    #[serde(default = "default_side_bar_width")]
+    pub side_bar_width: f64,
     /// The Effects panel, beside the side bar.
     pub effects: bool,
     /// The Recent Captures tray along the bottom.
@@ -58,7 +78,13 @@ pub struct Layout {
 
 impl Default for Layout {
     fn default() -> Layout {
-        Layout { side_bar: true, effects: false, tray: true, labels: true }
+        Layout {
+            side_bar: true,
+            side_bar_width: SIDE_BAR_DEFAULT_WIDTH,
+            effects: false,
+            tray: true,
+            labels: true,
+        }
     }
 }
 
@@ -332,5 +358,15 @@ mod tests {
         assert_eq!(themed[1].stroke, palette[1]);
         s.reset_styles(Tool::Arrow);
         assert_eq!(s.quick_styles(Tool::Arrow), built);
+    }
+
+    #[test]
+    fn side_bar_width_defaults_clamps_and_round_trips() {
+        let legacy: Layout = serde_json::from_str(r#"{"side_bar":true,"effects":false,"tray":true,"labels":true}"#).unwrap();
+        assert_eq!(legacy.side_bar_width, SIDE_BAR_DEFAULT_WIDTH);
+        assert_eq!(clamp_side_bar_width(120.0), SIDE_BAR_MIN_WIDTH);
+        assert_eq!(clamp_side_bar_width(900.0), SIDE_BAR_MAX_WIDTH);
+        assert_eq!(clamp_side_bar_width(f64::NAN), SIDE_BAR_DEFAULT_WIDTH);
+        assert_eq!(clamp_side_bar_width(360.0), 360.0);
     }
 }

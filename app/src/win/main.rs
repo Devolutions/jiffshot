@@ -427,6 +427,10 @@ impl MainViewModel for Model {
         act(|app| app.layout(|l| l.side_bar = value))
     }
 
+    fn set_side_bar_width(&mut self, value: f64) -> Result<()> {
+        act(|app| app.layout(|l| l.side_bar_width = settings::clamp_side_bar_width(value)))
+    }
+
     fn set_show_effects(&mut self, value: bool) -> Result<()> {
         act(|app| app.layout(|l| l.effects = value))
     }

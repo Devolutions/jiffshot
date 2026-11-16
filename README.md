@@ -182,7 +182,7 @@ The detailed feature list below describes the Windows application. The Linux bui
   - **Pen, Highlighter & Stamps:** Freehand drawing, multiply-blend highlighters, built-in icon stamps, flood fill, eraser, magic wand background removal, and eyedropper.
   - **Blur, Magnify & Spotlight:** Pixelate, Gaussian-blur, or solid-redact sensitive regions; add circular/rectangular zoom loupes; dim or blur the background outside one or more spotlight areas.
 - **Movable Cursor Object:** Optionally captures the mouse pointer as a separate layer you can move, resize, or delete in the editor. If that layer cannot be saved, the image remains in the library and Jiffshot reports the problem instead of opening an incomplete edit automatically.
-- **Quick Styles & Themes:** Save custom tool styles, switch Quick Style palettes, customize the toolbar order, and switch between **Dark**, **Light**, and **System** themes across every Jiffshot window. On Windows, Jiffshot's own Dark surfaces use Devolutions' DarkBlue palette.
+- **Quick Styles, Layout & Themes:** Save custom tool styles, switch Quick Style palettes, customize the toolbar order, drag the **Properties** panel's left edge to resize it (or double-click to reset), and switch between **Dark**, **Light**, and **System** themes across every Jiffshot window. On Windows, Jiffshot's own Dark surfaces use Devolutions' DarkBlue palette.
 
 ### Smart Editing Tools
 
@@ -235,7 +235,7 @@ The detailed feature list below describes the Windows application. The Linux bui
 - **Incremental Library Refresh:** Unchanged tiles and thumbnails are retained when a capture arrives or the editor reopens. List changes are published together, and a new capture is opened before refreshing the library.
 - **Copy & Drag Out:** Right-click any capture in the Library or the Recent Captures tray and choose **Copy** to put the image (with its edits) on the clipboard; videos and multiple picked captures are copied as files. Drag captures from the tray or Library straight into other applications such as Explorer, Outlook, Teams, or a browser. On macOS, see the platform notes below.
 - **Editable `.jsd` Documents & Multi-Format Export:** Edits to library captures are saved automatically as non-destructive `.jsd` companion files, so annotations stay movable and editable whenever you reopen a capture. To bound memory use when opening files, an image is limited to 160 MiB and 33.2 megapixels; `.jsd` archives are limited to 256 MiB and 33.2 megapixels total across the background and embedded images. Export flat files to **PNG**, **JPEG**, **PDF**, **BMP**, **GIF**, and **WebP**.
-- **One Preferences Dialog:** Configure Capture behavior, Editor layout and theme, Library location, Share destinations, and global Hotkeys from a single window (`Ctrl+,`).
+- **One Preferences Dialog:** Configure Capture behavior, Editor layout and theme, Library location, Share destinations, and global Hotkeys from a single grouped-card window (`Ctrl+,`).
 
 <p align="center">
   <img src="docs/images/preferences.png" alt="Jiffshot Preferences Dialog" width="600" />
