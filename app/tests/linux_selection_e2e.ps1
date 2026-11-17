@@ -230,8 +230,15 @@ try {
         $driver.Click($script:moreButton[0], $script:moreButton[1])
         $driver.Sync()
         $script:morePopup = $null
+        $script:moreClick = [System.Diagnostics.Stopwatch]::StartNew()
+        # A freshly mapped editor can drop the first click on slower runners; re-click only while no menu is open.
         Wait-E2EUntil {
             $script:morePopup = @(Get-VisiblePopups $server.Display | Where-Object { $_ -notin $existingPopups }) | Select-Object -First 1
+            if ($null -eq $script:morePopup -and $script:moreClick.Elapsed.TotalSeconds -ge 3) {
+                $driver.Click($script:moreButton[0], $script:moreButton[1])
+                $driver.Sync()
+                $script:moreClick.Restart()
+            }
             $null -ne $script:morePopup
         } 'the More tools menu'
         $driver.Press('Escape')
