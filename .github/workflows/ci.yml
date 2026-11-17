@@ -84,12 +84,13 @@ jobs:
           RUSTOLONIA_HOST_DIR: ${{ env.RUSTOLONIA_STATIC_HOST_DIR }}
         run: cargo build --release --locked -p jiffshot -p jiffshot-cli --features jiffshot/static-host --target ${{ matrix.target }}
 
-      - name: Build packaged executable (UIAccess)
+      - name: Build Windows static host
+        timeout-minutes: 20
         env:
           JIFFSHOT_VERSION: ${{ inputs.version }}
           JIFFSHOT_UIACCESS: ${{ github.event_name != 'pull_request' && inputs.signing_environment != '' && '1' || '0' }}
           RUSTOLONIA_HOST_DIR: ${{ env.RUSTOLONIA_STATIC_HOST_DIR }}
-        run: cargo build --release --locked -p jiffshot --features static-host --target ${{ matrix.target }} --target-dir target/uiaccess
+        run: cargo build --release --locked -p jiffshot --features static-host --target ${{ matrix.target }} --target-dir target/static-host
 
       - name: Test
         if: matrix.test
@@ -178,13 +179,13 @@ jobs:
           Get-ChildItem $dir | Format-Table Name, Length
           $packagedDir = "jiffshot-${{ matrix.rid }}-packaged"
           New-Item -ItemType Directory -Path $packagedDir | Out-Null
-          Copy-Item "target/uiaccess/${{ matrix.target }}/release/jiffshot.exe", "$out/jiffshot-cli.exe" -Destination $packagedDir
+          Copy-Item "target/static-host/${{ matrix.target }}/release/jiffshot.exe", "$out/jiffshot-cli.exe" -Destination $packagedDir
           Get-ChildItem $packagedDir | Format-Table Name, Length
           # Symbols for the exact binaries above (release profile: line tables), kept out of the
           # portable folder so packages stay unchanged. Signing does not affect PDB matching.
           $symbols = "jiffshot-${{ matrix.rid }}-symbols"
           New-Item -ItemType Directory -Path $symbols | Out-Null
-          foreach ($pdb in @("target/uiaccess/${{ matrix.target }}/release/jiffshot.pdb", "$out/jiffshot_cli.pdb")) {
+          foreach ($pdb in @("target/static-host/${{ matrix.target }}/release/jiffshot.pdb", "$out/jiffshot_cli.pdb")) {
             if (-not (Test-Path -LiteralPath $pdb -PathType Leaf)) { throw "Missing release symbols: $pdb" }
             Copy-Item -LiteralPath $pdb -Destination $symbols
           }
