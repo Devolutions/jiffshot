@@ -46,7 +46,7 @@ fn pipe_name(identity: &Identity) -> String {
 }
 
 fn owner_only_sddl(sid: &str) -> String {
-    format!("D:P(A;;GA;;;{sid})")
+    format!("D:P(A;;GA;;;{sid})S:(ML;;NW;;;ME)")
 }
 
 struct OwnedHandle(HANDLE);
@@ -347,7 +347,7 @@ mod tests {
         );
         assert_eq!(
             owner_only_sddl(&identity.sid),
-            "D:P(A;;GA;;;S-1-5-21-1-2-3-1000)"
+            "D:P(A;;GA;;;S-1-5-21-1-2-3-1000)S:(ML;;NW;;;ME)"
         );
     }
 

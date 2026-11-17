@@ -5,10 +5,11 @@
 
 use std::path::Path;
 
-/// Writes `ico` and `VS_VERSION_INFO` for `version` as a `.res` file: one
-/// `RT_ICON` per image, the `RT_GROUP_ICON` (id 1) that lists them, and
-/// `RT_VERSION` (id 1).
-fn write_icon_res(ico: &[u8], version: &str, out: &Path) -> std::io::Result<()> {
+/// Writes `ico`, `VS_VERSION_INFO` for `version`, and the `RT_MANIFEST`
+/// (id 1) application manifest as a `.res` file: one `RT_ICON` per image,
+/// the `RT_GROUP_ICON` (id 1) that lists them, `RT_VERSION` (id 1), and
+/// `RT_MANIFEST` (id 1).
+fn write_icon_res(ico: &[u8], version: &str, ui_access: bool, out: &Path) -> std::io::Result<()> {
     let u16_at = |i: usize| u16::from_le_bytes([ico[i], ico[i + 1]]);
     let u32_at = |i: usize| u32::from_le_bytes([ico[i], ico[i + 1], ico[i + 2], ico[i + 3]]);
     let bad = || std::io::Error::new(std::io::ErrorKind::InvalidData, "not an .ico file");
@@ -41,7 +42,35 @@ fn write_icon_res(ico: &[u8], version: &str, out: &Path) -> std::io::Result<()> 
     entry(&mut res, 14, 1, 0x1030, &group);
     // RT_VERSION.
     entry(&mut res, 16, 1, 0x0030, &version_info(version));
+    // RT_MANIFEST (`CREATEPROCESS_MANIFEST_RESOURCE_ID` = 1).
+    entry(&mut res, 24, 1, 0x0030, manifest_xml(ui_access).as_bytes());
     std::fs::write(out, res)
+}
+
+/// Builds the `RT_MANIFEST` XML for `jiffshot.exe`.
+///
+/// Packaged installations (MSI into `%ProgramFiles%` and MSIX) set
+/// `uiAccess="true"` when signed so Windows grants `jiffshot.exe` a UIAccess
+/// token (`SECURITY_MANDATORY_MEDIUM_PLUS_RID` / `ZBID_UIACCESS`), allowing
+/// global hotkeys, topmost capture overlays, and focus restoration to work
+/// over elevated windows without running Jiffshot as administrator. Portable
+/// and unsigned builds default to `uiAccess="false"` so they can run from any
+/// folder without a trusted Authenticode signature in `%ProgramFiles%`.
+fn manifest_xml(ui_access: bool) -> String {
+    let flag = if ui_access { "true" } else { "false" };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="{flag}" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+</assembly>
+"#
+    )
 }
 
 /// Builds a `VS_VERSION_INFO` block for `jiffshot.exe` at `version`.
@@ -158,11 +187,12 @@ fn entry(res: &mut Vec<u8>, kind: u16, name: u16, flags: u16, data: &[u8]) {
     }
 }
 
-/// Embeds `ico` (a path relative to the crate) and `VS_VERSION_INFO` into the
-/// executable.
+/// Embeds `ico` (a path relative to the crate), `VS_VERSION_INFO`, and the
+/// application manifest into the executable.
 fn embed_icon(ico: &str) {
     println!("cargo:rerun-if-changed={ico}");
     println!("cargo:rerun-if-env-changed=JIFFSHOT_VERSION");
+    println!("cargo:rerun-if-env-changed=JIFFSHOT_UIACCESS");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
         || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
     {
@@ -174,9 +204,25 @@ fn embed_icon(ico: &str) {
         .filter(|v| !v.is_empty())
         .or_else(|| std::env::var("CARGO_PKG_VERSION").ok())
         .unwrap_or_else(|| "0.0.0".to_string());
+    let ui_access = std::env::var("JIFFSHOT_UIACCESS")
+        .ok()
+        .is_some_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "YES"));
     let bytes = std::fs::read(ico).unwrap_or_else(|e| panic!("reading {ico}: {e}"));
     let out = Path::new(&std::env::var("OUT_DIR").expect("cargo sets OUT_DIR")).join("icon.res");
-    write_icon_res(&bytes, &version, &out)
+    write_icon_res(&bytes, &version, ui_access, &out)
         .unwrap_or_else(|e| panic!("writing {}: {e}", out.display()));
     println!("cargo:rustc-link-arg-bins={}", out.display());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_xml_controls_ui_access_level() {
+        let portable = manifest_xml(false);
+        assert!(portable.contains(r#"<requestedExecutionLevel level="asInvoker" uiAccess="false" />"#));
+        let installed = manifest_xml(true);
+        assert!(installed.contains(r#"<requestedExecutionLevel level="asInvoker" uiAccess="true" />"#));
+    }
 }

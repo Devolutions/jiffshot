@@ -83,13 +83,29 @@ current Rustolonia host.
 ### Windows
 
 1. **Launch Jiffshot:** Start **Devolutions Jiffshot** from the Start Menu (or run `jiffshot.exe` from the portable folder). Jiffshot places its icon in the Windows notification area (system tray).
-2. **Take a capture:** Press **Print Screen** (`PrtScn`) at any time, or left-click the tray icon to open the **Capture Window** and choose a capture mode.
+2. **Take a capture:** Press **Print Screen** (`PrtScn`), or left-click the tray icon to open the **Capture Window** and choose a capture mode.
    - **Capture a window or UI element:** Move the pointer over any window and click. Roll the **mouse wheel** up or down while hovering to step between the top-level window and individual child UI controls.
    - **Capture a region:** Click and drag a rectangle. Hold `Shift` for a square, `Ctrl` for `16:9`, or `Ctrl+Shift` for `4:3`.
    - **Include an open context menu:** Open the menu, press the capture hotkey without clicking Jiffshot, then drag around it. The desktop is frozen before the selection overlay takes focus. If the shortcut itself dismisses the menu, use **Print Screen** or start a delayed capture before opening it.
    - **Capture a full monitor or desktop:** Press `F` for the current screen or `A` for all screens.
 3. **Annotate & share:** By default, captures are saved to `Pictures\Jiffshot`, copied to the clipboard, and opened in the **Jiffshot Editor** where you can add arrows, callouts, numbered steps, blur, or effects, then copy (`Ctrl+Shift+C`), export (`Ctrl+E`), or share directly to other apps.
 4. **Stay ready in the tray:** Closing the editor window keeps Jiffshot running quietly in the notification area so your hotkeys stay active. To quit completely, right-click the tray icon and choose **Exit**.
+
+Signed MSI (`C:\Program Files\Devolutions\Jiffshot`) and MSIX installations run
+with Windows `uiAccess="true"`, allowing global capture shortcuts and the
+selection overlay to work while an administrator-level window is active
+(excluding the UAC secure desktop or DRM-protected surfaces) without running
+Jiffshot as administrator. Portable ZIP and unsigned local builds run without
+`uiAccess` so they can launch from any folder; if a shortcut does not fire while
+an administrator window has focus in a portable build, install the MSI or MSIX
+package, or start a delayed capture from the Capture Window before focusing the
+administrator window. In **Preferences > Hotkeys**, the first note shows the
+current capture shortcut, including any fallback if the configured key is
+unavailable.
+
+If **Print Screen** opens Windows Snipping Tool instead, choose another capture
+shortcut in **Preferences > Hotkeys**, or turn off **Use the Print screen key to
+open screen capture** in Windows keyboard settings.
 
 On the first full launch for each Windows user, Jiffshot enables startup at
 sign-in by default, including once for existing users of older versions. It

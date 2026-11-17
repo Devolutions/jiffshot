@@ -459,16 +459,22 @@ mod windows {
     }
 
     /// A security descriptor granting the current user, and nobody else, full
-    /// access (`D:P(A;;GA;;;<SID>)`).
+    /// access (`D:P(A;;GA;;;<SID>)S:(ML;;NW;;;ME)`), with a Medium mandatory
+    /// label so standard (`Medium` integrity) CLI clients can open the pipe
+    /// when Jiffshot runs with `uiAccess="true"` (`Medium+` integrity).
     pub(super) struct OwnerOnly(*mut core::ffi::c_void);
 
     // SAFETY: the descriptor is immutable once built.
     unsafe impl Send for OwnerOnly {}
     unsafe impl Sync for OwnerOnly {}
 
+    pub(super) fn owner_only_sddl(sid: &str) -> String {
+        format!("D:P(A;;GA;;;{sid})S:(ML;;NW;;;ME)")
+    }
+
     impl OwnerOnly {
         pub(super) fn new() -> io::Result<OwnerOnly> {
-            let sddl = wide(&format!("D:P(A;;GA;;;{})", user_sid()?));
+            let sddl = wide(&owner_only_sddl(&user_sid()?));
             let mut descriptor = std::ptr::null_mut();
             // SAFETY: NUL-terminated SDDL; the descriptor is freed on drop.
             if unsafe {
@@ -794,6 +800,11 @@ mod tests {
             "{name}"
         );
         assert!(name.ends_with(&format!(".{}", session_id())));
+        assert_eq!(
+            windows::owner_only_sddl("S-1-5-21-1-2-3-1000"),
+            "D:P(A;;GA;;;S-1-5-21-1-2-3-1000)S:(ML;;NW;;;ME)"
+        );
+        let _ = windows::OwnerOnly::new().expect("owner-only SDDL with Medium label parses");
     }
 
     #[test]

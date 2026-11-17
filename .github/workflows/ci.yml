@@ -88,6 +88,7 @@ jobs:
         timeout-minutes: 20
         env:
           JIFFSHOT_VERSION: ${{ inputs.version }}
+          JIFFSHOT_UIACCESS: ${{ github.event_name != 'pull_request' && inputs.signing_environment != '' && '1' || '0' }}
           RUSTOLONIA_HOST_DIR: ${{ env.RUSTOLONIA_STATIC_HOST_DIR }}
         run: cargo build --release --locked -p jiffshot --features static-host --target ${{ matrix.target }} --target-dir target/static-host
 
@@ -129,7 +130,7 @@ jobs:
           $root = Join-Path $env:RUNNER_TEMP 'jiffshot-static-host'
           New-Item -ItemType Directory -Path $root | Out-Null
           $binary = Join-Path $root 'jiffshot.exe'
-          Copy-Item "target\static-host\${{ matrix.target }}\release\jiffshot.exe" -Destination $binary
+          Copy-Item "target\${{ matrix.target }}\release\jiffshot.exe" -Destination $binary
           & .\app\tests\windows_grab_text_e2e.ps1 -Binary $binary -AllowDesktopInput
 
       - name: Package
@@ -176,11 +177,15 @@ jobs:
           }
           Write-Host "Version OK: jiffshot.exe FileVersion=$($exeInfo.FileVersion) ProductVersion=$($exeInfo.ProductVersion)"
           Get-ChildItem $dir | Format-Table Name, Length
+          $packagedDir = "jiffshot-${{ matrix.rid }}-packaged"
+          New-Item -ItemType Directory -Path $packagedDir | Out-Null
+          Copy-Item "target/static-host/${{ matrix.target }}/release/jiffshot.exe", "$out/jiffshot-cli.exe" -Destination $packagedDir
+          Get-ChildItem $packagedDir | Format-Table Name, Length
           # Symbols for the exact binaries above (release profile: line tables), kept out of the
           # portable folder so packages stay unchanged. Signing does not affect PDB matching.
           $symbols = "jiffshot-${{ matrix.rid }}-symbols"
           New-Item -ItemType Directory -Path $symbols | Out-Null
-          foreach ($pdb in @("$out/jiffshot.pdb", "$out/jiffshot_cli.pdb")) {
+          foreach ($pdb in @("target/static-host/${{ matrix.target }}/release/jiffshot.pdb", "$out/jiffshot_cli.pdb")) {
             if (-not (Test-Path -LiteralPath $pdb -PathType Leaf)) { throw "Missing release symbols: $pdb" }
             Copy-Item -LiteralPath $pdb -Destination $symbols
           }
@@ -202,11 +207,19 @@ jobs:
           files: |
             jiffshot-${{ matrix.rid }}\jiffshot.exe
             jiffshot-${{ matrix.rid }}\jiffshot-cli.exe
+            jiffshot-${{ matrix.rid }}-packaged\jiffshot.exe
+            jiffshot-${{ matrix.rid }}-packaged\jiffshot-cli.exe
 
       - uses: actions/upload-artifact@v7
         with:
           name: jiffshot-${{ matrix.rid }}
           path: jiffshot-${{ matrix.rid }}
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jiffshot-${{ matrix.rid }}-packaged
+          path: jiffshot-${{ matrix.rid }}-packaged
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
@@ -975,7 +988,7 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: jiffshot-${{ matrix.rid }}
+          name: jiffshot-${{ matrix.rid }}-packaged
           path: bin
 
       - name: Install WiX Toolset
@@ -1149,7 +1162,7 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: jiffshot-${{ matrix.rid }}
+          name: jiffshot-${{ matrix.rid }}-packaged
           path: bin
 
       - uses: actions/download-artifact@v8
@@ -1358,6 +1371,12 @@ jobs:
             $tasks = $extensions[0].SelectNodes('desktop:StartupTask', $manifestNs)
             if ($tasks.Count -ne 1 -or $tasks[0].TaskId -ne 'JiffshotStartup' -or $tasks[0].Enabled -ne 'false') {
               throw 'The installed MSIX startup task does not match the first-launch opt-out policy'
+            }
+            $manifestNs.AddNamespace('rescap', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities')
+            $uiAccessCap = $installedManifest.SelectSingleNode(
+              '/appx:Package/appx:Capabilities/rescap:Capability[@Name="uiAccess"]', $manifestNs)
+            if ($null -eq $uiAccessCap) {
+              throw 'The installed MSIX does not declare the uiAccess restricted capability'
             }
             $manifestNs.AddNamespace('uap13', 'http://schemas.microsoft.com/appx/manifest/uap/windows10/13')
             $autoUpdate = $installedManifest.SelectSingleNode(
