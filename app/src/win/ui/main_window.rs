@@ -338,6 +338,8 @@ fn follow_theme(scope: &AppScope, window: &Window, sink: MainViewModelSink, them
         window.clone().on_loaded(scope, move |_| super::native_theme::apply(&app, native_window.get()))?;
     }
     let app = scope.clone();
+    #[cfg(windows)]
+    let native_window = UiOnly::new(window.clone());
     Effect::new(move || {
         let variant = match sink.theme.get().as_str() {
             "Light" => ThemeVariant::Light,
@@ -345,7 +347,9 @@ fn follow_theme(scope: &AppScope, window: &Window, sink: MainViewModelSink, them
             _ => ThemeVariant::Dark,
         };
         app.set_requested_theme_variant(variant)?;
-        theme.dark.set_if_changed(app.actual_theme_variant()? == ThemeVariant::Dark);
+        theme.dark.set_if_changed(super::capture_view::parts::dark_theme(&app));
+        #[cfg(windows)]
+        super::native_theme::apply(&app, native_window.get());
         Ok(())
     })?;
     // The system's theme can change under "System".
@@ -353,9 +357,7 @@ fn follow_theme(scope: &AppScope, window: &Window, sink: MainViewModelSink, them
     #[cfg(windows)]
     let native_window = UiOnly::new(window.clone());
     window.clone().on_actual_theme_variant_changed(scope, move |_| {
-        if let Ok(variant) = app.actual_theme_variant() {
-            theme.dark.set_if_changed(variant == ThemeVariant::Dark);
-        }
+        theme.dark.set_if_changed(super::capture_view::parts::dark_theme(&app));
         #[cfg(windows)]
         super::native_theme::apply(&app, native_window.get());
     })?;

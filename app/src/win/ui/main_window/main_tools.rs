@@ -182,7 +182,13 @@ fn tool_content(sink: MainViewModelSink, theme: super::main_common::Theme, path_
                 .width(18.0)
                 .height(18.0)
                 .data(path_data)
-                .stroke(move || Some(if glyph_active() { solid(WHITE) } else { theme.get(Tone::Text) }))
+                .stroke(move || {
+                    Some(if glyph_active() && theme.dark.get() {
+                        solid(WHITE)
+                    } else {
+                        theme.get(Tone::Text)
+                    })
+                })
                 .stroke_thickness(1.5)
                 .horizontal_alignment(HorizontalAlignment::Center)
                 .vertical_alignment(VerticalAlignment::Center),
@@ -197,7 +203,17 @@ fn tool_content(sink: MainViewModelSink, theme: super::main_common::Theme, path_
                 .horizontal_alignment(HorizontalAlignment::Center)
                 .text_trimming("CharacterEllipsis")
                 .visible(sink.tool_labels)
-                .foreground(move || if active() { solid(WHITE) } else { theme.get(Tone::Caption) }),
+                .foreground(move || {
+                    if active() {
+                        if theme.dark.get() {
+                            solid(WHITE)
+                        } else {
+                            theme.get(Tone::Text)
+                        }
+                    } else {
+                        theme.get(Tone::Caption)
+                    }
+                }),
         )
 }
 
@@ -240,14 +256,26 @@ fn tool_button(sink: MainViewModelSink, theme: super::main_common::Theme, index:
         .tool_tip_tip(move || sink.tool_order.with(|order| format_tool_tooltip(order, index)))
         .background(move || {
             if active() {
-                solid(if theme.dark.get() && cfg!(windows) { crate::ui::dark_blue::SELECTION } else { brand_accent(theme) })
+                solid(if theme.dark.get() {
+                    if cfg!(windows) {
+                        crate::ui::dark_blue::SELECTION
+                    } else {
+                        brand_accent(theme)
+                    }
+                } else {
+                    0xFFDCEEFF
+                })
             } else {
                 solid(TRANSPARENT)
             }
         })
         .border_brush(move || {
-            if border_active() && theme.dark.get() && cfg!(windows) {
-                solid(brand_text(theme))
+            if border_active() {
+                solid(if theme.dark.get() && cfg!(windows) {
+                    brand_text(theme)
+                } else {
+                    brand_accent(theme)
+                })
             } else {
                 solid(TRANSPARENT)
             }
