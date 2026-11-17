@@ -111,8 +111,27 @@ pub fn claim_instance(name: &str) -> bool {
 }
 
 /// Lets other processes reach the window of `class` through
-/// [`post_to_instance`]: on Windows they find it by class, so nothing to do.
-pub fn serve_instance(_class: &str) {}
+/// [`post_to_instance`]: on Windows they find it by class, and when the
+/// running instance has a UIAccess token (`Medium+` integrity), UIPI blocks
+/// standard (`Medium` integrity) second instances unless its window message
+/// filter explicitly allows the cross-instance messages.
+pub fn serve_instance(class: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ChangeWindowMessageFilterEx, MSGFLT_ALLOW};
+    let hwnd = find_window(class);
+    if hwnd.is_null() {
+        return;
+    }
+    for msg in [
+        crate::tray::WM_APP_CAPTURE,
+        crate::tray::WM_APP_MENU,
+        crate::tray::WM_APP_CAPTURE_LATER,
+    ] {
+        // SAFETY: allows the message on our own window's UIPI filter.
+        unsafe {
+            ChangeWindowMessageFilterEx(hwnd, msg, MSGFLT_ALLOW, std::ptr::null_mut());
+        }
+    }
+}
 
 /// Posts `msg` to the running instance's window of `class` (in another
 /// process), passing on this process's right to take the foreground so the
@@ -130,5 +149,59 @@ pub fn post_to_instance(class: &str, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         GetWindowThreadProcessId(hwnd, &mut process);
         AllowSetForegroundWindow(process);
         PostMessageW(hwnd, msg, wparam, lparam) != 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, WNDCLASSW,
+    };
+
+    unsafe extern "system" fn test_wndproc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    }
+
+    #[test]
+    fn serve_instance_allows_cross_instance_messages_and_posts_to_window() {
+        let class = format!("Jiffshot.Test.Instance.{}", std::process::id());
+        let wide_class = jiffshot_capture::wide(&class);
+        unsafe {
+            let mut wc: WNDCLASSW = std::mem::zeroed();
+            wc.lpfnWndProc = Some(test_wndproc);
+            wc.lpszClassName = wide_class.as_ptr();
+            RegisterClassW(&wc);
+            let hwnd = CreateWindowExW(
+                0,
+                wide_class.as_ptr(),
+                wide_class.as_ptr(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            );
+            assert!(!hwnd.is_null());
+            serve_instance(&class);
+            assert!(post_to_instance(&class, crate::tray::WM_APP_CAPTURE, 0, 0));
+            assert!(post_to_instance(&class, crate::tray::WM_APP_MENU, 0, 0));
+            assert!(post_to_instance(
+                &class,
+                crate::tray::WM_APP_CAPTURE_LATER,
+                0,
+                0
+            ));
+            DestroyWindow(hwnd);
+        }
     }
 }

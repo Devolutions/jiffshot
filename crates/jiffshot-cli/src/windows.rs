@@ -819,16 +819,23 @@ fn resolve_executable(exe: &Path) -> std::io::Result<PathBuf> {
 #[cfg(windows)]
 impl Detached {
     /// Starts `exe` with `args` (each quoted), detached and in its own process group.
+    ///
+    /// When `exe` is a signed installation with `uiAccess="true"` in its
+    /// manifest, Windows blocks direct `CreateProcessW` from a standard token
+    /// with `ERROR_ELEVATION_REQUIRED` (740) and requires `ShellExecuteExW` so
+    /// the AppInfo service can verify the signature and path and grant the
+    /// UIAccess token without prompting.
     fn spawn(exe: &Path, args: &[&str]) -> std::io::Result<Self> {
         use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ELEVATION_REQUIRED};
         use windows_sys::Win32::System::Threading::{
             CreateProcessW, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS, PROCESS_INFORMATION,
             STARTUPINFOW,
         };
 
         let wide = |text: &std::ffi::OsStr| text.encode_wide().chain([0]).collect::<Vec<u16>>();
-        let application = wide(resolve_executable(exe)?.as_os_str());
+        let resolved = resolve_executable(exe)?;
+        let application = wide(resolved.as_os_str());
         let mut line = vec![b'"' as u16];
         line.extend(exe.as_os_str().encode_wide());
         line.push(b'"' as u16);
@@ -858,11 +865,49 @@ impl Detached {
             )
         };
         if created == 0 {
-            return Err(std::io::Error::last_os_error());
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(ERROR_ELEVATION_REQUIRED as i32) {
+                return Self::spawn_via_shell(&application, args);
+            }
+            return Err(err);
         }
         // SAFETY: the thread handle was returned to us and is not used.
         unsafe { CloseHandle(process.hThread) };
         Ok(Self(process.hProcess))
+    }
+
+    fn spawn_via_shell(application: &[u16], args: &[&str]) -> std::io::Result<Self> {
+        use windows_sys::Win32::UI::Shell::{
+            ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let verb: Vec<u16> = "open\0".encode_utf16().collect();
+        let params: Vec<u16> = args
+            .iter()
+            .map(|arg| format!("\"{arg}\""))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        // SAFETY: plain data, zero-initialized with cbSize set.
+        let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+        info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+        info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+        info.lpVerb = verb.as_ptr();
+        info.lpFile = application.as_ptr();
+        info.lpParameters = if args.is_empty() {
+            std::ptr::null()
+        } else {
+            params.as_ptr()
+        };
+        info.nShow = SW_SHOWNORMAL as i32;
+        // SAFETY: all referenced UTF-16 buffers are NUL-terminated and live across the call.
+        if unsafe { ShellExecuteExW(&mut info) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self(info.hProcess))
     }
 
     /// How the process ended, once it has.
@@ -870,6 +915,9 @@ impl Detached {
         use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
         use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
 
+        if self.0.is_null() {
+            return Some("started without process handle".to_string());
+        }
         // SAFETY: the process handle is owned by self.
         if unsafe { WaitForSingleObject(self.0, 0) } != WAIT_OBJECT_0 {
             return None;
@@ -884,8 +932,10 @@ impl Detached {
 #[cfg(windows)]
 impl Drop for Detached {
     fn drop(&mut self) {
-        // SAFETY: the process handle is owned by self and closed once.
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+        if !self.0.is_null() {
+            // SAFETY: the process handle is owned by self and closed once.
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+        }
     }
 }
 
@@ -1419,6 +1469,16 @@ mod tests {
         assert!(
             eof.is_ok(),
             "the launched process inherited the caller's pipe and kept it open"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn detached_null_handle_reports_started_and_drops_cleanly() {
+        let detached = Detached(std::ptr::null_mut());
+        assert_eq!(
+            detached.exit_status().as_deref(),
+            Some("started without process handle")
         );
     }
 
