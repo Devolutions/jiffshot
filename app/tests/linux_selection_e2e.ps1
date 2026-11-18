@@ -100,7 +100,9 @@ function Get-VisiblePopups {
         $id = $Matches[1]
         $info = (& xwininfo -display $Display -id $id 2>&1) -join "`n"
         if ($LASTEXITCODE -ne 0) {
-            if ($info -match 'No such window with id') { continue }
+            $currentTree = & xwininfo -display $Display -root -tree 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "Could not recheck the private X11 display: $currentTree" }
+            if (-not ($currentTree -match "^\s*$id(?:\s|$)")) { continue }
             throw "Could not inspect popup ${id}: $info"
         }
         if ($info.Contains('Map State: IsViewable')) { $id }
@@ -231,16 +233,28 @@ try {
         $driver.Sync()
         $script:morePopup = $null
         $script:moreClick = [System.Diagnostics.Stopwatch]::StartNew()
-        # A freshly mapped editor can drop the first click on slower runners; re-click only while no menu is open.
-        Wait-E2EUntil {
-            $script:morePopup = @(Get-VisiblePopups $server.Display | Where-Object { $_ -notin $existingPopups }) | Select-Object -First 1
-            if ($null -eq $script:morePopup -and $script:moreClick.Elapsed.TotalSeconds -ge 3) {
-                $driver.Click($script:moreButton[0], $script:moreButton[1])
-                $driver.Sync()
-                $script:moreClick.Restart()
-            }
-            $null -ne $script:morePopup
-        } 'the More tools menu'
+        try {
+            Wait-E2EUntil {
+                $script:morePopup = @(Get-VisiblePopups $server.Display | Where-Object { $_ -notin $existingPopups }) | Select-Object -First 1
+                if ($null -eq $script:morePopup -and $script:moreClick.Elapsed.TotalSeconds -ge 3) {
+                    # The toolbar may have reflowed since the last click.
+                    $position = Find-E2ELabel $reader $driver 'More'
+                    $script:morePopup = @(Get-VisiblePopups $server.Display | Where-Object { $_ -notin $existingPopups }) | Select-Object -First 1
+                    if ($null -ne $position -and $null -eq $script:morePopup) {
+                        $script:moreButton = $position
+                        $driver.Click($position[0], $position[1])
+                    }
+                    $script:moreClick.Restart()
+                }
+                $null -ne $script:morePopup
+            } 'the More tools menu'
+        }
+        catch [System.TimeoutException] {
+            Write-E2ELine "Last More click: $($script:moreButton -join ','); current label: $((Find-E2ELabel $reader $driver 'More') -join ',')"
+            Write-E2ELine ((& xwininfo -display $server.Display -root -tree) -join "`n")
+            Write-E2ETrace $driver 'more-timeout' 'selection'
+            throw
+        }
         $driver.Press('Escape')
         $driver.Sync()
         Wait-E2EUntil { $script:morePopup -notin @(Get-VisiblePopups $server.Display) } 'the More tools menu to close'
