@@ -465,7 +465,7 @@ workflow engine remains in `jiffshot-workflow`; Linux workflows live under
 
 ### Compiling
 
-Jiffshot requires **Rust 1.88+** and pins the published Rustolonia `v12.1.8`
+Jiffshot requires **Rust 1.88+** and pins the published Rustolonia `v12.1.9`
 release. Cargo downloads the matching shared host automatically for local
 development; release builds use the version-matched static host. CI verifies
 the upstream release `SHA256SUMS` and the host archive's version, target,
