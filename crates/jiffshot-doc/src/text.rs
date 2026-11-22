@@ -555,9 +555,14 @@ pub fn layout(text: &str, style: &TextStyle, max_width: Option<f32>) -> Layout {
             (scaled.ascent(), scaled.descent(), scaled.line_gap())
         })
         .collect();
+    // Fallback glyphs must fit, so they widen the ascent and descent. The
+    // gap between lines is the chosen font's alone: fallbacks such as Yu
+    // Gothic carry a half-em line gap, which made line spacing depend on
+    // the installed CJK fonts and left empty space under every line, so
+    // vertically centered text sat high.
     let ascent = metrics.iter().map(|m| m.0).fold(f32::NEG_INFINITY, f32::max);
     let descent = metrics.iter().map(|m| m.1).fold(0.0, f32::min);
-    let line_gap = metrics.iter().map(|m| m.2).fold(0.0, f32::max);
+    let line_gap = metrics[0].2.max(0.0);
     let line_height = (ascent - descent + line_gap).max(style.size);
 
     let pick = |c: char| -> (usize, GlyphId) {
@@ -880,6 +885,24 @@ mod tests {
             assert!(layout.ascent >= scaled.ascent());
             assert!(layout.line_height >= layout.ascent - scaled.descent());
         }
+    }
+
+    #[test]
+    fn line_spacing_uses_only_the_chosen_fonts_line_gap() {
+        let layout = layout("A", &style(100.0), None);
+        let descent = layout
+            .fonts
+            .iter()
+            .zip(&layout.scales)
+            .map(|(font, scale)| font.as_scaled(*scale).descent())
+            .fold(0.0, f32::min);
+        let primary = layout.fonts[0].as_scaled(layout.scales[0]);
+        let expected = (layout.ascent - descent + primary.line_gap().max(0.0)).max(100.0);
+        assert!(
+            (layout.line_height - expected).abs() < 0.01,
+            "line height {} should be {expected}: a fallback font's line gap leaked in",
+            layout.line_height
+        );
     }
 
     #[test]

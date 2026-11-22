@@ -2635,6 +2635,46 @@ mod tests {
     }
 
     #[test]
+    fn middle_aligned_text_sits_near_the_box_center() {
+        if text::font(text::DEFAULT_FAMILY, false, false).is_none() {
+            return; // No fonts on this machine.
+        }
+        let size = 40.0;
+        let style = Style {
+            fill: Rgba::TRANSPARENT,
+            text_color: Rgba::WHITE,
+            width: 0.0,
+            shadow: false,
+            font_size: size,
+            valign: VAlign::Middle,
+            ..Style::default()
+        };
+        let rect = Box2::new(10.0, 10.0, 290.0, 190.0);
+        let o = Object::new(
+            1,
+            Kind::Text {
+                rect,
+                text: "HEH".into(),
+            },
+            style,
+        );
+        let mut pm = raster::solid(300, 200, Rgba::BLACK).unwrap();
+        o.draw(&mut pm, (0, 0));
+        let rows: Vec<i32> = (0..200)
+            .filter(|&y| (0..300).any(|x| raster::pixel(&pm, x, y).g > 128))
+            .collect();
+        assert!(!rows.is_empty(), "no text drawn");
+        let middle = (rows[0] + rows.last().unwrap() + 1) as f32 / 2.0;
+        // Line-box centering puts capitals within a tenth of an em of the
+        // middle; a fallback font's line gap used to lift them a fifth.
+        assert!(
+            (middle - rect.center().y).abs() <= size * 0.1,
+            "capitals centered at {middle}, box center {}",
+            rect.center().y
+        );
+    }
+
+    #[test]
     fn step_labels_are_vertically_centered() {
         if text::font(text::DEFAULT_FAMILY, true, false).is_none() {
             return; // No fonts on this machine.
