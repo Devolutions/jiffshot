@@ -692,6 +692,35 @@ pub fn line_extents(
         .collect()
 }
 
+/// The vertical extent of the glyphs' outlines, as `(top, bottom)` offsets
+/// from the layout's top edge, or `None` when no glyph has an outline.
+///
+/// The line box is sized for every fallback font, so it reserves far more
+/// room above and below Latin text than its glyphs use. Use this to center
+/// short labels on what is actually drawn.
+pub fn ink_extent(layout: &Layout) -> Option<(f32, f32)> {
+    let mut extent: Option<(f32, f32)> = None;
+    for (row, line) in layout.lines.iter().enumerate() {
+        let baseline = layout.ascent + row as f32 * layout.line_height;
+        for g in &line.glyphs {
+            let font = &layout.fonts[g.font];
+            let Some(outline) = font.outline(g.id) else {
+                continue;
+            };
+            // Outline bounds are unscaled font units with y pointing up.
+            let k = font.as_scaled(layout.scales[g.font]).v_scale_factor();
+            let a = baseline - outline.bounds.min.y * k;
+            let b = baseline - outline.bounds.max.y * k;
+            let (top, bottom) = (a.min(b), a.max(b));
+            extent = Some(match extent {
+                Some((t, b)) => (t.min(top), b.max(bottom)),
+                None => (top, bottom),
+            });
+        }
+    }
+    extent
+}
+
 /// Draws `layout` with its top-left at (`x`, `y`) in document pixels, each
 /// line aligned within `box_width`. `origin` is the document position of the
 /// target pixmap's top-left pixel.
