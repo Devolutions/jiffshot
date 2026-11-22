@@ -1363,12 +1363,19 @@ impl Object {
                     italic: false,
                 };
                 let layout = text::layout(label, &style, None);
+                // Center the glyphs themselves: the line box includes the
+                // fallback fonts' taller ascent and descent, which leaves
+                // digits sitting visibly above the middle of the badge.
+                let top = match text::ink_extent(&layout) {
+                    Some((ink_top, ink_bottom)) => center.y - (ink_top + ink_bottom) / 2.0,
+                    None => center.y - layout.height() / 2.0,
+                };
                 text::draw(
                     pm,
                     origin,
                     &layout,
                     r.x0,
-                    center.y - layout.height() / 2.0,
+                    top,
                     r.width(),
                     Align::Center,
                     s.text_color,
@@ -2625,5 +2632,86 @@ mod tests {
         );
         let shadow = raster::pixel(&pm, 42, 42);
         assert!(shadow.r < 250, "shadow below and right: {shadow:?}");
+    }
+
+    #[test]
+    fn middle_aligned_text_sits_near_the_box_center() {
+        if text::font(text::DEFAULT_FAMILY, false, false).is_none() {
+            return; // No fonts on this machine.
+        }
+        let size = 40.0;
+        let style = Style {
+            fill: Rgba::TRANSPARENT,
+            text_color: Rgba::WHITE,
+            width: 0.0,
+            shadow: false,
+            font_size: size,
+            valign: VAlign::Middle,
+            ..Style::default()
+        };
+        let rect = Box2::new(10.0, 10.0, 290.0, 190.0);
+        let o = Object::new(
+            1,
+            Kind::Text {
+                rect,
+                text: "HEH".into(),
+            },
+            style,
+        );
+        let mut pm = raster::solid(300, 200, Rgba::BLACK).unwrap();
+        o.draw(&mut pm, (0, 0));
+        let rows: Vec<i32> = (0..200)
+            .filter(|&y| (0..300).any(|x| raster::pixel(&pm, x, y).g > 128))
+            .collect();
+        assert!(!rows.is_empty(), "no text drawn");
+        let middle = (rows[0] + rows.last().unwrap() + 1) as f32 / 2.0;
+        // Line-box centering puts capitals within a tenth of an em of the
+        // middle; a fallback font's line gap used to lift them a fifth.
+        assert!(
+            (middle - rect.center().y).abs() <= size * 0.1,
+            "capitals centered at {middle}, box center {}",
+            rect.center().y
+        );
+    }
+
+    #[test]
+    fn step_labels_are_vertically_centered() {
+        if text::font(text::DEFAULT_FAMILY, true, false).is_none() {
+            return; // No fonts on this machine.
+        }
+        let style = Style {
+            fill: Rgba::RED,
+            text_color: Rgba::WHITE,
+            width: 0.0,
+            shadow: false,
+            ..Style::default()
+        };
+        let center = Pt::new(50.0, 50.0);
+        for label in ["1", "2", "5", "6", "10", "42"] {
+            let o = Object::new(
+                1,
+                Kind::Step {
+                    center,
+                    radius: 25.0,
+                    label: label.into(),
+                    shape: ShapeKind::Ellipse,
+                },
+                style.clone(),
+            );
+            let mut pm = raster::solid(100, 100, Rgba::BLACK).unwrap();
+            o.draw(&mut pm, (0, 0));
+            // The red fill has no green, so green marks the white label.
+            let rows: Vec<i32> = (0..100)
+                .filter(|&y| (0..100).any(|x| raster::pixel(&pm, x, y).g > 128))
+                .collect();
+            assert!(!rows.is_empty(), "{label:?} drew no label");
+            let (top, bottom) = (rows[0] as f32, *rows.last().unwrap() as f32 + 1.0);
+            let middle = (top + bottom) / 2.0;
+            assert!(
+                (middle - center.y).abs() <= 1.0,
+                "{label:?} ink spans {top}..{bottom}, middle {middle}, badge center {}",
+                center.y
+            );
+        }
     }
 }
