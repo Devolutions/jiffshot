@@ -227,8 +227,11 @@ mod tests {
 
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = calls.clone();
+        let test_thread = std::thread::current().id();
         set_denied_handler(Some(Arc::new(move |_| {
-            observed.fetch_add(1, Ordering::Relaxed);
+            if std::thread::current().id() == test_thread {
+                observed.fetch_add(1, Ordering::Relaxed);
+            }
         })));
         let _reset = Reset;
 

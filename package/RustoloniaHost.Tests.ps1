@@ -5,8 +5,8 @@ BeforeAll {
 
 Describe 'Pinned Rustolonia release and host' {
     BeforeEach {
-        $script:Revision = '948c220837c2a131db249df26919d2fb6cf836ef'
-        $script:Version = '12.1.8'
+        $script:Revision = '7dc369c6dd4a2c27b26cadaabec6a0465f9a04bb'
+        $script:Version = '12.1.9'
         $script:Case = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         [void][IO.Directory]::CreateDirectory($script:Case)
         $script:Manifest = Join-Path $script:Case 'Cargo.toml'
@@ -17,13 +17,13 @@ Describe 'Pinned Rustolonia release and host' {
         @(
             '[[package]]'
             'name = "rustolonia"'
-            'version = "12.1.8"'
-            'source = "git+https://github.com/Devolutions/rustolonia?tag=v12.1.8#948c220837c2a131db249df26919d2fb6cf836ef"'
+            'version = "12.1.9"'
+            'source = "git+https://github.com/Devolutions/rustolonia?tag=v12.1.9#7dc369c6dd4a2c27b26cadaabec6a0465f9a04bb"'
             ''
             '[[package]]'
             'name = "rustolonia-sys"'
-            'version = "12.1.8"'
-            'source = "git+https://github.com/Devolutions/rustolonia?tag=v12.1.8#948c220837c2a131db249df26919d2fb6cf836ef"'
+            'version = "12.1.9"'
+            'source = "git+https://github.com/Devolutions/rustolonia?tag=v12.1.9#7dc369c6dd4a2c27b26cadaabec6a0465f9a04bb"'
         ) | Set-Content -LiteralPath (Join-Path $script:Case 'Cargo.lock')
     }
 
@@ -33,14 +33,14 @@ Describe 'Pinned Rustolonia release and host' {
     }
 
     It 'rejects mismatched crate tags' {
-        (Get-Content -LiteralPath $script:Manifest) -replace '^(rustolonia-sys.*)v12\.1\.8', '${1}v12.1.9' |
+        (Get-Content -LiteralPath $script:Manifest) -replace '^(rustolonia-sys.*)v12\.1\.9', '${1}v12.1.10' |
             Set-Content -LiteralPath $script:Manifest
         { Get-JiffshotRustoloniaRevision -Manifest $script:Manifest } | Should -Throw '*same release tag*'
     }
 
     It 'rejects a lockfile resolved from another tag' {
         $lock = Join-Path $script:Case 'Cargo.lock'
-        (Get-Content -LiteralPath $lock -Raw).Replace('tag=v12.1.8#', 'tag=v12.1.7#') |
+        (Get-Content -LiteralPath $lock -Raw).Replace('tag=v12.1.9#', 'tag=v12.1.8#') |
             Set-Content -LiteralPath $lock
         { Get-JiffshotRustoloniaRevision -Manifest $script:Manifest } | Should -Throw '*does not resolve*'
     }
@@ -71,10 +71,10 @@ Describe 'Pinned Rustolonia release and host' {
         }
 
         It 'rejects a mismatched <Field> even when the archive checksum is valid' -ForEach @(
-            @{ Field = 'Version'; Version = '12.1.9'; Rid = 'osx-arm64'; Linkage = 'Static'; Abi = '745f61b346977c8c4618fb8e32fc41cbfb80f764b8bd1a7506763072b43e554f' }
-            @{ Field = 'Rid'; Version = '12.1.8'; Rid = 'osx-x64'; Linkage = 'Static'; Abi = '745f61b346977c8c4618fb8e32fc41cbfb80f764b8bd1a7506763072b43e554f' }
-            @{ Field = 'Linkage'; Version = '12.1.8'; Rid = 'osx-arm64'; Linkage = 'Shared'; Abi = '745f61b346977c8c4618fb8e32fc41cbfb80f764b8bd1a7506763072b43e554f' }
-            @{ Field = 'ABI'; Version = '12.1.8'; Rid = 'osx-arm64'; Linkage = 'Static'; Abi = 'not-a-fingerprint' }
+            @{ Field = 'Version'; Version = '12.1.10'; Rid = 'osx-arm64'; Linkage = 'Static'; Abi = '745f61b346977c8c4618fb8e32fc41cbfb80f764b8bd1a7506763072b43e554f' }
+            @{ Field = 'Rid'; Version = '12.1.9'; Rid = 'osx-x64'; Linkage = 'Static'; Abi = '745f61b346977c8c4618fb8e32fc41cbfb80f764b8bd1a7506763072b43e554f' }
+            @{ Field = 'Linkage'; Version = '12.1.9'; Rid = 'osx-arm64'; Linkage = 'Shared'; Abi = '745f61b346977c8c4618fb8e32fc41cbfb80f764b8bd1a7506763072b43e554f' }
+            @{ Field = 'ABI'; Version = '12.1.9'; Rid = 'osx-arm64'; Linkage = 'Static'; Abi = 'not-a-fingerprint' }
         ) {
             if ($Field -eq 'ABI') {
                 (Get-Content -LiteralPath (Join-Path $script:Bundle 'host-manifest.json') -Raw).Replace(
