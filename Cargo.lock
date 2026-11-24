@@ -2556,8 +2556,8 @@ dependencies = [
 
 [[package]]
 name = "rustolonia"
-version = "12.1.9"
-source = "git+https://github.com/Devolutions/rustolonia?tag=v12.1.9#7dc369c6dd4a2c27b26cadaabec6a0465f9a04bb"
+version = "12.2.0"
+source = "git+https://github.com/Devolutions/rustolonia?tag=v12.2.0#ed41f2cfd6c1a61b9b4602ac58db996953901bbc"
 dependencies = [
  "rustolonia-macros",
  "rustolonia-sys",
@@ -2565,13 +2565,13 @@ dependencies = [
 
 [[package]]
 name = "rustolonia-macros"
-version = "12.1.9"
-source = "git+https://github.com/Devolutions/rustolonia?tag=v12.1.9#7dc369c6dd4a2c27b26cadaabec6a0465f9a04bb"
+version = "12.2.0"
+source = "git+https://github.com/Devolutions/rustolonia?tag=v12.2.0#ed41f2cfd6c1a61b9b4602ac58db996953901bbc"
 
 [[package]]
 name = "rustolonia-sys"
-version = "12.1.9"
-source = "git+https://github.com/Devolutions/rustolonia?tag=v12.1.9#7dc369c6dd4a2c27b26cadaabec6a0465f9a04bb"
+version = "12.2.0"
+source = "git+https://github.com/Devolutions/rustolonia?tag=v12.2.0#ed41f2cfd6c1a61b9b4602ac58db996953901bbc"
 dependencies = [
  "dirs",
  "flate2",
